@@ -9,7 +9,7 @@
 - [x] Verify `cargo test --all-features` passes standalone
 - [x] First benchmark baseline via `./scripts/bench-history.sh`
 
-## v0.2.0 — Standalone Hardening (in progress)
+## v0.2.0 — Standalone Hardening (complete)
 
 - [x] P(-1) scaffold hardening pass
 - [x] Full clippy + fmt + audit + deny clean
@@ -17,8 +17,8 @@
 - [x] CI workflows (ci.yml, release.yml)
 - [x] Integration tests in `tests/`
 - [x] Example in `examples/`
-- [ ] Narrow blanket `#[allow(dead_code)]` in lib.rs / main.rs
-- [ ] 80%+ code coverage target
+- [x] Narrow blanket `#[allow(dead_code)]` — targeted per-module allows
+- [x] 90.2% line coverage (target 80%+)
 
 ### P(-1) Audit Observations (deferred to future milestones)
 

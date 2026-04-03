@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! XWayland fallback support for the AGNOS compositor.
 //!
 //! Provides an X11 compatibility layer so that legacy applications (and Flutter

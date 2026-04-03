@@ -497,4 +497,195 @@ mod tests {
         assert_eq!(devs[1].device_index, 1);
         assert_eq!(devs[2].device_index, 3);
     }
+
+    #[test]
+    fn test_parse_alternative_field_names() {
+        // Uses "vram_used" / "vram_total" / "utilization" / "temperature" instead of primary names
+        let json = serde_json::json!({
+            "devices": [
+                {
+                    "device_index": 0,
+                    "name": "Alt GPU",
+                    "vram_used": 4096,
+                    "vram_total": 8192,
+                    "utilization": 50.0,
+                    "temperature": 65.0
+                }
+            ]
+        });
+        let devs = GpuStatusWidget::parse_gpu_status(&json).unwrap();
+        assert_eq!(devs.len(), 1);
+        assert_eq!(devs[0].vram_used_mib, 4096);
+        assert_eq!(devs[0].vram_total_mib, 8192);
+        assert!((devs[0].compute_utilization_pct - 50.0).abs() < 1e-4);
+        assert_eq!(devs[0].temperature_c, Some(65.0));
+    }
+
+    #[test]
+    fn test_parse_bare_array_format() {
+        let json = serde_json::json!([
+            {
+                "device_index": 0,
+                "name": "Bare GPU",
+                "vram_used_mib": 1024,
+                "vram_total_mib": 4096,
+                "compute_utilization_pct": 20.0
+            }
+        ]);
+        let devs = GpuStatusWidget::parse_gpu_status(&json).unwrap();
+        assert_eq!(devs.len(), 1);
+        assert_eq!(devs[0].name, "Bare GPU");
+    }
+
+    #[test]
+    fn test_parse_empty_devices() {
+        let json = serde_json::json!({ "devices": [] });
+        let devs = GpuStatusWidget::parse_gpu_status(&json).unwrap();
+        assert!(devs.is_empty());
+    }
+
+    #[test]
+    fn test_parse_empty_object() {
+        let json = serde_json::json!({});
+        let devs = GpuStatusWidget::parse_gpu_status(&json).unwrap();
+        assert!(devs.is_empty());
+    }
+
+    #[test]
+    fn test_parse_fallback_device_index() {
+        // When device_index is missing, uses enumeration index as fallback
+        let json = serde_json::json!({
+            "devices": [
+                { "name": "GPU-A", "vram_used_mib": 0, "vram_total_mib": 4096, "compute_utilization_pct": 0.0 },
+                { "name": "GPU-B", "vram_used_mib": 0, "vram_total_mib": 4096, "compute_utilization_pct": 0.0 }
+            ]
+        });
+        let devs = GpuStatusWidget::parse_gpu_status(&json).unwrap();
+        assert_eq!(devs[0].device_index, 0);
+        assert_eq!(devs[1].device_index, 1);
+    }
+
+    #[test]
+    fn test_parse_fallback_name() {
+        let json = serde_json::json!({
+            "devices": [
+                { "device_index": 0, "vram_used_mib": 0, "vram_total_mib": 4096, "compute_utilization_pct": 0.0 }
+            ]
+        });
+        let devs = GpuStatusWidget::parse_gpu_status(&json).unwrap();
+        assert_eq!(devs[0].name, "GPU");
+    }
+
+    #[test]
+    fn test_gpu_device_state_critical_bands() {
+        // VRAM 96% -> Critical, compute 97% -> Critical, temp 92C -> Critical
+        let dev = GpuDeviceState::new(
+            0,
+            "Hot GPU".to_string(),
+            9600,
+            10000,
+            97.0,
+            Some(92.0),
+            Some("9.0".to_string()),
+        );
+        assert_eq!(dev.vram_band, MetricBand::Critical);
+        assert_eq!(dev.compute_band, MetricBand::Critical);
+        assert_eq!(dev.temp_band, MetricBand::Critical);
+        assert_eq!(dev.compute_capability, Some("9.0".to_string()));
+    }
+
+    #[test]
+    fn test_gpu_device_state_no_temperature() {
+        let dev = GpuDeviceState::new(0, "Cool GPU".to_string(), 1024, 8192, 30.0, None, None);
+        assert!(dev.temperature_c.is_none());
+        assert_eq!(dev.temp_band, MetricBand::Normal);
+        assert!(dev.compute_capability.is_none());
+    }
+
+    #[test]
+    fn test_widget_default_trait() {
+        let widget = GpuStatusWidget::default();
+        let data = widget.render();
+        assert!(data.devices.is_empty());
+        assert!(!data.last_fetch_ok);
+    }
+
+    #[test]
+    fn test_set_devices_updates_fetch_state() {
+        let widget = GpuStatusWidget::new();
+        assert!(!widget.render().last_fetch_ok);
+        assert!(widget.render().last_fetch_at.is_none());
+
+        widget.set_devices(vec![]);
+        assert!(widget.render().last_fetch_ok);
+        assert!(widget.render().last_fetch_at.is_some());
+    }
+
+    #[test]
+    fn test_render_multiple_devices_under_pressure() {
+        let widget = GpuStatusWidget::new();
+        let devs = vec![
+            GpuDeviceState::new(0, "G0".to_string(), 7800, 8192, 50.0, Some(70.0), None),
+            GpuDeviceState::new(1, "G1".to_string(), 9800, 10240, 92.0, Some(88.0), None),
+        ];
+        widget.set_devices(devs);
+        let data = widget.render();
+        // G0: vram 95.2% -> Critical, G1: vram 95.7% -> Critical
+        assert_eq!(data.devices_under_pressure, 2);
+        assert!(data.peak_vram_fraction > 0.9);
+        assert_eq!(data.peak_temperature_c, Some(88.0));
+    }
+
+    #[test]
+    fn test_render_no_temperature_sensors() {
+        let widget = GpuStatusWidget::new();
+        let devs = vec![GpuDeviceState::new(
+            0,
+            "G0".to_string(),
+            1024,
+            8192,
+            10.0,
+            None,
+            None,
+        )];
+        widget.set_devices(devs);
+        let data = widget.render();
+        assert!(data.peak_temperature_c.is_none());
+    }
+
+    #[test]
+    fn test_metric_band_boundary_utilization() {
+        // Exact boundaries
+        assert_eq!(MetricBand::from_utilization(0.0), MetricBand::Normal);
+        assert_eq!(MetricBand::from_utilization(79.9), MetricBand::Normal);
+        assert_eq!(MetricBand::from_utilization(80.0), MetricBand::Warning);
+        assert_eq!(MetricBand::from_utilization(95.0), MetricBand::Critical);
+    }
+
+    #[test]
+    fn test_metric_band_boundary_temperature() {
+        assert_eq!(MetricBand::from_temperature(0.0), MetricBand::Normal);
+        assert_eq!(MetricBand::from_temperature(74.9), MetricBand::Normal);
+        assert_eq!(MetricBand::from_temperature(75.0), MetricBand::Warning);
+        assert_eq!(MetricBand::from_temperature(90.0), MetricBand::Critical);
+    }
+
+    #[test]
+    fn test_parse_mcp_wrapped_invalid_inner_json() {
+        let wrapped = serde_json::json!({
+            "result": {
+                "content": [
+                    { "text": "not valid json" }
+                ]
+            }
+        });
+        let devs = GpuStatusWidget::parse_gpu_status(&wrapped).unwrap();
+        assert!(devs.is_empty());
+    }
+
+    #[test]
+    fn test_vram_fraction_calculation() {
+        let dev = GpuDeviceState::new(0, "G".to_string(), 6144, 12288, 0.0, None, None);
+        assert!((dev.vram_fraction - 0.5).abs() < 1e-4);
+    }
 }

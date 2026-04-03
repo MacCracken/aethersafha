@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Accessibility (a11y) infrastructure for the AGNOS desktop environment.
 //!
 //! Provides AT-SPI2 bridge foundations, keyboard navigation support,

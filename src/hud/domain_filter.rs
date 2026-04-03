@@ -472,4 +472,190 @@ mod tests {
         let names: Vec<&str> = data.groups.iter().map(|g| g.domain.as_str()).collect();
         assert_eq!(names, vec!["aaa", "mmm", "zzz"]);
     }
+
+    #[test]
+    fn test_active_count_includes_active_and_acting_statuses() {
+        let widget = DomainFilterWidget::new();
+        widget.set_agents(vec![
+            make_agent(
+                "00000000-0000-0000-0000-000000000001",
+                "a1",
+                "ops",
+                "running",
+            ),
+            make_agent(
+                "00000000-0000-0000-0000-000000000002",
+                "a2",
+                "ops",
+                "active",
+            ),
+            make_agent(
+                "00000000-0000-0000-0000-000000000003",
+                "a3",
+                "ops",
+                "Acting",
+            ),
+            make_agent("00000000-0000-0000-0000-000000000004", "a4", "ops", "idle"),
+        ]);
+        let data = widget.render();
+        let ops = data.groups.iter().find(|g| g.domain == "ops").unwrap();
+        assert_eq!(ops.active_count, 3); // running + active + Acting
+        assert_eq!(ops.agents.len(), 4);
+    }
+
+    #[test]
+    fn test_filter_nonexistent_domain_shows_nothing() {
+        let widget = DomainFilterWidget::new();
+        widget.set_agents(vec![make_agent(
+            "00000000-0000-0000-0000-000000000001",
+            "agent",
+            "security",
+            "idle",
+        )]);
+        widget.set_filter(Some("nonexistent".to_string()));
+        let data = widget.render();
+        assert_eq!(data.total_visible, 0);
+        assert!(data.groups.is_empty());
+        // All domains still includes the real domain
+        assert_eq!(data.all_domains, vec!["security"]);
+    }
+
+    #[test]
+    fn test_default_trait() {
+        let widget = DomainFilterWidget::default();
+        let data = widget.render();
+        assert!(data.groups.is_empty());
+        assert!(!data.last_fetch_ok);
+    }
+
+    #[test]
+    fn test_set_agents_updates_fetch_ok() {
+        let widget = DomainFilterWidget::new();
+        assert!(!widget.render().last_fetch_ok);
+        widget.set_agents(vec![]);
+        assert!(widget.render().last_fetch_ok);
+    }
+
+    #[test]
+    fn test_parse_agents_invalid_uuid_generates_new() {
+        let json = serde_json::json!({
+            "agents": [
+                { "id": "not-a-uuid", "name": "bad-id", "status": "idle", "domain": "test" }
+            ]
+        });
+        let agents = DomainFilterWidget::parse_agents(&json).unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].name, "bad-id");
+        // agent_id should be a valid UUID (auto-generated)
+        assert!(!agents[0].agent_id.is_nil());
+    }
+
+    #[test]
+    fn test_parse_agents_empty_current_task_becomes_none() {
+        let json = serde_json::json!({
+            "agents": [
+                {
+                    "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    "name": "a",
+                    "status": "idle",
+                    "domain": "test",
+                    "current_task": ""
+                }
+            ]
+        });
+        let agents = DomainFilterWidget::parse_agents(&json).unwrap();
+        assert!(agents[0].current_task.is_none());
+    }
+
+    #[test]
+    fn test_parse_agents_missing_heartbeat() {
+        let json = serde_json::json!({
+            "agents": [
+                {
+                    "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    "name": "a",
+                    "status": "idle",
+                    "domain": "test"
+                }
+            ]
+        });
+        let agents = DomainFilterWidget::parse_agents(&json).unwrap();
+        assert!(agents[0].last_heartbeat.is_none());
+    }
+
+    #[test]
+    fn test_parse_agents_invalid_heartbeat_ignored() {
+        let json = serde_json::json!({
+            "agents": [
+                {
+                    "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    "name": "a",
+                    "status": "idle",
+                    "domain": "test",
+                    "last_heartbeat": "not-a-date"
+                }
+            ]
+        });
+        let agents = DomainFilterWidget::parse_agents(&json).unwrap();
+        assert!(agents[0].last_heartbeat.is_none());
+    }
+
+    #[test]
+    fn test_parse_agents_empty_array() {
+        let json = serde_json::json!({ "agents": [] });
+        let agents = DomainFilterWidget::parse_agents(&json).unwrap();
+        assert!(agents.is_empty());
+    }
+
+    #[test]
+    fn test_parse_agents_missing_agents_key() {
+        let json = serde_json::json!({});
+        let agents = DomainFilterWidget::parse_agents(&json).unwrap();
+        assert!(agents.is_empty());
+    }
+
+    #[test]
+    fn test_parse_agents_missing_name_defaults() {
+        let json = serde_json::json!({
+            "agents": [
+                { "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "status": "idle" }
+            ]
+        });
+        let agents = DomainFilterWidget::parse_agents(&json).unwrap();
+        assert_eq!(agents[0].name, "unknown");
+    }
+
+    #[test]
+    fn test_parse_agents_missing_status_defaults() {
+        let json = serde_json::json!({
+            "agents": [
+                { "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "name": "a" }
+            ]
+        });
+        let agents = DomainFilterWidget::parse_agents(&json).unwrap();
+        assert_eq!(agents[0].status, "unknown");
+    }
+
+    #[test]
+    fn test_set_agents_with_heartbeat_and_task() {
+        let widget = DomainFilterWidget::new();
+        let now = Utc::now();
+        let entry = DomainAgentEntry {
+            agent_id: Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap(),
+            name: "agent".to_string(),
+            domain: "test".to_string(),
+            status: "running".to_string(),
+            current_task: Some("doing stuff".to_string()),
+            last_heartbeat: Some(now),
+        };
+        widget.set_agents(vec![entry]);
+        let data = widget.render();
+        assert_eq!(data.total_visible, 1);
+        let group = &data.groups[0];
+        assert_eq!(
+            group.agents[0].current_task,
+            Some("doing stuff".to_string())
+        );
+        assert_eq!(group.agents[0].last_heartbeat, Some(now));
+    }
 }

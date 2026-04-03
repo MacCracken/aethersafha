@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use chrono::Timelike;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};

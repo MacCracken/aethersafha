@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Desktop Plugin Host
 //!
 //! Manages desktop plugin lifecycle, communication, and sandboxing.

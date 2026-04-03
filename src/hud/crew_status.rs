@@ -390,4 +390,218 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].status, CrewRunStatus::Running);
     }
+
+    #[test]
+    fn test_crew_run_status_case_insensitive() {
+        assert_eq!(CrewRunStatus::from("RUNNING"), CrewRunStatus::Running);
+        assert_eq!(CrewRunStatus::from("Active"), CrewRunStatus::Running);
+        assert_eq!(CrewRunStatus::from("IDLE"), CrewRunStatus::Idle);
+        assert_eq!(CrewRunStatus::from("Paused"), CrewRunStatus::Paused);
+        assert_eq!(CrewRunStatus::from("COMPLETED"), CrewRunStatus::Completed);
+        assert_eq!(CrewRunStatus::from("Finished"), CrewRunStatus::Completed);
+        assert_eq!(CrewRunStatus::from("FAILED"), CrewRunStatus::Failed);
+        assert_eq!(CrewRunStatus::from("Error"), CrewRunStatus::Failed);
+        assert_eq!(CrewRunStatus::from("Done"), CrewRunStatus::Completed);
+    }
+
+    #[test]
+    fn test_crew_run_status_default() {
+        let status = CrewRunStatus::default();
+        assert_eq!(status, CrewRunStatus::Unknown);
+    }
+
+    #[test]
+    fn test_parse_crews_bare_array() {
+        // parse_crews also accepts a bare JSON array (not wrapped in "crews" key)
+        let json = serde_json::json!([
+            { "id": "c1", "name": "Crew1", "status": "idle", "agent_count": 1 },
+            { "id": "c2", "name": "Crew2", "status": "running", "agent_count": 2 }
+        ]);
+        let entries = CrewStatusWidget::parse_crews(&json).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].crew_id, "c1");
+        assert_eq!(entries[1].crew_id, "c2");
+    }
+
+    #[test]
+    fn test_parse_crews_crew_id_field_fallback() {
+        // When "id" is absent, falls back to "crew_id"
+        let json = serde_json::json!({
+            "crews": [
+                { "crew_id": "fallback-id", "name": "Fallback", "status": "idle", "agent_count": 0 }
+            ]
+        });
+        let entries = CrewStatusWidget::parse_crews(&json).unwrap();
+        assert_eq!(entries[0].crew_id, "fallback-id");
+    }
+
+    #[test]
+    fn test_parse_crews_missing_id_defaults_to_unknown() {
+        let json = serde_json::json!({
+            "crews": [
+                { "name": "NoId", "status": "idle", "agent_count": 0 }
+            ]
+        });
+        let entries = CrewStatusWidget::parse_crews(&json).unwrap();
+        assert_eq!(entries[0].crew_id, "unknown");
+    }
+
+    #[test]
+    fn test_parse_crews_missing_name_defaults_to_unnamed() {
+        let json = serde_json::json!({
+            "crews": [
+                { "id": "x", "status": "idle", "agent_count": 0 }
+            ]
+        });
+        let entries = CrewStatusWidget::parse_crews(&json).unwrap();
+        assert_eq!(entries[0].name, "unnamed crew");
+    }
+
+    #[test]
+    fn test_parse_crews_missing_status_defaults_to_unknown() {
+        let json = serde_json::json!({
+            "crews": [
+                { "id": "x", "name": "X", "agent_count": 1 }
+            ]
+        });
+        let entries = CrewStatusWidget::parse_crews(&json).unwrap();
+        assert_eq!(entries[0].status, CrewRunStatus::Unknown);
+    }
+
+    #[test]
+    fn test_parse_crews_empty_object() {
+        let json = serde_json::json!({});
+        let entries = CrewStatusWidget::parse_crews(&json).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_parse_crews_null_value() {
+        let json = serde_json::Value::Null;
+        let entries = CrewStatusWidget::parse_crews(&json).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_parse_crews_mcp_wrapped_invalid_inner_json() {
+        // When inner text is invalid JSON, should fall back to the outer json
+        let wrapped = serde_json::json!({
+            "result": {
+                "content": [
+                    { "text": "not valid json!!!" }
+                ]
+            }
+        });
+        let entries = CrewStatusWidget::parse_crews(&wrapped).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_crew_entry_default_progress_and_task() {
+        let entry = CrewEntry::default();
+        assert!(entry.progress.is_none());
+        assert!(entry.current_task.is_none());
+        assert!(entry.name.is_empty());
+        // crew_id should be a valid UUID string
+        assert!(uuid::Uuid::parse_str(&entry.crew_id).is_ok());
+    }
+
+    #[test]
+    fn test_widget_default_trait() {
+        let widget = CrewStatusWidget::default();
+        let data = widget.render();
+        assert!(data.crews.is_empty());
+        assert!(!data.last_fetch_ok);
+    }
+
+    #[test]
+    fn test_set_crews_updates_fetch_state() {
+        let widget = CrewStatusWidget::new();
+        // Before set_crews, last_fetch_ok is false
+        assert!(!widget.render().last_fetch_ok);
+        assert!(widget.render().last_fetch_at.is_none());
+
+        widget.set_crews(vec![]);
+        // After set_crews, last_fetch_ok becomes true even with empty list
+        assert!(widget.render().last_fetch_ok);
+        assert!(widget.render().last_fetch_at.is_some());
+    }
+
+    #[test]
+    fn test_render_active_count_multiple_running() {
+        let widget = CrewStatusWidget::new();
+        let entries = vec![
+            CrewEntry {
+                crew_id: "c1".to_string(),
+                name: "A".to_string(),
+                status: CrewRunStatus::Running,
+                agent_count: 1,
+                current_task: None,
+                progress: None,
+                last_updated: Utc::now(),
+            },
+            CrewEntry {
+                crew_id: "c2".to_string(),
+                name: "B".to_string(),
+                status: CrewRunStatus::Running,
+                agent_count: 2,
+                current_task: None,
+                progress: None,
+                last_updated: Utc::now(),
+            },
+            CrewEntry {
+                crew_id: "c3".to_string(),
+                name: "C".to_string(),
+                status: CrewRunStatus::Idle,
+                agent_count: 1,
+                current_task: None,
+                progress: None,
+                last_updated: Utc::now(),
+            },
+        ];
+        widget.set_crews(entries);
+        let data = widget.render();
+        assert_eq!(data.active_count, 2);
+    }
+
+    #[test]
+    fn test_crew_run_status_serde_roundtrip() {
+        let statuses = vec![
+            CrewRunStatus::Idle,
+            CrewRunStatus::Running,
+            CrewRunStatus::Paused,
+            CrewRunStatus::Completed,
+            CrewRunStatus::Failed,
+            CrewRunStatus::Unknown,
+        ];
+        for status in statuses {
+            let json = serde_json::to_string(&status).unwrap();
+            let back: CrewRunStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(status, back);
+        }
+    }
+
+    #[test]
+    fn test_parse_crews_progress_present_and_absent() {
+        let json = serde_json::json!({
+            "crews": [
+                { "id": "a", "name": "A", "status": "running", "agent_count": 1, "progress": 0.5 },
+                { "id": "b", "name": "B", "status": "idle", "agent_count": 0 }
+            ]
+        });
+        let entries = CrewStatusWidget::parse_crews(&json).unwrap();
+        assert_eq!(entries[0].progress, Some(0.5));
+        assert!(entries[1].progress.is_none());
+    }
+
+    #[test]
+    fn test_parse_crews_empty_current_task_becomes_none() {
+        let json = serde_json::json!({
+            "crews": [
+                { "id": "a", "name": "A", "status": "idle", "agent_count": 0, "current_task": "" }
+            ]
+        });
+        let entries = CrewStatusWidget::parse_crews(&json).unwrap();
+        assert!(entries[0].current_task.is_none());
+    }
 }

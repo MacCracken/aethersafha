@@ -1,8 +1,3 @@
-// Desktop environment binary — re-includes library modules for the compositor
-// runtime. Many types are defined for the public API surface but not yet
-// exercised by the main binary.
-#![allow(dead_code, unused_mut, unused_imports)]
-
 use clap::Parser;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,11 +16,14 @@ mod shell;
 mod wayland;
 mod xwayland;
 
+#[allow(unused_imports)]
 use ai_features::{
     AIDesktopFeatures, AISuggestion, ContextEvent, ContextEventType, SuggestionType,
 };
 use apps::DesktopApplications;
+#[allow(unused_imports)]
 use compositor::{Compositor, ContextType, WindowState};
+#[allow(unused_imports)]
 use security_ui::{SecurityAlert, SecurityLevel, SecurityUI, ThreatLevel};
 use shell::{DesktopShell, Notification, NotificationPriority};
 
@@ -60,6 +58,7 @@ struct Args {
     high_contrast: bool,
 }
 
+#[allow(dead_code)]
 struct DesktopEnvironment {
     compositor: Arc<Compositor>,
     shell: Arc<DesktopShell>,

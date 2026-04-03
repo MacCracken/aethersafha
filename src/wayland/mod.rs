@@ -24,12 +24,15 @@ pub mod types;
 mod tests;
 
 // Re-export all public types from sub-modules for backward compatibility.
+#[allow(unused_imports)]
 pub use popups::*;
 pub use protocol::*;
+#[allow(unused_imports)]
 pub use types::*;
 
 // Feature-gated re-exports from server/stub.
 #[cfg(feature = "wayland")]
+#[allow(unused_imports)]
 pub use server::{
     WaylandServer, WaylandServerConfig, WaylandServerEvent, WaylandState, start_server,
 };

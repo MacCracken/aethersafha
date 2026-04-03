@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! XDG Popup / Positioner support.
 
 use std::collections::HashMap;

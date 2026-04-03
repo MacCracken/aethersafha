@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Protocol bridge and extension types for Wayland integration.
 
 use std::collections::HashMap;
@@ -829,4 +830,710 @@ pub enum WaylandKeyboardEvent {
     Modifiers {
         state: ModifierState,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- DataDeviceManager ----
+
+    #[test]
+    fn test_data_device_manager_new() {
+        let mgr = DataDeviceManager::new();
+        assert!(mgr.selections.is_empty());
+        assert!(mgr.drag_source.is_none());
+    }
+
+    #[test]
+    fn test_data_device_manager_default() {
+        let mgr = DataDeviceManager::default();
+        assert!(mgr.selections.is_empty());
+        assert!(mgr.drag_source.is_none());
+    }
+
+    #[test]
+    fn test_set_and_get_selection() {
+        let mut mgr = DataDeviceManager::new();
+        let sid = uuid::Uuid::new_v4();
+        mgr.set_selection(sid, vec!["text/plain".to_string()], 1);
+
+        let offer = mgr.get_selection(&sid);
+        assert!(offer.is_some());
+        let offer = offer.unwrap();
+        assert_eq!(offer.mime_types, vec!["text/plain"]);
+        assert_eq!(offer.source_surface, sid);
+        assert_eq!(offer.serial, 1);
+    }
+
+    #[test]
+    fn test_clear_selection() {
+        let mut mgr = DataDeviceManager::new();
+        let sid = uuid::Uuid::new_v4();
+        mgr.set_selection(sid, vec!["text/plain".to_string()], 1);
+        mgr.clear_selection(&sid);
+        assert!(mgr.get_selection(&sid).is_none());
+    }
+
+    #[test]
+    fn test_get_selection_nonexistent() {
+        let mgr = DataDeviceManager::new();
+        let sid = uuid::Uuid::new_v4();
+        assert!(mgr.get_selection(&sid).is_none());
+    }
+
+    #[test]
+    fn test_start_and_end_drag() {
+        let mut mgr = DataDeviceManager::new();
+        let source = uuid::Uuid::new_v4();
+        let icon = uuid::Uuid::new_v4();
+        mgr.start_drag(source, Some(icon), vec!["text/uri-list".to_string()]);
+
+        let drag = mgr.drag_source.as_ref().unwrap();
+        assert_eq!(drag.source_surface, source);
+        assert_eq!(drag.icon_surface, Some(icon));
+        assert!(drag.active);
+        assert_eq!(drag.position, (0.0, 0.0));
+
+        mgr.end_drag();
+        assert!(mgr.drag_source.is_none());
+    }
+
+    #[test]
+    fn test_start_drag_no_icon() {
+        let mut mgr = DataDeviceManager::new();
+        let source = uuid::Uuid::new_v4();
+        mgr.start_drag(source, None, vec![]);
+        let drag = mgr.drag_source.as_ref().unwrap();
+        assert!(drag.icon_surface.is_none());
+        assert!(drag.mime_types.is_empty());
+    }
+
+    // ---- TextInputState ----
+
+    #[test]
+    fn test_text_input_state_new() {
+        let state = TextInputState::new();
+        assert!(!state.enabled);
+        assert!(state.surface_id.is_none());
+        assert_eq!(state.content_type, ContentType::Normal);
+        assert!(state.surrounding_text.is_empty());
+        assert_eq!(state.cursor_position, 0);
+        assert!(state.preedit.is_none());
+    }
+
+    #[test]
+    fn test_text_input_state_default() {
+        let state = TextInputState::default();
+        assert!(!state.enabled);
+    }
+
+    #[test]
+    fn test_text_input_enable_disable() {
+        let mut state = TextInputState::new();
+        let sid = uuid::Uuid::new_v4();
+        state.enable(sid);
+        assert!(state.enabled);
+        assert_eq!(state.surface_id, Some(sid));
+
+        state.disable();
+        assert!(!state.enabled);
+        assert!(state.surface_id.is_none());
+        assert!(state.preedit.is_none());
+    }
+
+    #[test]
+    fn test_text_input_set_surrounding_text() {
+        let mut state = TextInputState::new();
+        state.set_surrounding_text("hello world".to_string(), 5);
+        assert_eq!(state.surrounding_text, "hello world");
+        assert_eq!(state.cursor_position, 5);
+    }
+
+    #[test]
+    fn test_text_input_commit_preedit() {
+        let mut state = TextInputState::new();
+        // No preedit -> returns None
+        assert!(state.commit_preedit().is_none());
+
+        state.preedit = Some(PreeditState {
+            text: "composing".to_string(),
+            cursor_begin: 0,
+            cursor_end: 9,
+        });
+        let text = state.commit_preedit();
+        assert_eq!(text, Some("composing".to_string()));
+        // After commit, preedit is consumed
+        assert!(state.preedit.is_none());
+    }
+
+    #[test]
+    fn test_text_input_clear_preedit() {
+        let mut state = TextInputState::new();
+        state.preedit = Some(PreeditState {
+            text: "test".to_string(),
+            cursor_begin: 0,
+            cursor_end: 4,
+        });
+        state.clear_preedit();
+        assert!(state.preedit.is_none());
+    }
+
+    #[test]
+    fn test_text_input_disable_clears_preedit() {
+        let mut state = TextInputState::new();
+        let sid = uuid::Uuid::new_v4();
+        state.enable(sid);
+        state.preedit = Some(PreeditState {
+            text: "draft".to_string(),
+            cursor_begin: 0,
+            cursor_end: 5,
+        });
+        state.disable();
+        assert!(state.preedit.is_none());
+    }
+
+    // ---- DecorationState ----
+
+    #[test]
+    fn test_decoration_state_new() {
+        let sid = uuid::Uuid::new_v4();
+        let state = DecorationState::new(sid);
+        assert_eq!(state.surface_id, sid);
+        assert_eq!(state.preferred, DecorationMode::ServerSide);
+        assert_eq!(state.current, DecorationMode::ServerSide);
+    }
+
+    #[test]
+    fn test_decoration_negotiate_server_side() {
+        let sid = uuid::Uuid::new_v4();
+        let mut state = DecorationState::new(sid);
+        state.preferred = DecorationMode::ServerSide;
+        let mode = state.negotiate();
+        assert_eq!(mode, DecorationMode::ServerSide);
+        assert_eq!(state.current, DecorationMode::ServerSide);
+    }
+
+    #[test]
+    fn test_decoration_negotiate_client_side() {
+        let sid = uuid::Uuid::new_v4();
+        let mut state = DecorationState::new(sid);
+        state.preferred = DecorationMode::ClientSide;
+        let mode = state.negotiate();
+        assert_eq!(mode, DecorationMode::ClientSide);
+        assert_eq!(state.current, DecorationMode::ClientSide);
+    }
+
+    #[test]
+    fn test_decoration_mode_default() {
+        assert_eq!(DecorationMode::default(), DecorationMode::ServerSide);
+    }
+
+    // ---- ViewportState ----
+
+    #[test]
+    fn test_viewport_state_new() {
+        let sid = uuid::Uuid::new_v4();
+        let state = ViewportState::new(sid);
+        assert_eq!(state.surface_id, sid);
+        assert!(state.source.is_none());
+        assert!(state.destination.is_none());
+    }
+
+    #[test]
+    fn test_viewport_set_source() {
+        let sid = uuid::Uuid::new_v4();
+        let mut state = ViewportState::new(sid);
+        state.set_source(10.0, 20.0, 640.0, 480.0);
+        let src = state.source.unwrap();
+        assert!((src.x - 10.0).abs() < f64::EPSILON);
+        assert!((src.y - 20.0).abs() < f64::EPSILON);
+        assert!((src.width - 640.0).abs() < f64::EPSILON);
+        assert!((src.height - 480.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_viewport_set_destination() {
+        let sid = uuid::Uuid::new_v4();
+        let mut state = ViewportState::new(sid);
+        state.set_destination(800, 600);
+        assert_eq!(state.destination, Some((800, 600)));
+    }
+
+    #[test]
+    fn test_viewport_effective_size_destination_takes_precedence() {
+        let sid = uuid::Uuid::new_v4();
+        let mut state = ViewportState::new(sid);
+        state.set_source(0.0, 0.0, 1920.0, 1080.0);
+        state.set_destination(960, 540);
+        assert_eq!(state.effective_size(), Some((960, 540)));
+    }
+
+    #[test]
+    fn test_viewport_effective_size_from_source() {
+        let sid = uuid::Uuid::new_v4();
+        let mut state = ViewportState::new(sid);
+        state.set_source(0.0, 0.0, 1920.0, 1080.0);
+        assert_eq!(state.effective_size(), Some((1920, 1080)));
+    }
+
+    #[test]
+    fn test_viewport_effective_size_none() {
+        let sid = uuid::Uuid::new_v4();
+        let state = ViewportState::new(sid);
+        assert_eq!(state.effective_size(), None);
+    }
+
+    // ---- FractionalScale ----
+
+    #[test]
+    fn test_fractional_scale_new() {
+        let sid = uuid::Uuid::new_v4();
+        let fs = FractionalScale::new(sid, 120);
+        assert_eq!(fs.surface_id, sid);
+        assert_eq!(fs.scale_120, 120);
+    }
+
+    #[test]
+    fn test_fractional_scale_factor_1x() {
+        let sid = uuid::Uuid::new_v4();
+        let fs = FractionalScale::new(sid, 120);
+        assert!((fs.scale_factor() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_fractional_scale_factor_1_25x() {
+        let sid = uuid::Uuid::new_v4();
+        let fs = FractionalScale::new(sid, 150);
+        assert!((fs.scale_factor() - 1.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_fractional_scale_factor_2x() {
+        let sid = uuid::Uuid::new_v4();
+        let fs = FractionalScale::new(sid, 240);
+        assert!((fs.scale_factor() - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_fractional_scale_from_scale() {
+        let sid = uuid::Uuid::new_v4();
+        let fs = FractionalScale::from_scale(sid, 1.5);
+        assert_eq!(fs.scale_120, 180);
+        assert!((fs.scale_factor() - 1.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_fractional_scale_from_scale_2x() {
+        let sid = uuid::Uuid::new_v4();
+        let fs = FractionalScale::from_scale(sid, 2.0);
+        assert_eq!(fs.scale_120, 240);
+    }
+
+    // ---- map_input_to_pointer_event ----
+
+    #[test]
+    fn test_map_mouse_move_to_pointer() {
+        let event = InputEvent::MouseMove { x: 100, y: 200 };
+        let result = map_input_to_pointer_event(&event);
+        assert!(result.is_some());
+        if let Some(WaylandPointerEvent::Motion { x, y }) = result {
+            assert!((x - 100.0).abs() < f64::EPSILON);
+            assert!((y - 200.0).abs() < f64::EPSILON);
+        } else {
+            panic!("Expected Motion event");
+        }
+    }
+
+    #[test]
+    fn test_map_mouse_click_to_pointer() {
+        let event = InputEvent::MouseClick {
+            button: 1,
+            x: 50,
+            y: 75,
+        };
+        let result = map_input_to_pointer_event(&event);
+        assert!(result.is_some());
+        if let Some(WaylandPointerEvent::Button {
+            button,
+            x,
+            y,
+            pressed,
+        }) = result
+        {
+            assert_eq!(button, 1);
+            assert!((x - 50.0).abs() < f64::EPSILON);
+            assert!((y - 75.0).abs() < f64::EPSILON);
+            assert!(pressed);
+        } else {
+            panic!("Expected Button event");
+        }
+    }
+
+    #[test]
+    fn test_map_keypress_to_pointer_returns_none() {
+        let event = InputEvent::KeyPress {
+            keycode: 42,
+            modifiers: 0,
+        };
+        assert!(map_input_to_pointer_event(&event).is_none());
+    }
+
+    // ---- map_input_to_keyboard_event ----
+
+    #[test]
+    fn test_map_keypress_to_keyboard() {
+        let event = InputEvent::KeyPress {
+            keycode: 42,
+            modifiers: 0x01, // shift
+        };
+        let result = map_input_to_keyboard_event(&event);
+        assert!(result.is_some());
+        if let Some(WaylandKeyboardEvent::Key {
+            keycode,
+            modifiers,
+            pressed,
+        }) = result
+        {
+            assert_eq!(keycode, 42);
+            assert!(modifiers.shift);
+            assert!(pressed);
+        } else {
+            panic!("Expected Key event");
+        }
+    }
+
+    #[test]
+    fn test_map_mouse_move_to_keyboard_returns_none() {
+        let event = InputEvent::MouseMove { x: 10, y: 20 };
+        assert!(map_input_to_keyboard_event(&event).is_none());
+    }
+
+    #[test]
+    fn test_map_mouse_click_to_keyboard_returns_none() {
+        let event = InputEvent::MouseClick {
+            button: 1,
+            x: 10,
+            y: 20,
+        };
+        assert!(map_input_to_keyboard_event(&event).is_none());
+    }
+
+    // ---- ProtocolBridge ----
+
+    #[test]
+    fn test_protocol_bridge_new() {
+        let bridge = ProtocolBridge::new();
+        assert_eq!(bridge.client_count(), 0);
+        assert_eq!(bridge.surface_count(), 0);
+        assert_eq!(bridge.mapped_toplevel_count(), 0);
+    }
+
+    #[test]
+    fn test_protocol_bridge_default() {
+        let bridge = ProtocolBridge::default();
+        assert_eq!(bridge.client_count(), 0);
+    }
+
+    #[test]
+    fn test_client_connect_no_pid() {
+        let mut bridge = ProtocolBridge::new();
+        let id = bridge.client_connect(None);
+        assert!(id > 0);
+        assert_eq!(bridge.client_count(), 1);
+        let actions = bridge.drain_actions();
+        assert!(actions.iter().any(
+            |a| matches!(a, ProtocolAction::ClientConnected { client_id } if *client_id == id)
+        ));
+    }
+
+    #[test]
+    fn test_client_connect_with_pid() {
+        let mut bridge = ProtocolBridge::new();
+        let id = bridge.client_connect(Some(1234));
+        assert!(id > 0);
+        assert_eq!(bridge.client_count(), 1);
+        let client = bridge.clients.get(id).unwrap();
+        assert_eq!(client.pid, Some(1234));
+    }
+
+    #[test]
+    fn test_client_disconnect() {
+        let mut bridge = ProtocolBridge::new();
+        let id = bridge.client_connect(None);
+        bridge.drain_actions();
+
+        let removed = bridge.client_disconnect(id);
+        assert!(removed.is_empty()); // no surfaces
+        assert_eq!(bridge.client_count(), 0);
+
+        let actions = bridge.drain_actions();
+        assert!(actions.iter().any(
+            |a| matches!(a, ProtocolAction::ClientDisconnected { client_id } if *client_id == id)
+        ));
+    }
+
+    #[test]
+    fn test_create_surface() {
+        let mut bridge = ProtocolBridge::new();
+        let client_id = bridge.client_connect(None);
+        let result = bridge.create_surface(client_id);
+        assert!(result.is_some());
+        let (_surface_id, proto_id) = result.unwrap();
+        assert!(proto_id > 0);
+        assert_eq!(bridge.surface_count(), 1);
+    }
+
+    #[test]
+    fn test_create_and_destroy_surface() {
+        let mut bridge = ProtocolBridge::new();
+        let client_id = bridge.client_connect(None);
+        let (surface_id, _) = bridge.create_surface(client_id).unwrap();
+        bridge.drain_actions();
+
+        bridge.destroy_surface(surface_id);
+        assert_eq!(bridge.surface_count(), 0);
+
+        let actions = bridge.drain_actions();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, ProtocolAction::DestroyWindow { .. }))
+        );
+    }
+
+    #[test]
+    fn test_create_toplevel_lifecycle() {
+        let mut bridge = ProtocolBridge::new();
+        let client_id = bridge.client_connect(None);
+        let (surface_id, _) = bridge.create_surface(client_id).unwrap();
+        bridge.drain_actions();
+
+        let configure = bridge.create_toplevel(surface_id, client_id);
+        assert_eq!(configure.surface_id, surface_id);
+        assert_eq!(configure.width, 0); // initial configure = client picks size
+        assert_eq!(configure.height, 0);
+        assert!(configure.is_activated());
+        let serial = configure.serial;
+
+        let actions = bridge.drain_actions();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, ProtocolAction::CreateWindow { .. }))
+        );
+
+        // Ack the configure
+        assert!(bridge.ack_configure(surface_id, serial));
+
+        // First commit after ack should map
+        assert!(bridge.surface_commit(surface_id));
+        assert_eq!(bridge.mapped_toplevel_count(), 1);
+
+        // Second commit should not re-map
+        assert!(!bridge.surface_commit(surface_id));
+    }
+
+    #[test]
+    fn test_ack_configure_wrong_serial() {
+        let mut bridge = ProtocolBridge::new();
+        let client_id = bridge.client_connect(None);
+        let (surface_id, _) = bridge.create_surface(client_id).unwrap();
+        bridge.create_toplevel(surface_id, client_id);
+        bridge.drain_actions();
+
+        assert!(!bridge.ack_configure(surface_id, 99999));
+    }
+
+    #[test]
+    fn test_ack_configure_no_toplevel() {
+        let mut bridge = ProtocolBridge::new();
+        let fake_id = uuid::Uuid::new_v4();
+        assert!(!bridge.ack_configure(fake_id, 1));
+    }
+
+    #[test]
+    fn test_set_title() {
+        let mut bridge = ProtocolBridge::new();
+        let client_id = bridge.client_connect(None);
+        let (surface_id, _) = bridge.create_surface(client_id).unwrap();
+        bridge.create_toplevel(surface_id, client_id);
+        bridge.drain_actions();
+
+        bridge.set_title(surface_id, "My Window".to_string());
+        let tracker = bridge.toplevels.get(&surface_id).unwrap();
+        assert_eq!(tracker.title, Some("My Window".to_string()));
+
+        let actions = bridge.drain_actions();
+        assert!(
+            actions.iter().any(
+                |a| matches!(a, ProtocolAction::SetTitle { title, .. } if title == "My Window")
+            )
+        );
+    }
+
+    #[test]
+    fn test_set_app_id() {
+        let mut bridge = ProtocolBridge::new();
+        let client_id = bridge.client_connect(None);
+        let (surface_id, _) = bridge.create_surface(client_id).unwrap();
+        bridge.create_toplevel(surface_id, client_id);
+        bridge.drain_actions();
+
+        bridge.set_app_id(surface_id, "org.example.app".to_string());
+        let tracker = bridge.toplevels.get(&surface_id).unwrap();
+        assert_eq!(tracker.app_id, Some("org.example.app".to_string()));
+    }
+
+    #[test]
+    fn test_set_minimized() {
+        let mut bridge = ProtocolBridge::new();
+        let sid = uuid::Uuid::new_v4();
+        bridge.set_minimized(sid);
+        let actions = bridge.drain_actions();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, ProtocolAction::SetMinimized { .. }))
+        );
+    }
+
+    #[test]
+    fn test_request_move_and_resize() {
+        let mut bridge = ProtocolBridge::new();
+        let sid = uuid::Uuid::new_v4();
+
+        bridge.request_move(sid);
+        bridge.request_resize(sid, 2);
+
+        let actions = bridge.drain_actions();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, ProtocolAction::RequestMove { .. }))
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, ProtocolAction::RequestResize { edge, .. } if *edge == 2))
+        );
+    }
+
+    #[test]
+    fn test_set_size_bounds() {
+        let mut bridge = ProtocolBridge::new();
+        let client_id = bridge.client_connect(None);
+        let (surface_id, _) = bridge.create_surface(client_id).unwrap();
+        bridge.create_toplevel(surface_id, client_id);
+        bridge.drain_actions();
+
+        bridge.set_size_bounds(surface_id, Some((100, 100)), Some((800, 600)));
+        let tracker = bridge.toplevels.get(&surface_id).unwrap();
+        assert_eq!(tracker.min_size, Some((100, 100)));
+        assert_eq!(tracker.max_size, Some((800, 600)));
+    }
+
+    #[test]
+    fn test_set_size_bounds_none_does_not_overwrite() {
+        let mut bridge = ProtocolBridge::new();
+        let client_id = bridge.client_connect(None);
+        let (surface_id, _) = bridge.create_surface(client_id).unwrap();
+        bridge.create_toplevel(surface_id, client_id);
+        bridge.drain_actions();
+
+        bridge.set_size_bounds(surface_id, Some((50, 50)), None);
+        bridge.set_size_bounds(surface_id, None, Some((400, 400)));
+        let tracker = bridge.toplevels.get(&surface_id).unwrap();
+        assert_eq!(tracker.min_size, Some((50, 50)));
+        assert_eq!(tracker.max_size, Some((400, 400)));
+    }
+
+    #[test]
+    fn test_set_maximized() {
+        let mut bridge = ProtocolBridge::new();
+        let client_id = bridge.client_connect(None);
+        let (surface_id, _) = bridge.create_surface(client_id).unwrap();
+        bridge.create_toplevel(surface_id, client_id);
+        bridge.drain_actions();
+
+        bridge.set_maximized(surface_id, true);
+        let actions = bridge.drain_actions();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, ProtocolAction::SetMaximized { maximized, .. } if *maximized))
+        );
+    }
+
+    #[test]
+    fn test_set_fullscreen() {
+        let mut bridge = ProtocolBridge::new();
+        let client_id = bridge.client_connect(None);
+        let (surface_id, _) = bridge.create_surface(client_id).unwrap();
+        bridge.create_toplevel(surface_id, client_id);
+        bridge.drain_actions();
+
+        bridge.set_fullscreen(surface_id, true);
+        let actions = bridge.drain_actions();
+        assert!(
+            actions.iter().any(
+                |a| matches!(a, ProtocolAction::SetFullscreen { fullscreen, .. } if *fullscreen)
+            )
+        );
+    }
+
+    #[test]
+    fn test_client_disconnect_removes_surfaces_and_clears_focus() {
+        let mut bridge = ProtocolBridge::new();
+        let client_id = bridge.client_connect(None);
+        let (surface_id, _) = bridge.create_surface(client_id).unwrap();
+        bridge.create_toplevel(surface_id, client_id);
+        bridge.drain_actions();
+
+        // Set focus to this surface
+        bridge
+            .pointer_focus
+            .set_focus(Some(surface_id), 0.0, 0.0, 1);
+        bridge.keyboard_focus.set_focus(Some(surface_id), 1);
+
+        let removed = bridge.client_disconnect(client_id);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0], surface_id);
+        assert!(bridge.pointer_focus.surface_id.is_none());
+        assert!(bridge.keyboard_focus.surface_id.is_none());
+        assert_eq!(bridge.surface_count(), 0);
+        assert!(bridge.toplevels.is_empty());
+    }
+
+    #[test]
+    fn test_client_disconnect_nonexistent() {
+        let mut bridge = ProtocolBridge::new();
+        let removed = bridge.client_disconnect(999);
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn test_drain_actions_empties_queue() {
+        let mut bridge = ProtocolBridge::new();
+        bridge.client_connect(None);
+        let first = bridge.drain_actions();
+        assert!(!first.is_empty());
+        let second = bridge.drain_actions();
+        assert!(second.is_empty());
+    }
+
+    #[test]
+    fn test_surface_commit_no_toplevel() {
+        let mut bridge = ProtocolBridge::new();
+        let fake = uuid::Uuid::new_v4();
+        // Should not panic, just returns false
+        assert!(!bridge.surface_commit(fake));
+    }
+
+    // ---- ContentType ----
+
+    #[test]
+    fn test_content_type_default() {
+        assert_eq!(ContentType::default(), ContentType::Normal);
+    }
 }

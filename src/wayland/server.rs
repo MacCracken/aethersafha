@@ -1,6 +1,7 @@
 //! Feature-gated live Wayland server integration.
 
 #[cfg(feature = "wayland")]
+#[allow(dead_code)]
 mod wayland_live {
     use std::collections::HashMap as StdHashMap;
     use std::sync::Arc;
@@ -579,6 +580,7 @@ pub use wayland_live::WaylandState;
 // ============================================================================
 
 #[cfg(feature = "wayland")]
+#[allow(dead_code)]
 mod wayland_accept {
     use std::path::{Path, PathBuf};
 
