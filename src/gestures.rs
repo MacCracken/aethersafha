@@ -177,6 +177,7 @@ impl GestureRecognizer {
     }
 
     /// Number of fingers currently touching.
+    #[must_use]
     pub fn active_touch_count(&self) -> usize {
         self.active_touches.iter().filter(|t| !t.released).count()
     }

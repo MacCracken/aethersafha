@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -121,10 +121,10 @@ pub struct OverrideRequest {
 
 #[derive(Debug)]
 pub struct SecurityUI {
-    alerts: Arc<RwLock<Vec<SecurityAlert>>>,
-    permission_requests: Arc<RwLock<Vec<PermissionRequest>>>,
+    alerts: Arc<RwLock<VecDeque<SecurityAlert>>>,
+    permission_requests: Arc<RwLock<VecDeque<PermissionRequest>>>,
     agent_permissions: Arc<RwLock<HashMap<Uuid, AgentPermission>>>,
-    override_requests: Arc<RwLock<Vec<OverrideRequest>>>,
+    override_requests: Arc<RwLock<VecDeque<OverrideRequest>>>,
     permission_definitions: Arc<RwLock<Vec<PermissionDefinition>>>,
     security_level: Arc<RwLock<SecurityLevel>>,
     emergency_mode: Arc<RwLock<bool>>,
@@ -149,10 +149,10 @@ impl Default for SecurityUI {
 impl SecurityUI {
     pub fn new() -> Self {
         let ui = Self {
-            alerts: Arc::new(RwLock::new(Vec::new())),
-            permission_requests: Arc::new(RwLock::new(Vec::new())),
+            alerts: Arc::new(RwLock::new(VecDeque::new())),
+            permission_requests: Arc::new(RwLock::new(VecDeque::new())),
             agent_permissions: Arc::new(RwLock::new(HashMap::new())),
-            override_requests: Arc::new(RwLock::new(Vec::new())),
+            override_requests: Arc::new(RwLock::new(VecDeque::new())),
             permission_definitions: Arc::new(RwLock::new(Vec::new())),
             security_level: Arc::new(RwLock::new(SecurityLevel::Standard)),
             emergency_mode: Arc::new(RwLock::new(false)),
@@ -222,7 +222,7 @@ impl SecurityUI {
             alerts.retain(|a| !a.is_resolved);
             // If still full, drop the oldest
             if alerts.len() >= MAX_ALERTS {
-                alerts.remove(0);
+                alerts.pop_front();
             }
         }
 
@@ -231,7 +231,7 @@ impl SecurityUI {
         }
 
         debug!("Security alert: {}", alert.title);
-        alerts.push(alert);
+        alerts.push_back(alert);
     }
 
     pub fn dismiss_alert(&self, alert_id: Uuid) -> Result<(), SecurityUIError> {
@@ -253,11 +253,11 @@ impl SecurityUI {
         if requests.len() >= MAX_PERMISSION_REQUESTS {
             requests.retain(|r| !r.is_granted);
             if requests.len() >= MAX_PERMISSION_REQUESTS {
-                requests.remove(0);
+                requests.pop_front();
             }
         }
 
-        requests.push(request);
+        requests.push_back(request);
         info!("Permission request: {}", permission);
     }
 
@@ -328,11 +328,13 @@ impl SecurityUI {
         action: String,
         reason: String,
     ) -> Uuid {
-        let agent_name_clone = agent_name.clone();
         let id = Uuid::new_v4();
+
+        warn!("Human override requested by {}", agent_name);
+
         let request = OverrideRequest {
             id,
-            agent_name: agent_name_clone,
+            agent_name,
             action,
             reason,
             timestamp: chrono::Utc::now(),
@@ -349,13 +351,11 @@ impl SecurityUI {
         if requests.len() >= MAX_OVERRIDE_REQUESTS {
             requests.retain(|r| !r.is_approved);
             if requests.len() >= MAX_OVERRIDE_REQUESTS {
-                requests.remove(0);
+                requests.pop_front();
             }
         }
 
-        requests.push(request);
-
-        warn!("Human override requested by {}", agent_name);
+        requests.push_back(request);
         id
     }
 
@@ -364,15 +364,14 @@ impl SecurityUI {
         request_id: Uuid,
         approver: String,
     ) -> Result<(), SecurityUIError> {
-        let approver_clone = approver.clone();
         let mut requests = self
             .override_requests
             .write()
             .unwrap_or_else(|e| e.into_inner());
         if let Some(req) = requests.iter_mut().find(|r| r.id == request_id) {
             req.is_approved = true;
+            info!("Override approved by {}", approver);
             req.approved_by = Some(approver);
-            info!("Override approved by {}", approver_clone);
             Ok(())
         } else {
             Err(SecurityUIError::AlertNotFound(request_id))

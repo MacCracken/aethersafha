@@ -91,7 +91,10 @@ impl TerminalApp {
 
         let program = parts[0];
 
-        // Only allow known-safe programs
+        // Only allow known-safe programs by basename, then resolve to the
+        // basename itself so that path-traversal attacks (e.g. `/evil/bin/ls`)
+        // are neutralised — we always execute the bare name, letting the OS
+        // resolve it via $PATH.
         let base_name = std::path::Path::new(program)
             .file_name()
             .and_then(|n| n.to_str())
@@ -105,7 +108,7 @@ impl TerminalApp {
 
         let args = &parts[1..];
 
-        let output = tokio::process::Command::new(program)
+        let output = tokio::process::Command::new(base_name)
             .args(args)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

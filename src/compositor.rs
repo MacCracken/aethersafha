@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -75,7 +76,7 @@ pub struct Workspace {
     pub context_type: ContextType,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ContextType {
     Development,
@@ -167,7 +168,9 @@ impl Compositor {
             agent_aware_mode: Arc::new(RwLock::new(true)),
             secure_mode: Arc::new(RwLock::new(false)),
             scene: Arc::new(RwLock::new(SceneGraph::new())),
-            renderer: Arc::new(RwLock::new(DesktopRenderer::new(width, height))),
+            renderer: Arc::new(RwLock::new(
+                DesktopRenderer::new(width, height).expect("default resolution must fit in memory"),
+            )),
             focused_window: Arc::new(RwLock::new(None)),
             drag_state: Arc::new(RwLock::new(None)),
             resize_state: Arc::new(RwLock::new(None)),
@@ -264,7 +267,8 @@ impl Compositor {
                 ],
             };
             tree.add_node(node);
-            tree.announce(&format!("Window opened: {}", title));
+            let sanitized_title: String = title.chars().filter(|c| !c.is_control()).collect();
+            tree.announce(&format!("Window opened: {}", sanitized_title));
         }
 
         Ok(id)
@@ -336,7 +340,9 @@ impl Compositor {
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
             tree.remove_node(&id);
-            tree.announce(&format!("Window closed: {}", window_title));
+            let sanitized_title: String =
+                window_title.chars().filter(|c| !c.is_control()).collect();
+            tree.announce(&format!("Window closed: {}", sanitized_title));
         }
 
         Ok(())
@@ -486,10 +492,10 @@ impl Compositor {
             .read()
             .unwrap_or_else(|e| e.into_inner());
         let workspaces = self.workspaces.read().unwrap_or_else(|e| e.into_inner());
-        let window_ids = if let Some(ws) = workspaces.get(active_ws) {
-            ws.windows.clone()
+        let window_ids: HashSet<SurfaceId> = if let Some(ws) = workspaces.get(active_ws) {
+            ws.windows.iter().copied().collect()
         } else {
-            Vec::new()
+            HashSet::new()
         };
 
         self.windows
@@ -511,10 +517,10 @@ impl Compositor {
             return String::new();
         }
 
-        let mut lines = Vec::new();
-        lines.push("╔══════════════════════════════════════╗".to_string());
-        lines.push("║         Agent HUD                    ║".to_string());
-        lines.push("╠══════════════════════════════════════╣".to_string());
+        let mut buf = String::new();
+        let _ = writeln!(buf, "╔══════════════════════════════════════╗");
+        let _ = writeln!(buf, "║         Agent HUD                    ║");
+        let _ = writeln!(buf, "╠══════════════════════════════════════╣");
 
         for agent in agents {
             let status_icon = match agent.status {
@@ -526,20 +532,22 @@ impl Compositor {
             };
 
             let name = if agent.agent_name.chars().count() > 20 {
-                let truncated: String = agent.agent_name.chars().take(19).collect();
-                format!("{}…", truncated)
+                let mut truncated: String = agent.agent_name.chars().take(19).collect();
+                truncated.push('\u{2026}');
+                truncated
             } else {
                 agent.agent_name.clone()
             };
 
-            lines.push(format!(
+            let _ = writeln!(
+                buf,
                 "║ {} {:<20} {:>5.1}% {:>4}MB ║",
                 status_icon, name, agent.resource_usage.cpu_percent, agent.resource_usage.memory_mb,
-            ));
+            );
         }
 
-        lines.push("╚══════════════════════════════════════╝".to_string());
-        lines.join("\n")
+        let _ = write!(buf, "╚══════════════════════════════════════╝");
+        buf
     }
 
     /// Route an input event through the scene graph and return the action.
@@ -604,7 +612,7 @@ impl Compositor {
             DecorationHit::MaximizeButton => InputAction::ToggleMaximize(surface_id),
             DecorationHit::Border(edge) => {
                 *self.resize_state.write().unwrap_or_else(|e| e.into_inner()) =
-                    Some((surface_id, edge.clone(), surface.geometry));
+                    Some((surface_id, edge, surface.geometry));
                 InputAction::BeginResize(surface_id, edge)
             }
             DecorationHit::ClientArea => {
@@ -627,11 +635,7 @@ impl Compositor {
         }
 
         // Handle active resize
-        let resize = self
-            .resize_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let resize = *self.resize_state.read().unwrap_or_else(|e| e.into_inner());
         if let Some((id, ref edge, ref original)) = resize {
             self.apply_resize(id, edge, original, x, y);
             return InputAction::PointerMove(x, y);
@@ -987,7 +991,7 @@ impl Compositor {
                 "Invalid workspace: {}",
                 workspace_id
             )))?;
-        Ok(ws.context_type.clone())
+        Ok(ws.context_type)
     }
 
     pub fn set_workspace_context(
@@ -997,7 +1001,7 @@ impl Compositor {
     ) -> Result<(), CompositorError> {
         let mut workspaces = self.workspaces.write().unwrap_or_else(|e| e.into_inner());
         if let Some(ws) = workspaces.get_mut(workspace_id) {
-            ws.context_type = context.clone();
+            ws.context_type = context;
             info!("Workspace {} context set to {:?}", workspace_id, context);
         }
         Ok(())
@@ -1686,7 +1690,7 @@ mod tests {
         ];
         for (i, ctx) in contexts.iter().enumerate() {
             let ws = i % 4;
-            compositor.set_workspace_context(ws, ctx.clone()).unwrap();
+            compositor.set_workspace_context(ws, *ctx).unwrap();
             assert_eq!(compositor.get_workspace_context(ws).unwrap(), *ctx);
         }
     }
@@ -2227,7 +2231,7 @@ mod tests {
         let id = compositor
             .create_window("W".to_string(), "app".to_string(), false)
             .unwrap();
-        let content = Framebuffer::new(50, 50, 0xFFFF0000); // Red
+        let content = Framebuffer::new(50, 50, 0xFFFF0000).unwrap(); // Red
         compositor.submit_window_buffer(id, content);
         // Should render without panicking
         compositor.render();

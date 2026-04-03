@@ -107,6 +107,7 @@ pub struct PluginInfo {
 impl PluginInfo {
     /// Returns `true` if the plugin is running and has sent a heartbeat
     /// within the last 30 seconds.
+    #[must_use]
     pub fn is_healthy(&self) -> bool {
         if self.state != PluginState::Running {
             return false;
@@ -121,6 +122,7 @@ impl PluginInfo {
     }
 
     /// Returns how long this plugin has been running since `started_at`.
+    #[must_use]
     pub fn uptime(&self) -> Duration {
         let elapsed = Utc::now().signed_duration_since(self.started_at);
         elapsed.to_std().unwrap_or(Duration::ZERO)

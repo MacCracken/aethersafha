@@ -120,7 +120,6 @@ pub struct Popup {
 #[derive(Debug)]
 pub struct PopupManager {
     popups: HashMap<SurfaceId, Popup>,
-    next_counter: u64,
 }
 
 impl PopupManager {
@@ -128,7 +127,6 @@ impl PopupManager {
     pub fn new() -> Self {
         Self {
             popups: HashMap::new(),
-            next_counter: 0,
         }
     }
 
@@ -150,7 +148,6 @@ impl PopupManager {
             grab: false,
         };
         self.popups.insert(id, popup);
-        self.next_counter += 1;
         id
     }
 

@@ -22,11 +22,15 @@ use crate::compositor::{Rectangle, SurfaceId, WindowState};
 pub type Pixel = u32;
 
 /// Construct an ARGB pixel from components.
+#[must_use]
+#[inline]
 pub const fn argb(a: u8, r: u8, g: u8, b: u8) -> Pixel {
     ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
 }
 
 /// Extract ARGB components from a pixel.
+#[must_use]
+#[inline]
 pub const fn decompose(p: Pixel) -> (u8, u8, u8, u8) {
     (
         ((p >> 24) & 0xFF) as u8,
@@ -37,6 +41,8 @@ pub const fn decompose(p: Pixel) -> (u8, u8, u8, u8) {
 }
 
 /// Alpha-blend `src` over `dst` (pre-multiplied alpha).
+#[must_use]
+#[inline]
 pub fn blend(src: Pixel, dst: Pixel) -> Pixel {
     let (sa, sr, sg, sb) = decompose(src);
 
@@ -104,38 +110,40 @@ impl std::fmt::Debug for Framebuffer {
 impl Framebuffer {
     /// Create a framebuffer filled with a solid color.
     ///
-    /// Returns `None` if `width * height` overflows `u32`.
-    pub fn new(width: u32, height: u32, fill: Pixel) -> Self {
-        let pixel_count = (width as usize)
-            .checked_mul(height as usize)
-            .expect("framebuffer dimensions overflow");
-        Self {
+    /// Returns `None` if `width * height` overflows `usize`.
+    pub fn new(width: u32, height: u32, fill: Pixel) -> Option<Self> {
+        let pixel_count = (width as usize).checked_mul(height as usize)?;
+        Some(Self {
             width,
             height,
             pixels: vec![fill; pixel_count],
-        }
+        })
     }
 
     /// Get a pixel at (x, y). Returns None if out of bounds.
+    #[must_use]
+    #[inline]
     pub fn get(&self, x: u32, y: u32) -> Option<Pixel> {
         if x < self.width && y < self.height {
-            Some(self.pixels[(y * self.width + x) as usize])
+            Some(self.pixels[y as usize * self.width as usize + x as usize])
         } else {
             None
         }
     }
 
     /// Set a pixel at (x, y). No-op if out of bounds.
+    #[inline]
     pub fn set(&mut self, x: u32, y: u32, color: Pixel) {
         if x < self.width && y < self.height {
-            self.pixels[(y * self.width + x) as usize] = color;
+            self.pixels[y as usize * self.width as usize + x as usize] = color;
         }
     }
 
     /// Blend a pixel onto the buffer at (x, y).
+    #[inline]
     pub fn blend_pixel(&mut self, x: u32, y: u32, color: Pixel) {
         if x < self.width && y < self.height {
-            let idx = (y * self.width + x) as usize;
+            let idx = y as usize * self.width as usize + x as usize;
             self.pixels[idx] = blend(color, self.pixels[idx]);
         }
     }
@@ -191,6 +199,7 @@ impl Framebuffer {
 
     /// Blit another framebuffer onto this one at offset (dx, dy).
     /// Pre-clips source ranges to avoid per-pixel bounds checks.
+    /// Uses a row-level fast path for fully opaque scanlines.
     pub fn blit(&mut self, src: &Framebuffer, dx: i32, dy: i32) {
         // Compute visible source row/col range upfront
         let sy_start = if dy < 0 { (-dy) as u32 } else { 0 };
@@ -198,12 +207,25 @@ impl Framebuffer {
         let sx_start = if dx < 0 { (-dx) as u32 } else { 0 };
         let sx_end = src.width.min(((self.width as i32) - dx).max(0) as u32);
 
+        let src_w = src.width as usize;
+        let dst_w = self.width as usize;
+
         for sy in sy_start..sy_end {
-            let ty = (dy + sy as i32) as u32;
-            for sx in sx_start..sx_end {
-                let tx = (dx + sx as i32) as u32;
-                let pixel = src.pixels[(sy * src.width + sx) as usize];
-                self.blend_pixel(tx, ty, pixel);
+            let ty = (dy + sy as i32) as usize;
+            let tx_start = (dx + sx_start as i32) as usize;
+            let src_row_start = sy as usize * src_w + sx_start as usize;
+            let src_row_end = sy as usize * src_w + sx_end as usize;
+            let src_row = &src.pixels[src_row_start..src_row_end];
+            let dst_row_start = ty * dst_w + tx_start;
+            let dst_row = &mut self.pixels[dst_row_start..dst_row_start + src_row.len()];
+
+            // Fast path: copy entire row when all source pixels are fully opaque
+            if src_row.iter().all(|&p| (p >> 24) == 0xFF) {
+                dst_row.copy_from_slice(src_row);
+            } else {
+                for (d, &s) in dst_row.iter_mut().zip(src_row.iter()) {
+                    *d = blend(s, *d);
+                }
             }
         }
     }
@@ -379,6 +401,7 @@ pub fn draw_text(fb: &mut Framebuffer, text: &str, x: u32, y: u32, color: Pixel)
 }
 
 /// Calculate text width in pixels.
+#[must_use]
 pub fn text_width(text: &str) -> u32 {
     if text.is_empty() {
         return 0;
@@ -388,6 +411,8 @@ pub fn text_width(text: &str) -> u32 {
 
 /// Get the 5x7 glyph bitmap for a character. Each u8 represents a row
 /// with the 5 most significant bits being the pixel columns.
+#[must_use]
+#[inline]
 fn get_glyph(ch: char) -> Option<&'static [u8; 7]> {
     // Minimal ASCII subset covering A-Z, a-z, 0-9, common punctuation
     match ch {
@@ -474,7 +499,7 @@ pub enum DecorationHit {
 }
 
 /// Which edge/corner is being resized.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ResizeEdge {
     Top,
@@ -520,8 +545,14 @@ pub fn render_decorations(
     let display_title = if text_width(title) > max_title_width {
         let max_chars = (max_title_width / 6) as usize;
         if max_chars > 2 {
-            let truncated: String = title.chars().take(max_chars - 1).collect();
-            format!("{}…", truncated)
+            let byte_end = title
+                .char_indices()
+                .nth(max_chars - 1)
+                .map_or(title.len(), |(i, _)| i);
+            let mut s = String::with_capacity(byte_end + '…'.len_utf8());
+            s.push_str(&title[..byte_end]);
+            s.push('…');
+            s
         } else {
             title.to_string()
         }
@@ -801,14 +832,14 @@ pub struct DesktopRenderer {
 }
 
 impl DesktopRenderer {
-    pub fn new(width: u32, height: u32) -> Self {
-        Self {
-            front: Framebuffer::new(width, height, COLOR_BG_DARK),
-            back: Framebuffer::new(width, height, COLOR_BG_DARK),
+    pub fn new(width: u32, height: u32) -> Option<Self> {
+        Some(Self {
+            front: Framebuffer::new(width, height, COLOR_BG_DARK)?,
+            back: Framebuffer::new(width, height, COLOR_BG_DARK)?,
             damage: DamageTracker::new(width, height),
             window_buffers: HashMap::new(),
             high_contrast: None,
-        }
+        })
     }
 
     /// Set or clear the high-contrast accessibility theme.
@@ -955,7 +986,7 @@ mod tests {
 
     #[test]
     fn test_framebuffer_new() {
-        let fb = Framebuffer::new(100, 50, COLOR_BLACK);
+        let fb = Framebuffer::new(100, 50, COLOR_BLACK).unwrap();
         assert_eq!(fb.width, 100);
         assert_eq!(fb.height, 50);
         assert_eq!(fb.pixels.len(), 5000);
@@ -964,7 +995,7 @@ mod tests {
 
     #[test]
     fn test_framebuffer_set_get() {
-        let mut fb = Framebuffer::new(10, 10, COLOR_BLACK);
+        let mut fb = Framebuffer::new(10, 10, COLOR_BLACK).unwrap();
         fb.set(5, 5, COLOR_WHITE);
         assert_eq!(fb.get(5, 5), Some(COLOR_WHITE));
         assert_eq!(fb.get(0, 0), Some(COLOR_BLACK));
@@ -972,14 +1003,14 @@ mod tests {
 
     #[test]
     fn test_framebuffer_out_of_bounds() {
-        let mut fb = Framebuffer::new(10, 10, COLOR_BLACK);
+        let mut fb = Framebuffer::new(10, 10, COLOR_BLACK).unwrap();
         assert_eq!(fb.get(10, 10), None);
         fb.set(10, 10, COLOR_WHITE); // Should not panic
     }
 
     #[test]
     fn test_framebuffer_fill_rect() {
-        let mut fb = Framebuffer::new(100, 100, COLOR_BLACK);
+        let mut fb = Framebuffer::new(100, 100, COLOR_BLACK).unwrap();
         let rect = Rectangle {
             x: 10,
             y: 10,
@@ -995,7 +1026,7 @@ mod tests {
 
     #[test]
     fn test_framebuffer_draw_rect_outline() {
-        let mut fb = Framebuffer::new(100, 100, COLOR_BLACK);
+        let mut fb = Framebuffer::new(100, 100, COLOR_BLACK).unwrap();
         let rect = Rectangle {
             x: 10,
             y: 10,
@@ -1010,8 +1041,8 @@ mod tests {
 
     #[test]
     fn test_framebuffer_blit() {
-        let mut dst = Framebuffer::new(100, 100, COLOR_BLACK);
-        let src = Framebuffer::new(10, 10, COLOR_WHITE);
+        let mut dst = Framebuffer::new(100, 100, COLOR_BLACK).unwrap();
+        let src = Framebuffer::new(10, 10, COLOR_WHITE).unwrap();
         dst.blit(&src, 5, 5);
         assert_eq!(dst.get(5, 5), Some(COLOR_WHITE));
         assert_eq!(dst.get(14, 14), Some(COLOR_WHITE));
@@ -1020,8 +1051,8 @@ mod tests {
 
     #[test]
     fn test_framebuffer_blit_negative_offset() {
-        let mut dst = Framebuffer::new(20, 20, COLOR_BLACK);
-        let src = Framebuffer::new(10, 10, COLOR_WHITE);
+        let mut dst = Framebuffer::new(20, 20, COLOR_BLACK).unwrap();
+        let src = Framebuffer::new(10, 10, COLOR_WHITE).unwrap();
         dst.blit(&src, -5, -5);
         assert_eq!(dst.get(0, 0), Some(COLOR_WHITE));
         assert_eq!(dst.get(4, 4), Some(COLOR_WHITE));
@@ -1030,7 +1061,7 @@ mod tests {
 
     #[test]
     fn test_framebuffer_clear() {
-        let mut fb = Framebuffer::new(10, 10, COLOR_BLACK);
+        let mut fb = Framebuffer::new(10, 10, COLOR_BLACK).unwrap();
         fb.set(5, 5, COLOR_WHITE);
         fb.clear(COLOR_BLACK);
         assert_eq!(fb.get(5, 5), Some(COLOR_BLACK));
@@ -1038,14 +1069,14 @@ mod tests {
 
     #[test]
     fn test_framebuffer_as_bytes() {
-        let fb = Framebuffer::new(2, 2, COLOR_BLACK);
+        let fb = Framebuffer::new(2, 2, COLOR_BLACK).unwrap();
         let bytes = fb.as_bytes();
         assert_eq!(bytes.len(), 16); // 4 pixels * 4 bytes
     }
 
     #[test]
     fn test_framebuffer_clone() {
-        let fb = Framebuffer::new(10, 10, COLOR_WHITE);
+        let fb = Framebuffer::new(10, 10, COLOR_WHITE).unwrap();
         let fb2 = fb.clone();
         assert_eq!(fb.pixels, fb2.pixels);
     }
@@ -1125,7 +1156,7 @@ mod tests {
 
     #[test]
     fn test_draw_char() {
-        let mut fb = Framebuffer::new(20, 20, COLOR_BLACK);
+        let mut fb = Framebuffer::new(20, 20, COLOR_BLACK).unwrap();
         assert!(draw_char(&mut fb, 'A', 0, 0, COLOR_WHITE));
         // At least some pixels should be white
         let white_count = fb.pixels.iter().filter(|&&p| p == COLOR_WHITE).count();
@@ -1134,13 +1165,13 @@ mod tests {
 
     #[test]
     fn test_draw_char_unknown() {
-        let mut fb = Framebuffer::new(20, 20, COLOR_BLACK);
+        let mut fb = Framebuffer::new(20, 20, COLOR_BLACK).unwrap();
         assert!(!draw_char(&mut fb, '★', 0, 0, COLOR_WHITE));
     }
 
     #[test]
     fn test_draw_text() {
-        let mut fb = Framebuffer::new(200, 20, COLOR_BLACK);
+        let mut fb = Framebuffer::new(200, 20, COLOR_BLACK).unwrap();
         let width = draw_text(&mut fb, "Hello", 0, 0, COLOR_WHITE);
         assert!(width > 0);
         assert_eq!(width, 5 * 6); // 5 chars * 6px each
@@ -1242,7 +1273,7 @@ mod tests {
 
     #[test]
     fn test_render_decorations_normal() {
-        let mut fb = Framebuffer::new(400, 300, COLOR_BG_DARK);
+        let mut fb = Framebuffer::new(400, 300, COLOR_BG_DARK).unwrap();
         let rect = Rectangle {
             x: 10,
             y: 10,
@@ -1256,7 +1287,7 @@ mod tests {
 
     #[test]
     fn test_render_decorations_fullscreen_noop() {
-        let mut fb = Framebuffer::new(400, 300, COLOR_BG_DARK);
+        let mut fb = Framebuffer::new(400, 300, COLOR_BG_DARK).unwrap();
         let rect = Rectangle {
             x: 0,
             y: 0,
@@ -1424,14 +1455,14 @@ mod tests {
 
     #[test]
     fn test_desktop_renderer_new() {
-        let renderer = DesktopRenderer::new(1920, 1080);
+        let renderer = DesktopRenderer::new(1920, 1080).unwrap();
         assert_eq!(renderer.front.width, 1920);
         assert_eq!(renderer.front.height, 1080);
     }
 
     #[test]
     fn test_desktop_renderer_render_frame() {
-        let mut renderer = DesktopRenderer::new(640, 480);
+        let mut renderer = DesktopRenderer::new(640, 480).unwrap();
         let mut scene = SceneGraph::new();
 
         let id = Uuid::new_v4();
@@ -1459,9 +1490,9 @@ mod tests {
 
     #[test]
     fn test_desktop_renderer_submit_buffer() {
-        let mut renderer = DesktopRenderer::new(640, 480);
+        let mut renderer = DesktopRenderer::new(640, 480).unwrap();
         let id = Uuid::new_v4();
-        let buf = Framebuffer::new(100, 100, COLOR_WHITE);
+        let buf = Framebuffer::new(100, 100, COLOR_WHITE).unwrap();
         renderer.submit_buffer(id, buf);
 
         let mut scene = SceneGraph::new();
@@ -1514,7 +1545,7 @@ mod tests {
 
     #[test]
     fn test_framebuffer_fill_rect_clipped() {
-        let mut fb = Framebuffer::new(10, 10, COLOR_BLACK);
+        let mut fb = Framebuffer::new(10, 10, COLOR_BLACK).unwrap();
         // Rectangle extends beyond framebuffer
         let rect = Rectangle {
             x: 5,
@@ -1529,8 +1560,8 @@ mod tests {
 
     #[test]
     fn test_blit_clipped() {
-        let mut dst = Framebuffer::new(100, 100, COLOR_BLACK);
-        let src = Framebuffer::new(50, 50, COLOR_WHITE);
+        let mut dst = Framebuffer::new(100, 100, COLOR_BLACK).unwrap();
+        let src = Framebuffer::new(50, 50, COLOR_WHITE).unwrap();
         let clip = Rectangle {
             x: 10,
             y: 10,

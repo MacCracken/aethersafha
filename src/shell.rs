@@ -445,15 +445,11 @@ impl DesktopShell {
     }
 
     pub fn request_human_override(&self, agent_name: String, action: String, reason: String) {
-        let agent_name_clone = agent_name.clone();
         let notification = Notification {
             id: Uuid::new_v4(),
-            app_name: format!("Agent: {}", agent_name_clone),
+            app_name: format!("Agent: {}", agent_name),
             title: "Human Override Requested".to_string(),
-            body: format!(
-                "{}\n\nAction: {}\nReason: {}",
-                agent_name_clone, action, reason
-            ),
+            body: format!("{}\n\nAction: {}\nReason: {}", agent_name, action, reason),
             priority: NotificationPriority::Critical,
             timestamp: chrono::Utc::now(),
             requires_action: true,

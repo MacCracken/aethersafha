@@ -16,6 +16,8 @@ pub enum ShmFormat {
 
 impl ShmFormat {
     /// Bytes per pixel for this format.
+    #[must_use]
+    #[inline]
     pub fn bpp(&self) -> u32 {
         match self {
             ShmFormat::Argb8888 => 4,
@@ -71,6 +73,7 @@ impl Default for OutputInfo {
 
 impl OutputInfo {
     /// Physical DPI (horizontal).
+    #[must_use]
     pub fn dpi_x(&self) -> f64 {
         if self.width_mm == 0 {
             return 96.0;
@@ -79,6 +82,7 @@ impl OutputInfo {
     }
 
     /// Physical DPI (vertical).
+    #[must_use]
     pub fn dpi_y(&self) -> f64 {
         if self.height_mm == 0 {
             return 96.0;
@@ -87,6 +91,7 @@ impl OutputInfo {
     }
 
     /// Effective logical size (after scale).
+    #[must_use]
     pub fn logical_size(&self) -> (u32, u32) {
         if self.scale == 0 {
             return (self.width_px, self.height_px);
@@ -95,6 +100,7 @@ impl OutputInfo {
     }
 
     /// Refresh rate in Hz (floating point).
+    #[must_use]
     pub fn refresh_hz(&self) -> f64 {
         self.refresh_mhz as f64 / 1000.0
     }
@@ -217,6 +223,8 @@ impl Default for SeatCapabilities {
 
 impl SeatCapabilities {
     /// Convert to the wayland bitmask representation.
+    #[must_use]
+    #[inline]
     pub fn to_bitmask(self) -> u32 {
         let mut mask = 0u32;
         if self.pointer {
@@ -232,6 +240,8 @@ impl SeatCapabilities {
     }
 
     /// Parse from a wayland bitmask.
+    #[must_use]
+    #[inline]
     pub fn from_bitmask(mask: u32) -> Self {
         Self {
             pointer: mask & 1 != 0,
@@ -254,6 +264,8 @@ pub struct ModifierState {
 
 impl ModifierState {
     /// Decompose a raw modifier bitmask (as from InputEvent).
+    #[must_use]
+    #[inline]
     pub fn from_raw(mods: u32) -> Self {
         Self {
             shift: mods & 0x01 != 0,
@@ -266,6 +278,8 @@ impl ModifierState {
     }
 
     /// Encode back to a raw bitmask.
+    #[must_use]
+    #[inline]
     pub fn to_raw(self) -> u32 {
         let mut raw = 0u32;
         if self.shift {
@@ -290,6 +304,8 @@ impl ModifierState {
     }
 
     /// True if no modifiers are active.
+    #[must_use]
+    #[inline]
     pub fn is_empty(&self) -> bool {
         !self.shift && !self.ctrl && !self.alt && !self.logo && !self.caps_lock && !self.num_lock
     }

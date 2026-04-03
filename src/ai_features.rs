@@ -1,5 +1,5 @@
 use chrono::Timelike;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
 use tracing::{debug, info};
@@ -109,7 +109,7 @@ pub enum ContextEventType {
 pub struct AIDesktopFeatures {
     suggestions: Arc<RwLock<Vec<AISuggestion>>>,
     agent_hud: Arc<RwLock<HashMap<Uuid, AgentHUDState>>>,
-    context_history: Arc<RwLock<Vec<ContextEvent>>>,
+    context_history: Arc<RwLock<VecDeque<ContextEvent>>>,
     current_context: Arc<RwLock<DesktopContext>>,
     proactive_mode: Arc<RwLock<bool>>,
     ambient_enabled: Arc<RwLock<bool>>,
@@ -180,7 +180,7 @@ impl AIDesktopFeatures {
         Self {
             suggestions: Arc::new(RwLock::new(Vec::new())),
             agent_hud: Arc::new(RwLock::new(HashMap::new())),
-            context_history: Arc::new(RwLock::new(Vec::new())),
+            context_history: Arc::new(RwLock::new(VecDeque::new())),
             current_context: Arc::new(RwLock::new(DesktopContext::default())),
             proactive_mode: Arc::new(RwLock::new(true)),
             ambient_enabled: Arc::new(RwLock::new(true)),
@@ -214,11 +214,11 @@ impl AIDesktopFeatures {
                 .context_history
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
-            history.push(event.clone());
+            history.push_back(event.clone());
 
             let len = history.len();
             if len > 100 {
-                history.drain(0..len - 100);
+                history.drain(..len - 100);
             }
         }
 

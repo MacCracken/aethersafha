@@ -259,6 +259,7 @@ impl AccessibilityTree {
     }
 
     /// Find nodes whose name contains the given substring (case-insensitive).
+    #[must_use]
     pub fn search_by_name(&self, name: &str) -> Vec<&AccessibleNode> {
         let lower = name.to_lowercase();
         self.nodes
@@ -268,6 +269,7 @@ impl AccessibilityTree {
     }
 
     /// Find all nodes with the given role.
+    #[must_use]
     pub fn search_by_role(&self, role: AccessibilityRole) -> Vec<&AccessibleNode> {
         self.nodes.iter().filter(|n| n.role == role).collect()
     }
@@ -283,11 +285,13 @@ impl AccessibilityTree {
     }
 
     /// Total number of nodes in the tree.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.nodes.len()
     }
 
     /// Whether the tree is empty.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }

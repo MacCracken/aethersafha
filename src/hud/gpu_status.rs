@@ -24,6 +24,7 @@ pub enum MetricBand {
 
 impl MetricBand {
     /// Classify a 0–100 utilisation percentage.
+    #[must_use]
     pub fn from_utilization(pct: f32) -> Self {
         if pct >= 95.0 {
             Self::Critical
@@ -35,6 +36,7 @@ impl MetricBand {
     }
 
     /// Classify a temperature in degrees Celsius.
+    #[must_use]
     pub fn from_temperature(deg_c: f32) -> Self {
         if deg_c >= 90.0 {
             Self::Critical

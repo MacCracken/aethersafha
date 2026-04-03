@@ -4,7 +4,7 @@
 //! agent by its `domain` metadata field, and exposes a filterable view that
 //! the compositor can render as domain tabs/chips with per-domain agent cards.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, RwLock};
 
 use chrono::{DateTime, Utc};
@@ -134,16 +134,10 @@ impl DomainFilterWidget {
         let last_fetch_ok = *self.last_fetch_ok.read().unwrap_or_else(|e| e.into_inner());
 
         // Collect all known domains (for tab rendering) before applying filter.
-        let mut all_domains: Vec<String> = {
-            let mut seen: HashMap<String, ()> = HashMap::new();
-            for a in &agents {
-                seen.entry(a.domain.clone()).or_default();
-            }
-            let mut v: Vec<String> = seen.into_keys().collect();
-            v.sort();
-            v
+        let all_domains: Vec<String> = {
+            let seen: BTreeSet<String> = agents.iter().map(|a| a.domain.clone()).collect();
+            seen.into_iter().collect()
         };
-        all_domains.dedup();
 
         // Apply optional domain filter.
         let visible_agents: Vec<&RawAgent> = agents

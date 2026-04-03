@@ -5,6 +5,7 @@
 //! Output formats: raw ARGB8888, PNG, and BMP.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -107,6 +108,7 @@ pub enum CaptureTargetKind {
 
 impl CaptureTargetKind {
     /// Check if a concrete target matches this kind.
+    #[must_use]
     pub fn matches(&self, target: &CaptureTarget) -> bool {
         matches!(
             (self, target),
@@ -159,7 +161,7 @@ pub struct ScreenCaptureManager {
     /// Per-agent rate-limit tracking (agent_id -> recent capture timestamps).
     rate_limits: Arc<RwLock<HashMap<String, RateEntry>>>,
     /// Completed capture history (ring buffer, max 100 entries — metadata only).
-    capture_history: Arc<RwLock<Vec<CaptureHistoryEntry>>>,
+    capture_history: Arc<RwLock<VecDeque<CaptureHistoryEntry>>>,
 }
 
 /// Metadata-only record of a past capture (no pixel data retained).
@@ -183,7 +185,7 @@ impl ScreenCaptureManager {
         Self {
             permissions: Arc::new(RwLock::new(HashMap::new())),
             rate_limits: Arc::new(RwLock::new(HashMap::new())),
-            capture_history: Arc::new(RwLock::new(Vec::new())),
+            capture_history: Arc::new(RwLock::new(VecDeque::new())),
         }
     }
 
@@ -247,7 +249,9 @@ impl ScreenCaptureManager {
         self.capture_history
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .clone()
+            .iter()
+            .cloned()
+            .collect()
     }
 
     fn record_history(&self, result: &CaptureResult) {
@@ -266,9 +270,9 @@ impl ScreenCaptureManager {
             .write()
             .unwrap_or_else(|e| e.into_inner());
         if history.len() >= MAX_HISTORY {
-            history.remove(0);
+            history.pop_front();
         }
-        history.push(entry);
+        history.push_back(entry);
     }
 
     // -----------------------------------------------------------------------

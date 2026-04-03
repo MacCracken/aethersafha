@@ -154,7 +154,7 @@ fn bench_framebuffer_copy(c: &mut Criterion) {
     let mut group = c.benchmark_group("screen_capture/pixel_buffer");
 
     for &(name, w, h) in RESOLUTIONS {
-        let fb = Framebuffer::new(w, h, 0xFF336699);
+        let fb = Framebuffer::new(w, h, 0xFF336699).unwrap();
 
         group.bench_with_input(BenchmarkId::new("clone", name), &(), |b, _| {
             b.iter(|| {
@@ -202,8 +202,8 @@ fn bench_framebuffer_blit(c: &mut Criterion) {
     ];
 
     for &(name, sw, sh) in blit_sizes {
-        let mut dst = Framebuffer::new(1920, 1080, 0xFF000000);
-        let src = Framebuffer::new(sw, sh, 0xFF336699);
+        let mut dst = Framebuffer::new(1920, 1080, 0xFF000000).unwrap();
+        let src = Framebuffer::new(sw, sh, 0xFF336699).unwrap();
 
         group.bench_with_input(BenchmarkId::new("to_1080p", name), &(), |b, _| {
             b.iter(|| {

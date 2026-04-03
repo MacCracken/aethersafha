@@ -27,14 +27,14 @@ fn bench_render_frame(c: &mut Criterion) {
     let mut group = c.benchmark_group("renderer");
 
     for surface_count in [1, 5, 10, 20] {
-        let mut renderer = DesktopRenderer::new(1920, 1080);
+        let mut renderer = DesktopRenderer::new(1920, 1080).unwrap();
         let mut scene = SceneGraph::new();
 
         for i in 0..surface_count {
             let id = uuid::Uuid::new_v4();
             let surface =
                 make_surface(id, (i * 50) % 1600, (i * 40) % 800, 400, 300, Layer::Normal);
-            let buf = Framebuffer::new(400, 300, 0xFF336699);
+            let buf = Framebuffer::new(400, 300, 0xFF336699).unwrap();
             renderer.submit_buffer(id, buf);
             scene.add_surface(surface);
         }
@@ -98,17 +98,17 @@ fn bench_framebuffer(c: &mut Criterion) {
     let mut group = c.benchmark_group("framebuffer");
 
     group.bench_function("create_1080p", |b| {
-        b.iter(|| black_box(Framebuffer::new(1920, 1080, 0xFF000000)));
+        b.iter(|| black_box(Framebuffer::new(1920, 1080, 0xFF000000).unwrap()));
     });
 
     group.bench_function("clear_1080p", |b| {
-        let mut fb = Framebuffer::new(1920, 1080, 0xFF000000);
+        let mut fb = Framebuffer::new(1920, 1080, 0xFF000000).unwrap();
         b.iter(|| fb.clear(black_box(0xFF222222)));
     });
 
     group.bench_function("blit_400x300", |b| {
-        let mut dst = Framebuffer::new(1920, 1080, 0xFF000000);
-        let src = Framebuffer::new(400, 300, 0xFF336699);
+        let mut dst = Framebuffer::new(1920, 1080, 0xFF000000).unwrap();
+        let src = Framebuffer::new(400, 300, 0xFF336699).unwrap();
         b.iter(|| dst.blit(black_box(&src), black_box(100), black_box(100)));
     });
 

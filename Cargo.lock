@@ -32,6 +32,7 @@ dependencies = [
 [[package]]
 name = "agnostik"
 version = "0.90.0"
+source = "git+https://github.com/MacCracken/agnostik?tag=0.90.0#707a3ebb271a16285a3ca2c8e4d6192320f998cf"
 dependencies = [
  "chrono",
  "serde",
