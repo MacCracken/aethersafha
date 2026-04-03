@@ -21,6 +21,7 @@ path = "src/lib.rs"
 [features]
 default = ["wayland"]
 wayland = ["wayland-server", "wayland-protocols", "wayland-protocols-wlr"]
+gpu = ["mabda"]
 
 [dependencies]
 wayland-server = { version = "0.31", optional = true }
@@ -28,6 +29,7 @@ wayland-protocols = { version = "0.31", features = ["server"], optional = true }
 wayland-protocols-wlr = { version = "0.2", features = ["server"], optional = true }
 agnostik = { git = "https://github.com/MacCracken/agnostik", tag = "0.90.0" }
 agnosys = { git = "https://github.com/MacCracken/agnosys", tag = "0.50.0" }
+mabda = { version = "1.0.0", optional = true }
 tokio = { version = "1.50", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
