@@ -43,6 +43,7 @@ impl Default for XWaylandConfig {
 
 /// Lifecycle state of the XWayland process.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum XWaylandState {
     Disabled,
     Starting,
@@ -57,6 +58,7 @@ pub enum XWaylandState {
 
 /// Subset of X11 window-manager properties that the compositor cares about.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum X11Property {
     /// `_NET_WM_NAME` — the window title.
     NetWmName(String),
@@ -77,6 +79,7 @@ pub enum X11Property {
 
 /// Individual `_NET_WM_STATE` atoms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum X11WmState {
     Maximized,
     Fullscreen,
@@ -93,6 +96,7 @@ pub enum X11WmState {
 
 /// A translated window state change that the compositor can apply.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WindowStateChange {
     SetTitle(String),
     SetState(WindowState),
@@ -236,8 +240,14 @@ impl XWaylandManager {
     /// Transitions to [`XWaylandState::Stopped`] and clears all tracked surfaces.
     pub fn stop(&mut self) -> Result<(), String> {
         if let Some(ref mut child) = self.child {
-            // Send SIGTERM via libc
-            let pid = child.id() as libc::pid_t;
+            // Send SIGTERM via libc — guard against PID 0 (would signal entire process group)
+            let raw_pid = child.id();
+            if raw_pid == 0 {
+                let msg = "XWayland child PID is 0; refusing to signal process group".to_string();
+                tracing::error!(%msg);
+                return Err(msg);
+            }
+            let pid = raw_pid as libc::pid_t;
             let ret = unsafe { libc::kill(pid, libc::SIGTERM) };
             if ret != 0 {
                 let err = std::io::Error::last_os_error();
@@ -380,8 +390,8 @@ impl XWaylandManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     fn enabled_config() -> XWaylandConfig {
         XWaylandConfig {
@@ -722,7 +732,7 @@ mod tests {
         let new_pid = result.unwrap();
         assert_eq!(*mgr.state(), XWaylandState::Running);
         assert_eq!(spawner.count(), 2); // spawned twice (start + restart)
-                                        // PIDs should differ (new sleep process)
+        // PIDs should differ (new sleep process)
         assert_ne!(old_pid, new_pid);
 
         mgr.stop().ok();

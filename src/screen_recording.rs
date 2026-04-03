@@ -31,6 +31,7 @@ const MAX_RING_BUFFER_FRAMES: usize = 100;
 /// Current state of a recording session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum RecordingState {
     /// Session created but not yet started (internal transition state).
     Idle,
@@ -114,6 +115,7 @@ pub struct RecordingSession {
 
 /// Errors from the screen recording subsystem.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum RecordingError {
     #[error("secure mode is active — screen recording is blocked")]
     SecureModeActive,
@@ -285,10 +287,10 @@ impl ScreenRecordingManager {
             }
 
             // 2. Check max_frames limit
-            if let Some(max) = inner.session.config.max_frames {
-                if inner.session.frame_count >= max {
-                    return Err(RecordingError::MaxFramesReached);
-                }
+            if let Some(max) = inner.session.config.max_frames
+                && inner.session.frame_count >= max
+            {
+                return Err(RecordingError::MaxFramesReached);
             }
 
             // 3. Check max_duration limit
@@ -498,8 +500,8 @@ impl Default for ScreenRecordingManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::screen_capture::{CapturePermission, CaptureTargetKind, ScreenCaptureManager};
     use crate::Compositor;
+    use crate::screen_capture::{CapturePermission, CaptureTargetKind, ScreenCaptureManager};
 
     fn setup() -> (Compositor, ScreenCaptureManager, ScreenRecordingManager) {
         let compositor = Compositor::with_resolution(800, 600);

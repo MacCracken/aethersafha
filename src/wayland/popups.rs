@@ -10,6 +10,7 @@ use crate::compositor::{Rectangle, SurfaceId};
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
 )]
+#[non_exhaustive]
 pub enum Edge {
     #[default]
     None,

@@ -117,8 +117,12 @@ for i, ts in enumerate(pick):
         labels.append(f"Mid (`{commits[ts]}`)")
 
 def fmt_ns(ns):
-    if ns >= 1_000_000:
-        return f"{ns/1000:.1f} µs"
+    if ns >= 1_000_000_000:
+        return f"{ns/1_000_000_000:.2f} s"
+    elif ns >= 1_000_000:
+        return f"{ns/1_000_000:.1f} ms"
+    elif ns >= 1_000:
+        return f"{ns/1_000:.1f} µs"
     elif ns >= 100:
         return f"{ns:.1f} ns"
     else:

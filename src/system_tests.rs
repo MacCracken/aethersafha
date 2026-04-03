@@ -931,8 +931,8 @@ mod desktop_system_tests {
 
     /// Scenario 18: Model manager operations
     /// Open model manager, add a model, select it, verify selection
-    #[test]
-    fn test_e2e_model_manager_operations() {
+    #[tokio::test]
+    async fn test_e2e_model_manager_operations() {
         let mut apps = DesktopApplications::new();
 
         let mm_window = apps.open_model_manager().unwrap();
@@ -954,12 +954,12 @@ mod desktop_system_tests {
         });
 
         // Select it
-        mm.select_model("llama-3.1-8b".to_string()).unwrap();
+        mm.select_model("llama-3.1-8b".to_string()).await.unwrap();
         assert_eq!(mm.active_model, Some("llama-3.1-8b".to_string()));
 
         // Selecting non-existent model may depend on gateway availability
         // In test env without gateway, it should fall back to checking local list
-        let result = mm.select_model("nonexistent-model".to_string());
+        let result = mm.select_model("nonexistent-model".to_string()).await;
         // The model doesn't exist locally and gateway is not running
         // So active_model was already set, this may or may not error depending on gateway
         let _ = result;

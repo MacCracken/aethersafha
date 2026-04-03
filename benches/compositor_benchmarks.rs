@@ -1,9 +1,9 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 
-use desktop_environment::renderer::{
+use aethersafha::renderer::{
     DamageTracker, DesktopRenderer, Framebuffer, Layer, SceneGraph, SceneSurface,
 };
-use desktop_environment::{Rectangle, SurfaceId, WindowState};
+use aethersafha::{Rectangle, SurfaceId, WindowState};
 
 fn make_surface(id: SurfaceId, x: i32, y: i32, w: u32, h: u32, layer: Layer) -> SceneSurface {
     SceneSurface {

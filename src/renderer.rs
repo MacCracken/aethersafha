@@ -39,7 +39,6 @@ pub const fn decompose(p: Pixel) -> (u8, u8, u8, u8) {
 /// Alpha-blend `src` over `dst` (pre-multiplied alpha).
 pub fn blend(src: Pixel, dst: Pixel) -> Pixel {
     let (sa, sr, sg, sb) = decompose(src);
-    let (_, dr, dg, db) = decompose(dst);
 
     if sa == 255 {
         return src;
@@ -48,11 +47,12 @@ pub fn blend(src: Pixel, dst: Pixel) -> Pixel {
         return dst;
     }
 
+    let (da, dr, dg, db) = decompose(dst);
     let inv_alpha = 255 - sa as u32;
     let r = sr as u32 + (dr as u32 * inv_alpha / 255);
     let g = sg as u32 + (dg as u32 * inv_alpha / 255);
     let b = sb as u32 + (db as u32 * inv_alpha / 255);
-    let a = sa as u32 + (255u32.saturating_sub(sa as u32)); // result alpha
+    let a = sa as u32 + (da as u32 * inv_alpha / 255); // src-over result alpha
 
     argb(
         a.min(255) as u8,
@@ -103,11 +103,16 @@ impl std::fmt::Debug for Framebuffer {
 
 impl Framebuffer {
     /// Create a framebuffer filled with a solid color.
+    ///
+    /// Returns `None` if `width * height` overflows `u32`.
     pub fn new(width: u32, height: u32, fill: Pixel) -> Self {
+        let pixel_count = (width as usize)
+            .checked_mul(height as usize)
+            .expect("framebuffer dimensions overflow");
         Self {
             width,
             height,
-            pixels: vec![fill; (width * height) as usize],
+            pixels: vec![fill; pixel_count],
         }
     }
 
@@ -237,11 +242,9 @@ impl Framebuffer {
         // array, so reinterpreting as &[u8] of len * 4 bytes is valid.
         // The resulting slice borrows self, preventing drop or reallocation.
         // The checked_mul guards against theoretical overflow on 32-bit platforms.
-        let byte_len = self
-            .pixels
-            .len()
-            .checked_mul(4)
-            .expect("framebuffer byte length overflow");
+        // checked_mul cannot fail here: pixels.len() was validated in new() and
+        // 4 * usize::MAX/4 < usize::MAX, but we propagate instead of panicking.
+        let byte_len = self.pixels.len() * 4;
         unsafe { std::slice::from_raw_parts(self.pixels.as_ptr() as *const u8, byte_len) }
     }
 }
@@ -452,6 +455,7 @@ pub const BUTTON_SIZE: u32 = 12;
 
 /// Decoration hit-test result.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DecorationHit {
     /// Title bar (for dragging).
     TitleBar,
@@ -471,6 +475,7 @@ pub enum DecorationHit {
 
 /// Which edge/corner is being resized.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ResizeEdge {
     Top,
     Bottom,
@@ -638,6 +643,7 @@ pub fn decoration_hit_test(rect: &Rectangle, x: i32, y: i32, state: &WindowState
 
 /// Z-order layers for compositing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum Layer {
     /// Desktop wallpaper / background.
     Background = 0,

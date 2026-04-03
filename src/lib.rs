@@ -70,8 +70,8 @@ pub use shell_integration::{
 };
 
 pub use theme_bridge::{
-    color_hex_to_u32, color_u32_to_hex, FlutterThemeData, PlatformChannelMessage, ThemeBridge,
-    ThemeOverrides,
+    FlutterThemeData, PlatformChannelMessage, ThemeBridge, ThemeOverrides, color_hex_to_u32,
+    color_u32_to_hex,
 };
 
 pub use screen_capture::{

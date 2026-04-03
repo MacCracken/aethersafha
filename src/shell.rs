@@ -8,6 +8,7 @@ use uuid::Uuid;
 const MAX_NOTIFICATIONS: usize = 200;
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ShellError {
     #[error("Notification not found: {0}")]
     NotificationNotFound(Uuid),
@@ -20,6 +21,7 @@ pub enum ShellError {
 pub type NotificationId = Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NotificationPriority {
     Low,
     Normal,
@@ -98,6 +100,7 @@ pub struct SystemStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NetworkStatus {
     Connected,
     Disconnected,
@@ -115,6 +118,7 @@ pub struct AppEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AppCategory {
     System,
     Internet,
@@ -140,6 +144,7 @@ pub struct LauncherItem {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum LauncherAction {
     OpenApp(String),
     RunCommand(String),
@@ -494,12 +499,7 @@ impl DesktopShell {
             .cloned()
             .collect();
 
-        results.sort_by(|a, b| {
-            b.relevance_score
-                .partial_cmp(&a.relevance_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
+        // Boost prefix matches before sorting so ordering is correct
         if !query.is_empty() {
             for item in &mut results {
                 if item.name.to_lowercase().starts_with(&query) {
@@ -507,6 +507,12 @@ impl DesktopShell {
                 }
             }
         }
+
+        results.sort_by(|a, b| {
+            b.relevance_score
+                .partial_cmp(&a.relevance_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         results
     }
@@ -776,9 +782,11 @@ mod tests {
         let shell = DesktopShell::new();
         let results = shell.search_launcher("terminal");
         assert!(!results.is_empty());
-        assert!(results
-            .iter()
-            .any(|r| r.name.to_lowercase().contains("terminal")));
+        assert!(
+            results
+                .iter()
+                .any(|r| r.name.to_lowercase().contains("terminal"))
+        );
     }
 
     #[test]

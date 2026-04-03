@@ -26,8 +26,8 @@ wayland = ["wayland-server", "wayland-protocols", "wayland-protocols-wlr"]
 wayland-server = { version = "0.31", optional = true }
 wayland-protocols = { version = "0.31", features = ["server"], optional = true }
 wayland-protocols-wlr = { version = "0.2", features = ["server"], optional = true }
-agnos-common = { path = "../agnosticos/userland/agnos-common" }
-agnosys = { path = "../agnosys" }
+agnostik = { path = "../agnostik" }
+agnosys = { git = "https://github.com/MacCracken/agnosys", tag = "0.50.0" }
 tokio = { version = "1.50", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -41,7 +41,7 @@ chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6.1"
 parking_lot = "0.12"
 libc = "0.2"
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "blocking"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 
 [dev-dependencies]
 tokio-test = "0.4"

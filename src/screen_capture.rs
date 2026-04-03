@@ -14,8 +14,8 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::compositor::Compositor;
 use crate::SurfaceId;
+use crate::compositor::Compositor;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -27,6 +27,7 @@ pub type CaptureId = Uuid;
 /// What region of the screen to capture.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CaptureTarget {
     /// Capture the entire composited output.
     FullScreen,
@@ -44,6 +45,7 @@ pub enum CaptureTarget {
 /// Desired output format for the captured image.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CaptureFormat {
     /// Raw ARGB8888 pixel data.
     RawArgb,
@@ -96,6 +98,7 @@ pub struct CapturePermission {
 /// Simplified target kind for permission checks (no embedded IDs).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CaptureTargetKind {
     FullScreen,
     Window,
@@ -116,6 +119,7 @@ impl CaptureTargetKind {
 
 /// Errors from the screen capture subsystem.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum CaptureError {
     #[error("secure mode is active — screen capture is blocked")]
     SecureModeActive,
@@ -299,10 +303,10 @@ impl ScreenCaptureManager {
             .ok_or_else(|| CaptureError::PermissionDenied(agent_id.to_string()))?;
 
         // 3. Check expiry
-        if let Some(expires) = perm.expires_at {
-            if Utc::now() > expires {
-                return Err(CaptureError::PermissionExpired(agent_id.to_string()));
-            }
+        if let Some(expires) = perm.expires_at
+            && Utc::now() > expires
+        {
+            return Err(CaptureError::PermissionExpired(agent_id.to_string()));
         }
 
         // 4. Check target kind is allowed
@@ -1247,19 +1251,21 @@ mod tests {
                 Some("agent-a"),
             )
             .unwrap();
-        assert!(manager
-            .capture(
-                &compositor,
-                CaptureTarget::Region {
-                    x: 0,
-                    y: 0,
-                    width: 100,
-                    height: 100
-                },
-                CaptureFormat::RawArgb,
-                Some("agent-a"),
-            )
-            .is_err());
+        assert!(
+            manager
+                .capture(
+                    &compositor,
+                    CaptureTarget::Region {
+                        x: 0,
+                        y: 0,
+                        width: 100,
+                        height: 100
+                    },
+                    CaptureFormat::RawArgb,
+                    Some("agent-a"),
+                )
+                .is_err()
+        );
 
         // agent-b can region but not fullscreen
         manager
@@ -1275,13 +1281,15 @@ mod tests {
                 Some("agent-b"),
             )
             .unwrap();
-        assert!(manager
-            .capture(
-                &compositor,
-                CaptureTarget::FullScreen,
-                CaptureFormat::RawArgb,
-                Some("agent-b"),
-            )
-            .is_err());
+        assert!(
+            manager
+                .capture(
+                    &compositor,
+                    CaptureTarget::FullScreen,
+                    CaptureFormat::RawArgb,
+                    Some("agent-b"),
+                )
+                .is_err()
+        );
     }
 }

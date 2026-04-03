@@ -1,13 +1,13 @@
-// SPDX-License-Identifier: GPL-3.0
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Screen capture benchmarks for the AGNOS desktop environment.
 //!
 //! Measures PNG/BMP/raw encoding throughput and pixel buffer operations at
 //! common display resolutions (720p, 1080p, 4K).
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 
-use desktop_environment::renderer::Framebuffer;
-use desktop_environment::{CaptureFormat, CaptureTarget, Compositor, ScreenCaptureManager};
+use aethersafha::renderer::Framebuffer;
+use aethersafha::{CaptureFormat, CaptureTarget, Compositor, ScreenCaptureManager};
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 /// Errors that can occur during plugin host operations.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum PluginHostError {
     #[error("plugin not found: {0}")]
     PluginNotFound(Uuid),
@@ -28,6 +29,7 @@ pub enum PluginHostError {
 
 /// The type of desktop plugin, determining its role and default capabilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum PluginType {
     /// Visual theme provider (colors, fonts, decorations).
     Theme,
@@ -47,6 +49,7 @@ pub enum PluginType {
 
 /// The lifecycle state of a plugin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum PluginState {
     /// Plugin process is being spawned and initialized.
     Starting,
@@ -62,6 +65,7 @@ pub enum PluginState {
 
 /// Capabilities that a plugin may request or be granted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum PluginCapability {
     /// Read access to allowed filesystem paths.
     FilesystemRead,
@@ -127,6 +131,7 @@ impl PluginInfo {
 /// over Unix domain sockets.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[non_exhaustive]
 pub enum PluginMessage {
     /// Sent by the plugin during initialization.
     Init {
@@ -163,8 +168,8 @@ pub enum PluginMessage {
 
 impl PluginMessage {
     /// Serialize this message to a JSON string.
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).expect("PluginMessage serialization should not fail")
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
     }
 
     /// Deserialize a message from a JSON string.
@@ -482,16 +487,20 @@ mod tests {
         let mut host = make_host();
         let id = register_test_plugin(&mut host);
         let plugin = host.get_plugin(id).unwrap();
-        assert!(plugin
-            .socket_path
-            .to_str()
-            .unwrap()
-            .contains(&id.to_string()));
-        assert!(plugin
-            .socket_path
-            .to_str()
-            .unwrap()
-            .starts_with("/run/agnos/plugins/"));
+        assert!(
+            plugin
+                .socket_path
+                .to_str()
+                .unwrap()
+                .contains(&id.to_string())
+        );
+        assert!(
+            plugin
+                .socket_path
+                .to_str()
+                .unwrap()
+                .starts_with("/run/agnos/plugins/")
+        );
     }
 
     #[test]
@@ -709,9 +718,11 @@ mod tests {
         assert!(!profile.network_allowed);
         assert_eq!(profile.max_memory_bytes, 32 * 1024 * 1024);
         assert!(profile.max_cpu_percent <= 5.0);
-        assert!(profile
-            .allowed_paths
-            .contains(&PathBuf::from("/usr/share/themes")));
+        assert!(
+            profile
+                .allowed_paths
+                .contains(&PathBuf::from("/usr/share/themes"))
+        );
     }
 
     #[test]
@@ -731,9 +742,11 @@ mod tests {
         let profile = host.sandbox_profile_for(PluginType::InputMethod);
         assert!(!profile.network_allowed);
         assert_eq!(profile.max_memory_bytes, 128 * 1024 * 1024);
-        assert!(profile
-            .allowed_paths
-            .contains(&PathBuf::from("/usr/share/locale")));
+        assert!(
+            profile
+                .allowed_paths
+                .contains(&PathBuf::from("/usr/share/locale"))
+        );
     }
 
     // --- Message serialization ---
@@ -741,7 +754,7 @@ mod tests {
     #[test]
     fn test_message_heartbeat_roundtrip() {
         let msg = PluginMessage::Heartbeat;
-        let json = msg.to_json();
+        let json = msg.to_json().unwrap();
         let parsed = PluginMessage::from_json(&json).unwrap();
         assert_eq!(parsed, PluginMessage::Heartbeat);
     }
@@ -756,7 +769,7 @@ mod tests {
                 PluginCapability::InputEvents,
             ],
         };
-        let json = msg.to_json();
+        let json = msg.to_json().unwrap();
         let parsed = PluginMessage::from_json(&json).unwrap();
         assert_eq!(parsed, msg);
     }
@@ -770,7 +783,7 @@ mod tests {
             width: 800,
             height: 600,
         };
-        let json = msg.to_json();
+        let json = msg.to_json().unwrap();
         let parsed = PluginMessage::from_json(&json).unwrap();
         assert_eq!(parsed, msg);
     }
@@ -781,7 +794,7 @@ mod tests {
         palette.insert("bg".to_string(), "#1e1e2e".to_string());
         palette.insert("fg".to_string(), "#cdd6f4".to_string());
         let msg = PluginMessage::ThemeUpdate { palette };
-        let json = msg.to_json();
+        let json = msg.to_json().unwrap();
         let parsed = PluginMessage::from_json(&json).unwrap();
         assert_eq!(parsed, msg);
     }
@@ -789,7 +802,7 @@ mod tests {
     #[test]
     fn test_message_shutdown_roundtrip() {
         let msg = PluginMessage::Shutdown;
-        let json = msg.to_json();
+        let json = msg.to_json().unwrap();
         let parsed = PluginMessage::from_json(&json).unwrap();
         assert_eq!(parsed, PluginMessage::Shutdown);
     }
@@ -809,8 +822,14 @@ mod tests {
             width: 1920,
             height: 1080,
         };
-        assert_eq!(PluginMessage::from_json(&req.to_json()).unwrap(), req);
-        assert_eq!(PluginMessage::from_json(&resp.to_json()).unwrap(), resp);
+        assert_eq!(
+            PluginMessage::from_json(&req.to_json().unwrap()).unwrap(),
+            req
+        );
+        assert_eq!(
+            PluginMessage::from_json(&resp.to_json().unwrap()).unwrap(),
+            resp
+        );
     }
 
     #[test]
@@ -819,7 +838,7 @@ mod tests {
             event_type: "key_press".to_string(),
             data: "{\"key\":\"Enter\"}".to_string(),
         };
-        let json = msg.to_json();
+        let json = msg.to_json().unwrap();
         let parsed = PluginMessage::from_json(&json).unwrap();
         assert_eq!(parsed, msg);
     }

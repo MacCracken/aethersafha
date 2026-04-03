@@ -23,6 +23,7 @@ pub struct TouchPoint {
 
 /// Direction of a swipe gesture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum SwipeDirection {
     Up,
     Down,
@@ -32,6 +33,7 @@ pub enum SwipeDirection {
 
 /// Recognised gesture type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum GestureType {
     Tap,
     DoubleTap,

@@ -14,6 +14,7 @@ use crate::compositor::Rectangle;
 
 /// Semantic role of an accessible UI element (AT-SPI2 compatible).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum AccessibilityRole {
     Window,
     Button,
@@ -60,6 +61,7 @@ pub struct AccessibilityState {
 
 /// Actions that can be performed on an accessible node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum AccessibleAction {
     Click,
     Focus,
@@ -166,10 +168,10 @@ impl AccessibilityTree {
         // Verify the node exists.
         if self.nodes.iter().any(|n| n.id == *id) {
             // Unfocus the previous node.
-            if let Some(prev_id) = self.focused_id {
-                if let Some(prev) = self.nodes.iter_mut().find(|n| n.id == prev_id) {
-                    prev.state.focused = false;
-                }
+            if let Some(prev_id) = self.focused_id
+                && let Some(prev) = self.nodes.iter_mut().find(|n| n.id == prev_id)
+            {
+                prev.state.focused = false;
             }
             // Focus the new node.
             if let Some(node) = self.nodes.iter_mut().find(|n| n.id == *id) {
@@ -207,10 +209,10 @@ impl AccessibilityTree {
         };
 
         // Update focus state on previous node.
-        if let Some(prev_id) = self.focused_id {
-            if let Some(prev) = self.nodes.iter_mut().find(|n| n.id == prev_id) {
-                prev.state.focused = false;
-            }
+        if let Some(prev_id) = self.focused_id
+            && let Some(prev) = self.nodes.iter_mut().find(|n| n.id == prev_id)
+        {
+            prev.state.focused = false;
         }
 
         self.nodes[next].state.focused = true;
@@ -244,10 +246,10 @@ impl AccessibilityTree {
         };
 
         // Update focus state on previous node.
-        if let Some(prev_id) = self.focused_id {
-            if let Some(p) = self.nodes.iter_mut().find(|n| n.id == prev_id) {
-                p.state.focused = false;
-            }
+        if let Some(prev_id) = self.focused_id
+            && let Some(p) = self.nodes.iter_mut().find(|n| n.id == prev_id)
+        {
+            p.state.focused = false;
         }
 
         self.nodes[prev].state.focused = true;

@@ -5,6 +5,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum AppError {
     #[error("App not found: {0}")]
     AppNotFound(String),
@@ -15,6 +16,7 @@ pub enum AppError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AppType {
     Terminal,
     FileManager,
@@ -72,6 +74,13 @@ impl TerminalApp {
         }
     }
 
+    /// Allowlist of programs the terminal is permitted to execute directly.
+    const ALLOWED_PROGRAMS: &[&str] = &[
+        "ls", "cat", "echo", "pwd", "whoami", "date", "uname", "env", "printenv", "id", "df", "du",
+        "free", "uptime", "head", "tail", "wc", "sort", "uniq", "grep", "find", "which", "file",
+        "stat", "basename", "dirname", "realpath", "true", "false", "expr",
+    ];
+
     pub async fn execute_command(&self, command: String) -> Result<String, AppError> {
         info!("Terminal executing: {}", command);
 
@@ -81,6 +90,19 @@ impl TerminalApp {
         }
 
         let program = parts[0];
+
+        // Only allow known-safe programs
+        let base_name = std::path::Path::new(program)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(program);
+        if !Self::ALLOWED_PROGRAMS.contains(&base_name) {
+            return Err(AppError::PermissionDenied(format!(
+                "Program '{}' is not in the allowlist",
+                program
+            )));
+        }
+
         let args = &parts[1..];
 
         let output = tokio::process::Command::new(program)
@@ -275,6 +297,7 @@ pub struct AuditFilters {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum TimeRange {
     LastHour,
     LastDay,
@@ -339,10 +362,10 @@ impl AuditViewerApp {
                 .unwrap_or_else(chrono::Utc::now);
 
             // Apply time range filter
-            if let Some(cutoff) = cutoff {
-                if timestamp < cutoff {
-                    continue;
-                }
+            if let Some(cutoff) = cutoff
+                && timestamp < cutoff
+            {
+                continue;
             }
 
             let event_type = parsed["event_type"]
@@ -452,43 +475,43 @@ impl ModelManagerApp {
     /// List models by querying the LLM Gateway `/v1/models` endpoint.
     ///
     /// Merges gateway-reported models with locally tracked models.
-    pub fn list_models(&mut self) -> Vec<ModelInfo> {
+    pub async fn list_models(&mut self) -> Vec<ModelInfo> {
         // Try to fetch live model list from the gateway
-        match reqwest::blocking::Client::new()
+        match reqwest::Client::new()
             .get(format!("{}/v1/models", LLM_GATEWAY_ADDR))
             .timeout(std::time::Duration::from_secs(5))
             .send()
+            .await
         {
             Ok(resp) if resp.status().is_success() => {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    if let Some(data) = body["data"].as_array() {
-                        let mut gateway_models: Vec<ModelInfo> = data
-                            .iter()
-                            .filter_map(|m| {
-                                let id = m["id"].as_str()?.to_string();
-                                let name = m["id"].as_str()?.to_string();
-                                let size = m["size"].as_u64().unwrap_or(0);
-                                let provider =
-                                    m["owned_by"].as_str().unwrap_or("unknown").to_string();
-                                Some(ModelInfo {
-                                    id,
-                                    name,
-                                    size,
-                                    provider,
-                                    is_downloaded: true,
-                                })
+                if let Ok(body) = resp.json::<serde_json::Value>().await
+                    && let Some(data) = body["data"].as_array()
+                {
+                    let mut gateway_models: Vec<ModelInfo> = data
+                        .iter()
+                        .filter_map(|m| {
+                            let id = m["id"].as_str()?.to_string();
+                            let name = m["id"].as_str()?.to_string();
+                            let size = m["size"].as_u64().unwrap_or(0);
+                            let provider = m["owned_by"].as_str().unwrap_or("unknown").to_string();
+                            Some(ModelInfo {
+                                id,
+                                name,
+                                size,
+                                provider,
+                                is_downloaded: true,
                             })
-                            .collect();
+                        })
+                        .collect();
 
-                        // Merge: add any locally tracked models not in gateway response
-                        for local in &self.installed_models {
-                            if !gateway_models.iter().any(|gm| gm.id == local.id) {
-                                gateway_models.push(local.clone());
-                            }
+                    // Merge: add any locally tracked models not in gateway response
+                    for local in &self.installed_models {
+                        if !gateway_models.iter().any(|gm| gm.id == local.id) {
+                            gateway_models.push(local.clone());
                         }
-
-                        self.installed_models = gateway_models;
                     }
+
+                    self.installed_models = gateway_models;
                 }
             }
             Ok(resp) => {
@@ -509,7 +532,7 @@ impl ModelManagerApp {
     ///
     /// Sends a pull request to the gateway (Ollama-compatible).  The model
     /// is tracked locally and marked as downloaded once the gateway confirms.
-    pub fn download_model(&mut self, model_id: String) -> Result<(), AppError> {
+    pub async fn download_model(&mut self, model_id: String) -> Result<(), AppError> {
         info!("Requesting model download: {}", model_id);
 
         // Try Ollama-compatible pull endpoint
@@ -518,11 +541,12 @@ impl ModelManagerApp {
             "stream": false
         });
 
-        match reqwest::blocking::Client::new()
+        match reqwest::Client::new()
             .post(format!("{}/api/pull", LLM_GATEWAY_ADDR))
             .json(&pull_body)
             .timeout(std::time::Duration::from_secs(300))
             .send()
+            .await
         {
             Ok(resp) if resp.status().is_success() => {
                 info!("Model '{}' download initiated via gateway", model_id);
@@ -558,23 +582,29 @@ impl ModelManagerApp {
     }
 
     /// Select the active model for inference.
-    pub fn select_model(&mut self, model_id: String) -> Result<(), AppError> {
+    pub async fn select_model(&mut self, model_id: String) -> Result<(), AppError> {
         // Verify model exists in our list
         let exists = self.installed_models.iter().any(|m| m.id == model_id);
         if !exists {
             // Check gateway
-            let gateway_has_it = reqwest::blocking::Client::new()
+            let gateway_has_it = match reqwest::Client::new()
                 .get(format!("{}/v1/models", LLM_GATEWAY_ADDR))
                 .timeout(std::time::Duration::from_secs(5))
                 .send()
-                .ok()
-                .and_then(|r| r.json::<serde_json::Value>().ok())
-                .and_then(|body| {
-                    body["data"]
-                        .as_array()
-                        .map(|arr| arr.iter().any(|m| m["id"].as_str() == Some(&model_id)))
-                })
-                .unwrap_or(false);
+                .await
+            {
+                Ok(resp) => resp
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()
+                    .and_then(|body| {
+                        body["data"]
+                            .as_array()
+                            .map(|arr| arr.iter().any(|m| m["id"].as_str() == Some(&model_id)))
+                    })
+                    .unwrap_or(false),
+                Err(_) => false,
+            };
 
             if !gateway_has_it {
                 return Err(AppError::AppNotFound(format!(
@@ -1121,8 +1151,8 @@ mod tests {
         assert!(mm.active_model.is_none());
     }
 
-    #[test]
-    fn test_model_manager_select_model() {
+    #[tokio::test]
+    async fn test_model_manager_select_model() {
         let mut mm = ModelManagerApp::new();
         // Pre-populate a model so select doesn't need to hit network
         mm.installed_models.push(ModelInfo {
@@ -1132,7 +1162,7 @@ mod tests {
             provider: "ollama".to_string(),
             is_downloaded: true,
         });
-        let result = mm.select_model("llama2-7b".to_string());
+        let result = mm.select_model("llama2-7b".to_string()).await;
         assert!(result.is_ok());
         assert_eq!(mm.active_model, Some("llama2-7b".to_string()));
     }
@@ -1501,11 +1531,11 @@ mod tests {
         assert!(cutoff.is_none());
     }
 
-    #[test]
-    fn test_model_manager_select_nonexistent_model() {
+    #[tokio::test]
+    async fn test_model_manager_select_nonexistent_model() {
         let mut mm = ModelManagerApp::new();
         // No models installed, gateway not running — should fail
-        let result = mm.select_model("nonexistent".to_string());
+        let result = mm.select_model("nonexistent".to_string()).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             AppError::AppNotFound(msg) => assert!(msg.contains("nonexistent")),
@@ -1513,8 +1543,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_model_manager_select_installed_model() {
+    #[tokio::test]
+    async fn test_model_manager_select_installed_model() {
         let mut mm = ModelManagerApp::new();
         mm.installed_models.push(ModelInfo {
             id: "model-a".to_string(),
@@ -1523,7 +1553,7 @@ mod tests {
             provider: "local".to_string(),
             is_downloaded: true,
         });
-        let result = mm.select_model("model-a".to_string());
+        let result = mm.select_model("model-a".to_string()).await;
         assert!(result.is_ok());
         assert_eq!(mm.active_model, Some("model-a".to_string()));
     }
@@ -1861,8 +1891,8 @@ mod tests {
     // ModelManagerApp: list_models and download_model error paths
     // ==================================================================
 
-    #[test]
-    fn test_model_manager_list_models_gateway_unreachable() {
+    #[tokio::test]
+    async fn test_model_manager_list_models_gateway_unreachable() {
         let mut mm = ModelManagerApp::new();
         // Pre-populate local models
         mm.installed_models.push(ModelInfo {
@@ -1873,16 +1903,16 @@ mod tests {
             is_downloaded: true,
         });
         // list_models hits gateway which isn't running; should fall back to cached list
-        let models = mm.list_models();
+        let models = mm.list_models().await;
         assert!(models.iter().any(|m| m.id == "local-model"));
     }
 
-    #[test]
-    fn test_model_manager_download_model_gateway_unreachable() {
+    #[tokio::test]
+    async fn test_model_manager_download_model_gateway_unreachable() {
         let mut mm = ModelManagerApp::new();
         // Gateway may or may not be running in test env.
         // If unreachable → Err(WindowError); if reachable but no model → Ok (tracked as pending).
-        let result = mm.download_model("llama2-7b".to_string());
+        let result = mm.download_model("llama2-7b".to_string()).await;
         match result {
             Err(AppError::WindowError(msg)) => {
                 assert!(msg.contains("LLM Gateway unreachable"), "Got: {}", msg);
@@ -1895,10 +1925,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_model_manager_select_model_not_in_list_or_gateway() {
+    #[tokio::test]
+    async fn test_model_manager_select_model_not_in_list_or_gateway() {
         let mut mm = ModelManagerApp::new();
-        let result = mm.select_model("ghost-model".to_string());
+        let result = mm.select_model("ghost-model".to_string()).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             AppError::AppNotFound(msg) => assert!(msg.contains("ghost-model")),
@@ -2109,8 +2139,8 @@ mod tests {
         assert!(fm.agent_assistance);
     }
 
-    #[test]
-    fn test_model_manager_list_models_with_cached_models() {
+    #[tokio::test]
+    async fn test_model_manager_list_models_with_cached_models() {
         let mut mm = ModelManagerApp::new();
         mm.installed_models.push(ModelInfo {
             id: "cached-1".to_string(),
@@ -2128,14 +2158,14 @@ mod tests {
         });
 
         // Gateway unreachable, should return cached models
-        let models = mm.list_models();
+        let models = mm.list_models().await;
         assert!(models.len() >= 2);
         assert!(models.iter().any(|m| m.id == "cached-1"));
         assert!(models.iter().any(|m| m.id == "cached-2"));
     }
 
-    #[test]
-    fn test_model_manager_select_then_re_select() {
+    #[tokio::test]
+    async fn test_model_manager_select_then_re_select() {
         let mut mm = ModelManagerApp::new();
         mm.installed_models.push(ModelInfo {
             id: "m-a".to_string(),
@@ -2152,10 +2182,10 @@ mod tests {
             is_downloaded: true,
         });
 
-        mm.select_model("m-a".to_string()).unwrap();
+        mm.select_model("m-a".to_string()).await.unwrap();
         assert_eq!(mm.active_model, Some("m-a".to_string()));
 
-        mm.select_model("m-b".to_string()).unwrap();
+        mm.select_model("m-b".to_string()).await.unwrap();
         assert_eq!(mm.active_model, Some("m-b".to_string()));
     }
 
@@ -2349,8 +2379,8 @@ mod tests {
         assert!(av.filters.include_system);
     }
 
-    #[test]
-    fn test_model_manager_select_existing_model() {
+    #[tokio::test]
+    async fn test_model_manager_select_existing_model() {
         let mut mm = ModelManagerApp::new();
         mm.installed_models.push(ModelInfo {
             id: "gpt-4".to_string(),
@@ -2367,10 +2397,10 @@ mod tests {
             is_downloaded: true,
         });
         // Select first model
-        mm.select_model("gpt-4".to_string()).unwrap();
+        mm.select_model("gpt-4".to_string()).await.unwrap();
         assert_eq!(mm.active_model.as_deref(), Some("gpt-4"));
         // Switch to second
-        mm.select_model("llama3".to_string()).unwrap();
+        mm.select_model("llama3".to_string()).await.unwrap();
         assert_eq!(mm.active_model.as_deref(), Some("llama3"));
     }
 
@@ -2524,8 +2554,8 @@ mod tests {
         assert!(am.running_agents.is_empty());
     }
 
-    #[test]
-    fn test_model_manager_select_switches_active() {
+    #[tokio::test]
+    async fn test_model_manager_select_switches_active() {
         let mut mm = ModelManagerApp::new();
         mm.installed_models.push(ModelInfo {
             id: "x".to_string(),
@@ -2541,9 +2571,9 @@ mod tests {
             provider: "".to_string(),
             is_downloaded: true,
         });
-        mm.select_model("x".to_string()).unwrap();
+        mm.select_model("x".to_string()).await.unwrap();
         assert_eq!(mm.active_model.as_deref(), Some("x"));
-        mm.select_model("y".to_string()).unwrap();
+        mm.select_model("y".to_string()).await.unwrap();
         assert_eq!(mm.active_model.as_deref(), Some("y"));
         // old selection replaced
         assert_ne!(mm.active_model.as_deref(), Some("x"));

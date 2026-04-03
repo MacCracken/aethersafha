@@ -6,6 +6,7 @@ use tracing::{debug, info};
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum AIFeatureError {
     #[error("Context not found: {0}")]
     ContextNotFound(String),
@@ -16,6 +17,7 @@ pub enum AIFeatureError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SuggestionType {
     WindowPlacement,
     ContextSwitch,
@@ -64,6 +66,7 @@ pub struct AgentHUDState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AgentStatus {
     Idle,
     Thinking,
@@ -89,6 +92,7 @@ pub struct ContextEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ContextEventType {
     WindowOpened,
     WindowClosed,
@@ -122,6 +126,7 @@ pub struct DesktopContext {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ContextType {
     Development,
     Writing,
@@ -134,6 +139,7 @@ pub enum ContextType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TimeOfDay {
     Morning,
     Afternoon,
@@ -142,6 +148,7 @@ pub enum TimeOfDay {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ActivityLevel {
     High,
     Medium,
@@ -222,10 +229,10 @@ impl AIDesktopFeatures {
                 .unwrap_or_else(|e| e.into_inner());
             match event.event_type {
                 ContextEventType::WindowOpened => {
-                    if let Some(app) = event.metadata.get("app") {
-                        if !context.active_apps.contains(app) {
-                            context.active_apps.push(app.clone());
-                        }
+                    if let Some(app) = event.metadata.get("app")
+                        && !context.active_apps.contains(app)
+                    {
+                        context.active_apps.push(app.clone());
                     }
                 }
                 ContextEventType::FileOpened => {
@@ -320,7 +327,7 @@ impl AIDesktopFeatures {
 
     pub fn proactive_suggestions(&self) -> Vec<AISuggestion> {
         let _context = self.analyze_context();
-        let suggestions = self.suggestions.write().unwrap_or_else(|e| e.into_inner());
+        let suggestions = self.suggestions.read().unwrap_or_else(|e| e.into_inner());
 
         let relevant: Vec<_> = suggestions
             .iter()

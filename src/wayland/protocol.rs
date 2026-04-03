@@ -8,6 +8,7 @@ use super::types::*;
 
 /// Actions the compositor should take in response to protocol events.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ProtocolAction {
     /// Create a new window for a client surface.
     CreateWindow {
@@ -197,6 +198,7 @@ pub struct TextInputState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum ContentType {
     #[default]
     Normal,
@@ -260,6 +262,7 @@ impl Default for TextInputState {
 
 /// Decoration mode negotiation (xdg_decoration_unstable_v1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum DecorationMode {
     ClientSide,
     #[default]
@@ -426,15 +429,15 @@ impl ProtocolBridge {
                 removed_surfaces.push(*surface_id);
             }
             // Clear focus if it belonged to this client
-            if let Some(focused) = self.pointer_focus.surface_id {
-                if info.surfaces.contains(&focused) {
-                    self.pointer_focus.surface_id = None;
-                }
+            if let Some(focused) = self.pointer_focus.surface_id
+                && info.surfaces.contains(&focused)
+            {
+                self.pointer_focus.surface_id = None;
             }
-            if let Some(focused) = self.keyboard_focus.surface_id {
-                if info.surfaces.contains(&focused) {
-                    self.keyboard_focus.surface_id = None;
-                }
+            if let Some(focused) = self.keyboard_focus.surface_id
+                && info.surfaces.contains(&focused)
+            {
+                self.keyboard_focus.surface_id = None;
             }
         }
         self.pending_actions
@@ -522,10 +525,10 @@ impl ProtocolBridge {
         self.surface_map.unregister(&surface_id);
         self.toplevels.remove(&surface_id);
         // Remove from client's surface list
-        if let Some(client_id) = self.clients.find_by_surface(&surface_id) {
-            if let Some(client) = self.clients.get_mut(client_id) {
-                client.remove_surface(&surface_id);
-            }
+        if let Some(client_id) = self.clients.find_by_surface(&surface_id)
+            && let Some(client) = self.clients.get_mut(client_id)
+        {
+            client.remove_surface(&surface_id);
         }
         self.pending_actions
             .push(ProtocolAction::DestroyWindow { surface_id });
@@ -533,12 +536,10 @@ impl ProtocolBridge {
 
     /// Handle xdg_toplevel.set_maximized / unset_maximized.
     pub fn set_maximized(&mut self, surface_id: SurfaceId, maximized: bool) {
-        if maximized {
-            if let Some(tracker) = self.toplevels.get_mut(&surface_id) {
-                let serial = self.serial.next_serial();
-                let configure = ToplevelConfigure::maximized(surface_id, &self.output, serial);
-                tracker.send_configure(configure);
-            }
+        if maximized && let Some(tracker) = self.toplevels.get_mut(&surface_id) {
+            let serial = self.serial.next_serial();
+            let configure = ToplevelConfigure::maximized(surface_id, &self.output, serial);
+            tracker.send_configure(configure);
         }
         self.pending_actions.push(ProtocolAction::SetMaximized {
             surface_id,
@@ -548,18 +549,16 @@ impl ProtocolBridge {
 
     /// Handle xdg_toplevel.set_fullscreen.
     pub fn set_fullscreen(&mut self, surface_id: SurfaceId, fullscreen: bool) {
-        if fullscreen {
-            if let Some(tracker) = self.toplevels.get_mut(&surface_id) {
-                let serial = self.serial.next_serial();
-                let configure = ToplevelConfigure {
-                    surface_id,
-                    width: self.output.width_px,
-                    height: self.output.height_px,
-                    states: vec![XdgToplevelState::Fullscreen, XdgToplevelState::Activated],
-                    serial,
-                };
-                tracker.send_configure(configure);
-            }
+        if fullscreen && let Some(tracker) = self.toplevels.get_mut(&surface_id) {
+            let serial = self.serial.next_serial();
+            let configure = ToplevelConfigure {
+                surface_id,
+                width: self.output.width_px,
+                height: self.output.height_px,
+                states: vec![XdgToplevelState::Fullscreen, XdgToplevelState::Activated],
+                serial,
+            };
+            tracker.send_configure(configure);
         }
         self.pending_actions.push(ProtocolAction::SetFullscreen {
             surface_id,
@@ -786,6 +785,7 @@ pub fn map_input_to_keyboard_event(event: &InputEvent) -> Option<WaylandKeyboard
 
 /// Wayland pointer event (protocol-level).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum WaylandPointerEvent {
     Motion {
         x: f64,
@@ -813,6 +813,7 @@ pub enum WaylandPointerEvent {
 
 /// Wayland keyboard event (protocol-level).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum WaylandKeyboardEvent {
     Key {
         keycode: u32,

@@ -6,6 +6,7 @@ use crate::compositor::{Rectangle, SurfaceId};
 
 /// Pixel format advertised to Wayland clients.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ShmFormat {
     /// ARGB8888 — 32-bit with alpha.
     Argb8888,
@@ -110,6 +111,7 @@ impl OutputInfo {
 
 /// Screen rotation / flip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OutputTransform {
     Normal,
     Rotate90,
@@ -123,6 +125,7 @@ pub enum OutputTransform {
 
 /// Subpixel geometry of the output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SubpixelLayout {
     Unknown,
     None,
@@ -182,6 +185,7 @@ impl ShmBufferInfo {
 
 /// XDG toplevel state flags (sent to clients in configure events).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum XdgToplevelState {
     Maximized,
     Fullscreen,
@@ -453,13 +457,13 @@ impl XdgToplevelTracker {
 
     /// Record that the client acknowledged a configure.
     pub fn ack_configure(&mut self, serial: u32) -> bool {
-        if let Some(ref pending) = self.pending_configure {
-            if pending.serial == serial {
-                self.configured = true;
-                self.last_serial = serial;
-                self.pending_configure = None;
-                return true;
-            }
+        if let Some(ref pending) = self.pending_configure
+            && pending.serial == serial
+        {
+            self.configured = true;
+            self.last_serial = serial;
+            self.pending_configure = None;
+            return true;
         }
         false
     }

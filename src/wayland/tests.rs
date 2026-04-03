@@ -737,12 +737,16 @@ fn test_bridge_request_move_and_resize() {
     bridge.request_resize(sid, 4); // right edge
 
     let actions = bridge.drain_actions();
-    assert!(actions
-        .iter()
-        .any(|a| matches!(a, ProtocolAction::RequestMove { .. })));
-    assert!(actions
-        .iter()
-        .any(|a| matches!(a, ProtocolAction::RequestResize { edge: 4, .. })));
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, ProtocolAction::RequestMove { .. }))
+    );
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, ProtocolAction::RequestResize { edge: 4, .. }))
+    );
 }
 
 #[test]
@@ -753,9 +757,11 @@ fn test_bridge_set_minimized() {
 
     bridge.set_minimized(sid);
     let actions = bridge.drain_actions();
-    assert!(actions
-        .iter()
-        .any(|a| matches!(a, ProtocolAction::SetMinimized { .. })));
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, ProtocolAction::SetMinimized { .. }))
+    );
 }
 
 // -- ClientInfo tests --

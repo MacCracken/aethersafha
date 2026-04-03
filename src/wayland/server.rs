@@ -7,10 +7,10 @@ mod wayland_live {
 
     use wayland_protocols::xdg::shell::server::{xdg_surface, xdg_toplevel, xdg_wm_base};
     use wayland_server::{
-        backend::ClientId,
-        protocol::{wl_buffer, wl_compositor, wl_output, wl_seat, wl_shm, wl_shm_pool, wl_surface},
         Client, DataInit, Dispatch, Display, DisplayHandle, GlobalDispatch, ListeningSocket, New,
         Resource,
+        backend::ClientId,
+        protocol::{wl_buffer, wl_compositor, wl_output, wl_seat, wl_shm, wl_shm_pool, wl_surface},
     };
 
     use crate::compositor::{Compositor, InputEvent, SurfaceId};
@@ -587,6 +587,7 @@ mod wayland_accept {
 
     /// Event dispatched when a new Wayland client connects.
     #[derive(Debug)]
+    #[non_exhaustive]
     pub enum WaylandServerEvent {
         /// A new client connection was accepted.
         ClientConnected {
@@ -651,10 +652,10 @@ mod wayland_accept {
             }
 
             // Ensure parent directory exists
-            if let Some(parent) = config.socket_path.parent() {
-                if !parent.exists() {
-                    std::fs::create_dir_all(parent)?;
-                }
+            if let Some(parent) = config.socket_path.parent()
+                && !parent.exists()
+            {
+                std::fs::create_dir_all(parent)?;
             }
 
             let (tx, rx) = mpsc::channel(64);
@@ -698,6 +699,10 @@ mod wayland_accept {
         tracing::info!(path = %socket_path.display(), "Wayland server listening");
 
         tokio::spawn(async move {
+            // Hold accepted streams so their fds stay open without leaking via mem::forget.
+            // TODO: hand streams off to protocol dispatch layer when implemented.
+            let mut client_streams = Vec::new();
+
             loop {
                 match listener.accept().await {
                     Ok((stream, _addr)) => {
@@ -725,9 +730,8 @@ mod wayland_accept {
                         );
 
                         // Keep the stream alive — in a real compositor this would be
-                        // handed off to the protocol dispatch layer. For now we leak
-                        // the fd intentionally so the connection stays open.
-                        std::mem::forget(stream);
+                        // handed off to the protocol dispatch layer.
+                        client_streams.push(stream);
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "Failed to accept Wayland client");
@@ -748,4 +752,4 @@ mod wayland_accept {
 }
 
 #[cfg(feature = "wayland")]
-pub use wayland_accept::{start_server, WaylandServer, WaylandServerConfig, WaylandServerEvent};
+pub use wayland_accept::{WaylandServer, WaylandServerConfig, WaylandServerEvent, start_server};

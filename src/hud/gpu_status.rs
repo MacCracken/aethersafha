@@ -12,6 +12,7 @@ use tracing::{debug, warn};
 
 /// Severity band used to colour-code a metric in the HUD.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum MetricBand {
     /// Value is in the normal/safe range (green).
     Normal,
@@ -263,8 +264,8 @@ impl GpuStatusWidget {
 
     // --- private helpers ---
 
-    async fn fetch_gpu_status(
-    ) -> Result<Vec<GpuDeviceState>, Box<dyn std::error::Error + Send + Sync>> {
+    async fn fetch_gpu_status()
+    -> Result<Vec<GpuDeviceState>, Box<dyn std::error::Error + Send + Sync>> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
             .build()?;

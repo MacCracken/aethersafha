@@ -13,6 +13,7 @@ use crate::renderer::{
 };
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum CompositorError {
     #[error("Window not found")]
     WindowNotFound(Uuid),
@@ -25,6 +26,7 @@ pub enum CompositorError {
 pub type SurfaceId = Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum WindowState {
     #[default]
     Normal,
@@ -74,6 +76,7 @@ pub struct Workspace {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ContextType {
     Development,
     Communication,
@@ -88,6 +91,7 @@ pub enum ContextType {
 
 /// Result of routing an input event to a window.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum InputAction {
     /// Start dragging a window from its title bar.
     BeginDrag(SurfaceId),
@@ -521,8 +525,9 @@ impl Compositor {
                 crate::ai_features::AgentStatus::Error => "✗",
             };
 
-            let name = if agent.agent_name.len() > 20 {
-                format!("{}…", &agent.agent_name[..19])
+            let name = if agent.agent_name.chars().count() > 20 {
+                let truncated: String = agent.agent_name.chars().take(19).collect();
+                format!("{}…", truncated)
             } else {
                 agent.agent_name.clone()
             };
@@ -783,10 +788,10 @@ impl Compositor {
             .read()
             .unwrap_or_else(|e| e.into_inner());
         let mut scene = self.scene.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(prev_id) = prev {
-            if let Some(s) = scene.get_surface_mut(prev_id) {
-                s.is_active = false;
-            }
+        if let Some(prev_id) = prev
+            && let Some(s) = scene.get_surface_mut(prev_id)
+        {
+            s.is_active = false;
         }
         // Focus new
         if let Some(s) = scene.get_surface_mut(id) {
@@ -1007,6 +1012,7 @@ pub trait CompositorBackend: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum InputEvent {
     MouseMove {
         x: i32,
@@ -1030,6 +1036,7 @@ pub enum InputEvent {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum TouchPhase {
     Down,
     Move,
@@ -1696,7 +1703,7 @@ mod tests {
             .collect();
         assert_eq!(compositor.get_windows().len(), 5);
         assert_eq!(compositor.get_agent_windows().len(), 3); // 0,2,4 are agent
-                                                             // Last created window should be active
+        // Last created window should be active
         let workspaces = compositor.workspaces.read().unwrap();
         assert_eq!(workspaces[0].active_window, Some(ids[4]));
     }
@@ -2319,6 +2326,7 @@ use std::path::PathBuf;
 
 /// Content stored on the clipboard.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub enum ClipboardContent {
     Text(String),
     Html(String),

@@ -14,6 +14,7 @@ use uuid::Uuid;
 /// Status of a single Agnostic crew.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CrewRunStatus {
     Idle,
     Running,

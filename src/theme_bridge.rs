@@ -136,8 +136,7 @@ impl ThemeBridge {
         PlatformChannelMessage {
             channel: "agnos/theme".to_string(),
             method: "setTheme".to_string(),
-            args: serde_json::to_value(theme_data)
-                .expect("FlutterThemeData is always serialisable"),
+            args: serde_json::to_value(theme_data).unwrap_or(serde_json::Value::Null),
         }
     }
 

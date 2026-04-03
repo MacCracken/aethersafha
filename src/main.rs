@@ -445,7 +445,7 @@ mod tests {
     fn test_ai_suggestion_default() {
         let suggestion = AISuggestion::default();
         assert!(suggestion.id != Uuid::nil());
-        assert!(!suggestion.title.is_empty() || suggestion.title.is_empty());
+        assert!(suggestion.title.is_empty()); // default title is empty
         assert!(suggestion.confidence >= 0.0 && suggestion.confidence <= 1.0);
     }
 

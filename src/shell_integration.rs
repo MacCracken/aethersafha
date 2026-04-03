@@ -12,6 +12,7 @@ use crate::shell::{Notification, NotificationPriority};
 // ============================================================================
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ShellIntegrationError {
     #[error("Tray item already exists: {0}")]
     DuplicateTrayItem(String),
@@ -47,6 +48,7 @@ pub struct TrayMenuItem {
 
 /// Action triggered when a tray menu item is selected.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TrayAction {
     Activate,
     ShowMenu,
@@ -60,6 +62,7 @@ pub enum TrayAction {
 
 /// Requests that external applications can make to the compositor.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum WindowManagementRequest {
     Minimize(SurfaceId),
     Maximize(SurfaceId),
@@ -73,6 +76,7 @@ pub enum WindowManagementRequest {
 
 /// Result of processing a window management request.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WindowManagementResult {
     /// The request was accepted; the compositor will carry it out.
     Accepted,
@@ -88,6 +92,7 @@ pub enum WindowManagementResult {
 
 /// Urgency level used by external notification senders (freedesktop-style).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Urgency {
     Low,
     Normal,

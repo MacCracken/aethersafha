@@ -31,7 +31,7 @@ pub use types::*;
 // Feature-gated re-exports from server/stub.
 #[cfg(feature = "wayland")]
 pub use server::{
-    start_server, WaylandServer, WaylandServerConfig, WaylandServerEvent, WaylandState,
+    WaylandServer, WaylandServerConfig, WaylandServerEvent, WaylandState, start_server,
 };
 
 #[cfg(not(feature = "wayland"))]

@@ -12,6 +12,7 @@ const MAX_PERMISSION_REQUESTS: usize = 200;
 const MAX_OVERRIDE_REQUESTS: usize = 100;
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum SecurityUIError {
     #[error("Permission not found: {0}")]
     PermissionNotFound(String),
@@ -22,6 +23,7 @@ pub enum SecurityUIError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum ThreatLevel {
     Info,
     Low,
@@ -78,6 +80,7 @@ pub struct PermissionDefinition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PermissionCategory {
     FileSystem,
     Network,
@@ -129,6 +132,7 @@ pub struct SecurityUI {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum SecurityLevel {
     #[default]
     Standard,
@@ -380,10 +384,11 @@ impl SecurityUI {
             .emergency_mode
             .write()
             .unwrap_or_else(|e| e.into_inner()) = true;
+        // Keep human override enabled during emergencies — humans must retain control
         *self
             .human_override_enabled
             .write()
-            .unwrap_or_else(|e| e.into_inner()) = false;
+            .unwrap_or_else(|e| e.into_inner()) = true;
 
         let mut requests = self
             .override_requests
@@ -538,15 +543,20 @@ impl SecurityUI {
             }
         }
 
-        // Deregister via HTTP API (best-effort, fire-and-forget)
+        // Deregister via HTTP API (best-effort, fire-and-forget).
+        // Guard against being called outside a tokio runtime.
         let agent_id_str = agent_id.to_string();
-        tokio::task::spawn(async move {
-            let _ = reqwest::Client::new()
-                .delete(format!("http://localhost:8090/v1/agents/{}", agent_id_str))
-                .timeout(std::time::Duration::from_secs(5))
-                .send()
-                .await;
-        });
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _ = reqwest::Client::new()
+                    .delete(format!("http://localhost:8090/v1/agents/{}", agent_id_str))
+                    .timeout(std::time::Duration::from_secs(5))
+                    .send()
+                    .await;
+            });
+        } else {
+            warn!("No tokio runtime available; skipping agent deregistration HTTP call");
+        }
 
         // Write audit log entry
         Self::write_audit_log(
@@ -1481,21 +1491,22 @@ mod tests {
     }
 
     #[test]
-    fn test_emergency_kill_switch_disables_human_override() {
+    fn test_emergency_kill_switch_keeps_human_override_enabled() {
         let ui = SecurityUI::new();
         assert!(*ui.human_override_enabled.read().unwrap());
         ui.emergency_kill_switch();
-        assert!(!*ui.human_override_enabled.read().unwrap());
+        // Human override must remain enabled during emergencies
+        assert!(*ui.human_override_enabled.read().unwrap());
     }
 
     #[test]
-    fn test_deactivate_emergency_does_not_reenable_override() {
+    fn test_deactivate_emergency_keeps_override_enabled() {
         let ui = SecurityUI::new();
         ui.emergency_kill_switch();
         ui.deactivate_emergency();
-        // deactivate only sets emergency_mode to false, not human_override
         assert!(!ui.is_emergency_mode());
-        assert!(!*ui.human_override_enabled.read().unwrap());
+        // Human override was never disabled
+        assert!(*ui.human_override_enabled.read().unwrap());
     }
 
     #[test]
@@ -1596,6 +1607,7 @@ use crate::compositor::SurfaceId;
 
 /// Trust level for an agent that owns a window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum TrustLevel {
     System,
     Verified,
@@ -1606,6 +1618,7 @@ pub enum TrustLevel {
 
 /// Sandbox enforcement status for a window's owning agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum SandboxStatus {
     Full,
     Partial,
@@ -1614,6 +1627,7 @@ pub enum SandboxStatus {
 
 /// Visual icon type shown on the window badge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum BadgeIcon {
     Shield,
     Lock,
