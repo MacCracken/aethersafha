@@ -1,63 +1,63 @@
 # Benchmarks
 
-Latest: **2026-04-03T08:28:51Z** — commit `a460c3a`
+Latest: **2026-04-03T09:04:10Z** — commit `a460c3a`
 
 ## renderer
 
-| Benchmark | Current (`a460c3a`) |
-|-----------|------|
-| `render_frame` | 490.6 µs |
-| `render_frame` | 917.6 µs |
-| `render_frame` | 1.6 ms |
-| `render_frame` | 2.5 ms |
+| Benchmark | Baseline (`a460c3a`) | Current (`a460c3a`) |
+|-----------|------|------|
+| `render_frame` | 490.6 µs | 352.2 µs **-28%** |
+| `render_frame` | 917.6 µs | 694.7 µs **-24%** |
+| `render_frame` | 1.6 ms | 1.2 ms **-28%** |
+| `render_frame` | 2.5 ms | 2.0 ms **-17%** |
 
 ## scene_graph
 
-| Benchmark | Current (`a460c3a`) |
-|-----------|------|
-| `add_100_surfaces` | 16.4 µs |
-| `z_order_rebuild_50_surfaces` | 614.9 ns |
+| Benchmark | Baseline (`a460c3a`) | Current (`a460c3a`) |
+|-----------|------|------|
+| `add_100_surfaces` | 16.4 µs | 14.7 µs **-11%** |
+| `z_order_rebuild_50_surfaces` | 614.9 ns | 558.9 ns **-9%** |
 
 ## framebuffer
 
-| Benchmark | Current (`a460c3a`) |
-|-----------|------|
-| `create_1080p` | 188.3 µs |
-| `clear_1080p` | 156.6 µs |
-| `blit_400x300` | 77.9 µs |
+| Benchmark | Baseline (`a460c3a`) | Current (`a460c3a`) |
+|-----------|------|------|
+| `create_1080p` | 188.3 µs | 125.5 µs **-33%** |
+| `clear_1080p` | 156.6 µs | 136.2 µs **-13%** |
+| `blit_400x300` | 77.9 µs | 64.2 µs **-18%** |
 
 ## damage_tracker
 
-| Benchmark | Current (`a460c3a`) |
-|-----------|------|
-| `add_50_damage_regions` | 206.8 ns |
+| Benchmark | Baseline (`a460c3a`) | Current (`a460c3a`) |
+|-----------|------|------|
+| `add_50_damage_regions` | 206.8 ns | 211.2 ns |
 
 ## screen_capture
 
-| Benchmark | Current (`a460c3a`) |
-|-----------|------|
-| `png_encode` | 41.2 ms |
-| `png_encode` | 94.0 ms |
-| `png_encode` | 405.5 ms |
-| `bmp_encode` | 4.3 ms |
-| `bmp_encode` | 10.1 ms |
-| `bmp_encode` | 78.9 ms |
-| `raw_encode` | 990.4 µs |
-| `raw_encode` | 2.9 ms |
-| `raw_encode` | 48.0 ms |
-| `region_png` | 3.2 ms |
-| `region_png` | 13.2 ms |
-| `region_png` | 38.0 ms |
-| `region_png` | 83.6 ms |
-| `pixel_buffer` | 142.5 µs |
-| `pixel_buffer` | 786.2 µs |
-| `pixel_buffer` | 6.2 ms |
-| `argb_to_rgba` | 4.1 ms |
-| `argb_to_rgba` | 10.2 ms |
-| `argb_to_rgba` | 37.8 ms |
-| `blit` | 49.8 µs |
-| `blit` | 224.5 µs |
-| `blit` | 694.7 µs |
+| Benchmark | Baseline (`a460c3a`) | Current (`a460c3a`) |
+|-----------|------|------|
+| `png_encode` | 41.2 ms | 40.7 ms |
+| `png_encode` | 94.0 ms | 92.9 ms |
+| `png_encode` | 405.5 ms | 389.2 ms **-4%** |
+| `bmp_encode` | 4.3 ms | 3.9 ms **-9%** |
+| `bmp_encode` | 10.1 ms | 9.5 ms **-6%** |
+| `bmp_encode` | 78.9 ms | 74.8 ms **-5%** |
+| `raw_encode` | 990.4 µs | 718.9 µs **-27%** |
+| `raw_encode` | 2.9 ms | 2.1 ms **-28%** |
+| `raw_encode` | 48.0 ms | 45.7 ms **-5%** |
+| `region_png` | 3.2 ms | 3.0 ms **-5%** |
+| `region_png` | 13.2 ms | 12.4 ms **-6%** |
+| `region_png` | 38.0 ms | 36.5 ms **-4%** |
+| `region_png` | 83.6 ms | 81.5 ms |
+| `pixel_buffer` | 142.5 µs | 77.7 µs **-45%** |
+| `pixel_buffer` | 786.2 µs | 349.4 µs **-56%** |
+| `pixel_buffer` | 6.2 ms | 6.0 ms **-3%** |
+| `argb_to_rgba` | 4.1 ms | 3.8 ms **-7%** |
+| `argb_to_rgba` | 10.2 ms | 8.6 ms **-15%** |
+| `argb_to_rgba` | 37.8 ms | 34.7 ms **-8%** |
+| `blit` | 49.8 µs | 36.4 µs **-27%** |
+| `blit` | 224.5 µs | 167.7 µs **-25%** |
+| `blit` | 694.7 µs | 527.0 µs **-24%** |
 
 ---
 
