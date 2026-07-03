@@ -70,7 +70,7 @@ symbols), each compiling + smoke-tested. Driven by the parity workflow.
 ### M4 — Apps + capture + plugins (v0.4.0)
 - `apps.cyr` (Terminal allowlist exec, FileManager, AgentManager, ModelManager, AuditViewer).
 - **`screen_capture.cyr` ✅** — permission model + rate-limit + secure-mode auth + history
-  ring buffer + full/region/window capture + byte-exact RAW/BMP/PNG encoders; 69-assertion
+  ring buffer + full/region/window capture + byte-exact RAW/BMP/PNG encoders; 90-assertion
   parity test (standalone, wiring follow-on). `screen_recording.cyr` (ring buffer) next.
 - `plugin_host.cyr` (Unix-socket IPC, sandbox profiles, capability grants).
 - HUD widgets (`hud/{gpu,domain,crew}_status.cyr`) — HTTP polling of daimon MCP.

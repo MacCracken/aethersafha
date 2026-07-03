@@ -76,7 +76,7 @@ Rust: `apps.rs` (2986) — Terminal, FileManager, AgentManager, AuditViewer, Mod
   sliding-window rate limiting, secure-mode + system/agent authorization, capture-history
   ring buffer, and full-screen/region(clamped)/window capture off a caller-supplied bhumi
   framebuffer, with byte-exact **raw/BMP/PNG** encoders (real PNG — hand-rolled Adler-32 +
-  CRC-32 + zlib STORED — not a stub). `tests/screen_capture.tcyr` (69 assertions). Standalone;
+  CRC-32 + zlib STORED — not a stub). `tests/screen_capture.tcyr` (90 assertions). Standalone;
   compositor wiring is follow-on.
 - **D2** `screen_recording` (938): depends on D1 — ring buffer + state machine. Next.
 - **Accept**: permission + rate-limit tested; capture reads the bhumi framebuffer. ✅ (D1)

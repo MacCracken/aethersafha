@@ -94,6 +94,7 @@ fn main() {
     assert_eq(scap_result_width(fr), 800, "raw width == 800");
     assert_eq(scap_result_height(fr), 600, "raw height == 600");
     assert_eq(scap_result_data_size(fr), 800 * 600 * 4, "raw data_size == w*h*4");
+    assert_eq(scap_result_req_agent(fr), 0, "system capture stamps agent 0");
     # test_full_screen_capture_bmp
     var fbmp = scap_mgr_capture(mm, comp, fb, FS, 0, 0, 0, 0, BMP, 0, NOW);
     assert_eq(scap_result_data_size(fbmp), 54 + 800 * 600 * 4, "bmp data_size == 54 + w*h*4");
@@ -166,10 +167,12 @@ fn main() {
     var pd = scap_mgr_capture(mp, compp, fbs, FS, 0, 0, 0, 0, PNG, "rogue", NOW);
     assert_eq(pd, 0, "unpermitted agent denied");
     assert_eq(scap_mgr_last_err(mp), ScapErr.SCAP_ERR_PERM_DENIED, "last_err == PERM_DENIED");
-    # test_agent_with_permission_succeeds
-    scap_mgr_grant_full_access(mp, "good", NOW);
-    var ps = scap_mgr_capture(mp, compp, fbs, FS, 0, 0, 0, 0, PNG, "good", NOW);
+    # test_agent_with_permission_succeeds (+ requesting-agent stamping)
+    var good = "good";
+    scap_mgr_grant_full_access(mp, good, NOW);
+    var ps = scap_mgr_capture(mp, compp, fbs, FS, 0, 0, 0, 0, PNG, good, NOW);
     assert(t_ok(ps), "permitted agent succeeds");
+    assert_eq(scap_result_req_agent(ps), good, "result stamps requesting agent");
     # test_agent_target_not_allowed: allowed=[REGION], request FULLSCREEN
     var reg_only = vec_new();
     vec_push(reg_only, RG);
@@ -194,6 +197,13 @@ fn main() {
     scap_mgr_grant(mm2, scap_perm_new("agent-b", b_only, NOW, 0, 10));
     assert_eq(vec_len(scap_mgr_list_permissions(mm2)), 2, "two permissions listed");
     assert(t_ok(scap_mgr_get_permission(mm2, "agent-a")), "get agent-a permission");
+    # cross-agent enforcement through the real capture path (each agent's own scope)
+    assert(t_ok(scap_mgr_capture(mm2, compp, fbs, FS, 0, 0, 0, 0, RAW, "agent-a", NOW)), "agent-a FS allowed");
+    assert_eq(scap_mgr_capture(mm2, compp, fbs, RG, 0, 0, 4, 4, RAW, "agent-a", NOW), 0, "agent-a RG denied");
+    assert_eq(scap_mgr_last_err(mm2), ScapErr.SCAP_ERR_TARGET_NOT_ALLOWED, "agent-a RG not allowed");
+    assert(t_ok(scap_mgr_capture(mm2, compp, fbs, RG, 0, 0, 4, 4, RAW, "agent-b", NOW)), "agent-b RG allowed");
+    assert_eq(scap_mgr_capture(mm2, compp, fbs, FS, 0, 0, 0, 0, RAW, "agent-b", NOW), 0, "agent-b FS denied");
+    assert_eq(scap_mgr_last_err(mm2), ScapErr.SCAP_ERR_TARGET_NOT_ALLOWED, "agent-b FS not allowed");
 
     # -----------------------------------------------------------------------
     test_group("screen_capture — rate limiting");
@@ -211,6 +221,15 @@ fn main() {
     var rl4 = scap_mgr_capture(mrl, compr, fbs, FS, 0, 0, 0, 0, RAW, "fast", NOW);
     assert_eq(rl4, 0, "4th capture rate-limited");
     assert_eq(scap_mgr_last_err(mrl), ScapErr.SCAP_ERR_RATE_LIMIT, "last_err == RATE_LIMIT");
+    # sliding window: 61s on, the 3 stamps at NOW age out -> allowed again (prune half)
+    assert(t_ok(scap_mgr_capture(mrl, compr, fbs, FS, 0, 0, 0, 0, RAW, "fast", NOW + 61)), "window slides: allowed");
+    # strict-> boundary: a stamp exactly 60s old is pruned, not retained (fresh mgr, max 1)
+    var mrb = scap_mgr_new();
+    var compb = comp_new();
+    scap_mgr_grant(mrb, scap_perm_new("b1", scap_allowed_all(), NOW, 0, 1));
+    assert(t_ok(scap_mgr_capture(mrb, compb, fbs, FS, 0, 0, 0, 0, RAW, "b1", 1000)), "b1 first at t=1000 ok");
+    assert_eq(scap_mgr_capture(mrb, compb, fbs, FS, 0, 0, 0, 0, RAW, "b1", 1000), 0, "b1 second at t=1000 blocked");
+    assert(t_ok(scap_mgr_capture(mrb, compb, fbs, FS, 0, 0, 0, 0, RAW, "b1", 1060)), "b1 at t=1060 allowed (pruned)");
 
     # -----------------------------------------------------------------------
     test_group("screen_capture — grant / revoke");
@@ -222,6 +241,12 @@ fn main() {
     assert_eq(scap_mgr_get_permission(mg, "agent-x"), 0, "agent-x gone after revoke");
     # test_revoke_nonexistent_returns_false
     assert_eq(scap_mgr_revoke(mg, "ghost"), 0, "revoke nonexistent returns false");
+    # regrant overwrites (HashMap::insert): second grant wins, still one entry
+    var mo = scap_mgr_new();
+    scap_mgr_grant(mo, scap_perm_new("dup", scap_allowed_all(), NOW, 0, 3));
+    scap_mgr_grant(mo, scap_perm_new("dup", scap_allowed_all(), NOW, 0, 60));
+    assert_eq(vec_len(scap_mgr_list_permissions(mo)), 1, "regrant keeps one entry");
+    assert_eq(scap_perm_max_per_min(scap_mgr_get_permission(mo, "dup")), 60, "second grant wins (max 60)");
 
     # -----------------------------------------------------------------------
     test_group("screen_capture — capture history");
@@ -232,6 +257,7 @@ fn main() {
     scap_mgr_capture(mh, comph, fbs, FS, 0, 0, 0, 0, RAW, 0, NOW);
     assert_eq(vec_len(scap_mgr_capture_history(mh)), 1, "one history entry after capture");
     assert_eq(scap_hist_width(vec_get(scap_mgr_capture_history(mh), 0)), 4, "history[0] width == fb width");
+    assert_eq(scap_hist_height(vec_get(scap_mgr_capture_history(mh), 0)), 4, "history[0] height == fb height");
     # test_capture_history_max_entries: 110 captures, cap at 100
     var mh2 = scap_mgr_new();
     var comph2 = comp_new();
@@ -241,6 +267,22 @@ fn main() {
         c = c + 1;
     }
     assert_eq(vec_len(scap_mgr_capture_history(mh2)), ScapCap.SCAP_MAX_HISTORY, "history capped at MAX_HISTORY (100)");
+
+    # -----------------------------------------------------------------------
+    test_group("screen_capture — end-to-end pixel content (fb -> capture -> encode)");
+    var ppfb = bhumi_fb_new(4, 4);
+    bhumi_fb_clear(ppfb, 0);
+    bhumi_fb_set(ppfb, 1, 2, bhumi_xrgb(0x11, 0x22, 0x33));   # R=0x11 G=0x22 B=0x33 at (1,2)
+    var mpx = scap_mgr_new();
+    var comppx = comp_new();
+    var rpx = scap_mgr_capture(mpx, comppx, ppfb, RG, 1, 2, 1, 1, RAW, 0, NOW);
+    assert(t_ok(rpx), "1x1 pixel region captured");
+    assert_eq(scap_result_data_size(rpx), 4, "1x1 raw == 4 bytes");
+    var pdat = scap_result_data(rpx);
+    assert_eq(load8(pdat + 0), 0x33, "raw byte0 B == 0x33");
+    assert_eq(load8(pdat + 1), 0x22, "raw byte1 G == 0x22");
+    assert_eq(load8(pdat + 2), 0x11, "raw byte2 R == 0x11");
+    assert_eq(load8(pdat + 3), 0, "raw byte3 X == 0");
 
     return assert_summary();
 }

@@ -17,7 +17,7 @@ execution — the XWayland-successor path), 0.3.0 (kashi fonts, B3 desktop wirin
 
 **Unreleased (HEAD)** — **screen_capture** ported (Bite D1: per-agent permission model +
 sliding-window rate limiting + full-screen/region/window framebuffer capture + byte-exact
-RAW/BMP/PNG encoders; 69-assertion parity test). mehman `0.3.1` → `1.0.0`; toolchain
+RAW/BMP/PNG encoders; 90-assertion parity test). mehman `0.3.1` → `1.0.0`; toolchain
 `6.3.40` → `6.3.41`; `scripts/version-bump.sh` fixed for the Cyrius layout.
 
 ## Toolchain
@@ -63,7 +63,7 @@ RAW/BMP/PNG encoders; 69-assertion parity test). mehman `0.3.1` → `1.0.0`; too
   hit-test + shell-panel bars + bitmap text pixel test), `input` (13), `leaf_modules`
   (11), `desktop` (15). mehman: `foreign` (23 — guest spec/surface + host-as-window +
   sandboxed run + capture + **presentation pixel test**). capture: `screen_capture`
-  (69 — permissions / rate-limit / secure-mode / region-clamp / window / history +
+  (90 — permissions / rate-limit / secure-mode / region-clamp / window / history +
   RAW/BMP/PNG encoder checksums). Behavioral per-module: `theme_bridge`, `gestures`,
   `accessibility`, `ai_features`, `shell`, `security_ui`, `shell_integration`, `plugin_host`.
 - Run: `cyrius tests tests/` (or a single `cyrius test tests/<file>.tcyr`).

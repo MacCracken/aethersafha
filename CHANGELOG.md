@@ -16,7 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   full-screen / **region** (clamped, saturating) / **window** capture off a
   caller-supplied bhumi framebuffer. Includes byte-exact **RAW / BMP / PNG encoders**
   (hand-rolled Adler-32 + CRC-32 + zlib STORED deflate). `tests/screen_capture.tcyr`
-  mirrors the Rust unit tests (**69 assertions**, all green). Not yet wired into the
+  mirrors the Rust unit tests (**90 assertions**, all green). Not yet wired into the
   compositor surface (follow-on, like the M2 leaf modules).
 
 ### Changed
