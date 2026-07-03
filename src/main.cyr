@@ -40,6 +40,7 @@ fn ae_backend_open(w, h): i64 {
 
 fn main(): i64 {
     alloc_init();
+    kashi_font_init();   # populate the VGA 8x16 glyph tables (kashi font-data core)
     println("aethersafha: AI-augmented AGNOS compositor (Cyrius port)");
 
     var be = ae_backend_open(AE_W, AE_H);

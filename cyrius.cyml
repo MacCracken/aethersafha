@@ -52,6 +52,15 @@ path = "../agnodrm"
 tag = "1.4.5"
 modules = ["dist/agnodrm.cyr"]
 
+# --- Bitmap console fonts (the AGNOS font subsystem). We consume only the
+# freestanding font-data core (pure store8/load8, no stdlib): the IBM VGA 8x16 +
+# CGA 8x8 glyph tables + a row-query API. Replaces the hand-rolled 5x7 font.
+[deps.kashi]
+git = "https://github.com/MacCracken/kashi.git"
+path = "../kashi"
+tag = "1.0.2"
+modules = ["src/font_data.cyr"]
+
 # --- DEFERRED to Bite G. mehman (XWayland-successor "swallow" backend) hosts
 # foreign-ABI surfaces in a kavach sandbox. Its manifest declares [deps.kavach],
 # so consuming even its types-only `src/types.cyr` prepends kavach → sandhi →

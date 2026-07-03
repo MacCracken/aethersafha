@@ -22,9 +22,10 @@ modules, B3 desktop wiring, Bite A window interaction. Ported from Rust via
   - **Core (M1/Bite A)** — `geom`, `window`, `compositor`, `render`, `input`, `main`.
     compositor: workspaces + context types + move/switch + secure/agent-aware modes
     + window-at-point hit-test; renderer: alpha blend + damage tracking + window
-    **decorations** (close/max/min buttons + `deco_hit` decoration hit-test);
+    **decorations** (close/max/min buttons + `deco_hit`) + **bitmap text** via the
+    **kashi** IBM VGA 8×16 console font (`draw_char`/`draw_text`; window titles render);
     input: **window-management shortcuts** (Tab focus-cycle, F4 close, F5 maximize-
-    toggle, F6 minimize) via `input_map`/`input_apply`, wired into the frame loop.
+    toggle, F6 minimize) via `input_map`/`input_apply`.
   - **Leaf (M2)** — `theme_bridge`, `gestures`, `accessibility`, `ai_features`,
     `shell`, `security_ui`, `shell_integration`, `plugin_host` (all 8). Parity vs
     `rust-old/` (heap offset-accessor structs, prefixed symbols); behaviorally tested.
@@ -38,9 +39,9 @@ modules, B3 desktop wiring, Bite A window interaction. Ported from Rust via
 
 ## Tests
 
-- **13 `.tcyr` files, all green.** Core: `aethersafha` (38), `render` (27 — decoration
-  hit-test + shell-panel bars), `input` (13 — key→action→window mgmt), `leaf_modules`
-  (11), `desktop` (15 — B3 wiring + theme bg). Behavioral per-module: `theme_bridge`, `gestures`,
+- **13 `.tcyr` files, all green.** Core: `aethersafha` (38), `render` (34 — decoration
+  hit-test + shell-panel bars + bitmap text pixel test), `input` (13), `leaf_modules`
+  (11), `desktop` (15). Behavioral per-module: `theme_bridge`, `gestures`,
   `accessibility`, `ai_features`, `shell`, `security_ui`, `shell_integration`,
   `plugin_host`.
 - Run: `cyrius tests tests/` (or a single `cyrius test tests/<file>.tcyr`).
@@ -54,6 +55,8 @@ Active (auto-prepended; stdlib declared per each dep's reviewed needs):
 - **bhumi** 1.0.0 — platform backend (output/input/seat).
 - **agnostik** 1.3.3 — shared domain primitives (errors namespaced `STIK_ERR_*`).
 - **agnodrm** 1.4.5 — udev/DRM device model (errors namespaced `DRM_ERR_*`).
+- **kashi** 1.0.2 — bitmap console fonts; we consume the freestanding
+  `src/font_data.cyr` core (IBM VGA 8×16 + CGA 8×8 glyph tables).
 
 Deferred (mapping kept in `cyrius.cyml`, re-enable per the opt-in review):
 - **mehman** 0.2.1 — now ships `sandbox`/`surface` modules but still declares

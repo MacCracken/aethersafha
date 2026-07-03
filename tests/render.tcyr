@@ -50,6 +50,32 @@ fn main() {
     assert_eq(panel_bar_w(150, 40), 40, "clamp above 100%");
     assert_eq(panel_bar_w(0 - 10, 40), 0, "clamp below 0%");
 
+    test_group("render — bitmap text (kashi VGA 8x16)");
+    kashi_font_init();
+    assert_eq(kashi_font_is_ready(), 1, "kashi font initialized");
+    assert_eq(kashi_font_width(KASHI_FONT_VGA_8X16), 8, "glyph width 8");
+    assert_eq(kashi_font_height(KASHI_FONT_VGA_8X16), 16, "glyph height 16");
+    assert_eq(text_width("Hi"), 17, "text width = 2*9 - 1");
+    assert_eq(text_width(""), 0, "empty string has width 0");
+    var tfb = bhumi_fb_new(16, 20);
+    bhumi_fb_clear(tfb, 0);
+    var white = bhumi_xrgb(255, 255, 255);
+    draw_char(tfb, 'A', 0, 0, white);
+    var setpx = 0;
+    var yy = 0;
+    while (yy < 16) {
+        var xx = 0;
+        while (xx < 8) {
+            if (bhumi_fb_get(tfb, xx, yy) == white) { setpx = setpx + 1; }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    var some = (setpx > 0);
+    assert(some, "'A' glyph drew pixels");
+    var notall = (setpx < 128);
+    assert(notall, "'A' glyph is not a solid block");
+
     return assert_summary();
 }
 

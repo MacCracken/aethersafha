@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Bitmap text** — `draw_char`/`draw_text`/`text_width` in the renderer, backed by
+  the **kashi** font subsystem (`[deps.kashi]` 1.0.2, freestanding `font_data.cyr`
+  core — IBM VGA 8×16 glyphs). **Window titles now render** in their titlebars.
+  Pixel-level test verifies glyph blitting. (Replaced an initial hand-rolled 5×7 font.)
 - **B3 wiring completed** — a **shell status panel** rendered from the desktop shell
   (cpu/mem/battery bar-graphs, net-status dot, notification badge; `render_shell_panel`
   + pure `panel_bar_w`), and **theme → renderer** (`render_desktop` clears to the

@@ -56,8 +56,10 @@ symbols), each compiling + smoke-tested. Driven by the parity workflow.
 - **B3 wiring** — `desktop` aggregate owns compositor + all 8 leaf managers, created
   by `main`. `render_desktop` = themed bg + windows + shell status panel. Live links:
   compositor→accessibility, theme→renderer, shell→renderer, tray.  ✅ complete
+- **Bitmap text** — `draw_char`/`draw_text` over the **kashi** VGA 8×16 console font
+  (`[deps.kashi]`); window titles render in titlebars.  ✅
 - Remaining (feature depth): notifications surface, input→gestures, quick-settings,
-  and the big renderer piece — **bitmap text** (window titles + status labels).
+  panel text labels (cpu/mem %), scene-graph/damage-driven redraw.
 
 ### M3 — Renderer + compositor depth (v0.3.0)
 - Damage tracking, scene graph, decorations, bitmap text (`renderer.rs` full).

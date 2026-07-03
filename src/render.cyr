@@ -160,6 +160,8 @@ fn render_window(fb, win, focused): i64 {
     var tb = bhumi_xrgb(50, 54, 62);
     if (focused == 1) { tb = bhumi_xrgb(70, 90, 140); }
     fill_rect(fb, x, y, w, TITLEBAR_H, tb);
+    # title text, left-aligned + vertically centered in the titlebar
+    draw_text(fb, win_title(win), x + 6, y + (TITLEBAR_H - FONT_H) / 2, bhumi_xrgb(230, 230, 235));
     # decoration buttons: close (red), maximize (green), minimize (amber)
     var by = deco_btn_y(win);
     fill_rect(fb, deco_close_x(win), by, BTN_W, BTN_H, bhumi_xrgb(220, 80, 80));
@@ -237,4 +239,51 @@ fn render_shell_panel(fb, shell): i64 {
         fill_rect(fb, PANEL_PAD, y, IND_H, IND_H, bhumi_xrgb(220, 80, 80));
     }
     return 0;
+}
+
+# --- bitmap text (kashi IBM VGA 8x16 console font — see [deps.kashi]) ---------
+enum FontK {
+    FONT_W   = 8;
+    FONT_H   = 16;
+    FONT_ADV = 9;   # 8px glyph + 1px spacing
+}
+
+# draw_char(fb, ch, x, y, color): blit one kashi VGA 8x16 glyph. Each row is a
+# byte; bit (7 - col) = leftmost-first pixel. Requires kashi_font_init() first.
+fn draw_char(fb, ch, x, y, color): i64 {
+    var row = 0;
+    while (row < FONT_H) {
+        var bits = kashi_glyph_row(KASHI_FONT_VGA_8X16, ch, row);
+        var col = 0;
+        while (col < FONT_W) {
+            if ((bits & (1 << (7 - col))) != 0) {
+                bhumi_fb_set(fb, x + col, y + row, color);
+            }
+            col = col + 1;
+        }
+        row = row + 1;
+    }
+    return 1;
+}
+
+# draw_text(fb, s, x, y, color): render a NUL-terminated cstring. -> width in px.
+fn draw_text(fb, s, x, y, color): i64 {
+    var cx = x;
+    var i = 0;
+    while (1) {
+        var ch = load8(s + i);
+        if (ch == 0) { break; }
+        draw_char(fb, ch, cx, y, color);
+        cx = cx + FONT_ADV;
+        i = i + 1;
+    }
+    return cx - x;
+}
+
+# text_width(s): pixel width of a cstring in this font (chars*6 - 1; 0 if empty).
+fn text_width(s): i64 {
+    var n = 0;
+    while (load8(s + n) != 0) { n = n + 1; }
+    if (n == 0) { return 0; }
+    return n * FONT_ADV - 1;
 }
