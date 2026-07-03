@@ -1,0 +1,411 @@
+# aethersafha ai_features behavioral parity test.
+# Mirrors rust-old/src/ai_features.rs #[cfg(test)] behaviors against the
+# Cyrius port src/ai_features.cyr.
+#
+# Confidence/progress are PERMILLE (0..1000): 0.5->500, 0.65->650, 0.75->750,
+# 0.85->850, 0.9->900, 0.95->950, 0.3->300, 0.51->510.
+#
+# Stdlib (str, vec, hashmap, chrono, alloc, string, assert) auto-included via
+# cyrius.cyml [deps]. ai_features.cyr references no other src module.
+include "src/ai_features.cyr"
+
+# assert(cond) passes only when cond == 1; normalize a non-zero pointer to 1.
+fn t_ok(x): i64 {
+    if (x != 0) { return 1; }
+    return 0;
+}
+
+# Build a WindowOpened event carrying {"app": <app_cstr>}.
+fn make_window_event(id, app_cstr): i64 {
+    var meta = map_new();
+    map_set(meta, "app", str_from(app_cstr));
+    return ai_event_new(id, AI_ContextEventType.AI_CE_WINDOW_OPENED,
+        str_from("test"), clock_epoch_secs(), meta);
+}
+
+# Build a FileOpened event carrying {"file": <file_cstr>}.
+fn make_file_event(id, file_cstr): i64 {
+    var meta = map_new();
+    map_set(meta, "file", str_from(file_cstr));
+    return ai_event_new(id, AI_ContextEventType.AI_CE_FILE_OPENED,
+        str_from("test"), clock_epoch_secs(), meta);
+}
+
+# Build an event of an arbitrary type with empty metadata.
+fn make_bare_event(id, etyp): i64 {
+    return ai_event_new(id, etyp, str_from("test"), clock_epoch_secs(), map_new());
+}
+
+# Count elements of a suggestions vec whose title str_eq's the given cstr.
+fn count_title(v, title_cstr): i64 {
+    var want = str_from(title_cstr);
+    var n = vec_len(v);
+    var i = 0;
+    var c = 0;
+    while (i < n) {
+        var eq = str_eq(ai_suggestion_title(vec_get(v, i)), want);
+        if (eq == 1) { c = c + 1; }
+        i = i + 1;
+    }
+    return c;
+}
+
+fn main() {
+    alloc_init();
+
+    # --- new() / default context (test_ai_desktop_features_new,
+    #     test_ai_desktop_features_analyze_context, test_desktop_context_default) ---
+    test_group("ai_features — new & default context");
+    var f = ai_new();
+    assert(t_ok(f), "ai_new non-null");
+    assert_eq(ai_agent_hud_count(f), 0, "no agents registered at start");
+    assert_eq(ai_proactive_mode(f), 1, "proactive_mode defaults true");
+    assert_eq(ai_ambient_enabled(f), 1, "ambient_enabled defaults true");
+    var ctx0 = ai_get_context(f);
+    assert_eq(ai_context_type(ctx0), AI_ContextType.AI_CT_IDLE, "default context Idle");
+    assert_eq(ai_context_tod(ctx0), AI_TimeOfDay.AI_TOD_AFTERNOON, "default tod Afternoon");
+    assert_eq(ai_context_activity(ctx0), AI_ActivityLevel.AI_AL_MEDIUM, "default activity Medium");
+    assert_eq(vec_len(ai_context_apps(ctx0)), 0, "default active_apps empty");
+    assert_eq(vec_len(ai_context_files(ctx0)), 0, "default open_files empty");
+
+    # --- suggestion default (test_ai_suggestion_default) ---
+    test_group("ai_features — suggestion default");
+    var sdef = ai_suggestion_default(1);
+    assert_eq(ai_suggestion_type(sdef), AI_SuggestionType.AI_ST_PRODUCTIVITY, "default type Productivity");
+    assert_eq(ai_suggestion_dismissed(sdef), 0, "default not dismissed");
+    assert_eq(ai_suggestion_conf(sdef), 0, "default confidence 0");
+    assert_eq(ai_suggestion_has_action(sdef), 0, "default action None");
+
+    # --- generate_suggestion (test_ai_desktop_features_generate_suggestion) ---
+    test_group("ai_features — generate_suggestion");
+    var gs = ai_generate_suggestion(2, AI_SuggestionType.AI_ST_TASK_RECOMMENDATION,
+        str_from("Take a break"), str_from("You've been coding for 2 hours"), 850);
+    var gs_title_eq = str_eq(ai_suggestion_title(gs), str_from("Take a break"));
+    assert_eq(gs_title_eq, 1, "generated title matches");
+    assert_eq(ai_suggestion_conf(gs), 850, "generated confidence 850");
+    assert_eq(ai_suggestion_has_action(gs), 0, "generated action None");
+    assert_eq(ai_suggestion_dismissed(gs), 0, "generated not dismissed");
+
+    # --- detect_context_type: development via "vscode" contains "code"
+    #     (test_detect_context_type_development_code / update_context) ---
+    test_group("ai_features — detect_context Development");
+    var fdev = ai_new();
+    ai_update_context(fdev, make_window_event(10, "vscode"));
+    var cdev = ai_get_context(fdev);
+    assert_eq(ai_context_type(cdev), AI_ContextType.AI_CT_DEVELOPMENT, "vscode -> Development");
+    assert_eq(vec_len(ai_context_apps(cdev)), 1, "active_apps has vscode");
+    var has_vscode = ai_context_apps_contains(cdev, str_from("vscode"));
+    assert_eq(has_vscode, 1, "active_apps contains vscode");
+
+    # --- detect_context_type: design (test_detect_context_type_design_figma) ---
+    test_group("ai_features — detect_context Design");
+    var fdes = ai_new();
+    ai_update_context(fdes, make_window_event(11, "figma"));
+    assert_eq(ai_context_type(ai_get_context(fdes)), AI_ContextType.AI_CT_DESIGN, "figma -> Design");
+
+    # --- detect_context_type: communication (test_detect_context_type_communication_slack) ---
+    test_group("ai_features — detect_context Communication");
+    var fcom = ai_new();
+    ai_update_context(fcom, make_window_event(12, "slack"));
+    assert_eq(ai_context_type(ai_get_context(fcom)), AI_ContextType.AI_CT_COMMUNICATION, "slack -> Communication");
+
+    # --- detect_context_type: browsing (test_detect_context_type_browsing) ---
+    test_group("ai_features — detect_context Browsing");
+    var fbro = ai_new();
+    ai_update_context(fbro, make_window_event(13, "browser"));
+    assert_eq(ai_context_type(ai_get_context(fbro)), AI_ContextType.AI_CT_BROWSING, "browser -> Browsing");
+
+    # --- detect_context_type: idle unknown app (test_detect_context_type_idle_unknown_app) ---
+    test_group("ai_features — detect_context Idle");
+    var fidle = ai_new();
+    ai_update_context(fidle, make_window_event(14, "calculator"));
+    assert_eq(ai_context_type(ai_get_context(fidle)), AI_ContextType.AI_CT_IDLE, "calculator -> Idle");
+
+    # --- update_context: duplicate app not added twice
+    #     (test_update_context_window_opened_duplicate_app) ---
+    test_group("ai_features — duplicate app dedup");
+    var fdup = ai_new();
+    ai_update_context(fdup, make_window_event(15, "vscode"));
+    ai_update_context(fdup, make_window_event(16, "vscode"));
+    assert_eq(vec_len(ai_context_apps(ai_get_context(fdup))), 1, "duplicate app not added twice");
+
+    # --- update_context: WindowOpened without app metadata is a no-op
+    #     (test_update_context_window_opened_no_app_metadata) ---
+    test_group("ai_features — WindowOpened no metadata");
+    var fnoapp = ai_new();
+    ai_update_context(fnoapp, make_bare_event(17, AI_ContextEventType.AI_CE_WINDOW_OPENED));
+    assert_eq(vec_len(ai_context_apps(ai_get_context(fnoapp))), 0, "no app meta -> apps empty");
+
+    # --- update_context: non-mutating event types (WindowClosed / AppSwitched)
+    #     (test_update_context_window_closed / _app_switched) ---
+    test_group("ai_features — passthrough event types");
+    var fpass = ai_new();
+    ai_update_context(fpass, make_bare_event(18, AI_ContextEventType.AI_CE_WINDOW_CLOSED));
+    ai_update_context(fpass, make_bare_event(19, AI_ContextEventType.AI_CE_APP_SWITCHED));
+    assert_eq(vec_len(ai_context_apps(ai_get_context(fpass))), 0, "closed/switched leave apps empty");
+
+    # --- update_context: FileOpened adds file (test_update_context_file_opened) ---
+    test_group("ai_features — FileOpened");
+    var ffile = ai_new();
+    ai_update_context(ffile, make_file_event(20, "/home/user/doc.txt"));
+    assert_eq(vec_len(ai_context_files(ai_get_context(ffile))), 1, "file added to open_files");
+
+    # --- update_context: FileOpened without file metadata ignored
+    #     (test_file_opened_without_file_metadata_ignored) ---
+    var ffile_none = ai_new();
+    ai_update_context(ffile_none, make_bare_event(21, AI_ContextEventType.AI_CE_FILE_OPENED));
+    assert_eq(vec_len(ai_context_files(ai_get_context(ffile_none))), 0, "no file meta -> files empty");
+
+    # --- update_context: open_files capped at 10, oldest evicted
+    #     (test_multiple_file_open_events_ordering / _cap_at_10) ---
+    test_group("ai_features — open_files cap 10");
+    var fcap = ai_new();
+    var fi = 0;
+    while (fi < 12) {
+        ai_update_context(fcap, make_file_event(100 + fi, "f"));
+        fi = fi + 1;
+    }
+    assert_eq(vec_len(ai_context_files(ai_get_context(fcap))), 10, "open_files capped at 10");
+
+    # --- context history capped at 100 (test_context_history_capped_at_100) ---
+    test_group("ai_features — history cap 100");
+    var fhist = ai_new();
+    var hi = 0;
+    while (hi < 120) {
+        ai_update_context(fhist, make_bare_event(200 + hi, AI_ContextEventType.AI_CE_USER_PRESENT));
+        hi = hi + 1;
+    }
+    assert_eq(vec_len(ai_history(fhist)), 100, "history capped at 100");
+
+    # --- add_suggestion dedup by (type,title) keeps higher-confidence
+    #     (test_add_suggestion_deduplicates_same_type_and_title) ---
+    test_group("ai_features — add_suggestion dedup");
+    var fadd = ai_new();
+    var s_a = ai_generate_suggestion(30, AI_SuggestionType.AI_ST_PRODUCTIVITY,
+        str_from("Same"), str_from("First"), 700);
+    var s_b = ai_generate_suggestion(31, AI_SuggestionType.AI_ST_PRODUCTIVITY,
+        str_from("Same"), str_from("Second"), 900);
+    ai_add_suggestion(fadd, s_a);
+    ai_add_suggestion(fadd, s_b);
+    var same_cnt = count_title(ai_suggestions(fadd), "Same");
+    assert_eq(same_cnt, 1, "same type+title deduped to one");
+    var kept_desc_eq = str_eq(ai_suggestion_desc(vec_get(ai_suggestions(fadd), 0)), str_from("Second"));
+    assert_eq(kept_desc_eq, 1, "higher-confidence entry (Second) kept");
+
+    # --- add_suggestion sorts by confidence descending
+    #     (test_add_suggestion_sorts_by_confidence_descending) ---
+    test_group("ai_features — add_suggestion sort");
+    var fsort = ai_new();
+    ai_add_suggestion(fsort, ai_generate_suggestion(40, AI_SuggestionType.AI_ST_PRODUCTIVITY,
+        str_from("Low"), str_from("D"), 600));
+    ai_add_suggestion(fsort, ai_generate_suggestion(41, AI_SuggestionType.AI_ST_TASK_RECOMMENDATION,
+        str_from("High"), str_from("D"), 950));
+    ai_add_suggestion(fsort, ai_generate_suggestion(42, AI_SuggestionType.AI_ST_SECURITY_ALERT,
+        str_from("Mid"), str_from("D"), 800));
+    var sv = ai_suggestions(fsort);
+    assert_eq(vec_len(sv), 3, "three suggestions");
+    assert_eq(ai_suggestion_conf(vec_get(sv, 0)), 950, "sorted[0] = 950");
+    assert_eq(ai_suggestion_conf(vec_get(sv, 1)), 800, "sorted[1] = 800");
+    assert_eq(ai_suggestion_conf(vec_get(sv, 2)), 600, "sorted[2] = 600");
+
+    # --- dedup keeps different types with same title
+    #     (test_suggestion_dedup_different_types_same_title_kept) ---
+    test_group("ai_features — dedup different types kept");
+    var fdt = ai_new();
+    ai_add_suggestion(fdt, ai_generate_suggestion(50, AI_SuggestionType.AI_ST_PRODUCTIVITY,
+        str_from("Same Title"), str_from("D1"), 800));
+    ai_add_suggestion(fdt, ai_generate_suggestion(51, AI_SuggestionType.AI_ST_SECURITY_ALERT,
+        str_from("Same Title"), str_from("D2"), 900));
+    assert_eq(vec_len(ai_suggestions(fdt)), 2, "different types same title both kept");
+
+    # --- proactive_suggestions filters dismissed
+    #     (test_proactive_suggestions_filters_dismissed) ---
+    test_group("ai_features — proactive filters dismissed");
+    var fpd = ai_new();
+    var pd1 = ai_generate_suggestion(60, AI_SuggestionType.AI_ST_PRODUCTIVITY,
+        str_from("S1"), str_from("D1"), 900);
+    var pd2 = ai_generate_suggestion(61, AI_SuggestionType.AI_ST_TASK_RECOMMENDATION,
+        str_from("S2"), str_from("D2"), 800);
+    ai_add_suggestion(fpd, pd1);
+    ai_add_suggestion(fpd, pd2);
+    ai_dismiss_suggestion(fpd, 60);
+    var pd_out = ai_proactive_suggestions(fpd);
+    assert_eq(vec_len(pd_out), 1, "dismissed suggestion filtered out");
+    var pd_kept_eq = str_eq(ai_suggestion_title(vec_get(pd_out, 0)), str_from("S2"));
+    assert_eq(pd_kept_eq, 1, "surviving suggestion is S2");
+
+    # --- proactive_suggestions filters low confidence
+    #     (test_proactive_suggestions_filters_low_confidence) ---
+    test_group("ai_features — proactive filters low confidence");
+    var fpl = ai_new();
+    ai_add_suggestion(fpl, ai_generate_suggestion(70, AI_SuggestionType.AI_ST_PRODUCTIVITY,
+        str_from("Low"), str_from("D"), 300));
+    ai_add_suggestion(fpl, ai_generate_suggestion(71, AI_SuggestionType.AI_ST_TASK_RECOMMENDATION,
+        str_from("High"), str_from("D"), 900));
+    var pl_out = ai_proactive_suggestions(fpl);
+    assert_eq(vec_len(pl_out), 1, "low-confidence filtered out");
+
+    # --- proactive_suggestions threshold boundary: exactly 500 excluded,
+    #     510 included (test_suggestion_boundary_confidence_at_threshold /
+    #     test_suggestion_just_above_threshold) ---
+    test_group("ai_features — proactive threshold boundary");
+    var fthr = ai_new();
+    ai_add_suggestion(fthr, ai_generate_suggestion(80, AI_SuggestionType.AI_ST_PRODUCTIVITY,
+        str_from("Exactly 500"), str_from("D"), 500));
+    assert_eq(vec_len(ai_proactive_suggestions(fthr)), 0, "conf==500 excluded (> threshold)");
+    var fabove = ai_new();
+    ai_add_suggestion(fabove, ai_generate_suggestion(81, AI_SuggestionType.AI_ST_PRODUCTIVITY,
+        str_from("Above"), str_from("D"), 510));
+    assert_eq(vec_len(ai_proactive_suggestions(fabove)), 1, "conf==510 included");
+
+    # --- proactive_suggestions empty (test_proactive_suggestions_empty) ---
+    var fempty = ai_new();
+    assert_eq(vec_len(ai_proactive_suggestions(fempty)), 0, "no suggestions -> empty");
+
+    # --- dismiss marks the matching suggestion (test_dismiss_suggestion_marks_dismissed) ---
+    test_group("ai_features — dismiss marks entry");
+    var fdis = ai_new();
+    var dsug = ai_generate_suggestion(90, AI_SuggestionType.AI_ST_SECURITY_ALERT,
+        str_from("Alert"), str_from("D"), 950);
+    ai_add_suggestion(fdis, dsug);
+    assert_eq(ai_suggestion_dismissed(dsug), 0, "not dismissed before dismiss");
+    ai_dismiss_suggestion(fdis, 90);
+    assert_eq(ai_suggestion_dismissed(dsug), 1, "dismissed flag set after dismiss");
+
+    # --- smart_window_placement per context type
+    #     (test_smart_window_placement_development/_design/_communication/_default) ---
+    test_group("ai_features — smart_window_placement");
+    var fdefp = ai_new();
+    var rdef = ai_smart_window_placement(fdefp);
+    assert_eq(ai_place_x(rdef), 100, "default place x=100");
+    assert_eq(ai_place_w(rdef), 1200, "default place w=1200");
+    assert_eq(ai_place_h(rdef), 800, "default place h=800");
+
+    var fdevp = ai_new();
+    ai_update_context(fdevp, make_window_event(300, "code"));
+    var rdev = ai_smart_window_placement(fdevp);
+    assert_eq(ai_place_w(rdev), 1400, "development place w=1400");
+    assert_eq(ai_place_h(rdev), 900, "development place h=900");
+
+    var fdesp = ai_new();
+    ai_update_context(fdesp, make_window_event(301, "figma"));
+    var rdes = ai_smart_window_placement(fdesp);
+    assert_eq(ai_place_x(rdes), 50, "design place x=50");
+    assert_eq(ai_place_w(rdes), 1820, "design place w=1820");
+
+    var fcomp = ai_new();
+    ai_update_context(fcomp, make_window_event(302, "slack"));
+    var rcom = ai_smart_window_placement(fcomp);
+    assert_eq(ai_place_x(rcom), 200, "communication place x=200");
+    assert_eq(ai_place_w(rcom), 600, "communication place w=600");
+
+    # --- register / initial state / count (test_register_agent_hud_initial_state) ---
+    test_group("ai_features — register agent HUD");
+    var freg = ai_new();
+    ai_register_agent_hud(freg, 7, str_from("my-agent"));
+    assert_eq(ai_agent_hud_count(freg), 1, "one agent registered");
+    var st7 = ai_get_agent_hud_state(freg, 7);
+    assert(t_ok(st7), "agent state non-null");
+    assert_eq(ai_hud_id(st7), 7, "agent id 7");
+    var name_eq = str_eq(ai_hud_name(st7), str_from("my-agent"));
+    assert_eq(name_eq, 1, "agent name my-agent");
+    assert_eq(ai_hud_status(st7), AI_AgentStatus.AI_AS_IDLE, "initial status Idle");
+    assert_eq(ai_hud_progress(st7), 0, "initial progress 0");
+    var res7 = ai_hud_res(st7);
+    assert_eq(ai_res_cpu(res7), 0, "initial cpu 0");
+    assert_eq(ai_res_mem(res7), 0, "initial mem 0");
+    assert_eq(ai_res_has_gpu(res7), 0, "initial gpu None");
+
+    # --- register multiple (test_register_multiple_agents_hud) ---
+    test_group("ai_features — multiple agents");
+    var fmul = ai_new();
+    ai_register_agent_hud(fmul, 1, str_from("agent-1"));
+    ai_register_agent_hud(fmul, 2, str_from("agent-2"));
+    assert_eq(ai_agent_hud_count(fmul), 2, "two agents registered");
+    assert_eq(vec_len(ai_get_agent_hud_states(fmul)), 2, "get_agent_hud_states returns two");
+
+    # --- register overwrites existing (test_register_agent_overwrites_existing) ---
+    var fov = ai_new();
+    ai_register_agent_hud(fov, 5, str_from("first-name"));
+    ai_register_agent_hud(fov, 5, str_from("second-name"));
+    assert_eq(ai_agent_hud_count(fov), 1, "same id overwrites -> one agent");
+    var ov_name_eq = str_eq(ai_hud_name(ai_get_agent_hud_state(fov, 5)), str_from("second-name"));
+    assert_eq(ov_name_eq, 1, "overwrite keeps second-name");
+
+    # --- update agent HUD (test_update_agent_hud_updates_last_activity) ---
+    test_group("ai_features — update agent HUD");
+    var fupd = ai_new();
+    ai_register_agent_hud(fupd, 9, str_from("agent"));
+    ai_update_agent_hud(fupd, 9, AI_AgentStatus.AI_AS_ACTING, str_from("task"), 750);
+    var st9 = ai_get_agent_hud_state(fupd, 9);
+    assert_eq(ai_hud_status(st9), AI_AgentStatus.AI_AS_ACTING, "status -> Acting");
+    assert_eq(ai_hud_progress(st9), 750, "progress -> 750");
+    var task_eq = str_eq(ai_hud_task(st9), str_from("task"));
+    assert_eq(task_eq, 1, "task -> 'task'");
+
+    # --- update nonexistent agent is a no-op (test_update_agent_hud_nonexistent) ---
+    var fupn = ai_new();
+    ai_update_agent_hud(fupn, 999, AI_AgentStatus.AI_AS_ERROR, str_from("t"), 0);
+    assert_eq(ai_agent_hud_count(fupn), 0, "update nonexistent agent adds nothing");
+
+    # --- unregister (test_ai_desktop_features_unregister_agent_hud) ---
+    test_group("ai_features — unregister agent HUD");
+    var funr = ai_new();
+    ai_register_agent_hud(funr, 3, str_from("test-agent"));
+    assert_eq(ai_agent_hud_count(funr), 1, "one agent before unregister");
+    ai_unregister_agent_hud(funr, 3);
+    assert_eq(ai_agent_hud_count(funr), 0, "zero agents after unregister");
+
+    # --- toggles (test_set_proactive_mode_toggle / test_set_ambient_enabled_toggle) ---
+    test_group("ai_features — mode toggles");
+    var ftog = ai_new();
+    ai_set_proactive_mode(ftog, 0);
+    assert_eq(ai_proactive_mode(ftog), 0, "proactive_mode -> false");
+    ai_set_proactive_mode(ftog, 1);
+    assert_eq(ai_proactive_mode(ftog), 1, "proactive_mode -> true");
+    ai_set_ambient_enabled(ftog, 0);
+    assert_eq(ai_ambient_enabled(ftog), 0, "ambient_enabled -> false");
+    ai_set_ambient_enabled(ftog, 1);
+    assert_eq(ai_ambient_enabled(ftog), 1, "ambient_enabled -> true");
+
+    # --- suggest_workspace_switch (test_suggest_workspace_switch_fields) ---
+    test_group("ai_features — suggest_workspace_switch");
+    var wss = ai_suggest_workspace_switch(400, 2, str_from("Focus needed"));
+    assert_eq(ai_suggestion_type(wss), AI_SuggestionType.AI_ST_CONTEXT_SWITCH, "type ContextSwitch");
+    assert_eq(ai_suggestion_conf(wss), 750, "workspace-switch conf 750");
+    var wss_title_eq = str_eq(ai_suggestion_title(wss), str_from("Switch to Workspace 3"));
+    assert_eq(wss_title_eq, 1, "title 'Switch to Workspace 3' (to+1)");
+    var wss_desc_eq = str_eq(ai_suggestion_desc(wss), str_from("Focus needed"));
+    assert_eq(wss_desc_eq, 1, "desc = reason");
+
+    # --- optimize_resources (test_optimize_resources_confidence) ---
+    test_group("ai_features — optimize_resources");
+    var opt = ai_optimize_resources(401);
+    assert_eq(ai_suggestion_type(opt), AI_SuggestionType.AI_ST_RESOURCE_OPTIMIZATION, "type ResourceOptimization");
+    assert_eq(ai_suggestion_conf(opt), 650, "optimize conf 650");
+    assert_eq(ai_suggestion_dismissed(opt), 0, "optimize not dismissed");
+
+    # --- time-of-day classification (analyze_context hour ranges) ---
+    test_group("ai_features — time_of_day classification");
+    assert_eq(ai_time_of_day_for_hour(8), AI_TimeOfDay.AI_TOD_MORNING, "08h -> Morning");
+    assert_eq(ai_time_of_day_for_hour(14), AI_TimeOfDay.AI_TOD_AFTERNOON, "14h -> Afternoon");
+    assert_eq(ai_time_of_day_for_hour(18), AI_TimeOfDay.AI_TOD_EVENING, "18h -> Evening");
+    assert_eq(ai_time_of_day_for_hour(2), AI_TimeOfDay.AI_TOD_NIGHT, "02h -> Night");
+    assert_eq(ai_time_of_day_for_hour(5), AI_TimeOfDay.AI_TOD_MORNING, "05h boundary -> Morning");
+    assert_eq(ai_time_of_day_for_hour(11), AI_TimeOfDay.AI_TOD_MORNING, "11h boundary -> Morning");
+    assert_eq(ai_time_of_day_for_hour(23), AI_TimeOfDay.AI_TOD_NIGHT, "23h -> Night");
+
+    # --- status_from_str mapping (poll_agents status mapping) ---
+    test_group("ai_features — status_from_str mapping");
+    assert_eq(ai_status_from_str("running"), AI_AgentStatus.AI_AS_ACTING, "running -> Acting");
+    assert_eq(ai_status_from_str("registered"), AI_AgentStatus.AI_AS_IDLE, "registered -> Idle");
+    assert_eq(ai_status_from_str("error"), AI_AgentStatus.AI_AS_ERROR, "error -> Error");
+    assert_eq(ai_status_from_str("failed"), AI_AgentStatus.AI_AS_ERROR, "failed -> Error");
+    assert_eq(ai_status_from_str("waiting"), AI_AgentStatus.AI_AS_WAITING, "waiting -> Waiting");
+    assert_eq(ai_status_from_str("unknown"), AI_AgentStatus.AI_AS_IDLE, "unknown -> Idle");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

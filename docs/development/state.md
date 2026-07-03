@@ -17,36 +17,42 @@ preserved at `rust-old/` as the frozen parity oracle.
 ## Source
 
 - Rust reference: 27,207 lines at `rust-old/` (frozen, do not edit).
-- Cyrius port: ~8,000 lines across 12 modules; compiles + runs on the bhumi seam.
-  - **Core (M1)** — `geom`, `window`, `compositor`, `render` (software renderer over
-    bhumi's XRGB framebuffer), `input` (bhumi HID → actions), `main` (backend →
-    seed windows → poll/dispatch/render/present loop). Wired into the running binary.
+- Cyrius port: **6,006 lines across 14 modules**; compiles clean + runs on the bhumi seam.
+  - **Core (M1)** — `geom`, `window`, `compositor`, `render`, `input`, `main`.
+    Deepened this pass: compositor now has **workspaces + context types +
+    move/switch + secure/agent-aware modes + window-at-point hit-test**; renderer
+    has **alpha blend + damage tracking**. Wired into the running binary.
   - **Leaf (M2)** — `theme_bridge`, `gestures`, `accessibility`, `ai_features`,
-    `shell`, `security_ui`. Structural parity vs `rust-old/` (heap offset-accessor
-    structs, prefixed symbols); compile individually + together (no collisions);
-    smoke-tested. Standalone (not yet wired into the compositor). Deeper behavioral
-    parity tests are follow-on.
+    `shell`, `security_ui`, `shell_integration`, `plugin_host` (all 8). Parity vs
+    `rust-old/` (heap offset-accessor structs, prefixed symbols); compile
+    individually + together (no collisions); behaviorally tested. Not yet wired
+    into the compositor (B3).
 
 ## Tests
 
-- `tests/aethersafha.tcyr` — **21 passed** (geom, window model, compositor CRUD).
-- `tests/leaf_modules.tcyr` — **11 passed** (all 6 leaf modules coexist + construct).
+- **11 `.tcyr` files, ~670 assertions, all green.** Core: `aethersafha` (38),
+  `render` (13), `leaf_modules` (11). Behavioral per-module: `theme_bridge`,
+  `gestures`, `accessibility`, `ai_features`, `shell`, `security_ui`,
+  `shell_integration`, `plugin_host`.
 - Run: `cyrius tests tests/` (or a single `cyrius test tests/<file>.tcyr`).
 
 ## Dependencies
 
-Declared in `cyrius.cyml` (resolved into `lib/`):
+- **stdlib** (auto-prepended) — syscalls, string, alloc, atomic, fmt, vec, str,
+  slice, hashmap, fnptr, io, fs, process, args, tagged, result, chrono, math,
+  assert, bench.
+- **bhumi** 0.7.0 — platform backend (output/input/seat). **The only active dep**
+  — clean (no git sub-deps).
+- **Deferred (documented in `cyrius.cyml`, NOT auto-prepended until consumed):**
+  - **mehman** 0.1.0 — pulls `[deps.kavach]` → sigil/patra/sandhi, dragging in the
+    HTTP/`thread_local` surface as reachable-undefined. Types-only, post-MVP (Bite G).
+  - **agnostik** 1.3.2 + **agnodrm** 1.4.4 — both bundle the shared `ERR_*` module
+    (duplicate symbols); unused today. Re-enable with selective `modules` when consumed.
+  - **mabda** 4.0.2 — GPU, off the v1.0 path.
 
-- **stdlib** — syscalls, string, alloc, atomic, str, fmt, vec, slice, hashmap,
-  fnptr, io, fs, process, args, ct, net, tagged, result, trait, bayan, chrono,
-  math, assert, bench.
-- **bhumi** 0.7.0 — platform backend (output/input/seat). Actively consumed.
-- **mehman** 0.1.0 — foreign-surface backend (types-only). Wired, post-MVP.
-- **agnostik** 1.3.2 — shared domain primitives. Wired.
-- **agnodrm** 1.4.4 — udev/DRM device model (was `agnosys`). Wired.
-
-Known: agnostik + agnodrm both bundle the shared `ERR_*` error module → benign
-duplicate-symbol warnings ("last wins"). See roadmap "Known cleanup".
+  Rationale: `cyrius build` prepends every `[deps.*]` module; the unused heavy
+  bundles only broke the build. The full dependency mapping is preserved in the
+  manifest comments.
 
 ## Consumers
 
@@ -54,5 +60,6 @@ _None yet (top-level application, `publish = false`)._
 
 ## Next
 
-M2 — leaf feature parity (shell, ai_features, security_ui, accessibility,
-gestures, theme_bridge), driven by the parity workflow. See [`roadmap.md`](roadmap.md).
+M2-B3: wire the 8 leaf modules into the compositor/shell surface. Continue Bite A
+(renderer decorations + bitmap text; input routing). See
+[`roadmap.md`](roadmap.md) / [`parity-plan.md`](parity-plan.md).

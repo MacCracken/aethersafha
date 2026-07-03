@@ -1,0 +1,201 @@
+# aethersafha — shell_integration behavioral parity test.
+# Mirrors rust-old/src/shell_integration.rs #[cfg(test)] mod tests.
+# Stdlib (vec, str, string, assert, alloc) auto-included via cyrius.cyml.
+# shell_integration.cyr bridges to shell.cyr's Notification API
+# (shell_notif_new / SH_NotifPriority), so include shell.cyr first.
+include "src/shell.cyr"
+include "src/shell_integration.cyr"
+
+# assert(cond) passes only when cond == 1; normalize a non-zero pointer to 1.
+fn t_ok(x): i64 {
+    if (x != 0) { return 1; }
+    return 0;
+}
+
+# rust test helper: make_tray_item(id) -> SystemTrayItem with one Quit menu.
+# Returns a *SI_SystemTrayItem. app_name/tooltip formatting is not asserted
+# structurally here (rust asserts app_name == "App test"); we pass explicit
+# caller strings to mirror the constructed fields we DO assert.
+fn t_make_tray_item(id, app_name): i64 {
+    var menu = vec_new();
+    var act = shint_tray_action_quit();
+    var mi = shint_menu_new("quit", "Quit", act, 1);
+    vec_push(menu, mi);
+    return shint_tray_item_new(id, app_name, "icon.png", "Tooltip", 1, menu);
+}
+
+# rust test helper: make_external_notification() — Firefox / Normal / no actions.
+fn t_make_ext_notif(): i64 {
+    return shint_ext_notif_new(
+        "Firefox",
+        "Download complete",
+        "file.zip has been downloaded",
+        SI_Urgency.SI_URG_NORMAL,
+        "download",
+        5000,
+        0);
+}
+
+fn main() {
+    alloc_init();
+
+    # ---- Tray CRUD --------------------------------------------------------
+    test_group("shell_integration — tray CRUD");
+
+    # rust: test_register_tray_item — register ok, len == 1.
+    var mgr = shint_mgr_new();
+    assert(t_ok(mgr), "mgr_new non-null");
+    assert_eq(shint_mgr_tray_count(mgr), 0, "new manager empty (get_tray_items_empty)");
+    var it1 = t_make_tray_item("app1", "App app1");
+    var reg1 = shint_mgr_register_tray_item(mgr, it1);
+    assert_eq(reg1, SI_Err.SI_OK, "register returns SI_OK");
+    assert_eq(shint_mgr_tray_count(mgr), 1, "count == 1 after register");
+
+    # rust: test_register_multiple_tray_items — three distinct ids -> len 3.
+    var mgr2 = shint_mgr_new();
+    shint_mgr_register_tray_item(mgr2, t_make_tray_item("a", "App a"));
+    shint_mgr_register_tray_item(mgr2, t_make_tray_item("b", "App b"));
+    shint_mgr_register_tray_item(mgr2, t_make_tray_item("c", "App c"));
+    assert_eq(shint_mgr_tray_count(mgr2), 3, "count == 3 after three registers");
+
+    # rust: test_register_duplicate_tray_item — same id -> DuplicateTrayItem.
+    var mgrd = shint_mgr_new();
+    shint_mgr_register_tray_item(mgrd, t_make_tray_item("dup", "App dup"));
+    var regdup = shint_mgr_register_tray_item(mgrd, t_make_tray_item("dup", "App dup"));
+    assert_eq(regdup, SI_Err.SI_ERR_DUPLICATE_TRAY, "duplicate id -> SI_ERR_DUPLICATE_TRAY");
+    assert_eq(shint_mgr_tray_count(mgrd), 1, "duplicate rejected, count stays 1");
+
+    # rust: test_remove_tray_item — remove ok, empty after.
+    var mgrr = shint_mgr_new();
+    shint_mgr_register_tray_item(mgrr, t_make_tray_item("rm", "App rm"));
+    var rmok = shint_mgr_remove_tray_item(mgrr, "rm");
+    assert_eq(rmok, SI_Err.SI_OK, "remove existing -> SI_OK");
+    assert_eq(shint_mgr_tray_count(mgrr), 0, "empty after remove");
+
+    # rust: test_remove_nonexistent_tray_item — TrayItemNotFound.
+    var rmghost = shint_mgr_remove_tray_item(mgrr, "ghost");
+    assert_eq(rmghost, SI_Err.SI_ERR_TRAY_NOT_FOUND, "remove missing -> SI_ERR_TRAY_NOT_FOUND");
+
+    # rust: test_register_then_remove_then_reregister — id reusable after removal.
+    var mgrc = shint_mgr_new();
+    shint_mgr_register_tray_item(mgrc, t_make_tray_item("cycle", "App cycle"));
+    shint_mgr_remove_tray_item(mgrc, "cycle");
+    var rereg = shint_mgr_register_tray_item(mgrc, t_make_tray_item("cycle", "App cycle"));
+    assert_eq(rereg, SI_Err.SI_OK, "re-register same id after remove -> SI_OK");
+    assert_eq(shint_mgr_tray_count(mgrc), 1, "count == 1 after cycle");
+
+    # ---- Tray item / action fields ---------------------------------------
+    test_group("shell_integration — tray item fields");
+
+    # rust: test_tray_item_fields — id/app_name/visible/menu len/menu[0].action.
+    var itf = t_make_tray_item("test", "App test");
+    assert_eq(streq(shint_tray_item_id(itf), "test"), 1, "tray id == test");
+    assert_eq(streq(shint_tray_item_app_name(itf), "App test"), 1, "tray app_name == App test");
+    assert_eq(shint_tray_item_visible(itf), 1, "tray visible == true");
+    assert_eq(shint_tray_item_menu_count(itf), 1, "menu len == 1");
+    var mi0 = vec_get(shint_tray_item_menu(itf), 0);
+    var act0 = shint_menu_action(mi0);
+    assert_eq(shint_tray_action_kind(act0), SI_TrayActionKind.SI_TA_QUIT, "menu[0].action == Quit");
+
+    # rust: test_tray_action_variants — variant equality / inequality.
+    var a_act = shint_tray_action_activate();
+    var a_act2 = shint_tray_action_activate();
+    assert_eq(shint_tray_action_eq(a_act, a_act2), 1, "Activate == Activate");
+    var sm = shint_tray_action_show_menu();
+    var sm2 = shint_tray_action_show_menu();
+    assert_eq(shint_tray_action_eq(sm, sm2), 1, "ShowMenu == ShowMenu");
+    var q1 = shint_tray_action_quit();
+    var q2 = shint_tray_action_quit();
+    assert_eq(shint_tray_action_eq(q1, q2), 1, "Quit == Quit");
+    var cu1 = shint_tray_action_custom("open");
+    var cu2 = shint_tray_action_custom("open");
+    assert_eq(shint_tray_action_eq(cu1, cu2), 1, "Custom(open) == Custom(open)");
+    var cu3 = shint_tray_action_custom("close");
+    assert_eq(shint_tray_action_eq(cu1, cu3), 0, "Custom(open) != Custom(close)");
+    assert_eq(shint_tray_action_eq(a_act, q1), 0, "Activate != Quit");
+
+    # ---- Window management -----------------------------------------------
+    test_group("shell_integration — window management");
+
+    var wm = shint_mgr_new();
+
+    # rust: test_process_minimize/maximize/close/focus -> Accepted.
+    var r_min = shint_mgr_process_window_request(wm, shint_wmreq_minimize(1));
+    assert_eq(shint_wmresult_is_accepted(r_min), 1, "Minimize accepted");
+    var r_max = shint_mgr_process_window_request(wm, shint_wmreq_maximize(2));
+    assert_eq(shint_wmresult_is_accepted(r_max), 1, "Maximize accepted");
+    var r_close = shint_mgr_process_window_request(wm, shint_wmreq_close(3));
+    assert_eq(shint_wmresult_is_accepted(r_close), 1, "Close accepted");
+    var r_focus = shint_mgr_process_window_request(wm, shint_wmreq_focus(4));
+    assert_eq(shint_wmresult_is_accepted(r_focus), 1, "Focus accepted");
+
+    # rust: test_process_set_position_request -> Accepted.
+    var r_pos = shint_mgr_process_window_request(wm, shint_wmreq_set_position(5, 100, 200));
+    assert_eq(shint_wmresult_is_accepted(r_pos), 1, "SetPosition accepted");
+
+    # rust: test_process_set_always_on_top -> Accepted.
+    var r_top = shint_mgr_process_window_request(wm, shint_wmreq_set_always_on_top(6, 1));
+    assert_eq(shint_wmresult_is_accepted(r_top), 1, "SetAlwaysOnTop accepted");
+
+    # rust: test_process_set_size_valid -> Accepted (800x600).
+    var r_size = shint_mgr_process_window_request(wm, shint_wmreq_set_size(7, 800, 600));
+    assert_eq(shint_wmresult_is_accepted(r_size), 1, "SetSize 800x600 accepted");
+
+    # rust: test_process_set_size_zero_denied -> Denied for zero w or zero h.
+    var r_w0 = shint_mgr_process_window_request(wm, shint_wmreq_set_size(8, 0, 600));
+    assert_eq(shint_wmresult_is_denied(r_w0), 1, "SetSize 0x600 denied");
+    var r_h0 = shint_mgr_process_window_request(wm, shint_wmreq_set_size(9, 800, 0));
+    assert_eq(shint_wmresult_is_denied(r_h0), 1, "SetSize 800x0 denied");
+
+    # rust: test_process_set_title_valid -> Accepted.
+    var r_title = shint_mgr_process_window_request(wm, shint_wmreq_set_title(10, "My Window"));
+    assert_eq(shint_wmresult_is_accepted(r_title), 1, "SetTitle non-empty accepted");
+
+    # rust: test_process_set_title_empty_denied -> Denied.
+    var r_title0 = shint_mgr_process_window_request(wm, shint_wmreq_set_title(11, ""));
+    assert_eq(shint_wmresult_is_denied(r_title0), 1, "SetTitle empty denied");
+
+    # ---- Notification bridging -------------------------------------------
+    test_group("shell_integration — notification bridging");
+
+    # rust: test_bridge_notification_basic — fields + Normal priority, no action.
+    var bmgr = shint_mgr_new();
+    var ext = t_make_ext_notif();
+    var notif = shint_mgr_bridge_notification(bmgr, ext, 1, 1000);
+    assert(t_ok(notif), "bridged notification non-null");
+    assert_eq(streq(shell_notif_app_name(notif), "Firefox"), 1, "notif app_name == Firefox");
+    assert_eq(streq(shell_notif_title(notif), "Download complete"), 1, "notif title matches");
+    assert_eq(streq(shell_notif_body(notif), "file.zip has been downloaded"), 1, "notif body matches");
+    assert_eq(shell_notif_priority(notif), SH_NotifPriority.SH_PRIO_NORMAL, "notif priority Normal");
+    assert_eq(shell_notif_requires_action(notif), 0, "no actions -> requires_action false");
+    assert_eq(shell_notif_is_agent(notif), 0, "bridged notif is_agent_related false");
+
+    # rust: test_bridge_notification_with_actions_sets_requires_action.
+    var exta = t_make_ext_notif();
+    shint_ext_notif_add_action(exta, "open", "Open File");
+    assert_eq(shint_ext_notif_has_actions(exta), 1, "ext notif has_actions after add");
+    var notifa = shint_mgr_bridge_notification(bmgr, exta, 2, 1000);
+    assert_eq(shell_notif_requires_action(notifa), 1, "with action -> requires_action true");
+
+    # rust: test_urgency_mapping_low / normal / critical.
+    assert_eq(shint_map_urgency(SI_Urgency.SI_URG_LOW), SH_NotifPriority.SH_PRIO_LOW, "map Low -> Low");
+    assert_eq(shint_map_urgency(SI_Urgency.SI_URG_NORMAL), SH_NotifPriority.SH_PRIO_NORMAL, "map Normal -> Normal");
+    assert_eq(shint_map_urgency(SI_Urgency.SI_URG_CRITICAL), SH_NotifPriority.SH_PRIO_CRITICAL, "map Critical -> Critical");
+
+    # rust: test_bridge_critical_notification -> Critical priority.
+    var extc = shint_ext_notif_new(
+        "Firefox", "Download complete", "file.zip has been downloaded",
+        SI_Urgency.SI_URG_CRITICAL, "download", 5000, 0);
+    var notifc = shint_mgr_bridge_notification(bmgr, extc, 3, 1000);
+    assert_eq(shell_notif_priority(notifc), SH_NotifPriority.SH_PRIO_CRITICAL, "critical urgency -> Critical priority");
+
+    # rust: test_default_impl — default() manager is empty.
+    var mgrdef = shint_mgr_default();
+    assert(t_ok(mgrdef), "default manager non-null");
+    assert_eq(shint_mgr_tray_count(mgrdef), 0, "default manager empty");
+
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);

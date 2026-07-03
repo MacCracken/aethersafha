@@ -1,0 +1,212 @@
+# aethersafha — behavioral parity test for the gestures module.
+# Parity oracle: rust-old/src/gestures.rs  (#[cfg(test)] mod tests).
+#
+# Mirrors the Rust unit tests: recognizer construction, tap, double-tap
+# (in-window and too-slow), long-press, all four swipe directions, pinch,
+# rotate, reset, active-touch count, drain semantics, and config defaults.
+#
+# Numeric model (see src/gestures.cyr header):
+#   px = 1 unit, pressure = permille (1.0 -> 1000), ts = epoch millis,
+#   pinch scale = permille (1.0 -> 1000), angle = milliradians.
+#
+# Stdlib + [deps.*] are auto-included by cyrius.cyml; gestures.cyr has no
+# intra-src references, so only it is included here.
+include "src/gestures.cyr"
+
+# assert(cond) passes only when cond == 1; normalize a non-zero pointer to 1.
+fn t_ok(x): i64 {
+    if (x != 0) { return 1; }
+    return 0;
+}
+
+# point(id, x, y, ts) — mirrors the Rust test helper (pressure fixed at 1.0).
+fn t_point(id, x, y, ts): i64 {
+    return gest_point(id, x, y, 1000, ts);
+}
+
+# t_find_kind(vec, kind) -> first *GestureEvent whose kind matches, or 0.
+# Mirrors Rust `gestures.iter().find(|g| matches!(g.gesture, ...))`.
+fn t_find_kind(v, kind): i64 {
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(v, i);
+        if (gest_event_kind(e) == kind) { return e; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    # -- config defaults (parity: test_gesture_config_default) --
+    test_group("gestures — GestureConfig::default");
+    var cfg = gest_config_default();
+    assert(t_ok(cfg), "config_default alloc");
+    assert_eq(gest_config_tap_timeout(cfg), 300, "default tap_timeout 300");
+    assert_eq(gest_config_dbl_interval(cfg), 400, "default double_tap 400");
+    assert_eq(gest_config_long_press(cfg), 500, "default long_press 500");
+    assert_eq(gest_config_swipe_thresh(cfg), 50, "default swipe_threshold 50");
+    assert_eq(gest_config_pinch_thresh(cfg), 100, "default pinch_threshold 100");
+
+    # -- recognizer construction (parity: test_recognizer_new) --
+    test_group("gestures — recognizer_new");
+    var r = gest_recognizer_new(gest_config_default());
+    assert(t_ok(r), "recognizer_new alloc");
+    assert_eq(gest_active_touch_count(r), 0, "new recognizer 0 active touches");
+
+    # -- active_touch_count (parity: test_active_touch_count) --
+    test_group("gestures — active_touch_count");
+    var rc = gest_recognizer_new(gest_config_default());
+    assert_eq(gest_active_touch_count(rc), 0, "count 0 before down");
+    gest_touch_down(rc, t_point(1, 0, 0, 0));
+    assert_eq(gest_active_touch_count(rc), 1, "count 1 after first down");
+    gest_touch_down(rc, t_point(2, 10, 10, 0));
+    assert_eq(gest_active_touch_count(rc), 2, "count 2 after second down");
+
+    # -- tap (parity: test_tap) --
+    test_group("gestures — tap");
+    var rt = gest_recognizer_new(gest_config_default());
+    gest_touch_down(rt, t_point(1, 100, 100, 0));
+    assert_eq(gest_active_touch_count(rt), 1, "1 active after down");
+    gest_touch_up(rt, 1);
+    var gt = gest_recognized_gestures(rt);
+    assert_eq(vec_len(gt), 1, "tap yields 1 gesture");
+    var tap_kind = G_GestureKind.G_TAP;
+    assert_eq(gest_event_kind(vec_get(gt, 0)), tap_kind, "gesture is Tap");
+    assert_eq(gest_active_touch_count(rt), 0, "0 active after up");
+
+    # -- double-tap in-window (parity: test_double_tap) --
+    test_group("gestures — double_tap");
+    var rd = gest_recognizer_new(gest_config_default());
+    gest_touch_down(rd, t_point(1, 100, 100, 0));
+    gest_touch_up(rd, 1);
+    var d1 = gest_recognized_gestures(rd);
+    assert_eq(vec_len(d1), 1, "first tap yields 1");
+    assert_eq(gest_event_kind(vec_get(d1, 0)), tap_kind, "first gesture is Tap");
+    gest_touch_down(rd, t_point(2, 100, 100, 200));
+    gest_touch_up(rd, 2);
+    var d2 = gest_recognized_gestures(rd);
+    assert_eq(vec_len(d2), 1, "second tap yields 1");
+    var dbl_kind = G_GestureKind.G_DOUBLETAP;
+    assert_eq(gest_event_kind(vec_get(d2, 0)), dbl_kind, "second gesture is DoubleTap");
+
+    # -- double-tap too slow -> plain Tap (parity: test_double_tap_too_slow) --
+    test_group("gestures — double_tap_too_slow");
+    var rs = gest_recognizer_new(gest_config_default());
+    gest_touch_down(rs, t_point(1, 100, 100, 0));
+    gest_touch_up(rs, 1);
+    gest_recognized_gestures(rs);
+    gest_touch_down(rs, t_point(2, 100, 100, 1000));
+    gest_touch_up(rs, 2);
+    var sg = gest_recognized_gestures(rs);
+    assert_eq(vec_len(sg), 1, "slow second tap yields 1");
+    assert_eq(gest_event_kind(vec_get(sg, 0)), tap_kind, "slow second is Tap not DoubleTap");
+
+    # -- long press (parity: test_long_press) --
+    test_group("gestures — long_press");
+    var rl = gest_recognizer_new(gest_config_default());
+    gest_touch_down(rl, t_point(1, 100, 100, 0));
+    gest_touch_move(rl, t_point(1, 100, 100, 600));
+    gest_touch_up(rl, 1);
+    var lg = gest_recognized_gestures(rl);
+    assert_eq(vec_len(lg), 1, "long press yields 1");
+    var long_kind = G_GestureKind.G_LONGPRESS;
+    assert_eq(gest_event_kind(vec_get(lg, 0)), long_kind, "gesture is LongPress");
+
+    # -- swipe right (parity: test_swipe_right) --
+    test_group("gestures — swipe_right");
+    var rr = gest_recognizer_new(gest_config_default());
+    gest_touch_down(rr, t_point(1, 100, 100, 0));
+    gest_touch_move(rr, t_point(1, 200, 105, 100));
+    gest_touch_up(rr, 1);
+    var sr = gest_recognized_gestures(rr);
+    assert_eq(vec_len(sr), 1, "swipe right yields 1");
+    var swipe_kind = G_GestureKind.G_SWIPE;
+    assert_eq(gest_event_kind(vec_get(sr, 0)), swipe_kind, "gesture is Swipe");
+    var dir_right = G_SwipeDir.G_SWIPE_RIGHT;
+    assert_eq(gest_event_swipe_dir(vec_get(sr, 0)), dir_right, "direction Right");
+
+    # -- swipe left (parity: test_swipe_left) --
+    test_group("gestures — swipe_left");
+    var rle = gest_recognizer_new(gest_config_default());
+    gest_touch_down(rle, t_point(1, 200, 100, 0));
+    gest_touch_move(rle, t_point(1, 50, 105, 100));
+    gest_touch_up(rle, 1);
+    var sl = gest_recognized_gestures(rle);
+    var dir_left = G_SwipeDir.G_SWIPE_LEFT;
+    assert_eq(gest_event_swipe_dir(vec_get(sl, 0)), dir_left, "direction Left");
+
+    # -- swipe up (parity: test_swipe_up) --
+    test_group("gestures — swipe_up");
+    var ru = gest_recognizer_new(gest_config_default());
+    gest_touch_down(ru, t_point(1, 100, 200, 0));
+    gest_touch_move(ru, t_point(1, 105, 50, 100));
+    gest_touch_up(ru, 1);
+    var su = gest_recognized_gestures(ru);
+    var dir_up = G_SwipeDir.G_SWIPE_UP;
+    assert_eq(gest_event_swipe_dir(vec_get(su, 0)), dir_up, "direction Up");
+
+    # -- swipe down (parity: test_swipe_down) --
+    test_group("gestures — swipe_down");
+    var rdn = gest_recognizer_new(gest_config_default());
+    gest_touch_down(rdn, t_point(1, 100, 50, 0));
+    gest_touch_move(rdn, t_point(1, 105, 200, 100));
+    gest_touch_up(rdn, 1);
+    var sd = gest_recognized_gestures(rdn);
+    var dir_down = G_SwipeDir.G_SWIPE_DOWN;
+    assert_eq(gest_event_swipe_dir(vec_get(sd, 0)), dir_down, "direction Down");
+
+    # -- pinch (parity: test_pinch) — fingers move apart, scale > 1.0 --
+    test_group("gestures — pinch");
+    var rp = gest_recognizer_new(gest_config_default());
+    gest_touch_down(rp, t_point(1, 100, 100, 0));
+    gest_touch_down(rp, t_point(2, 110, 100, 0));
+    gest_touch_move(rp, t_point(1, 50, 100, 100));
+    gest_touch_move(rp, t_point(2, 160, 100, 100));
+    var pg = gest_recognized_gestures(rp);
+    var pinch_kind = G_GestureKind.G_PINCH;
+    var pev = t_find_kind(pg, pinch_kind);
+    assert(t_ok(pev), "pinch gesture present");
+    var pscale = gest_event_scale(pev);
+    var scale_gt = (pscale > 1000);   # permille: >1.0 means fingers apart
+    assert(scale_gt, "pinch scale > 1.0 (permille > 1000)");
+
+    # -- rotate (parity: test_rotate) — opposing horizontal motion --
+    test_group("gestures — rotate");
+    var rrot = gest_recognizer_new(gest_config_default());
+    gest_touch_down(rrot, t_point(1, 100, 100, 0));
+    gest_touch_down(rrot, t_point(2, 100, 200, 0));
+    gest_touch_move(rrot, t_point(1, 150, 100, 100));
+    gest_touch_move(rrot, t_point(2, 50, 200, 100));
+    var rg = gest_recognized_gestures(rrot);
+    var rot_kind = G_GestureKind.G_ROTATE;
+    var rev = t_find_kind(rg, rot_kind);
+    assert(t_ok(rev), "rotate gesture present");
+
+    # -- reset (parity: test_reset) --
+    test_group("gestures — reset");
+    var rrs = gest_recognizer_new(gest_config_default());
+    gest_touch_down(rrs, t_point(1, 100, 100, 0));
+    gest_reset(rrs);
+    assert_eq(gest_active_touch_count(rrs), 0, "0 active after reset");
+    var empty = gest_recognized_gestures(rrs);
+    assert_eq(vec_len(empty), 0, "no gestures after reset");
+
+    # -- drain semantics (parity: test_recognized_gestures_drains) --
+    test_group("gestures — recognized_gestures_drains");
+    var rdr = gest_recognizer_new(gest_config_default());
+    gest_touch_down(rdr, t_point(1, 100, 100, 0));
+    gest_touch_up(rdr, 1);
+    var drain1 = gest_recognized_gestures(rdr);
+    var drain1_nonempty = (vec_len(drain1) > 0);
+    assert(drain1_nonempty, "first drain non-empty");
+    var drain2 = gest_recognized_gestures(rdr);
+    assert_eq(vec_len(drain2), 0, "second drain empty (drained)");
+
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);

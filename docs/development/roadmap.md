@@ -1,8 +1,10 @@
 # aethersafha — Roadmap
 
-> Milestone plan through v1.0. State lives in [`state.md`](state.md); this file
-> is the sequencing — what ships, in what order, against which dependency gates.
-> The bar is **parity with `rust-old/`** (the frozen 27,207-line Rust oracle).
+> Milestone plan through v1.0. State lives in [`state.md`](state.md); the
+> executable bite-level breakdown (with workflow catalog) lives in
+> [`parity-plan.md`](parity-plan.md). This file is the sequencing — what ships,
+> in what order, against which dependency gates. The bar is **parity with
+> `rust-old/`** (the frozen 27,207-line Rust oracle).
 
 ## v1.0 criteria
 
@@ -48,9 +50,10 @@ symbols), each compiling + smoke-tested. Driven by the parity workflow.
 - `ai_features.cyr` (context engine, suggestions, agent HUD, resource metrics)  ✅
 - `shell.cyr` (notifications, quick settings, system status, launcher)  ✅
 - `security_ui.cyr` (permission model, alerts, dashboard)  ✅
-- `shell_integration.cyr` (tray, window-mgmt requests, notification bridge)  ⬜ next
-- Remaining: deeper behavioral parity tests per module; wire modules into the
-  compositor/shell surface.
+- `shell_integration.cyr` (tray, window-mgmt, notification bridge)  ✅ ported
+- `plugin_host.cyr` (lifecycle, sandbox profiles, capabilities; IPC stubbed)  ✅ ported
+- Behavioral parity tests for all 8 leaf modules  ✅ (~670 assertions green)
+- Remaining (B3): wire the leaf modules into the compositor/shell surface.
 
 ### M3 — Renderer + compositor depth (v0.3.0)
 - Damage tracking, scene graph, decorations, bitmap text (`renderer.rs` full).
@@ -69,11 +72,14 @@ symbols), each compiling + smoke-tested. Driven by the parity workflow.
 - Host foreign-ABI app surfaces in a kavach sandbox → native surface handoff.
 
 ## Known cleanup
-- **agnostik/agnodrm `ERR_*` overlap**: both dist bundles carry the shared AGNOS
-  error module → duplicate-symbol warnings ("last wins", benign today). Resolve
-  when first consumed (selective `modules = [...]` or upstream ownership split).
-- `cyrius lib sync --full` is required before `cyrius deps` because the declared
-  stdlib set exceeds the incremental pin. Documented in CLAUDE.md quick-start.
+- **Deferred deps** (mehman / agnostik / agnodrm): `cyrius build` auto-prepends
+  every `[deps.*]` module, so these unused-but-heavy bundles broke the build —
+  mehman→`[deps.kavach]` drags in `sandhi_server_*`/`thread_local_*` (reachable-
+  undefined), agnostik+agnodrm collide on `ERR_*`. Deferred (mapping kept in the
+  manifest). Re-enable each with a selective `modules = [...]` subset when the
+  code that needs it lands (mehman at Bite G; agnostik/agnodrm/mabda as consumed).
+- `cyrius lib sync --full` is required before `cyrius deps` (the declared stdlib
+  set + bhumi's needs exceed the incremental pin). Documented in CLAUDE.md.
 
 ## Out of scope (for v1.0)
 - Rust `system_tests.rs` port (verification code, not runtime) — re-expressed as

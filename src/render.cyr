@@ -31,6 +31,61 @@ fn fill_rect(fb, x, y, w, h, color): i64 {
     return 0;
 }
 
+# rend_blend(dst, src, a): alpha-blend src over dst, a in 0..255. XRGB8888.
+# Parity: renderer.rs blend() (premultiplied-alpha compositing).
+fn rend_blend(dst, src, a): i64 {
+    var ia = 255 - a;
+    var dr = (dst >> 16) & 0xFF;
+    var dg = (dst >> 8) & 0xFF;
+    var db = dst & 0xFF;
+    var sr = (src >> 16) & 0xFF;
+    var sg = (src >> 8) & 0xFF;
+    var sb = src & 0xFF;
+    var r = (sr * a + dr * ia) / 255;
+    var g = (sg * a + dg * ia) / 255;
+    var b = (sb * a + db * ia) / 255;
+    return (r << 16) | (g << 8) | b;
+}
+
+# Damage tracker — a per-frame dirty-rect bounding box (parity: DamageTracker).
+enum DmgOff {
+    D_VALID = 0;
+    D_X0    = 8;
+    D_Y0    = 16;
+    D_X1    = 24;
+    D_Y1    = 32;
+    D_SZ    = 40;
+}
+fn rend_dmg_new(): i64 {
+    var d = alloc(D_SZ);
+    if (d == 0) { return 0; }
+    store64(d + D_VALID, 0);
+    return d;
+}
+fn rend_dmg_valid(d) { return load64(d + D_VALID); }
+fn rend_dmg_add(d, x, y, w, h): i64 {
+    var x1 = x + w;
+    var y1 = y + h;
+    if (load64(d + D_VALID) == 0) {
+        store64(d + D_X0, x);
+        store64(d + D_Y0, y);
+        store64(d + D_X1, x1);
+        store64(d + D_Y1, y1);
+        store64(d + D_VALID, 1);
+        return 0;
+    }
+    if (x < load64(d + D_X0)) { store64(d + D_X0, x); }
+    if (y < load64(d + D_Y0)) { store64(d + D_Y0, y); }
+    if (x1 > load64(d + D_X1)) { store64(d + D_X1, x1); }
+    if (y1 > load64(d + D_Y1)) { store64(d + D_Y1, y1); }
+    return 0;
+}
+fn rend_dmg_x(d) { return load64(d + D_X0); }
+fn rend_dmg_y(d) { return load64(d + D_Y0); }
+fn rend_dmg_w(d) { return load64(d + D_X1) - load64(d + D_X0); }
+fn rend_dmg_h(d) { return load64(d + D_Y1) - load64(d + D_Y0); }
+fn rend_dmg_clear(d) { store64(d + D_VALID, 0); return 0; }
+
 fn render_window(fb, win, focused): i64 {
     var x = win_x(win);
     var y = win_y(win);

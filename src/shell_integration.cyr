@@ -1,0 +1,500 @@
+# aethersafha — shell integration
+# Parity: rust-old/src/shell_integration.rs
+#   Bridges external app APIs (system tray, window management, freedesktop
+#   notifications) to the AGNOS compositor and shell panel.
+#
+# Heap-object idiom: every Rust struct is arena-allocated with a named-offset
+# enum; fields via load64/store64 (same convention as src/window.cyr,
+# src/shell.cyr, src/compositor.cyr). Rust enums -> Cyrius enums (payload-
+# carrying variants become heap objects {kind, payload}). Rust collections ->
+# stdlib vec. Every symbol is prefixed shint_/SI_.
+#
+# Cross-module: notification bridging reuses the shell.cyr Notification API
+# (shell_notif_new / SH_NotifPriority). SurfaceId is a plain i64 (rust:
+# crate::compositor::SurfaceId). Both modules share the global build namespace
+# (aethersafha links its src/*.cyr together — no `import` in this dialect).
+#
+# Parity substitutions (no clean Cyrius analog):
+#   - Uuid notification id (Uuid::new_v4)   -> caller-passed monotonic i64 id
+#                                              (matches shell.cyr convention;
+#                                              see shint_bridge_notification)
+#   - chrono::Utc::now() timestamp          -> caller-passed i64 epoch `now`
+#   - thiserror ShellIntegrationError       -> i64 error codes (SI_ERR_*)
+#   - Vec<(String,String)> actions          -> vec of *SI_ActionPair (id,label)
+#   - String payloads on enum variants      -> cstr / Str pointers on a heap
+#                                              variant object (kind + payload)
+#   - bool always_on_top on SetAlwaysOnTop  -> stored in the int_a slot (0/1)
+#   - Debug/Clone/PartialEq derives         -> dropped (structural, no runtime)
+
+# ================================================================
+# Errors (rust: enum ShellIntegrationError). 0 == Ok.
+# ================================================================
+enum SI_Err {
+    SI_OK                     = 0;
+    SI_ERR_DUPLICATE_TRAY     = 1;   # DuplicateTrayItem(id)
+    SI_ERR_TRAY_NOT_FOUND     = 2;   # TrayItemNotFound(id)
+    SI_ERR_INVALID_REQUEST    = 3;   # InvalidRequest(_)
+    SI_ERR_OOM                = 4;   # allocation failure (no rust analog; alloc==0)
+}
+
+# ================================================================
+# TrayAction (rust: enum TrayAction) — heap object {kind, arg}.
+# Only Custom(String) carries a payload; the arg slot is 0 otherwise.
+# ================================================================
+enum SI_TrayActionKind {
+    SI_TA_ACTIVATE  = 0;   # Activate
+    SI_TA_SHOW_MENU = 1;   # ShowMenu
+    SI_TA_QUIT      = 2;   # Quit
+    SI_TA_CUSTOM    = 3;   # Custom(String)
+}
+
+enum SI_TrayActionOff {
+    TA_KIND = 0;   # SI_TrayActionKind
+    TA_ARG  = 8;   # cstr / Str pointer for Custom(String), else 0
+    TA_SZ   = 16;
+}
+
+# shint_tray_action_new(kind, arg): arg is a pointer (cstr/Str) or 0.
+# -> *SI_TrayAction (0 on OOM).
+fn shint_tray_action_new(kind, arg): i64 {
+    var p = alloc(TA_SZ);
+    if (p == 0) { return 0; }
+    store64(p + TA_KIND, kind);
+    store64(p + TA_ARG, arg);
+    return p;
+}
+
+# Convenience constructors (rust: TrayAction::Activate, ...).
+fn shint_tray_action_activate(): i64  { return shint_tray_action_new(SI_TrayActionKind.SI_TA_ACTIVATE, 0); }
+fn shint_tray_action_show_menu(): i64 { return shint_tray_action_new(SI_TrayActionKind.SI_TA_SHOW_MENU, 0); }
+fn shint_tray_action_quit(): i64      { return shint_tray_action_new(SI_TrayActionKind.SI_TA_QUIT, 0); }
+fn shint_tray_action_custom(arg): i64 { return shint_tray_action_new(SI_TrayActionKind.SI_TA_CUSTOM, arg); }
+
+fn shint_tray_action_kind(p) { return load64(p + TA_KIND); }
+fn shint_tray_action_arg(p)  { return load64(p + TA_ARG); }
+
+# rust: TrayAction PartialEq/Eq. Same kind, and for Custom the arg cstrs match.
+# Both args must be cstr pointers when kind == Custom. -> 1 equal / 0 not.
+fn shint_tray_action_eq(a, b): i64 {
+    var ka = load64(a + TA_KIND);
+    var kb = load64(b + TA_KIND);
+    if (ka != kb) { return 0; }
+    var is_custom = (ka == SI_TrayActionKind.SI_TA_CUSTOM);
+    if (is_custom) {
+        return streq(load64(a + TA_ARG), load64(b + TA_ARG));
+    }
+    return 1;
+}
+
+# ================================================================
+# TrayMenuItem (rust: struct TrayMenuItem)
+# ================================================================
+enum SI_MenuOff {
+    M_ID      = 0;    # cstr / Str pointer
+    M_LABEL   = 8;    # cstr / Str pointer
+    M_ACTION  = 16;   # *SI_TrayAction
+    M_ENABLED = 24;   # bool (0/1)
+    M_SZ      = 32;
+}
+
+fn shint_menu_new(id, label, action, enabled): i64 {
+    var p = alloc(M_SZ);
+    if (p == 0) { return 0; }
+    store64(p + M_ID, id);
+    store64(p + M_LABEL, label);
+    store64(p + M_ACTION, action);
+    store64(p + M_ENABLED, enabled);
+    return p;
+}
+
+fn shint_menu_id(p)      { return load64(p + M_ID); }
+fn shint_menu_label(p)   { return load64(p + M_LABEL); }
+fn shint_menu_action(p)  { return load64(p + M_ACTION); }
+fn shint_menu_enabled(p) { return load64(p + M_ENABLED); }
+
+# ================================================================
+# SystemTrayItem (rust: struct SystemTrayItem)
+# menu_items: Vec<TrayMenuItem> -> vec of *SI_TrayMenuItem.
+# ================================================================
+enum SI_TrayOff {
+    T_ID       = 0;    # cstr / Str pointer
+    T_APP_NAME = 8;    # cstr / Str pointer
+    T_ICON     = 16;   # cstr / Str pointer
+    T_TOOLTIP  = 24;   # cstr / Str pointer
+    T_VISIBLE  = 32;   # bool (0/1)
+    T_MENU     = 40;   # vec of *SI_TrayMenuItem
+    T_SZ       = 48;
+}
+
+# shint_tray_item_new: menu is a caller-supplied vec (0 => allocate empty).
+# -> *SI_SystemTrayItem (0 on OOM).
+fn shint_tray_item_new(id, app_name, icon, tooltip, visible, menu): i64 {
+    var p = alloc(T_SZ);
+    if (p == 0) { return 0; }
+    var m = menu;
+    if (m == 0) { m = vec_new(); }
+    store64(p + T_ID, id);
+    store64(p + T_APP_NAME, app_name);
+    store64(p + T_ICON, icon);
+    store64(p + T_TOOLTIP, tooltip);
+    store64(p + T_VISIBLE, visible);
+    store64(p + T_MENU, m);
+    return p;
+}
+
+fn shint_tray_item_id(p)       { return load64(p + T_ID); }
+fn shint_tray_item_app_name(p) { return load64(p + T_APP_NAME); }
+fn shint_tray_item_icon(p)     { return load64(p + T_ICON); }
+fn shint_tray_item_tooltip(p)  { return load64(p + T_TOOLTIP); }
+fn shint_tray_item_visible(p)  { return load64(p + T_VISIBLE); }
+fn shint_tray_item_menu(p)     { return load64(p + T_MENU); }
+fn shint_tray_item_menu_count(p): i64 { return vec_len(load64(p + T_MENU)); }
+
+# shint_tray_item_add_menu: append a *SI_TrayMenuItem to the menu vec.
+fn shint_tray_item_add_menu(p, mi): i64 {
+    vec_push(load64(p + T_MENU), mi);
+    return 0;
+}
+
+# ================================================================
+# Window management request (rust: enum WindowManagementRequest)
+# One heap object holding {kind, surface_id, str_arg, int_a, int_b}; unused
+# slots are 0. This flattens the differently-shaped variants (matches the
+# LauncherAction {kind,arg} pattern in src/shell.cyr).
+#   Minimize/Maximize/Close/Focus(sid)      -> sid
+#   SetTitle(sid, title)                    -> sid, str_arg=title
+#   SetPosition(sid, x, y)                  -> sid, int_a=x, int_b=y
+#   SetSize(sid, w, h)                      -> sid, int_a=w, int_b=h
+#   SetAlwaysOnTop(sid, on_top)             -> sid, int_a=on_top (0/1)
+# ================================================================
+enum SI_WmReqKind {
+    SI_WR_MINIMIZE          = 0;   # Minimize(SurfaceId)
+    SI_WR_MAXIMIZE          = 1;   # Maximize(SurfaceId)
+    SI_WR_CLOSE             = 2;   # Close(SurfaceId)
+    SI_WR_SET_TITLE         = 3;   # SetTitle(SurfaceId, String)
+    SI_WR_SET_POSITION      = 4;   # SetPosition(SurfaceId, i32, i32)
+    SI_WR_SET_SIZE          = 5;   # SetSize(SurfaceId, u32, u32)
+    SI_WR_FOCUS             = 6;   # Focus(SurfaceId)
+    SI_WR_SET_ALWAYS_ON_TOP = 7;   # SetAlwaysOnTop(SurfaceId, bool)
+}
+
+enum SI_WmReqOff {
+    WR_KIND    = 0;    # SI_WmReqKind
+    WR_SID     = 8;    # SurfaceId (i64)
+    WR_STR     = 16;   # cstr / Str pointer (SetTitle) else 0
+    WR_INT_A   = 24;   # x / w / on_top
+    WR_INT_B   = 32;   # y / h
+    WR_SZ      = 40;
+}
+
+fn shint_wmreq_new(kind, sid, str_arg, int_a, int_b): i64 {
+    var p = alloc(WR_SZ);
+    if (p == 0) { return 0; }
+    store64(p + WR_KIND, kind);
+    store64(p + WR_SID, sid);
+    store64(p + WR_STR, str_arg);
+    store64(p + WR_INT_A, int_a);
+    store64(p + WR_INT_B, int_b);
+    return p;
+}
+
+# Convenience constructors mirroring the rust variants.
+fn shint_wmreq_minimize(sid): i64 { return shint_wmreq_new(SI_WmReqKind.SI_WR_MINIMIZE, sid, 0, 0, 0); }
+fn shint_wmreq_maximize(sid): i64 { return shint_wmreq_new(SI_WmReqKind.SI_WR_MAXIMIZE, sid, 0, 0, 0); }
+fn shint_wmreq_close(sid): i64    { return shint_wmreq_new(SI_WmReqKind.SI_WR_CLOSE, sid, 0, 0, 0); }
+fn shint_wmreq_focus(sid): i64    { return shint_wmreq_new(SI_WmReqKind.SI_WR_FOCUS, sid, 0, 0, 0); }
+fn shint_wmreq_set_title(sid, title): i64 { return shint_wmreq_new(SI_WmReqKind.SI_WR_SET_TITLE, sid, title, 0, 0); }
+fn shint_wmreq_set_position(sid, x, y): i64 { return shint_wmreq_new(SI_WmReqKind.SI_WR_SET_POSITION, sid, 0, x, y); }
+fn shint_wmreq_set_size(sid, w, h): i64 { return shint_wmreq_new(SI_WmReqKind.SI_WR_SET_SIZE, sid, 0, w, h); }
+fn shint_wmreq_set_always_on_top(sid, on_top): i64 { return shint_wmreq_new(SI_WmReqKind.SI_WR_SET_ALWAYS_ON_TOP, sid, 0, on_top, 0); }
+
+fn shint_wmreq_kind(p)  { return load64(p + WR_KIND); }
+fn shint_wmreq_sid(p)   { return load64(p + WR_SID); }
+fn shint_wmreq_str(p)   { return load64(p + WR_STR); }
+fn shint_wmreq_int_a(p) { return load64(p + WR_INT_A); }
+fn shint_wmreq_int_b(p) { return load64(p + WR_INT_B); }
+
+# ================================================================
+# Window management result (rust: enum WindowManagementResult)
+# Heap object {kind, sid, msg}: Accepted carries nothing, SurfaceNotFound
+# carries a SurfaceId, Denied carries a reason String.
+# ================================================================
+enum SI_WmResultKind {
+    SI_RES_ACCEPTED           = 0;   # Accepted
+    SI_RES_SURFACE_NOT_FOUND  = 1;   # SurfaceNotFound(SurfaceId)
+    SI_RES_DENIED             = 2;   # Denied(String)
+}
+
+enum SI_WmResultOff {
+    RES_KIND = 0;   # SI_WmResultKind
+    RES_SID  = 8;   # SurfaceId for SurfaceNotFound, else 0
+    RES_MSG  = 16;  # cstr / Str pointer for Denied, else 0
+    RES_SZ   = 24;
+}
+
+fn shint_wmresult_new(kind, sid, msg): i64 {
+    var p = alloc(RES_SZ);
+    if (p == 0) { return 0; }
+    store64(p + RES_KIND, kind);
+    store64(p + RES_SID, sid);
+    store64(p + RES_MSG, msg);
+    return p;
+}
+
+fn shint_wmresult_accepted(): i64            { return shint_wmresult_new(SI_WmResultKind.SI_RES_ACCEPTED, 0, 0); }
+fn shint_wmresult_surface_not_found(sid): i64 { return shint_wmresult_new(SI_WmResultKind.SI_RES_SURFACE_NOT_FOUND, sid, 0); }
+fn shint_wmresult_denied(msg): i64           { return shint_wmresult_new(SI_WmResultKind.SI_RES_DENIED, 0, msg); }
+
+fn shint_wmresult_kind(p) { return load64(p + RES_KIND); }
+fn shint_wmresult_sid(p)  { return load64(p + RES_SID); }
+fn shint_wmresult_msg(p)  { return load64(p + RES_MSG); }
+fn shint_wmresult_is_accepted(p): i64 {
+    var k = load64(p + RES_KIND);
+    if (k == SI_WmResultKind.SI_RES_ACCEPTED) { return 1; }
+    return 0;
+}
+fn shint_wmresult_is_denied(p): i64 {
+    var k = load64(p + RES_KIND);
+    if (k == SI_WmResultKind.SI_RES_DENIED) { return 1; }
+    return 0;
+}
+# rust: matches!(result, WindowManagementResult::SurfaceNotFound(_)). Completes
+# the variant-predicate set (parity with is_accepted / is_denied). The wrapped
+# SurfaceId is read via shint_wmresult_sid.
+fn shint_wmresult_is_surface_not_found(p): i64 {
+    var k = load64(p + RES_KIND);
+    if (k == SI_WmResultKind.SI_RES_SURFACE_NOT_FOUND) { return 1; }
+    return 0;
+}
+
+# ================================================================
+# Urgency (rust: enum Urgency, freedesktop-style)
+# ================================================================
+enum SI_Urgency {
+    SI_URG_LOW      = 0;   # Low
+    SI_URG_NORMAL   = 1;   # Normal
+    SI_URG_CRITICAL = 2;   # Critical
+}
+
+# ================================================================
+# Action pair (rust: (String, String) in ExternalNotification.actions).
+# ================================================================
+enum SI_ActionPairOff {
+    AP_ID    = 0;   # cstr / Str pointer (action id)
+    AP_LABEL = 8;   # cstr / Str pointer (action label)
+    AP_SZ    = 16;
+}
+
+fn shint_action_pair_new(id, label): i64 {
+    var p = alloc(AP_SZ);
+    if (p == 0) { return 0; }
+    store64(p + AP_ID, id);
+    store64(p + AP_LABEL, label);
+    return p;
+}
+
+fn shint_action_pair_id(p)    { return load64(p + AP_ID); }
+fn shint_action_pair_label(p) { return load64(p + AP_LABEL); }
+
+# ================================================================
+# ExternalNotification (rust: struct ExternalNotification)
+# actions: Vec<(String,String)> -> vec of *SI_ActionPair.
+# ================================================================
+enum SI_ExtNotifOff {
+    E_APP_NAME   = 0;    # cstr / Str pointer
+    E_TITLE      = 8;    # cstr / Str pointer
+    E_BODY       = 16;   # cstr / Str pointer
+    E_URGENCY    = 24;   # SI_Urgency
+    E_ICON       = 32;   # cstr / Str pointer
+    E_TIMEOUT_MS = 40;   # u32 timeout_ms (i64)
+    E_ACTIONS    = 48;   # vec of *SI_ActionPair
+    E_SZ         = 56;
+}
+
+# shint_ext_notif_new: actions is a caller vec (0 => allocate empty).
+# -> *SI_ExternalNotification (0 on OOM).
+fn shint_ext_notif_new(app_name, title, body, urgency, icon, timeout_ms, actions): i64 {
+    var p = alloc(E_SZ);
+    if (p == 0) { return 0; }
+    var a = actions;
+    if (a == 0) { a = vec_new(); }
+    store64(p + E_APP_NAME, app_name);
+    store64(p + E_TITLE, title);
+    store64(p + E_BODY, body);
+    store64(p + E_URGENCY, urgency);
+    store64(p + E_ICON, icon);
+    store64(p + E_TIMEOUT_MS, timeout_ms);
+    store64(p + E_ACTIONS, a);
+    return p;
+}
+
+fn shint_ext_notif_app_name(p)   { return load64(p + E_APP_NAME); }
+fn shint_ext_notif_title(p)      { return load64(p + E_TITLE); }
+fn shint_ext_notif_body(p)       { return load64(p + E_BODY); }
+fn shint_ext_notif_urgency(p)    { return load64(p + E_URGENCY); }
+fn shint_ext_notif_icon(p)       { return load64(p + E_ICON); }
+fn shint_ext_notif_timeout_ms(p) { return load64(p + E_TIMEOUT_MS); }
+fn shint_ext_notif_actions(p)    { return load64(p + E_ACTIONS); }
+
+# rust: !external.actions.is_empty(). -> 1 if any actions, else 0.
+fn shint_ext_notif_has_actions(p): i64 {
+    var n = vec_len(load64(p + E_ACTIONS));
+    if (n > 0) { return 1; }
+    return 0;
+}
+
+fn shint_ext_notif_add_action(p, id, label): i64 {
+    var ap = shint_action_pair_new(id, label);
+    if (ap == 0) { return 0 - 1; }
+    vec_push(load64(p + E_ACTIONS), ap);
+    return 0;
+}
+
+# ================================================================
+# Urgency -> NotificationPriority mapping
+# (rust: ShellIntegrationManager::map_urgency)
+# Maps SI_Urgency -> SH_NotifPriority (defined in src/shell.cyr).
+# Low -> Low, Normal -> Normal, Critical -> Critical.
+# ================================================================
+fn shint_map_urgency(urgency): i64 {
+    var is_low = (urgency == SI_Urgency.SI_URG_LOW);
+    if (is_low) { return SH_NotifPriority.SH_PRIO_LOW; }
+    var is_crit = (urgency == SI_Urgency.SI_URG_CRITICAL);
+    if (is_crit) { return SH_NotifPriority.SH_PRIO_CRITICAL; }
+    # Normal (and any future/unknown variant) -> Normal, matching rust's
+    # exhaustive Low/Normal/Critical arm set.
+    return SH_NotifPriority.SH_PRIO_NORMAL;
+}
+
+# ================================================================
+# NotificationBridge (rust: struct NotificationBridge, unit type)
+# convert(): build a shell.cyr Notification from an ExternalNotification.
+# ================================================================
+# rust: NotificationBridge::convert. In rust the id is Uuid::new_v4() and the
+# timestamp is chrono::Utc::now(); here they are caller-supplied (id, now) to
+# match src/shell.cyr's Uuid/chrono substitution (SH_ counter + epoch). The
+# priority comes from map_urgency, requires_action from !actions.is_empty(),
+# is_agent_related is always false. -> *Notification (shell.cyr layout, 0 OOM).
+fn shint_notif_convert(external, id, now): i64 {
+    var prio = shint_map_urgency(shint_ext_notif_urgency(external));
+    var requires_action = shint_ext_notif_has_actions(external);
+    return shell_notif_new(
+        id,
+        shint_ext_notif_app_name(external),
+        shint_ext_notif_title(external),
+        shint_ext_notif_body(external),
+        prio,
+        now,
+        requires_action,
+        0);
+}
+
+# ================================================================
+# ShellIntegrationManager (rust: struct ShellIntegrationManager)
+# Holds a vec of *SI_SystemTrayItem (rust: Vec<SystemTrayItem>).
+# ================================================================
+enum SI_MgrOff {
+    MG_TRAY = 0;   # vec of *SI_SystemTrayItem
+    MG_SZ   = 8;
+}
+
+# rust: ShellIntegrationManager::new / Default::default — empty tray vec.
+# -> *SI_ShellIntegrationManager (0 on OOM).
+fn shint_mgr_new(): i64 {
+    var p = alloc(MG_SZ);
+    if (p == 0) { return 0; }
+    store64(p + MG_TRAY, vec_new());
+    return p;
+}
+
+fn shint_mgr_default(): i64 { return shint_mgr_new(); }
+
+fn shint_mgr_tray(p) { return load64(p + MG_TRAY); }
+
+# shint_mgr_find_index: linear scan for a tray item whose id (cstr) equals id.
+# rust: tray_items.iter().position(|t| t.id == id). -> index or -1.
+fn shint_mgr_find_index(mgr, id): i64 {
+    var v = load64(mgr + MG_TRAY);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var t = vec_get(v, i);
+        var eq = streq(shint_tray_item_id(t), id);
+        if (eq == 1) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# rust: register_tray_item — reject duplicate id, else push.
+# item is a *SI_SystemTrayItem. -> SI_OK / SI_ERR_DUPLICATE_TRAY.
+fn shint_mgr_register_tray_item(mgr, item): i64 {
+    var id = shint_tray_item_id(item);
+    var dup = shint_mgr_find_index(mgr, id);
+    var exists = (dup >= 0);
+    if (exists) { return SI_Err.SI_ERR_DUPLICATE_TRAY; }
+    vec_push(load64(mgr + MG_TRAY), item);
+    return SI_Err.SI_OK;
+}
+
+# rust: remove_tray_item — remove by id.
+# -> SI_OK / SI_ERR_TRAY_NOT_FOUND.
+fn shint_mgr_remove_tray_item(mgr, id): i64 {
+    var idx = shint_mgr_find_index(mgr, id);
+    if (idx < 0) { return SI_Err.SI_ERR_TRAY_NOT_FOUND; }
+    vec_remove(load64(mgr + MG_TRAY), idx);
+    return SI_Err.SI_OK;
+}
+
+# rust: get_tray_items — returns the live vec of *SI_SystemTrayItem.
+fn shint_mgr_get_tray_items(mgr): i64 {
+    return load64(mgr + MG_TRAY);
+}
+
+fn shint_mgr_tray_count(mgr): i64 {
+    return vec_len(load64(mgr + MG_TRAY));
+}
+
+# shint_cstr_is_empty: rust `s.is_empty()` for a cstr pointer. -> 1 if len==0.
+fn shint_cstr_is_empty(s): i64 {
+    if (s == 0) { return 1; }
+    var n = strlen(s);
+    if (n == 0) { return 1; }
+    return 0;
+}
+
+# rust: process_window_request. Validates SetSize (w!=0 && h!=0) and SetTitle
+# (non-empty), returns Denied with a reason otherwise; all other requests are
+# Accepted. request is a *SI_WmReq; the title arg is treated as a cstr pointer.
+# -> *SI_WmResult (0 on OOM of the result object).
+fn shint_mgr_process_window_request(mgr, request): i64 {
+    var kind = shint_wmreq_kind(request);
+
+    var is_size = (kind == SI_WmReqKind.SI_WR_SET_SIZE);
+    if (is_size) {
+        var w = shint_wmreq_int_a(request);
+        var h = shint_wmreq_int_b(request);
+        var bad = ((w == 0) || (h == 0));
+        if (bad) {
+            return shint_wmresult_denied("Width and height must be non-zero");
+        }
+        return shint_wmresult_accepted();
+    }
+
+    var is_title = (kind == SI_WmReqKind.SI_WR_SET_TITLE);
+    if (is_title) {
+        var empty = shint_cstr_is_empty(shint_wmreq_str(request));
+        if (empty == 1) {
+            return shint_wmresult_denied("Title must not be empty");
+        }
+        return shint_wmresult_accepted();
+    }
+
+    return shint_wmresult_accepted();
+}
+
+# rust: bridge_notification — thin wrapper over NotificationBridge::convert.
+# id / now are caller-supplied (see shint_notif_convert). -> *Notification.
+fn shint_mgr_bridge_notification(mgr, external, id, now): i64 {
+    return shint_notif_convert(external, id, now);
+}

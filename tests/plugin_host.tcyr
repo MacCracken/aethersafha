@@ -1,0 +1,272 @@
+# aethersafha plugin_host — BEHAVIORAL parity test.
+# Mirrors rust-old/src/plugin_host.rs #[cfg(test)] mod tests.
+# Stdlib (vec/str/hashmap/assert/chrono/...) auto-prepended via cyrius.cyml.
+include "src/plugin_host.cyr"
+
+# assert(cond) passes only when cond == 1; normalize a non-zero pointer to 1.
+fn t_ok(x): i64 {
+    if (x != 0) { return 1; }
+    return 0;
+}
+
+# Compare a RAW cstr pointer (as stored in PluginInfo fields / message slots)
+# against an expected cstr literal by bytes. Wraps the raw pointer in a Str
+# header since str_eq_cstr's first arg must be a Str fat pointer. Returns 0/1.
+fn t_cstr_eq(raw, expected): i64 {
+    var s = str_from(raw);
+    return str_eq_cstr(s, expected);
+}
+
+# Search a vec of cstr pointers for one whose BYTES equal `needle` (cstr).
+# Compares contents, not pointer identity (literals are not guaranteed pooled
+# across compilation units). Returns 1 if present, else 0.
+fn t_vec_has_cstr(v, needle): i64 {
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var s = str_from(vec_get(v, i));
+        var eq = str_eq_cstr(s, needle);
+        if (eq == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Register a PanelWidget "test-plugin" v1.0.0 with [WaylandSurface], mirroring
+# the rust register_test_plugin helper. Returns the minted id.
+fn t_register_test_plugin(h, now): i64 {
+    var caps = vec_new();
+    vec_push(caps, PLG_Capability.PLG_CAP_WAYLAND_SURFACE);
+    var pt = PLG_Type.PLG_TYPE_PANEL_WIDGET;
+    var id = plug_host_register_plugin(h, "test-plugin", "1.0.0", pt, caps, now);
+    return id;
+}
+
+fn main() {
+    alloc_init();
+    var now = 1000000;   # fixed epoch stand-in for Utc::now.
+
+    # --- Registration and lookup (test_register_and_get_plugin) ---
+    test_group("plugin_host — register + get");
+    var h = plug_host_new(10);
+    assert(t_ok(h), "plug_host_new");
+    var id = t_register_test_plugin(h, now);
+    var idok = (id >= 1);
+    assert(idok, "register mints id >= 1");
+    var p = plug_host_get_plugin(h, id);
+    assert(t_ok(p), "get_plugin returns info");
+    assert_eq(t_cstr_eq(plug_info_name(p), "test-plugin"), 1, "name is test-plugin");
+    assert_eq(t_cstr_eq(plug_info_version(p), "1.0.0"), 1, "version is 1.0.0");
+    assert_eq(plug_info_type(p), PLG_Type.PLG_TYPE_PANEL_WIDGET, "type PanelWidget");
+    assert_eq(plug_info_state(p), PLG_State.PLG_STATE_STARTING, "initial state Starting");
+    assert_eq(plug_info_restart_count(p), 0, "restart_count starts 0");
+    assert_eq(plug_info_hb_is_none(p), 1, "last_heartbeat is None");
+    var caps_v = plug_info_capabilities(p);
+    assert_eq(vec_len(caps_v), 1, "one capability");
+    assert_eq(vec_get(caps_v, 0), PLG_Capability.PLG_CAP_WAYLAND_SURFACE, "cap WaylandSurface");
+
+    # --- Socket path (test_register_sets_socket_path) ---
+    test_group("plugin_host — socket path");
+    var sock = plug_info_socket_path(p);
+    assert(t_ok(sock), "socket_path set");
+    assert_eq(str_starts_with(sock, str_from("/run/agnos/plugins/")), 1, "socket under /run/agnos/plugins/");
+    assert_eq(str_contains_cstr(sock, ".sock"), 1, "socket path ends .sock");
+    assert_eq(str_contains_cstr(sock, "1.sock"), 1, "socket path embeds id 1");
+
+    # --- Nonexistent lookup (test_get_nonexistent_plugin) ---
+    test_group("plugin_host — get nonexistent");
+    assert_eq(plug_host_get_plugin(h, 9999), 0, "get missing returns 0");
+
+    # --- Unregister (test_unregister_plugin / _nonexistent) ---
+    test_group("plugin_host — unregister");
+    assert_eq(plug_host_len(h), 1, "len 1 before unregister");
+    var removed = plug_host_unregister_plugin(h, id);
+    assert(t_ok(removed), "unregister returns info");
+    assert_eq(plug_info_id(removed), id, "removed info has same id");
+    assert_eq(plug_host_len(h), 0, "len 0 after unregister");
+    assert_eq(plug_host_get_plugin(h, id), 0, "removed plugin no longer found");
+    assert_eq(plug_host_unregister_plugin(h, id), 0, "unregister missing returns 0");
+
+    # --- Max plugins enforcement (test_max_plugins_enforcement) ---
+    test_group("plugin_host — max plugins");
+    var h2 = plug_host_new(2);
+    t_register_test_plugin(h2, now);
+    t_register_test_plugin(h2, now);
+    assert_eq(plug_host_len(h2), 2, "two registered fills capacity");
+    var over = plug_host_register_plugin(h2, "third", "1.0.0", PLG_Type.PLG_TYPE_THEME, 0, now);
+    var expect_full = 0 - PLG_Err.PLG_ERR_MAX_PLUGINS_REACHED;
+    assert_eq(over, expect_full, "over-capacity returns -MaxPluginsReached");
+    assert_eq(plug_host_len(h2), 2, "count unchanged after rejection");
+
+    # --- State transitions (starting->running, invalid, crash restart) ---
+    test_group("plugin_host — state transitions");
+    var h3 = plug_host_new(10);
+    var id3 = t_register_test_plugin(h3, now);
+    # Starting -> Running valid.
+    assert_eq(plug_host_update_state(h3, id3, PLG_State.PLG_STATE_RUNNING), PLG_Err.PLG_OK, "Starting->Running ok");
+    var p3 = plug_host_get_plugin(h3, id3);
+    assert_eq(plug_info_state(p3), PLG_State.PLG_STATE_RUNNING, "state now Running");
+    # Running -> Suspended valid; then Suspended->Running back.
+    assert_eq(plug_host_update_state(h3, id3, PLG_State.PLG_STATE_SUSPENDED), PLG_Err.PLG_OK, "Running->Suspended ok");
+    assert_eq(plug_host_update_state(h3, id3, PLG_State.PLG_STATE_RUNNING), PLG_Err.PLG_OK, "Suspended->Running ok");
+    # Running -> Crashed valid; Crashed->Starting increments restart_count.
+    assert_eq(plug_host_update_state(h3, id3, PLG_State.PLG_STATE_CRASHED), PLG_Err.PLG_OK, "Running->Crashed ok");
+    assert_eq(plug_info_restart_count(p3), 0, "restart 0 before recovery");
+    assert_eq(plug_host_update_state(h3, id3, PLG_State.PLG_STATE_STARTING), PLG_Err.PLG_OK, "Crashed->Starting ok");
+    assert_eq(plug_info_restart_count(p3), 1, "Crashed->Starting increments restart_count");
+
+    # Invalid transition: Starting -> Suspended.
+    var h4 = plug_host_new(10);
+    var id4 = t_register_test_plugin(h4, now);
+    var bad = plug_host_update_state(h4, id4, PLG_State.PLG_STATE_SUSPENDED);
+    assert_eq(bad, PLG_Err.PLG_ERR_INVALID_TRANSITION, "Starting->Suspended invalid");
+    # State unchanged after invalid transition.
+    assert_eq(plug_info_state(plug_host_get_plugin(h4, id4)), PLG_State.PLG_STATE_STARTING, "state unchanged after invalid");
+    # update_state on missing plugin.
+    assert_eq(plug_host_update_state(h4, 7777, PLG_State.PLG_STATE_RUNNING), PLG_Err.PLG_ERR_PLUGIN_NOT_FOUND, "update missing = NotFound");
+
+    # --- Transition-table spot checks (plug_host_transition_valid) ---
+    test_group("plugin_host — transition table");
+    assert_eq(plug_host_transition_valid(PLG_State.PLG_STATE_STARTING, PLG_State.PLG_STATE_RUNNING), 1, "Starting->Running valid");
+    assert_eq(plug_host_transition_valid(PLG_State.PLG_STATE_STARTING, PLG_State.PLG_STATE_SUSPENDED), 0, "Starting->Suspended invalid");
+    assert_eq(plug_host_transition_valid(PLG_State.PLG_STATE_STOPPED, PLG_State.PLG_STATE_STARTING), 1, "Stopped->Starting valid");
+    assert_eq(plug_host_transition_valid(PLG_State.PLG_STATE_CRASHED, PLG_State.PLG_STATE_RUNNING), 0, "Crashed->Running invalid");
+
+    # --- Heartbeat + health (record_heartbeat, check_health) ---
+    test_group("plugin_host — heartbeat + health");
+    var h5 = plug_host_new(10);
+    var id5 = t_register_test_plugin(h5, now);
+    plug_host_update_state(h5, id5, PLG_State.PLG_STATE_RUNNING);
+    var p5 = plug_host_get_plugin(h5, id5);
+    assert_eq(plug_info_hb_is_none(p5), 1, "no heartbeat before record");
+    # No heartbeat while Running -> flagged unhealthy by check_health.
+    var unhealthy = plug_host_check_health(h5, now);
+    var found_before = vec_find(unhealthy, id5);
+    var flagged = (found_before >= 0);
+    assert(flagged, "no-heartbeat Running plugin flagged");
+    # Record a fresh heartbeat -> now healthy, not flagged.
+    assert_eq(plug_host_record_heartbeat(h5, id5, now), PLG_Err.PLG_OK, "record_heartbeat ok");
+    assert_eq(plug_info_hb_is_none(p5), 0, "heartbeat set after record");
+    var healthy = plug_host_check_health(h5, now);
+    var found_after = vec_find(healthy, id5);
+    var clear = (found_after < 0);
+    assert(clear, "fresh-heartbeat plugin not flagged");
+    # Stale heartbeat (> interval*3 = 30s) -> flagged again.
+    var later = now + 31;
+    var stale = plug_host_check_health(h5, later);
+    var found_stale = vec_find(stale, id5);
+    var flagged_stale = (found_stale >= 0);
+    assert(flagged_stale, "stale-heartbeat plugin flagged");
+    # record_heartbeat on missing plugin.
+    assert_eq(plug_host_record_heartbeat(h5, 8888, now), PLG_Err.PLG_ERR_PLUGIN_NOT_FOUND, "heartbeat missing = NotFound");
+
+    # --- PluginInfo::is_healthy + uptime ---
+    test_group("plugin_host — is_healthy + uptime");
+    var h6 = plug_host_new(10);
+    var id6 = t_register_test_plugin(h6, now);
+    var p6 = plug_host_get_plugin(h6, id6);
+    # Starting is never healthy.
+    assert_eq(plug_info_is_healthy(p6, now), 0, "Starting not healthy");
+    plug_host_update_state(h6, id6, PLG_State.PLG_STATE_RUNNING);
+    # Running but no heartbeat -> not healthy.
+    assert_eq(plug_info_is_healthy(p6, now), 0, "Running no-heartbeat not healthy");
+    plug_host_record_heartbeat(h6, id6, now);
+    # Running with recent heartbeat -> healthy.
+    assert_eq(plug_info_is_healthy(p6, now), 1, "Running recent-heartbeat healthy");
+    # Heartbeat older than 30s window -> not healthy.
+    assert_eq(plug_info_is_healthy(p6, now + 30), 0, "heartbeat >=30s old not healthy");
+    # uptime is now - started_at, clamped >= 0.
+    assert_eq(plug_info_uptime(p6, now), 0, "uptime 0 at registration epoch");
+    assert_eq(plug_info_uptime(p6, now + 5), 5, "uptime 5s after 5s");
+    assert_eq(plug_info_uptime(p6, now - 100), 0, "uptime clamps negative to 0");
+
+    # --- Listing + filtering (list_plugins, list_by_type, list_by_state) ---
+    test_group("plugin_host — listing + filtering");
+    var h7 = plug_host_new(10);
+    assert_eq(vec_len(plug_host_list_plugins(h7)), 0, "list empty at start");
+    var a = t_register_test_plugin(h7, now);   # PanelWidget
+    plug_host_register_plugin(h7, "theme", "1.0.0", PLG_Type.PLG_TYPE_THEME, 0, now);
+    assert_eq(vec_len(plug_host_list_plugins(h7)), 2, "list 2 after two registers");
+    assert_eq(vec_len(plug_host_list_by_type(h7, PLG_Type.PLG_TYPE_PANEL_WIDGET)), 1, "one PanelWidget");
+    assert_eq(vec_len(plug_host_list_by_type(h7, PLG_Type.PLG_TYPE_THEME)), 1, "one Theme");
+    assert_eq(vec_len(plug_host_list_by_type(h7, PLG_Type.PLG_TYPE_OVERLAY)), 0, "zero Overlay");
+    assert_eq(vec_len(plug_host_list_by_state(h7, PLG_State.PLG_STATE_STARTING)), 2, "two Starting");
+    plug_host_update_state(h7, a, PLG_State.PLG_STATE_RUNNING);
+    assert_eq(vec_len(plug_host_list_by_state(h7, PLG_State.PLG_STATE_STARTING)), 1, "one Starting after transition");
+    assert_eq(vec_len(plug_host_list_by_state(h7, PLG_State.PLG_STATE_RUNNING)), 1, "one Running after transition");
+
+    # --- len / is_empty ---
+    test_group("plugin_host — len + is_empty");
+    var h8 = plug_host_new(10);
+    assert_eq(plug_host_is_empty(h8), 1, "empty host is_empty");
+    assert_eq(plug_host_len(h8), 0, "empty host len 0");
+    t_register_test_plugin(h8, now);
+    assert_eq(plug_host_is_empty(h8), 0, "non-empty host not is_empty");
+    assert_eq(plug_host_len(h8), 1, "len 1 after register");
+
+    # --- Sandbox profiles (theme, desktop_app, input_method) ---
+    test_group("plugin_host — sandbox profiles");
+    var h9 = plug_host_new(10);
+    var sb_theme = plug_host_sandbox_profile_for(h9, PLG_Type.PLG_TYPE_THEME);
+    assert(t_ok(sb_theme), "theme profile allocated");
+    assert_eq(plug_sandbox_network_allowed(sb_theme), 0, "theme no network");
+    assert_eq(plug_sandbox_max_memory(sb_theme), plug_mb(32), "theme 32MB memory");
+    assert_eq(plug_sandbox_max_cpu(sb_theme), 5000, "theme cpu 5.0 permille=5000");
+    var theme_paths = plug_sandbox_paths(sb_theme);
+    assert_eq(t_cstr_eq(vec_get(theme_paths, 0), "/usr/share/themes"), 1, "theme path /usr/share/themes");
+
+    var sb_app = plug_host_sandbox_profile_for(h9, PLG_Type.PLG_TYPE_DESKTOP_APP);
+    assert_eq(plug_sandbox_network_allowed(sb_app), 1, "desktop app network allowed");
+    assert_eq(plug_sandbox_max_memory(sb_app), plug_mb(512), "desktop app 512MB memory");
+    assert_eq(plug_sandbox_max_cpu(sb_app), 50000, "desktop app cpu 50.0 permille=50000");
+    var app_sc = plug_sandbox_syscalls(sb_app);
+    assert_eq(t_vec_has_cstr(app_sc, "socket"), 1, "desktop app syscalls include socket");
+    assert_eq(t_vec_has_cstr(app_sc, "connect"), 1, "desktop app syscalls include connect");
+
+    var sb_ime = plug_host_sandbox_profile_for(h9, PLG_Type.PLG_TYPE_INPUT_METHOD);
+    assert_eq(plug_sandbox_network_allowed(sb_ime), 0, "input method no network");
+    assert_eq(plug_sandbox_max_memory(sb_ime), plug_mb(128), "input method 128MB memory");
+    assert_eq(plug_sandbox_max_cpu(sb_ime), 15000, "input method cpu 15.0 permille=15000");
+
+    # --- Message model (Init / SurfaceGrant / RenderReq+Resp / InputEvent / Heartbeat / Shutdown) ---
+    test_group("plugin_host — message model");
+    var caps_m = vec_new();
+    vec_push(caps_m, PLG_Capability.PLG_CAP_WAYLAND_SURFACE);
+    vec_push(caps_m, PLG_Capability.PLG_CAP_INPUT_EVENTS);
+    var m_init = plug_msg_init(PLG_Type.PLG_TYPE_PANEL_WIDGET, "2.0.0", caps_m);
+    assert_eq(plug_msg_kind(m_init), PLG_MsgKind.PLG_MSG_INIT, "init kind");
+    assert_eq(plug_msg_init_type(m_init), PLG_Type.PLG_TYPE_PANEL_WIDGET, "init plugin_type");
+    assert_eq(t_cstr_eq(plug_msg_init_version(m_init), "2.0.0"), 1, "init version 2.0.0");
+    assert_eq(vec_len(plug_msg_init_caps(m_init)), 2, "init 2 capabilities");
+
+    var m_sg = plug_msg_surface_grant(42, 100, 200, 800, 600);
+    assert_eq(plug_msg_kind(m_sg), PLG_MsgKind.PLG_MSG_SURFACE_GRANT, "surface_grant kind");
+    assert_eq(plug_msg_grant_surface(m_sg), 42, "grant surface_id 42");
+    assert_eq(plug_msg_grant_x(m_sg), 100, "grant x 100");
+    assert_eq(plug_msg_grant_y(m_sg), 200, "grant y 200");
+    assert_eq(plug_msg_grant_w(m_sg), 800, "grant w 800");
+    assert_eq(plug_msg_grant_h(m_sg), 600, "grant h 600");
+
+    var m_req = plug_msg_render_request(7);
+    assert_eq(plug_msg_kind(m_req), PLG_MsgKind.PLG_MSG_RENDER_REQUEST, "render_request kind");
+    assert_eq(plug_msg_req_surface(m_req), 7, "render_request surface 7");
+    var m_resp = plug_msg_render_response(7, "argb8888", 1920, 1080);
+    assert_eq(plug_msg_kind(m_resp), PLG_MsgKind.PLG_MSG_RENDER_RESPONSE, "render_response kind");
+    assert_eq(plug_msg_resp_surface(m_resp), 7, "render_response surface 7");
+    assert_eq(t_cstr_eq(plug_msg_resp_format(m_resp), "argb8888"), 1, "render_response format");
+    assert_eq(plug_msg_resp_w(m_resp), 1920, "render_response w 1920");
+    assert_eq(plug_msg_resp_h(m_resp), 1080, "render_response h 1080");
+
+    var m_ie = plug_msg_input_event("key_press", "enter");
+    assert_eq(plug_msg_kind(m_ie), PLG_MsgKind.PLG_MSG_INPUT_EVENT, "input_event kind");
+    assert_eq(t_cstr_eq(plug_msg_input_type(m_ie), "key_press"), 1, "input_event type");
+    assert_eq(t_cstr_eq(plug_msg_input_data(m_ie), "enter"), 1, "input_event data");
+
+    assert_eq(plug_msg_kind(plug_msg_heartbeat()), PLG_MsgKind.PLG_MSG_HEARTBEAT, "heartbeat kind");
+    assert_eq(plug_msg_kind(plug_msg_shutdown()), PLG_MsgKind.PLG_MSG_SHUTDOWN, "shutdown kind");
+
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);

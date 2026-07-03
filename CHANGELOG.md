@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- Compositor depth: workspaces + context types, move-window-to-workspace,
+  switch-workspace, secure + agent-aware modes, window-at-point hit-testing.
+- Renderer depth: alpha blend (`rend_blend`) + damage tracking (bounding-box
+  `DamageTracker`).
+- Ported `shell_integration` + `plugin_host` — completes all 8 M2 leaf modules.
+- Behavioral parity test suites for all 8 leaf modules (~670 assertions, all green).
+
+### Changed
+
+- Deferred `mehman` / `agnostik` / `agnodrm` from the active build (mapping kept in
+  `cyrius.cyml` comments). All are unused today and their full `dist` bundles break
+  the build: `cyrius build` prepends every `[deps.*]` module, and mehman→`[deps.kavach]`
+  drags in the HTTP/`thread_local` surface (`sandhi_server_*`) as reachable-undefined,
+  while agnostik+agnodrm collide on `ERR_*`. **bhumi is the only active dep** (clean,
+  no git sub-deps). Re-enable with selective `modules = [...]` when consumed.
+
 ## [0.1.0] - 2026-07-02 — Cyrius port
 
 First release of the Cyrius incarnation of aethersafha. The prior Rust crate is

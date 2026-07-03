@@ -45,6 +45,35 @@ fn main() {
     assert_eq(comp_count(c), 1, "count drops after close");
     assert_eq(comp_find_by_id(c, 1), 0 - 1, "closed window gone");
 
+    test_group("compositor — workspaces, modes, hit-test");
+    var c2 = comp_new();
+    assert_eq(comp_workspace_count(c2), 1, "default workspace exists");
+    assert_eq(comp_active_workspace(c2), 0, "active workspace is 0");
+    assert_eq(comp_secure_mode(c2), 0, "secure mode off by default");
+    comp_set_secure_mode(c2, 1);
+    assert_eq(comp_secure_mode(c2), 1, "secure mode toggles on");
+    assert_eq(comp_agent_aware(c2), 0, "agent-aware off by default");
+    comp_set_agent_aware(c2, 1);
+    assert_eq(comp_agent_aware(c2), 1, "agent-aware toggles on");
+    var ws1 = comp_create_workspace(c2, "Dev", CtxType.CTX_DEVELOPMENT);
+    assert_eq(ws1, 1, "second workspace has index 1");
+    assert_eq(comp_workspace_count(c2), 2, "two workspaces");
+    assert_eq(comp_switch_workspace(c2, 1), 0, "switch to workspace 1");
+    assert_eq(comp_active_workspace(c2), 1, "active workspace now 1");
+    assert_eq(comp_switch_workspace(c2, 9), 0 - 1, "invalid workspace rejected");
+    var wA = comp_create_window(c2, 0, 0, 100, 100, "a");
+    var wsp1 = comp_get_workspace(c2, 1);
+    assert_eq(wsp_count(wsp1), 1, "new window lands in active workspace");
+    assert_eq(comp_move_window_to_workspace(c2, win_id(wA), 0), 0, "move window to ws0");
+    assert_eq(wsp_count(wsp1), 0, "window removed from ws1");
+    assert_eq(wsp_count(comp_get_workspace(c2, 0)), 1, "window added to ws0");
+
+    test_group("compositor — window_at hit-test");
+    var c3 = comp_new();
+    var hw = comp_create_window(c3, 100, 100, 200, 150, "hit");
+    assert_eq(win_id(comp_window_at(c3, 150, 150)), win_id(hw), "point inside finds window");
+    assert_eq(comp_window_at(c3, 5, 5), 0, "point outside returns 0");
+
     return assert_summary();
 }
 

@@ -10,21 +10,21 @@ cyrius = "6.3.36"
 entry = "src/main.cyr"
 output = "aethersafha"
 
-# Stdlib modules auto-prepended by `cyrius build`. This is the UNION of what
-# the compositor port needs plus what every [deps.*] below transitively
-# requires (agnostik → trait/bayan; agnodrm → ct/slice/net; bhumi → fnptr):
+# Stdlib modules auto-prepended by `cyrius build`. Kept to what the compositor
+# port + M2 leaf modules actually use — a minimal, self-consistent set that
+# `cyrius deps` can vendor without pulling the HTTP/thread_local/sigil cluster.
+# (The agnostik/agnodrm-only extras — trait, bayan, ct, net — were dropped when
+# those deps were deferred; re-add alongside them when consumed.)
 #   containers ....... vec, hashmap, str, slice
 #   dispatch ......... fnptr
-#   sum types ........ tagged, result, trait   (Rust Result/Option/enum port)
+#   sum types ........ tagged, result   (Rust Result/Option port)
 #   runtime .......... io, fs, process, args, atomic
-#   data/wire ........ bayan (json/toml/base64), ct
 #   time/geometry .... chrono (seat `now` gate), math
-#   net .............. net (agnodrm device model)
 [deps]
 stdlib = [
     "syscalls", "string", "alloc", "atomic", "fmt", "vec", "str", "slice",
-    "hashmap", "fnptr", "io", "fs", "process", "args", "ct", "net",
-    "tagged", "result", "trait", "bayan", "chrono", "math", "assert", "bench",
+    "hashmap", "fnptr", "io", "fs", "process", "args",
+    "tagged", "result", "chrono", "math", "assert", "bench",
 ]
 
 # --- Platform backend: replaces the Linux DRM/KMS + libinput + logind trio.
@@ -36,28 +36,26 @@ path = "../bhumi"
 tag = "0.7.0"
 modules = ["dist/bhumi.cyr"]
 
-# --- Compat / "swallow" backend: successor to XWayland's real job — hosting
-# foreign-ABI app surfaces inside a kavach sandbox. Post-MVP (v0.1.0 is the
-# types-only foundation); wired so the compositor seam exists. Was: xwayland.rs.
-[deps.mehman]
-git = "https://github.com/MacCracken/mehman.git"
-path = "../mehman"
-tag = "0.1.0"
-modules = ["src/types.cyr"]
+# --- DEFERRED until consumed (Bite G, post-MVP). mehman is the "swallow"
+# backend — successor to XWayland's job, hosting foreign-ABI app surfaces in a
+# kavach sandbox. It transitively pulls [deps.kavach] → sigil/patra/sandhi,
+# whose reachable init drags in the HTTP/thread_local surface (sandhi_server_*,
+# thread_local_*) as undefined. It is types-only today and no code uses it, so
+# it only broke the build. Re-enable when the compositor actually hosts guests.
+#   mehman 0.1.0 — git = "https://github.com/MacCracken/mehman.git",
+#   path = "../mehman", modules = ["src/types.cyr"]  (needs [deps.kavach] too)
 
-# --- Shared AGNOS domain primitives: types, error handling, wire-format
-# encoders. Was the `agnostik` Rust crate (0.90.0); now the Cyrius port.
-[deps.agnostik]
-git = "https://github.com/MacCracken/agnostik.git"
-path = "../agnostik"
-tag = "1.3.2"
-modules = ["dist/agnostik.cyr"]
-
-# --- AGNOS device / DRM model: udev device enumeration + DRM/KMS node access.
-# Was the `agnosys` Rust crate (0.50.0); agnosys decomposed 2026-06-19 and the
-# udev/DRM device model became agnodrm. (bhumi also sits on agnodrm internally.)
-[deps.agnodrm]
-git = "https://github.com/MacCracken/agnodrm.git"
-path = "../agnodrm"
-tag = "1.4.4"
-modules = ["dist/agnodrm.cyr"]
+# --- DEFERRED until consumed (see docs/development/parity-plan.md "Bite 0").
+# The dependency MAPPING is recorded here, but these are NOT auto-prepended:
+# cyrius build prepends every [deps.*] module, and the full agnostik/agnodrm
+# `dist/*.cyr` bundles (a) both redefine the shared `ERR_*` module (duplicate
+# symbols) and (b) drag in their HTTP/thread_local surface (`sandhi_server_*`,
+# `thread_local_*`) as reachable-but-undefined. No current code uses them, so
+# they only broke the build. Re-enable with SELECTIVE `modules = [...]` (a core
+# subset) when M-level work actually consumes them.
+#
+#   agnostik 1.3.2 — shared AGNOS domain primitives (was Rust `agnostik` 0.90.0)
+#     git = "https://github.com/MacCracken/agnostik.git", path = "../agnostik"
+#   agnodrm  1.4.4 — udev + DRM/KMS device model (was Rust `agnosys` 0.50.0;
+#     agnosys decomposed 2026-06-19 → agnodrm; bhumi also sits on agnodrm)
+#     git = "https://github.com/MacCracken/agnodrm.git", path = "../agnodrm"

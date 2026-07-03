@@ -1,0 +1,191 @@
+# theme_bridge — BEHAVIORAL parity test.
+# Mirrors rust-old/src/theme_bridge.rs #[cfg(test)] mod tests:
+#   color_u32_to_hex (white/black/red/alpha-ignored), color_hex_to_u32
+#   (white/black/blue + missing-hash/too-short/invalid-char errors), roundtrip,
+#   convert_to_flutter (light + dark high-contrast), create_platform_message
+#   (channel/method/args JSON object), apply_theme_override (empty/partial/full).
+# Stdlib + [deps.*] auto-included via cyrius.cyml (str, result, alloc, assert...).
+include "src/theme_bridge.cyr"
+
+# assert(cond) passes only when cond == 1; normalize a non-zero pointer to 1.
+fn t_ok(x): i64 {
+    if (x != 0) { return 1; }
+    return 0;
+}
+
+# Str (from theme_color_u32_to_hex) equals the given C-string literal? -> 1/0.
+fn t_hexeq(s, cstr): i64 {
+    var r = str_eq_cstr(s, cstr);
+    if (r == 1) { return 1; }
+    return 0;
+}
+
+# JSON Str (from theme_flutter_to_json / theme_message_args_json) contains the
+# given key literal? Mirrors serde `obj.contains_key(...)` — scans for a
+# quoted-key substring. Returns 1 if found, else 0.
+fn t_json_has(js, needle): i64 {
+    var jd = str_data(js);
+    var jl = str_len(js);
+    var nl = strlen(needle);
+    if (nl > jl) { return 0; }
+    var i = 0;
+    var last = jl - nl;
+    while (i <= last) {
+        var m = memeq(jd + i, needle, nl);
+        if (m == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    # -- color_u32_to_hex --------------------------------------------------
+    test_group("theme_bridge — color_u32_to_hex (parity)");
+    var hx_white = theme_color_u32_to_hex(0xFFFFFFFF);
+    assert(t_hexeq(hx_white, "#FFFFFF"), "u32->hex white");
+    var hx_black = theme_color_u32_to_hex(0xFF000000);
+    assert(t_hexeq(hx_black, "#000000"), "u32->hex black");
+    var hx_red = theme_color_u32_to_hex(0xFFFF0000);
+    assert(t_hexeq(hx_red, "#FF0000"), "u32->hex red");
+    # alpha ignored: different alpha, same RGB -> same hex
+    var hx_a0 = theme_color_u32_to_hex(0x00FF8800);
+    assert(t_hexeq(hx_a0, "#FF8800"), "u32->hex ignores alpha (a=00)");
+    var hx_aF = theme_color_u32_to_hex(0xFFFF8800);
+    assert(t_hexeq(hx_aF, "#FF8800"), "u32->hex ignores alpha (a=FF)");
+
+    # -- color_hex_to_u32 (Ok cases) ---------------------------------------
+    test_group("theme_bridge — color_hex_to_u32 Ok (parity)");
+    var r_white = theme_color_hex_to_u32(str_from("#FFFFFF"));
+    assert(t_ok(is_ok(r_white)), "hex->u32 white is Ok");
+    assert_eq(result_unwrap(r_white), 0xFFFFFFFF, "hex->u32 white value");
+    var r_black = theme_color_hex_to_u32(str_from("#000000"));
+    assert(t_ok(is_ok(r_black)), "hex->u32 black is Ok");
+    assert_eq(result_unwrap(r_black), 0xFF000000, "hex->u32 black value");
+    var r_blue = theme_color_hex_to_u32(str_from("#0000FF"));
+    assert(t_ok(is_ok(r_blue)), "hex->u32 blue is Ok");
+    assert_eq(result_unwrap(r_blue), 0xFF0000FF, "hex->u32 blue value");
+
+    # -- color_hex_to_u32 (Err cases) --------------------------------------
+    test_group("theme_bridge — color_hex_to_u32 Err (parity)");
+    var r_nohash = theme_color_hex_to_u32(str_from("FFFFFF"));
+    assert(t_ok(is_err_result(r_nohash)), "hex->u32 missing '#' is Err");
+    var r_short = theme_color_hex_to_u32(str_from("#FFF"));
+    assert(t_ok(is_err_result(r_short)), "hex->u32 too short is Err");
+    var r_bad = theme_color_hex_to_u32(str_from("#GGGGGG"));
+    assert(t_ok(is_err_result(r_bad)), "hex->u32 invalid chars is Err");
+
+    # -- roundtrip ---------------------------------------------------------
+    test_group("theme_bridge — color roundtrip (parity)");
+    var orig = 0xFF12AB34;
+    var rt_hex = theme_color_u32_to_hex(orig);
+    assert(t_hexeq(rt_hex, "#12AB34"), "roundtrip hex form");
+    var rt_back = theme_color_hex_to_u32(rt_hex);
+    assert(t_ok(is_ok(rt_back)), "roundtrip parses back Ok");
+    assert_eq(result_unwrap(rt_back), orig, "roundtrip u32 preserved");
+
+    # -- convert_to_flutter: light high-contrast ---------------------------
+    test_group("theme_bridge — convert light high-contrast (parity)");
+    var light = theme_hc_default_high_contrast();
+    assert(t_ok(light), "default_high_contrast ctor");
+    var fl = theme_bridge_convert_to_flutter(light);
+    assert(t_ok(fl), "convert light -> FlutterThemeData");
+    assert(t_hexeq(theme_flutter_brightness(fl), "light"), "light brightness");
+    assert(t_hexeq(theme_flutter_background_color(fl), "#FFFFFF"), "light bg #FFFFFF");
+    assert(t_hexeq(theme_flutter_on_background(fl), "#000000"), "light on_bg #000000");
+    assert(t_hexeq(theme_flutter_primary_color(fl), "#0000FF"), "light primary=accent blue");
+    assert(t_hexeq(theme_flutter_error_color(fl), "#FF0000"), "light error #FF0000");
+    # surface == background hex; on_error == background hex (readable vs error)
+    assert(t_hexeq(theme_flutter_surface_color(fl), "#FFFFFF"), "light surface==bg");
+    assert(t_hexeq(theme_flutter_on_error(fl), "#FFFFFF"), "light on_error==bg");
+    assert_eq(theme_flutter_font_multiplier(fl), 1250, "light font 1.25 permille");
+    assert_eq(theme_flutter_use_material3(fl), 1, "light use_material3=true");
+
+    # -- convert_to_flutter: dark high-contrast ----------------------------
+    test_group("theme_bridge — convert dark high-contrast (parity)");
+    var dark = theme_hc_default_dark_high_contrast();
+    var fd = theme_bridge_convert_to_flutter(dark);
+    assert(t_ok(fd), "convert dark -> FlutterThemeData");
+    assert(t_hexeq(theme_flutter_brightness(fd), "dark"), "dark brightness");
+    assert(t_hexeq(theme_flutter_background_color(fd), "#000000"), "dark bg #000000");
+    assert(t_hexeq(theme_flutter_on_background(fd), "#FFFFFF"), "dark on_bg #FFFFFF");
+    assert(t_hexeq(theme_flutter_primary_color(fd), "#00CCFF"), "dark primary=accent cyan");
+
+    # -- luminance threshold (fixed-point of 0.299R+0.587G+0.114B) ---------
+    test_group("theme_bridge — luminance x1000 (parity)");
+    # white background: 255*(299+587+114) = 255*1000 = 255000 > 127500 -> light
+    assert_eq(theme_bridge_luminance_x1000(0xFFFFFFFF), 255000, "lum white 255000");
+    assert_eq(theme_bridge_luminance_x1000(0xFF000000), 0, "lum black 0");
+
+    # -- create_platform_message + args JSON -------------------------------
+    test_group("theme_bridge — platform message (parity)");
+    var msg = theme_bridge_create_platform_message(fl);
+    assert(t_ok(msg), "create_platform_message");
+    assert(t_hexeq(theme_message_channel(msg), "agnos/theme"), "channel agnos/theme");
+    assert(t_hexeq(theme_message_method(msg), "setTheme"), "method setTheme");
+    assert_eq(theme_message_args(msg), fl, "args points to flutter data");
+    var js = theme_message_args_json(msg);
+    assert(t_ok(js), "args_json builds");
+    assert(t_json_has(js, "brightness"), "json has brightness key");
+    assert(t_json_has(js, "primary_color"), "json has primary_color key");
+    assert(t_json_has(js, "font_size_multiplier"), "json has font_size_multiplier key");
+
+    # -- apply_theme_override: empty (identity) ----------------------------
+    test_group("theme_bridge — apply empty overrides (parity)");
+    var ov_empty = theme_overrides_default();
+    assert(t_ok(ov_empty), "overrides_default");
+    var applied_empty = theme_bridge_apply_theme_override(fl, ov_empty);
+    assert(t_ok(applied_empty), "apply empty overrides");
+    assert_eq(theme_flutter_eq(applied_empty, fl), 1, "empty overrides == base");
+
+    # -- apply_theme_override: partial -------------------------------------
+    test_group("theme_bridge — apply partial overrides (parity)");
+    var ov_part = theme_overrides_default();
+    theme_overrides_set_primary(ov_part, str_from("#FF00FF"));
+    theme_overrides_set_font(ov_part, 2000);
+    var applied_part = theme_bridge_apply_theme_override(fl, ov_part);
+    assert(t_hexeq(theme_flutter_primary_color(applied_part), "#FF00FF"), "partial primary overridden");
+    assert_eq(theme_flutter_font_multiplier(applied_part), 2000, "partial font 2.0");
+    # unchanged fields preserved from base
+    assert(t_hexeq(theme_flutter_brightness(applied_part), "light"), "partial brightness preserved");
+    assert(t_hexeq(theme_flutter_background_color(applied_part), "#FFFFFF"), "partial bg preserved");
+    # base must be untouched (override produces a new object)
+    assert(t_hexeq(theme_flutter_primary_color(fl), "#0000FF"), "base primary unchanged");
+
+    # -- apply_theme_override: full ----------------------------------------
+    test_group("theme_bridge — apply full overrides (parity)");
+    var ov_full = theme_overrides_default();
+    theme_overrides_set_brightness(ov_full, str_from("dark"));
+    theme_overrides_set_primary(ov_full, str_from("#111111"));
+    theme_overrides_set_background(ov_full, str_from("#222222"));
+    theme_overrides_set_surface(ov_full, str_from("#333333"));
+    theme_overrides_set_error(ov_full, str_from("#444444"));
+    theme_overrides_set_on_primary(ov_full, str_from("#555555"));
+    theme_overrides_set_on_background(ov_full, str_from("#666666"));
+    theme_overrides_set_on_surface(ov_full, str_from("#777777"));
+    theme_overrides_set_on_error(ov_full, str_from("#888888"));
+    theme_overrides_set_font(ov_full, 3000);
+    theme_overrides_set_material3(ov_full, 0);
+    var applied_full = theme_bridge_apply_theme_override(fl, ov_full);
+    assert(t_hexeq(theme_flutter_brightness(applied_full), "dark"), "full brightness dark");
+    assert(t_hexeq(theme_flutter_primary_color(applied_full), "#111111"), "full primary");
+    assert(t_hexeq(theme_flutter_background_color(applied_full), "#222222"), "full background");
+    assert(t_hexeq(theme_flutter_surface_color(applied_full), "#333333"), "full surface");
+    assert(t_hexeq(theme_flutter_error_color(applied_full), "#444444"), "full error");
+    assert(t_hexeq(theme_flutter_on_error(applied_full), "#888888"), "full on_error");
+    assert_eq(theme_flutter_font_multiplier(applied_full), 3000, "full font 3.0");
+    assert_eq(theme_flutter_use_material3(applied_full), 0, "full use_material3=false");
+
+    # -- material3=0 override survives (0 is a valid Some, not None) --------
+    test_group("theme_bridge — material3 false is Some(false) (parity)");
+    var ov_m3 = theme_overrides_default();
+    theme_overrides_set_material3(ov_m3, 0);
+    var applied_m3 = theme_bridge_apply_theme_override(fl, ov_m3);
+    assert_eq(theme_flutter_use_material3(applied_m3), 0, "m3=0 override applied (not treated as None)");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

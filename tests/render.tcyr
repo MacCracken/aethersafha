@@ -1,0 +1,37 @@
+# aethersafha renderer test — alpha blend + damage tracking (pure logic).
+# Stdlib + [deps.*] auto-included via cyrius.cyml.
+include "lib/bhumi.cyr"
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/render.cyr"
+
+fn main() {
+    alloc_init();
+
+    test_group("render — alpha blend");
+    assert_eq(rend_blend(0x000000, 0xFFFFFF, 255), 0xFFFFFF, "full src alpha = src");
+    assert_eq(rend_blend(0x000000, 0xFFFFFF, 0), 0x000000, "zero alpha = dst");
+    assert_eq(rend_blend(0x000000, 0xFFFFFF, 128), 0x808080, "half alpha = mid grey");
+    assert_eq(rend_blend(0x203040, 0x203040, 200), 0x203040, "same src/dst is stable");
+
+    test_group("render — damage tracker");
+    var d = rend_dmg_new();
+    assert_eq(rend_dmg_valid(d), 0, "empty damage invalid");
+    rend_dmg_add(d, 10, 10, 20, 20);
+    assert_eq(rend_dmg_valid(d), 1, "first add makes it valid");
+    assert_eq(rend_dmg_x(d), 10, "damage x");
+    assert_eq(rend_dmg_w(d), 20, "damage w");
+    rend_dmg_add(d, 5, 5, 10, 10);
+    assert_eq(rend_dmg_x(d), 5, "damage grows left");
+    assert_eq(rend_dmg_y(d), 5, "damage grows up");
+    assert_eq(rend_dmg_w(d), 25, "damage right edge held (30-5)");
+    assert_eq(rend_dmg_h(d), 25, "damage bottom edge held");
+    rend_dmg_clear(d);
+    assert_eq(rend_dmg_valid(d), 0, "clear resets validity");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

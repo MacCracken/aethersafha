@@ -1,0 +1,389 @@
+# aethersafha — security_ui BEHAVIORAL parity test.
+# Mirrors rust-old/src/security_ui.rs #[cfg(test)] mod tests + mod badge_tests.
+#
+# The module references only stdlib (vec / hashmap-u64 / string:streq) — all
+# auto-prepended by `cyrius build` (see cyrius.cyml [deps.stdlib]) — so we only
+# include the module itself. No src peer modules are referenced by security_ui.
+include "src/security_ui.cyr"
+
+# assert(cond) passes only when cond == 1; normalize a non-zero pointer to 1.
+fn t_ok(x): i64 {
+    if (x != 0) { return 1; }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    # -----------------------------------------------------------------------
+    # SecurityAlert::default() — Low threat, no action required, unresolved.
+    # (test_security_alert_default)
+    # -----------------------------------------------------------------------
+    test_group("security_ui — SecurityAlert default");
+    var da = sec_alert_default(1, 1000);
+    assert(t_ok(da), "sec_alert_default non-null");
+    assert_eq(sec_alert_threat(da), SecThreatLevel.SEC_TL_LOW, "default threat == Low");
+    assert_eq(sec_alert_requires_action(da), 0, "default !requires_action");
+    assert_eq(sec_alert_is_resolved(da), 0, "default !is_resolved");
+
+    # Custom alert (test_security_alert_custom).
+    var ca = sec_alert_new(2, "Suspicious", "Unusual", SecThreatLevel.SEC_TL_HIGH,
+        "agent-runtime", 1000, 1, 0);
+    assert_eq(sec_alert_threat(ca), SecThreatLevel.SEC_TL_HIGH, "custom threat == High");
+    assert_eq(sec_alert_requires_action(ca), 1, "custom requires_action");
+
+    # -----------------------------------------------------------------------
+    # ThreatLevel ordering (test_threat_level_ordering / _info_ordering).
+    # Ordered ascending: Info < Low < Medium < High < Critical.
+    # -----------------------------------------------------------------------
+    test_group("security_ui — ThreatLevel ordering");
+    var crit_gt_high = 0;
+    if (SecThreatLevel.SEC_TL_CRITICAL > SecThreatLevel.SEC_TL_HIGH) { crit_gt_high = 1; }
+    assert(crit_gt_high, "Critical > High");
+    var med_gt_low = 0;
+    if (SecThreatLevel.SEC_TL_MEDIUM > SecThreatLevel.SEC_TL_LOW) { med_gt_low = 1; }
+    assert(med_gt_low, "Medium > Low");
+    var info_lt_low = 0;
+    if (SecThreatLevel.SEC_TL_INFO < SecThreatLevel.SEC_TL_LOW) { info_lt_low = 1; }
+    assert(info_lt_low, "Info < Low");
+
+    # -----------------------------------------------------------------------
+    # SecurityUI::new — empty active/pending, 6 perm defs, Standard level.
+    # (test_security_ui_new / _permission_definitions_initialized /
+    #  test_security_ui_set_security_level default)
+    # -----------------------------------------------------------------------
+    test_group("security_ui — SecurityUI::new");
+    var ui = sec_ui_new();
+    assert(t_ok(ui), "sec_ui_new non-null");
+    var act0 = sec_ui_get_active_alerts(ui);
+    assert_eq(vec_len(act0), 0, "new: no active alerts");
+    var pend0 = sec_ui_get_pending_permissions(ui);
+    assert_eq(vec_len(pend0), 0, "new: no pending permissions");
+    assert_eq(vec_len(sec_ui_perm_defs(ui)), 6, "new: 6 permission definitions");
+    assert_eq(sec_ui_get_security_level(ui), SecLevel.SEC_LVL_STANDARD, "new: level Standard");
+    assert_eq(sec_ui_is_emergency_mode(ui), 0, "new: not emergency");
+    assert_eq(sec_ui_human_override_enabled(ui), 1, "new: human override enabled");
+
+    # find_perm_def for a seeded name resolves; unknown -> 0.
+    var def_fr = sec_ui_find_perm_def(ui, "file:read");
+    assert(t_ok(def_fr), "find_perm_def file:read");
+    assert_eq(sec_permdef_requires_confirmation(def_fr), 0, "file:read no confirmation");
+    var def_fw = sec_ui_find_perm_def(ui, "file:write");
+    assert_eq(sec_permdef_requires_confirmation(def_fw), 1, "file:write requires confirmation");
+    assert_eq(sec_ui_find_perm_def(ui, "unknown:perm"), 0, "find_perm_def unknown -> 0");
+
+    # -----------------------------------------------------------------------
+    # Show + dismiss alert (test_security_ui_show_alert / _dismiss_alert /
+    #  test_dismiss_nonexistent_alert_succeeds).
+    # -----------------------------------------------------------------------
+    test_group("security_ui — show / dismiss alert");
+    var al = sec_alert_new(10, "Test Alert", "Test", SecThreatLevel.SEC_TL_MEDIUM,
+        "test", 1000, 1, 0);
+    sec_ui_show_security_alert(ui, al);
+    var act1 = sec_ui_get_active_alerts(ui);
+    assert_eq(vec_len(act1), 1, "show: 1 active alert");
+
+    # Dismiss by id -> resolved -> drops out of active set.
+    var derr = sec_ui_dismiss_alert(ui, 10);
+    assert_eq(derr, SecErr.SEC_ERR_OK, "dismiss returns OK");
+    var act2 = sec_ui_get_active_alerts(ui);
+    assert_eq(vec_len(act2), 0, "dismiss: 0 active alerts");
+    # Dismiss nonexistent id still returns OK (Rust: Ok(()) always).
+    assert_eq(sec_ui_dismiss_alert(ui, 9999), SecErr.SEC_ERR_OK, "dismiss missing -> OK");
+
+    # -----------------------------------------------------------------------
+    # Request / grant / deny permission (test_security_ui_request_permission,
+    #  _grant_permission, _deny_permission, grant/deny nonexistent succeed).
+    # -----------------------------------------------------------------------
+    test_group("security_ui — request / grant / deny permission");
+    var pr = sec_permreq_new(20, 100, "test", "file:read", "/home", "Read files", 1000, 0);
+    sec_ui_request_permission(ui, pr);
+    var pend1 = sec_ui_get_pending_permissions(ui);
+    assert_eq(vec_len(pend1), 1, "request: 1 pending");
+
+    # Grant marks granted -> no longer pending.
+    var gerr = sec_ui_grant_permission(ui, 20);
+    assert_eq(gerr, SecErr.SEC_ERR_OK, "grant returns OK");
+    assert_eq(sec_permreq_is_granted(pr), 1, "grant: request is_granted");
+    var pend2 = sec_ui_get_pending_permissions(ui);
+    assert_eq(vec_len(pend2), 0, "grant: 0 pending");
+    # Grant nonexistent still OK.
+    assert_eq(sec_ui_grant_permission(ui, 9999), SecErr.SEC_ERR_OK, "grant missing -> OK");
+
+    # Deny removes the request outright.
+    var pr2 = sec_permreq_new(21, 100, "test", "file:read", "/home", "Read", 1000, 0);
+    sec_ui_request_permission(ui, pr2);
+    var pend3 = sec_ui_get_pending_permissions(ui);
+    assert_eq(vec_len(pend3), 1, "second request: 1 pending");
+    var yerr = sec_ui_deny_permission(ui, 21);
+    assert_eq(yerr, SecErr.SEC_ERR_OK, "deny returns OK");
+    var pend4 = sec_ui_get_pending_permissions(ui);
+    assert_eq(vec_len(pend4), 0, "deny: 0 pending");
+    assert_eq(sec_ui_deny_permission(ui, 9999), SecErr.SEC_ERR_OK, "deny missing -> OK");
+
+    # -----------------------------------------------------------------------
+    # Agent permissions map (test_security_ui_set_agent_permissions,
+    #  _revoke_agent_permissions, _revoke_nonexistent, set overwrite).
+    # -----------------------------------------------------------------------
+    test_group("security_ui — agent permissions map");
+    var perms = vec_new();
+    vec_push(perms, "read");
+    sec_ui_set_agent_permissions(ui, 500, "test-agent", perms, 1000);
+    var apget = sec_ui_get_agent_permission(ui, 500);
+    assert(t_ok(apget), "set_agent_permissions stored");
+    assert_eq(sec_agentperm_agent_id(apget), 500, "agent id stored");
+    var has_read = sec_agentperm_has(apget, "read");
+    assert_eq(has_read, 1, "agent perm has read");
+
+    # Overwrite: second set replaces the whole entry (test_set..overwrite).
+    var perms2 = vec_new();
+    vec_push(perms2, "write");
+    sec_ui_set_agent_permissions(ui, 500, "test-agent", perms2, 1001);
+    var apget2 = sec_ui_get_agent_permission(ui, 500);
+    var has_write = sec_agentperm_has(apget2, "write");
+    assert_eq(has_write, 1, "overwrite: has write");
+    var has_read2 = sec_agentperm_has(apget2, "read");
+    assert_eq(has_read2, 0, "overwrite: no longer has read");
+
+    # Revoke present -> OK; revoke absent -> PERMISSION_NOT_FOUND.
+    var rerr = sec_ui_revoke_agent_permissions(ui, 500);
+    assert_eq(rerr, SecErr.SEC_ERR_OK, "revoke present -> OK");
+    assert_eq(sec_ui_get_agent_permission(ui, 500), 0, "revoke: entry gone");
+    var rerr2 = sec_ui_revoke_agent_permissions(ui, 4242);
+    assert_eq(rerr2, SecErr.SEC_ERR_PERMISSION_NOT_FOUND, "revoke absent -> NOT_FOUND");
+
+    # -----------------------------------------------------------------------
+    # AgentPermission add/remove/has dedup + expiry (test_grant_duplicate,
+    #  _agent_permission, expires_at). Uses the entry accessors directly.
+    # -----------------------------------------------------------------------
+    test_group("security_ui — AgentPermission add/remove/expire");
+    var ap = sec_agentperm_new(600, "a", 0, 1000, 0);
+    assert(t_ok(ap), "agentperm_new non-null");
+    var added1 = sec_agentperm_add(ap, "read");
+    assert_eq(added1, 1, "add read -> 1 (added)");
+    var added_dup = sec_agentperm_add(ap, "read");
+    assert_eq(added_dup, 0, "add dup read -> 0 (already present)");
+    var added2 = sec_agentperm_add(ap, "write");
+    assert_eq(added2, 1, "add write -> 1 (added)");
+    assert_eq(vec_len(sec_agentperm_permissions(ap)), 2, "dedup: 2 permissions");
+    var removed = sec_agentperm_remove(ap, "read");
+    assert_eq(removed, 1, "remove read -> count 1");
+    assert_eq(sec_agentperm_has(ap, "read"), 0, "removed: no read");
+    assert_eq(sec_agentperm_has(ap, "write"), 1, "removed: still write");
+    # Expiry: 0 == None -> never expires; set future/past.
+    assert_eq(sec_agentperm_is_expired(ap, 5000), 0, "expires_at None -> not expired");
+    sec_agentperm_set_expires_at(ap, 2000);
+    assert_eq(sec_agentperm_is_expired(ap, 1500), 0, "now < exp -> not expired");
+    assert_eq(sec_agentperm_is_expired(ap, 2500), 1, "now >= exp -> expired");
+
+    # -----------------------------------------------------------------------
+    # Human override request / approve (test_..request_human_override,
+    #  _approve_override, _approve_nonexistent, multiple_overrides_then_approve).
+    # -----------------------------------------------------------------------
+    test_group("security_ui — human override");
+    var oid1 = sec_ui_request_human_override(ui, "agent", "delete", "test", 1000);
+    var ovreq1 = sec_ui_get_override_requests(ui);
+    assert_eq(vec_len(ovreq1), 1, "override: 1 pending");
+    var oid2 = sec_ui_request_human_override(ui, "b", "y", "r", 1000);
+    var ovreq2 = sec_ui_get_override_requests(ui);
+    assert_eq(vec_len(ovreq2), 2, "override: 2 pending");
+    # Approve id1 -> only id2 remains pending.
+    var aerr = sec_ui_approve_override(ui, oid1, "admin");
+    assert_eq(aerr, SecErr.SEC_ERR_OK, "approve returns OK");
+    var ovreq3 = sec_ui_get_override_requests(ui);
+    assert_eq(vec_len(ovreq3), 1, "approve: 1 pending remains");
+    var remaining = vec_get(ovreq3, 0);
+    assert_eq(sec_override_id(remaining), oid2, "remaining override is id2");
+    # Approve nonexistent -> ALERT_NOT_FOUND (Rust reuses AlertNotFound).
+    var aerr2 = sec_ui_approve_override(ui, 999999, "admin");
+    assert_eq(aerr2, SecErr.SEC_ERR_ALERT_NOT_FOUND, "approve missing -> NOT_FOUND");
+
+    # -----------------------------------------------------------------------
+    # Emergency kill switch (test_..emergency_kill_switch, _deactivate,
+    #  _revokes_overrides, _keeps_human_override_enabled).
+    # -----------------------------------------------------------------------
+    test_group("security_ui — emergency kill switch");
+    # Approve id2 so it is approved before the kill switch un-approves it.
+    sec_ui_approve_override(ui, oid2, "admin");
+    var before_kill = sec_ui_get_override_requests(ui);
+    assert_eq(vec_len(before_kill), 0, "both overrides approved before kill");
+    sec_ui_emergency_kill_switch(ui);
+    assert_eq(sec_ui_is_emergency_mode(ui), 1, "kill switch: emergency on");
+    assert_eq(sec_ui_human_override_enabled(ui), 1, "kill switch: human override kept");
+    # All overrides un-approved -> both pending again.
+    var after_kill = sec_ui_get_override_requests(ui);
+    assert_eq(vec_len(after_kill), 2, "kill switch: overrides un-approved");
+    # Deactivate clears emergency but keeps human override.
+    sec_ui_deactivate_emergency(ui);
+    assert_eq(sec_ui_is_emergency_mode(ui), 0, "deactivate: emergency off");
+    assert_eq(sec_ui_human_override_enabled(ui), 1, "deactivate: human override kept");
+
+    # -----------------------------------------------------------------------
+    # Security level transitions (test_..set_security_level, _transitions).
+    # -----------------------------------------------------------------------
+    test_group("security_ui — security level transitions");
+    sec_ui_set_security_level(ui, SecLevel.SEC_LVL_ELEVATED);
+    assert_eq(sec_ui_get_security_level(ui), SecLevel.SEC_LVL_ELEVATED, "level Elevated");
+    sec_ui_set_security_level(ui, SecLevel.SEC_LVL_LOCKDOWN);
+    assert_eq(sec_ui_get_security_level(ui), SecLevel.SEC_LVL_LOCKDOWN, "level Lockdown");
+    sec_ui_set_security_level(ui, SecLevel.SEC_LVL_STANDARD);
+    assert_eq(sec_ui_get_security_level(ui), SecLevel.SEC_LVL_STANDARD, "level back to Standard");
+
+    # -----------------------------------------------------------------------
+    # Enforcement paths (test_grant_permission_enforced, _lockdown,
+    #  _no_confirmation_in_lockdown, _revoke_enforced, _not_found, dedup,
+    #  multiple, elevated, network_outbound_lockdown_ok).
+    # -----------------------------------------------------------------------
+    test_group("security_ui — enforced grant / revoke");
+    # Known permission grants OK; creates the agent entry with the permission.
+    var e1 = sec_ui_grant_permission_enforced(ui, 700, "test-agent", "file:read", 1000);
+    assert_eq(e1, SecErr.SEC_ERR_OK, "enforced grant file:read OK");
+    var ent700 = sec_ui_get_agent_permission(ui, 700);
+    assert(t_ok(ent700), "enforced grant created agent entry");
+    assert_eq(sec_agentperm_has(ent700, "file:read"), 1, "entry has file:read");
+    # Unknown permission -> PERMISSION_NOT_FOUND.
+    var e2 = sec_ui_grant_permission_enforced(ui, 700, "test-agent", "unknown:perm", 1000);
+    assert_eq(e2, SecErr.SEC_ERR_PERMISSION_NOT_FOUND, "enforced grant unknown -> NOT_FOUND");
+    # Duplicate grant is deduped -> still one entry for file:read.
+    sec_ui_grant_permission_enforced(ui, 700, "test-agent", "file:read", 1000);
+    assert_eq(vec_len(sec_agentperm_permissions(ent700)), 1, "enforced dedup: 1 perm");
+    # Add a second permission -> 2.
+    sec_ui_grant_permission_enforced(ui, 700, "test-agent", "network:outbound", 1000);
+    assert_eq(vec_len(sec_agentperm_permissions(ent700)), 2, "enforced grant 2nd -> 2 perms");
+
+    # Lockdown blocks confirmation-required perms; allows no-confirm perms.
+    sec_ui_set_security_level(ui, SecLevel.SEC_LVL_LOCKDOWN);
+    var e3 = sec_ui_grant_permission_enforced(ui, 701, "agent", "file:write", 1000);
+    assert_eq(e3, SecErr.SEC_ERR_ACTION_BLOCKED, "lockdown blocks file:write");
+    var e4 = sec_ui_grant_permission_enforced(ui, 701, "agent", "file:delete", 1000);
+    assert_eq(e4, SecErr.SEC_ERR_ACTION_BLOCKED, "lockdown blocks file:delete");
+    var e5 = sec_ui_grant_permission_enforced(ui, 701, "agent", "process:spawn", 1000);
+    assert_eq(e5, SecErr.SEC_ERR_ACTION_BLOCKED, "lockdown blocks process:spawn");
+    var e6 = sec_ui_grant_permission_enforced(ui, 701, "agent", "file:read", 1000);
+    assert_eq(e6, SecErr.SEC_ERR_OK, "lockdown allows file:read (no confirm)");
+    var e7 = sec_ui_grant_permission_enforced(ui, 701, "agent", "network:outbound", 1000);
+    assert_eq(e7, SecErr.SEC_ERR_OK, "lockdown allows network:outbound (no confirm)");
+
+    # Elevated (not Lockdown) allows confirmation-required perms.
+    sec_ui_set_security_level(ui, SecLevel.SEC_LVL_ELEVATED);
+    var e8 = sec_ui_grant_permission_enforced(ui, 702, "test-agent", "file:write", 1000);
+    assert_eq(e8, SecErr.SEC_ERR_OK, "elevated allows file:write");
+    sec_ui_set_security_level(ui, SecLevel.SEC_LVL_STANDARD);
+
+    # Revoke enforced removes only the named perm; missing agent -> NOT_FOUND.
+    var rv1 = sec_ui_revoke_permission_enforced(ui, 700, "file:read", 0);
+    assert_eq(rv1, SecErr.SEC_ERR_OK, "revoke enforced OK");
+    assert_eq(sec_agentperm_has(ent700, "file:read"), 0, "revoke removed file:read");
+    assert_eq(sec_agentperm_has(ent700, "network:outbound"), 1, "revoke kept network:outbound");
+    var rv2 = sec_ui_revoke_permission_enforced(ui, 9999, "file:read", 0);
+    assert_eq(rv2, SecErr.SEC_ERR_PERMISSION_NOT_FOUND, "revoke missing agent -> NOT_FOUND");
+
+    # -----------------------------------------------------------------------
+    # Dashboard aggregation (test_..get_dashboard, _with_alerts_and_perms,
+    #  _no_active_alerts_returns_low, _critical_alert_shows, _info_level).
+    # Use a fresh UI to control counts precisely.
+    # -----------------------------------------------------------------------
+    test_group("security_ui — dashboard aggregation");
+    var ui2 = sec_ui_new();
+    var d0 = sec_ui_get_security_dashboard(ui2, 2000);
+    assert_eq(sec_dash_active_alerts(d0), 0, "empty dash: 0 active alerts");
+    assert_eq(sec_dash_pending_permissions(d0), 0, "empty dash: 0 pending");
+    assert_eq(sec_dash_threat_level(d0), SecThreatLevel.SEC_TL_LOW, "empty dash: Low threat");
+    assert_eq(sec_dash_last_scan(d0), 2000, "empty dash: last_scan == now");
+
+    # 2 alerts (1 High unresolved, 1 Medium resolved), 1 pending req, 1 agent.
+    var h = sec_alert_new(30, "Alert 1", "", SecThreatLevel.SEC_TL_HIGH, "s", 2000, 0, 0);
+    sec_ui_show_security_alert(ui2, h);
+    var mrez = sec_alert_new(31, "Alert 2", "", SecThreatLevel.SEC_TL_MEDIUM, "s", 2000, 0, 1);
+    sec_ui_show_security_alert(ui2, mrez);
+    var req = sec_permreq_new(40, 100, "test", "file:read", "/home", "test", 2000, 0);
+    sec_ui_request_permission(ui2, req);
+    var emptyv = vec_new();
+    sec_ui_set_agent_permissions(ui2, 900, "a", emptyv, 2000);
+    var d1 = sec_ui_get_security_dashboard(ui2, 2100);
+    assert_eq(sec_dash_active_alerts(d1), 1, "dash: 1 active alert (unresolved only)");
+    assert_eq(sec_dash_pending_permissions(d1), 1, "dash: 1 pending permission");
+    assert_eq(sec_dash_running_agents(d1), 1, "dash: 1 running agent");
+    assert_eq(sec_dash_threat_level(d1), SecThreatLevel.SEC_TL_HIGH, "dash: max threat High");
+
+    # -----------------------------------------------------------------------
+    # emergency_kill_agent — records a RESOLVED critical alert (test_..no_pid).
+    # Resolved -> does NOT count as active, but is recorded in the alert vec.
+    # -----------------------------------------------------------------------
+    test_group("security_ui — emergency kill agent");
+    var ui3 = sec_ui_new();
+    var kerr = sec_ui_emergency_kill_agent(ui3, 123, 0, 3000);
+    assert_eq(kerr, SecErr.SEC_ERR_OK, "kill agent -> OK");
+    # The alert was recorded (raw alerts vec has 1) but resolved (0 active).
+    assert_eq(vec_len(sec_ui_alerts(ui3)), 1, "kill agent: 1 alert recorded");
+    var act_after_kill = sec_ui_get_active_alerts(ui3);
+    assert_eq(vec_len(act_after_kill), 0, "kill agent: alert is resolved (0 active)");
+    var killed_alert = vec_get(sec_ui_alerts(ui3), 0);
+    assert_eq(sec_alert_threat(killed_alert), SecThreatLevel.SEC_TL_CRITICAL, "kill alert Critical");
+    assert_eq(sec_alert_is_resolved(killed_alert), 1, "kill alert resolved");
+
+    # -----------------------------------------------------------------------
+    # WindowBadgeManager (badge_tests: new_empty, assign_and_get, get_missing,
+    #  remove, remove_missing, badges_by_trust, color_for_trust, overwrite).
+    # -----------------------------------------------------------------------
+    test_group("security_ui — WindowBadgeManager");
+    var mgr = sec_badge_mgr_new();
+    assert(t_ok(mgr), "badge_mgr_new non-null");
+    assert_eq(sec_badge_mgr_is_empty(mgr), 1, "new mgr is empty");
+    assert_eq(sec_badge_mgr_len(mgr), 0, "new mgr len 0");
+
+    var col_ver = sec_badge_color_for_trust(SecTrustLevel.SEC_TRUST_VERIFIED);
+    var b1 = sec_badge_new("agent-001", "test-agent", SecTrustLevel.SEC_TRUST_VERIFIED,
+        SecSandboxStatus.SEC_SB_FULL, col_ver, SecBadgeIcon.SEC_ICON_AGENT);
+    sec_badge_mgr_assign(mgr, 1, b1);
+    var got = sec_badge_mgr_get(mgr, 1);
+    assert(t_ok(got), "assign then get badge");
+    assert_eq(sec_badge_trust_level(got), SecTrustLevel.SEC_TRUST_VERIFIED, "badge trust Verified");
+    assert_eq(sec_badge_mgr_len(mgr), 1, "mgr len 1 after assign");
+    assert_eq(sec_badge_mgr_is_empty(mgr), 0, "mgr not empty after assign");
+    assert_eq(sec_badge_mgr_get(mgr, 999), 0, "get missing surface -> 0");
+
+    # Overwrite same surface -> len stays 1, new badge wins.
+    var b1b = sec_badge_new("agent-002", "new-agent", SecTrustLevel.SEC_TRUST_UNVERIFIED,
+        SecSandboxStatus.SEC_SB_FULL, 0, SecBadgeIcon.SEC_ICON_AGENT);
+    sec_badge_mgr_assign(mgr, 1, b1b);
+    assert_eq(sec_badge_mgr_len(mgr), 1, "overwrite: len stays 1");
+    var got2 = sec_badge_mgr_get(mgr, 1);
+    assert_eq(sec_badge_trust_level(got2), SecTrustLevel.SEC_TRUST_UNVERIFIED, "overwrite: new trust");
+
+    # badges_by_trust — 2 Verified + 1 Untrusted across fresh surfaces.
+    var mgr2 = sec_badge_mgr_new();
+    var v_a = sec_badge_new(0, "a", SecTrustLevel.SEC_TRUST_VERIFIED,
+        SecSandboxStatus.SEC_SB_FULL, 0, SecBadgeIcon.SEC_ICON_AGENT);
+    var v_b = sec_badge_new(0, "b", SecTrustLevel.SEC_TRUST_UNTRUSTED,
+        SecSandboxStatus.SEC_SB_FULL, 0, SecBadgeIcon.SEC_ICON_AGENT);
+    var v_c = sec_badge_new(0, "c", SecTrustLevel.SEC_TRUST_VERIFIED,
+        SecSandboxStatus.SEC_SB_FULL, 0, SecBadgeIcon.SEC_ICON_AGENT);
+    sec_badge_mgr_assign(mgr2, 10, v_a);
+    sec_badge_mgr_assign(mgr2, 11, v_b);
+    sec_badge_mgr_assign(mgr2, 12, v_c);
+    var verified = sec_badge_mgr_badges_by_trust(mgr2, SecTrustLevel.SEC_TRUST_VERIFIED);
+    assert_eq(vec_len(verified), 2, "badges_by_trust Verified -> 2");
+    var untrusted = sec_badge_mgr_badges_by_trust(mgr2, SecTrustLevel.SEC_TRUST_UNTRUSTED);
+    assert_eq(vec_len(untrusted), 1, "badges_by_trust Untrusted -> 1");
+    var system = sec_badge_mgr_badges_by_trust(mgr2, SecTrustLevel.SEC_TRUST_SYSTEM);
+    assert_eq(vec_len(system), 0, "badges_by_trust System -> 0");
+
+    # remove returns the badge and empties; remove missing -> 0.
+    var rmv = sec_badge_mgr_remove(mgr2, 10);
+    assert(t_ok(rmv), "remove returns the badge");
+    assert_eq(sec_badge_mgr_len(mgr2), 2, "remove: len 2");
+    assert_eq(sec_badge_mgr_remove(mgr2, 9999), 0, "remove missing -> 0");
+
+    # color_for_trust constants (test_badge_color_for_trust).
+    assert_eq(sec_badge_color_for_trust(SecTrustLevel.SEC_TRUST_SYSTEM), 0xFF4488FF, "color System");
+    assert_eq(sec_badge_color_for_trust(SecTrustLevel.SEC_TRUST_VERIFIED), 0xFF44CC44, "color Verified");
+    assert_eq(sec_badge_color_for_trust(SecTrustLevel.SEC_TRUST_UNVERIFIED), 0xFFCCCC44, "color Unverified");
+    assert_eq(sec_badge_color_for_trust(SecTrustLevel.SEC_TRUST_UNTRUSTED), 0xFFCC4444, "color Untrusted");
+    assert_eq(sec_badge_color_for_trust(SecTrustLevel.SEC_TRUST_SANDBOXED), 0xFFCC8844, "color Sandboxed");
+
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);

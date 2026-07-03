@@ -1,0 +1,259 @@
+# aethersafha accessibility (a11y) parity test.
+# Mirrors rust-old/src/accessibility.rs #[cfg(test)] behaviors against the
+# Cyrius port in src/accessibility.cyr.
+#
+# accessibility.cyr is self-contained: it uses only stdlib intrinsics
+# (alloc/load64/store64/load8/strlen) and stdlib containers (vec_*), all
+# auto-prepended via cyrius.cyml [deps.stdlib]. No src/ includes are needed.
+include "src/accessibility.cyr"
+
+# assert(cond) passes only when cond == 1; normalize a non-zero pointer to 1.
+fn t_ok(x): i64 {
+    if (x != 0) { return 1; }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    # ------------------------------------------------------------------
+    # test_tree_new_is_empty + test_tree_default_impl
+    # ------------------------------------------------------------------
+    test_group("a11y — tree new is empty");
+    var tree = a11y_tree_new();
+    assert(t_ok(tree), "a11y_tree_new non-null");
+    assert_eq(a11y_tree_is_empty(tree), 1, "fresh tree is empty");
+    assert_eq(a11y_tree_len(tree), 0, "fresh tree len 0");
+
+    # ------------------------------------------------------------------
+    # test_add_and_get_node
+    # ------------------------------------------------------------------
+    test_group("a11y — add and get node");
+    var id_ok = a11y_tree_add(tree, AxRole.AX_ROLE_BUTTON, "OK");
+    assert_eq(a11y_tree_len(tree), 1, "len 1 after add");
+    var oknode = a11y_tree_get_node(tree, id_ok);
+    assert(t_ok(oknode), "get_node returns node");
+    assert_eq(a11y_node_role(oknode), AxRole.AX_ROLE_BUTTON, "role is Button");
+    var okname = a11y_node_name(oknode);
+    var okname_match = strlen(okname);
+    assert_eq(okname_match, 2, "name 'OK' has len 2");
+    var same_name = a11y_cstr_icontains(okname, "OK");
+    assert_eq(same_name, 1, "node name is OK");
+
+    # ------------------------------------------------------------------
+    # test_accessible_node_new + test_accessibility_state_default
+    # ------------------------------------------------------------------
+    test_group("a11y — node/state defaults");
+    var dnode = a11y_node_new(99, AxRole.AX_ROLE_DIALOG, "Confirm");
+    assert(t_ok(dnode), "node_new non-null");
+    assert_eq(a11y_node_role(dnode), AxRole.AX_ROLE_DIALOG, "node role Dialog");
+    assert_eq(a11y_node_parent(dnode), 0, "node has no parent");
+    assert_eq(vec_len(a11y_node_children(dnode)), 0, "node children empty");
+    assert_eq(vec_len(a11y_node_actions(dnode)), 0, "node actions empty");
+    assert_eq(a11y_node_is_focused(dnode), 0, "node not focused by default");
+    var dstate = a11y_node_state(dnode);
+    assert_eq(a11y_state_focused(dstate), 0, "state focused false");
+    assert_eq(a11y_state_selected(dstate), 0, "state selected false");
+    assert_eq(a11y_state_expanded(dstate), 0, "state expanded false");
+    assert_eq(a11y_state_checked(dstate), AxTristate.AX_TRISTATE_NONE, "state checked None");
+    assert_eq(a11y_state_disabled(dstate), 0, "state disabled false");
+    assert_eq(a11y_state_hidden(dstate), 0, "state hidden false");
+    assert_eq(a11y_state_value(dstate), 0, "state value None (0)");
+
+    # ------------------------------------------------------------------
+    # test_remove_node + test_remove_nonexistent_node
+    # ------------------------------------------------------------------
+    test_group("a11y — remove node");
+    var rtree = a11y_tree_new();
+    var rid = a11y_tree_add(rtree, AxRole.AX_ROLE_LABEL, "Title");
+    var removed = a11y_tree_remove_node(rtree, rid);
+    assert(t_ok(removed), "remove returns removed node");
+    assert_eq(a11y_tree_is_empty(rtree), 1, "tree empty after remove");
+    assert_eq(a11y_tree_get_node(rtree, rid), 0, "get_node gone after remove");
+    var miss = a11y_tree_remove_node(rtree, 424242);
+    assert_eq(miss, 0, "remove nonexistent returns 0");
+
+    # ------------------------------------------------------------------
+    # test_set_focus + test_set_focus_nonexistent
+    # ------------------------------------------------------------------
+    test_group("a11y — set focus");
+    var ftree = a11y_tree_new();
+    var fid = a11y_tree_add(ftree, AxRole.AX_ROLE_TEXT_INPUT, "Name");
+    var src = a11y_tree_set_focus(ftree, fid);
+    assert_eq(src, 0, "set_focus ok returns 0");
+    assert_eq(a11y_tree_focused_id(ftree), fid, "focused_id set");
+    var fnode = a11y_tree_get_focused(ftree);
+    assert(t_ok(fnode), "get_focused non-null");
+    assert_eq(a11y_node_id(fnode), fid, "focused node id matches");
+    assert_eq(a11y_node_is_focused(fnode), 1, "focused node state.focused true");
+    var missfocus = a11y_tree_set_focus(ftree, 777);
+    assert_eq(missfocus, 0 - 1, "set_focus nonexistent returns -1");
+
+    # ------------------------------------------------------------------
+    # test_set_focus_clears_previous + test_remove_focused_node_clears_focus
+    # ------------------------------------------------------------------
+    test_group("a11y — focus transitions");
+    var ctree = a11y_tree_new();
+    var ca = a11y_tree_add(ctree, AxRole.AX_ROLE_BUTTON, "A");
+    var cb = a11y_tree_add(ctree, AxRole.AX_ROLE_BUTTON, "B");
+    a11y_tree_set_focus(ctree, ca);
+    a11y_tree_set_focus(ctree, cb);
+    assert_eq(a11y_node_is_focused(a11y_tree_get_node(ctree, ca)), 0, "prev node unfocused");
+    assert_eq(a11y_node_is_focused(a11y_tree_get_node(ctree, cb)), 1, "new node focused");
+    a11y_tree_remove_node(ctree, cb);
+    assert_eq(a11y_tree_get_focused(ctree), 0, "focus cleared when focused node removed");
+    assert_eq(a11y_tree_focused_id(ctree), 0, "focused_id reset to 0");
+
+    # ------------------------------------------------------------------
+    # test_navigate_next_simple (wraps)
+    # ------------------------------------------------------------------
+    test_group("a11y — navigate next wraps");
+    var ntree = a11y_tree_new();
+    var na = a11y_tree_add(ntree, AxRole.AX_ROLE_BUTTON, "A");
+    var nb = a11y_tree_add(ntree, AxRole.AX_ROLE_BUTTON, "B");
+    var nc = a11y_tree_add(ntree, AxRole.AX_ROLE_BUTTON, "C");
+    assert_eq(a11y_node_id(a11y_tree_navigate_next(ntree)), na, "next -> A");
+    assert_eq(a11y_node_id(a11y_tree_navigate_next(ntree)), nb, "next -> B");
+    assert_eq(a11y_node_id(a11y_tree_navigate_next(ntree)), nc, "next -> C");
+    assert_eq(a11y_node_id(a11y_tree_navigate_next(ntree)), na, "next wraps -> A");
+
+    # ------------------------------------------------------------------
+    # test_navigate_next_skips_hidden
+    # ------------------------------------------------------------------
+    test_group("a11y — navigate skips hidden");
+    var htree = a11y_tree_new();
+    var ha = a11y_tree_add(htree, AxRole.AX_ROLE_BUTTON, "A");
+    var hh = a11y_tree_add(htree, AxRole.AX_ROLE_BUTTON, "Hidden");
+    a11y_state_set_hidden(a11y_node_state(a11y_tree_get_node(htree, hh)), 1);
+    var hc = a11y_tree_add(htree, AxRole.AX_ROLE_BUTTON, "C");
+    a11y_tree_navigate_next(htree);   # focus A
+    assert_eq(a11y_node_id(a11y_tree_navigate_next(htree)), hc, "hidden node skipped -> C");
+
+    # ------------------------------------------------------------------
+    # test_navigate_next_skips_disabled (only one focusable -> wraps back)
+    # ------------------------------------------------------------------
+    test_group("a11y — navigate skips disabled");
+    var dtree = a11y_tree_new();
+    var da = a11y_tree_add(dtree, AxRole.AX_ROLE_BUTTON, "A");
+    var dd = a11y_tree_add(dtree, AxRole.AX_ROLE_BUTTON, "Disabled");
+    a11y_state_set_disabled(a11y_node_state(a11y_tree_get_node(dtree, dd)), 1);
+    a11y_tree_navigate_next(dtree);   # focus A (only focusable)
+    assert_eq(a11y_node_id(a11y_tree_navigate_next(dtree)), da, "disabled skipped, wraps to A");
+
+    # ------------------------------------------------------------------
+    # test_navigate_next_empty_tree + test_navigate_prev_empty
+    # ------------------------------------------------------------------
+    test_group("a11y — navigate empty tree");
+    var etree = a11y_tree_new();
+    assert_eq(a11y_tree_navigate_next(etree), 0, "navigate_next empty -> 0");
+    assert_eq(a11y_tree_navigate_prev(etree), 0, "navigate_prev empty -> 0");
+
+    # ------------------------------------------------------------------
+    # test_navigate_prev (no focus goes to last, then walks backwards)
+    # ------------------------------------------------------------------
+    test_group("a11y — navigate prev");
+    var ptree = a11y_tree_new();
+    var pa = a11y_tree_add(ptree, AxRole.AX_ROLE_BUTTON, "A");
+    var pb = a11y_tree_add(ptree, AxRole.AX_ROLE_BUTTON, "B");
+    var pc = a11y_tree_add(ptree, AxRole.AX_ROLE_BUTTON, "C");
+    assert_eq(a11y_node_id(a11y_tree_navigate_prev(ptree)), pc, "prev (no focus) -> last C");
+    assert_eq(a11y_node_id(a11y_tree_navigate_prev(ptree)), pb, "prev -> B");
+    assert_eq(a11y_node_id(a11y_tree_navigate_prev(ptree)), pa, "prev -> A");
+
+    # ------------------------------------------------------------------
+    # test_search_by_name + case-insensitive + no-match
+    # ------------------------------------------------------------------
+    test_group("a11y — search by name");
+    var stree = a11y_tree_new();
+    a11y_tree_add(stree, AxRole.AX_ROLE_BUTTON, "Save File");
+    a11y_tree_add(stree, AxRole.AX_ROLE_BUTTON, "Save As");
+    a11y_tree_add(stree, AxRole.AX_ROLE_BUTTON, "Cancel");
+    assert_eq(vec_len(a11y_tree_search_by_name(stree, "save")), 2, "2 nodes match 'save'");
+    assert_eq(vec_len(a11y_tree_search_by_name(stree, "SAVE")), 2, "case-insensitive SAVE");
+    assert_eq(vec_len(a11y_tree_search_by_name(stree, "Xyzzy")), 0, "no match empty");
+
+    var htree2 = a11y_tree_new();
+    a11y_tree_add(htree2, AxRole.AX_ROLE_LABEL, "Hello World");
+    assert_eq(vec_len(a11y_tree_search_by_name(htree2, "HELLO")), 1, "HELLO matches Hello World");
+
+    # ------------------------------------------------------------------
+    # test_search_by_role + no-match
+    # ------------------------------------------------------------------
+    test_group("a11y — search by role");
+    var rtree2 = a11y_tree_new();
+    a11y_tree_add(rtree2, AxRole.AX_ROLE_BUTTON, "A");
+    a11y_tree_add(rtree2, AxRole.AX_ROLE_LABEL, "B");
+    a11y_tree_add(rtree2, AxRole.AX_ROLE_BUTTON, "C");
+    assert_eq(vec_len(a11y_tree_search_by_role(rtree2, AxRole.AX_ROLE_BUTTON)), 2, "2 buttons");
+    assert_eq(vec_len(a11y_tree_search_by_role(rtree2, AxRole.AX_ROLE_LABEL)), 1, "1 label");
+    assert_eq(vec_len(a11y_tree_search_by_role(rtree2, AxRole.AX_ROLE_SLIDER)), 0, "0 sliders");
+
+    # ------------------------------------------------------------------
+    # test_announcements + test_announcements_empty
+    # ------------------------------------------------------------------
+    test_group("a11y — announcements");
+    var atree = a11y_tree_new();
+    a11y_tree_announce(atree, "Window opened");
+    a11y_tree_announce(atree, "Focus moved to OK button");
+    assert_eq(a11y_tree_announcement_count(atree), 2, "2 pending announcements");
+    var pending = a11y_tree_pending_announcements(atree);
+    assert_eq(vec_len(pending), 2, "drained queue has 2 entries");
+    var first_msg = vec_get(pending, 0);
+    var first_ok = a11y_cstr_icontains(first_msg, "Window opened");
+    assert_eq(first_ok, 1, "first announcement text");
+    assert_eq(a11y_tree_announcement_count(atree), 0, "queue drained to 0");
+
+    # ------------------------------------------------------------------
+    # test_high_contrast_theme_light + dark
+    # ------------------------------------------------------------------
+    test_group("a11y — high-contrast themes");
+    var lt = a11y_theme_default_high_contrast();
+    assert(t_ok(lt), "light theme non-null");
+    assert_eq(a11y_theme_background(lt), 0xFFFFFFFF, "light bg white");
+    assert_eq(a11y_theme_foreground(lt), 0xFF000000, "light fg black");
+    assert_eq(a11y_theme_focus_ring_width(lt), 3, "light ring width 3");
+    var lscale = a11y_theme_font_scale(lt);
+    var lscale_big = 0;
+    if (lscale > 1000) { lscale_big = 1; }
+    assert_eq(lscale_big, 1, "light font_scale > 1.0 (permille>1000)");
+    var dt = a11y_theme_default_dark_high_contrast();
+    assert(t_ok(dt), "dark theme non-null");
+    assert_eq(a11y_theme_background(dt), 0xFF000000, "dark bg black");
+    assert_eq(a11y_theme_foreground(dt), 0xFFFFFFFF, "dark fg white");
+    var dscale = a11y_theme_font_scale(dt);
+    var dscale_big = 0;
+    if (dscale > 1000) { dscale_big = 1; }
+    assert_eq(dscale_big, 1, "dark font_scale > 1.0");
+
+    # ------------------------------------------------------------------
+    # test_keyboard_nav_config_defaults
+    # ------------------------------------------------------------------
+    test_group("a11y — keyboard nav defaults");
+    var kn = a11y_kbdnav_default();
+    assert(t_ok(kn), "kbdnav default non-null");
+    assert_eq(a11y_kbdnav_tab_cycle(kn), 1, "tab_cycle default true");
+    assert_eq(a11y_kbdnav_arrow_navigation(kn), 1, "arrow_navigation default true");
+    assert_eq(a11y_kbdnav_escape_closes_dialog(kn), 1, "escape_closes_dialog default true");
+    assert_eq(a11y_kbdnav_enter_activates(kn), 1, "enter_activates default true");
+
+    # ------------------------------------------------------------------
+    # test_node_with_children_and_parent
+    # ------------------------------------------------------------------
+    test_group("a11y — children and parent");
+    var wtree = a11y_tree_new();
+    var pwin = a11y_tree_add(wtree, AxRole.AX_ROLE_WINDOW, "Main");
+    var childnode = a11y_node_new(a11y_tree_next_id(wtree), AxRole.AX_ROLE_BUTTON, "Close");
+    a11y_node_set_parent(childnode, pwin);
+    var childid = a11y_tree_add_node(wtree, childnode);
+    var pnode = a11y_tree_get_node(wtree, pwin);
+    a11y_node_add_child(pnode, childid);
+    assert_eq(vec_len(a11y_node_children(pnode)), 1, "parent has 1 child");
+    assert_eq(vec_get(a11y_node_children(pnode), 0), childid, "child id recorded");
+    var gotchild = a11y_tree_get_node(wtree, childid);
+    assert_eq(a11y_node_parent(gotchild), pwin, "child parent points to window");
+
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);

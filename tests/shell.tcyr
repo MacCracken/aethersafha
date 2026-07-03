@@ -1,0 +1,227 @@
+# aethersafha desktop shell — behavioral parity test.
+# Mirrors rust-old/src/shell.rs #[cfg(test)] behaviors against the
+# Cyrius port in src/shell.cyr. Stdlib (vec/str/hashmap/assert/string)
+# is auto-prepended via cyrius.cyml [deps.stdlib]; shell.cyr has no
+# src cross-references so it is the only include needed.
+include "src/shell.cyr"
+
+# Non-null pointer check helper (assert() is strict cond==1).
+fn t_ok(x) { if (x != 0) { return 1; } return 0; }
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # DesktopShell::new + initial state
+    # (rust: test_desktop_shell_new, test_desktop_shell_initial_system_status)
+    # ============================================================
+    test_group("shell — construction + initial state");
+    var sh = shell_new();
+    assert(t_ok(sh), "shell_new returns non-null");
+    assert_eq(shell_notification_count(sh), 0, "no notifications at start");
+    assert_eq(shell_quick_settings_count(sh), 5, "5 quick settings seeded");
+    assert_eq(shell_is_locked(sh), 0, "not locked at start");
+    assert_eq(shell_panel_visible(sh), 1, "panel visible at start");
+    assert_eq(shell_registry_count(sh), 14, "14 app registry entries");
+
+    var st0 = shell_get_system_status(sh);
+    assert(t_ok(st0), "initial status non-null");
+    assert_eq(shell_status_cpu(st0), 0, "initial cpu 0");
+    assert_eq(shell_status_mem(st0), 0, "initial mem 0");
+    assert_eq(shell_status_disk(st0), 0, "initial disk 0");
+    assert_eq(shell_status_battery_is_none(st0), 1, "initial battery None");
+    assert_eq(shell_status_net(st0), SH_NetStatus.SH_NET_CONNECTED, "initial net Connected");
+    assert_eq(shell_status_agents(st0), 0, "initial agents 0");
+
+    # ============================================================
+    # Quick settings initial state + toggle
+    # (rust: test_desktop_shell_quick_settings_initial_state,
+    #  test_desktop_shell_toggle_quick_setting[_double_toggle/_nonexistent])
+    # ============================================================
+    test_group("shell — quick settings toggle");
+    var wifi = shell_qs_find(sh, "wifi");
+    assert(t_ok(wifi), "wifi setting found");
+    assert_eq(shell_qs_is_active(wifi), 1, "wifi active initially");
+    var bt = shell_qs_find(sh, "bluetooth");
+    assert(t_ok(bt), "bluetooth setting found");
+    assert_eq(shell_qs_is_active(bt), 0, "bluetooth inactive initially");
+
+    var tw = shell_toggle_quick_setting(sh, "wifi");
+    assert_eq(tw, SH_Err.SH_OK, "toggle wifi returns OK");
+    assert_eq(shell_qs_is_active(wifi), 0, "wifi flipped to inactive");
+
+    # double toggle bluetooth returns to original state
+    shell_toggle_quick_setting(sh, "bluetooth");
+    assert_eq(shell_qs_is_active(bt), 1, "bluetooth flipped active");
+    shell_toggle_quick_setting(sh, "bluetooth");
+    assert_eq(shell_qs_is_active(bt), 0, "bluetooth back to inactive");
+
+    var tmiss = shell_toggle_quick_setting(sh, "nonexistent");
+    assert_eq(tmiss, SH_Err.SH_ERR_APP_NOT_FOUND, "toggle unknown setting errors");
+
+    # ============================================================
+    # App launch + registry
+    # (rust: test_desktop_shell_launch_app, test_desktop_shell_launch_all_registered_apps)
+    # ============================================================
+    test_group("shell — launch app");
+    assert_eq(shell_launch_app(sh, "terminal"), SH_Err.SH_OK, "launch terminal OK");
+    assert_eq(shell_launch_app(sh, "midori"), SH_Err.SH_OK, "launch midori OK");
+    assert_eq(shell_launch_app(sh, "agent-manager"), SH_Err.SH_OK, "launch agent-manager OK");
+    assert_eq(shell_launch_app(sh, "nonexistent-app-xyz"), SH_Err.SH_ERR_APP_NOT_FOUND, "launch unknown app errors");
+    var term_entry = shell_registry_get(sh, "terminal");
+    assert(t_ok(term_entry), "terminal registry entry present");
+    assert_eq(shell_app_category(term_entry), SH_AppCategory.SH_CAT_SYSTEM, "terminal is System category");
+    assert_eq(shell_app_is_ai(term_entry), 1, "terminal flagged is_ai");
+
+    # ============================================================
+    # Notification lifecycle
+    # (rust: test_desktop_shell_notification_lifecycle,
+    #  test_desktop_shell_dismiss_nonexistent, dismiss_twice)
+    # ============================================================
+    test_group("shell — notification lifecycle");
+    var nid = shell_next_notif_id(sh);
+    var n1 = shell_notif_new(nid, "test", "Test", "Body", SH_NotifPriority.SH_PRIO_NORMAL, 100, 0, 0);
+    assert(t_ok(n1), "notification allocated");
+    shell_show_notification(sh, n1);
+    assert_eq(shell_notification_count(sh), 1, "one notification after show");
+    assert_eq(shell_dismiss_notification(sh, nid), SH_Err.SH_OK, "dismiss existing OK");
+    assert_eq(shell_notification_count(sh), 0, "zero after dismiss");
+    assert_eq(shell_dismiss_notification(sh, nid), SH_Err.SH_ERR_NOTIF_NOT_FOUND, "dismiss again errors");
+    assert_eq(shell_dismiss_notification(sh, 99999), SH_Err.SH_ERR_NOTIF_NOT_FOUND, "dismiss unknown id errors");
+
+    # ============================================================
+    # Agent notification: requires_action -> High + agent-related
+    # (rust: test_desktop_shell_agent_notification[_requires_action])
+    # ============================================================
+    test_group("shell — agent notification");
+    var an = shell_show_agent_notification(sh, "Title", "Body", 0, 200);
+    assert(t_ok(an), "agent notif (no action) allocated");
+    assert_eq(shell_notif_is_agent(an), 1, "agent notif is_agent_related");
+    assert_eq(shell_notif_requires_action(an), 0, "agent notif not requires_action");
+    assert_eq(shell_notif_priority(an), SH_NotifPriority.SH_PRIO_NORMAL, "no-action agent notif is Normal");
+
+    var an2 = shell_show_agent_notification(sh, "Alert", "Body", 1, 201);
+    assert(t_ok(an2), "agent notif (action) allocated");
+    assert_eq(shell_notif_requires_action(an2), 1, "action agent notif requires_action");
+    assert_eq(shell_notif_priority(an2), SH_NotifPriority.SH_PRIO_HIGH, "action agent notif is High");
+    assert_eq(shell_notification_count(sh), 2, "two agent notifs stored");
+
+    # ============================================================
+    # Human override: Critical, requires_action, agent, body content
+    # (rust: test_desktop_shell_human_override_request/_fields/_is_critical)
+    # ============================================================
+    test_group("shell — human override");
+    var ov = shell_request_human_override(sh, "agent-a", "write /etc/passwd", "needs access", 300);
+    assert(t_ok(ov), "override notif allocated");
+    assert_eq(shell_notif_priority(ov), SH_NotifPriority.SH_PRIO_CRITICAL, "override is Critical");
+    assert_eq(shell_notif_requires_action(ov), 1, "override requires_action");
+    assert_eq(shell_notif_is_agent(ov), 1, "override is_agent_related");
+    # title == "Human Override Requested"
+    var ov_title = shell_notif_title(ov);
+    var title_needle = str_from("Human Override Requested");
+    var title_hay = str_from(ov_title);
+    assert_eq(str_eq(title_hay, title_needle), 1, "override title matches");
+    # body (a Str fat pointer) contains agent name + action + reason
+    var ov_body = shell_notif_body(ov);
+    assert_eq(str_contains(ov_body, str_from("agent-a")), 1, "override body has agent name");
+    assert_eq(str_contains(ov_body, str_from("write /etc/passwd")), 1, "override body has action");
+    assert_eq(str_contains(ov_body, str_from("needs access")), 1, "override body has reason");
+
+    # ============================================================
+    # Launcher search: match / empty / no-result / case-insensitive / boost
+    # (rust: test_desktop_shell_search_launcher[_empty_query/_no_results/
+    #  _case_insensitive], boost logic in search_launcher)
+    # ============================================================
+    test_group("shell — launcher search");
+    var r_term = shell_search_launcher(sh, "terminal");
+    var n_term = vec_len(r_term);
+    var term_found = (n_term > 0);
+    assert_eq(term_found, 1, "search 'terminal' yields results");
+
+    var r_empty = shell_search_launcher(sh, "");
+    var n_empty = vec_len(r_empty);
+    # empty query matches every launcher item (14 apps + search-files == 15)
+    assert_eq(n_empty, 15, "empty query matches all 15 items");
+
+    var r_none = shell_search_launcher(sh, "zzz_nonexistent_12345");
+    assert_eq(vec_len(r_none), 0, "gibberish query yields no results");
+
+    var r_lower = shell_search_launcher(sh, "terminal");
+    var r_upper = shell_search_launcher(sh, "TERMINAL");
+    assert_eq(vec_len(r_lower), vec_len(r_upper), "search is case-insensitive (equal counts)");
+
+    # prefix boost: top result for "terminal" has boosted relevance 1000*3/2 == 1500,
+    # and results are relevance-sorted descending so index 0 is the boosted match.
+    var top = vec_get(r_term, 0);
+    assert(t_ok(top), "top search result non-null");
+    assert_eq(shell_item_relevance(top), 1500, "prefix match boosted to 1500 permille");
+
+    # boost applied to a CLONE — the live launcher item keeps base 1000.
+    var live_items = shell_items(sh);
+    var live0 = vec_get(live_items, 0);
+    assert_eq(shell_item_relevance(live0), 1000, "live launcher item relevance unchanged (1000)");
+
+    # ============================================================
+    # Lock / unlock + panel toggle round trips
+    # (rust: test_desktop_shell_lock_screen, test_desktop_shell_toggle_panel_round_trip)
+    # ============================================================
+    test_group("shell — lock + panel");
+    shell_lock_screen(sh);
+    assert_eq(shell_is_locked(sh), 1, "locked after lock_screen");
+    shell_unlock_screen(sh);
+    assert_eq(shell_is_locked(sh), 0, "unlocked after unlock_screen");
+
+    var p1 = shell_toggle_panel(sh);
+    assert_eq(p1, 0, "panel hidden after first toggle");
+    var p2 = shell_toggle_panel(sh);
+    assert_eq(p2, 1, "panel visible after second toggle");
+    assert_eq(shell_panel_visible(sh), 1, "panel_visible reflects round trip");
+
+    # ============================================================
+    # System status update + agent count
+    # (rust: test_desktop_shell_update_system_status_all_fields,
+    #  test_desktop_shell_set_agent_count[_multiple_times],
+    #  test_desktop_shell_system_status_battery_some)
+    # ============================================================
+    test_group("shell — system status");
+    var newst = shell_status_new(999, 875, 552, 15, SH_NetStatus.SH_NET_ERROR, 42);
+    assert(t_ok(newst), "new status allocated");
+    shell_update_system_status(sh, newst);
+    var cur = shell_get_system_status(sh);
+    assert_eq(shell_status_cpu(cur), 999, "cpu updated");
+    assert_eq(shell_status_battery(cur), 15, "battery updated to 15");
+    assert_eq(shell_status_battery_is_none(cur), 0, "battery Some(15) not None");
+    assert_eq(shell_status_net(cur), SH_NetStatus.SH_NET_ERROR, "net updated to Error");
+    assert_eq(shell_status_agents(cur), 42, "agent_count updated to 42");
+
+    shell_set_agent_count(sh, 100);
+    assert_eq(shell_status_agents(shell_get_system_status(sh)), 100, "set_agent_count 100");
+    shell_set_agent_count(sh, 0);
+    assert_eq(shell_status_agents(shell_get_system_status(sh)), 0, "set_agent_count back to 0");
+
+    # ============================================================
+    # Notification eviction at capacity
+    # (rust: test_desktop_shell_notification_eviction)
+    # A fresh shell; push MAX+1 (201) non-action notifs. Eviction of the
+    # oldest non-action keeps the count capped at MAX (200).
+    # ============================================================
+    test_group("shell — notification eviction");
+    var sh2 = shell_new();
+    assert(t_ok(sh2), "second shell non-null");
+    var i = 0;
+    var cap = SH_Limits.SH_MAX_NOTIFICATIONS;
+    var upper = cap + 1;
+    while (i < upper) {
+        var eid = shell_next_notif_id(sh2);
+        # ascending timestamps so the oldest (smallest ts) is the eviction target
+        var en = shell_notif_new(eid, "app", "Title", "", SH_NotifPriority.SH_PRIO_NORMAL, i, 0, 0);
+        shell_show_notification(sh2, en);
+        i = i + 1;
+    }
+    assert_eq(shell_notification_count(sh2), cap, "count capped at MAX_NOTIFICATIONS (200)");
+
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);

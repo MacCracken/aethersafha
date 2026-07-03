@@ -1,0 +1,758 @@
+# aethersafha — desktop plugin host
+# Parity: rust-old/src/plugin_host.rs
+#   (PluginInfo, PluginType, PluginState, PluginCapability, PluginMessage,
+#    PluginSandboxProfile, PluginHost + lifecycle / heartbeat / health /
+#    per-type sandbox profiles + JSON-RPC message model.)
+#
+# Heap-object idiom: every Rust struct is arena-allocated with a named-offset
+# enum; fields via load64/store64 (same convention as src/window.cyr,
+# src/shell.cyr, src/security_ui.cyr, lib/bhumi.cyr). Rust enums -> Cyrius
+# enums. Rust collections -> stdlib vec / hashmap. Every symbol is prefixed
+# plug_ / PLG_.
+#
+# Parity substitutions (no clean Cyrius analog — see stubbed[] in the summary):
+#   - Uuid plugin id                  -> monotonic i64 (PLG_NEXT_ID counter in
+#                                        the host; Uuid::new_v4 substitute).
+#   - HashMap<Uuid,PluginInfo>        -> map_u64 (u64 id -> *PluginInfo), same
+#                                        pattern as security_ui agent_perms.
+#   - PathBuf socket_path / paths     -> cstr / Str pointer (no PathBuf type).
+#   - chrono::DateTime<Utc> times     -> i64 epoch seconds (caller passes `now`).
+#   - Option<DateTime> last_heartbeat -> i64, sentinel 0 == None (epoch 0).
+#   - Duration uptime                 -> i64 epoch-second diff (>=0, clamped).
+#   - f32 max_cpu_percent             -> integer permille (5.0 == 5000, 0..100000).
+#   - Vec<PluginCapability>           -> stdlib vec of PLG_Capability ints.
+#   - Vec<String> syscalls/paths      -> stdlib vec of cstr pointers.
+#   - thiserror PluginHostError       -> i64 error codes (PLG_ERR_*). 0 == Ok.
+#   - serde_json to_json/from_json    -> STUBBED (no serde). Message TYPES are
+#                                        modeled as heap objects; the JSON wire
+#                                        encode/decode is a parity TODO.
+#   - Unix-domain-socket IPC transport-> STUBBED (# TODO parity: socket IPC).
+#                                        This module models message TYPES only;
+#                                        the transport is out of scope.
+#
+# LIBRARY MODULE: definitions only, no main / no top-level statements.
+
+# ---------------------------------------------------------------------------
+# Result / error codes (rust: PluginHostError). 0 == Ok.
+# ---------------------------------------------------------------------------
+enum PLG_Err {
+    PLG_OK                       = 0;   # Ok(())
+    PLG_ERR_PLUGIN_NOT_FOUND     = 1;   # PluginNotFound(Uuid)
+    PLG_ERR_MAX_PLUGINS_REACHED  = 2;   # MaxPluginsReached { max }
+    PLG_ERR_INVALID_TRANSITION   = 3;   # InvalidStateTransition { from, to }
+    PLG_ERR_SERIALIZATION        = 4;   # Serialization(serde_json::Error) [stub]
+}
+
+# rust: PluginType — role / default-capability class.
+enum PLG_Type {
+    PLG_TYPE_THEME            = 0;   # Theme
+    PLG_TYPE_PANEL_WIDGET     = 1;   # PanelWidget
+    PLG_TYPE_WINDOW_DECORATOR = 2;   # WindowDecorator
+    PLG_TYPE_INPUT_METHOD     = 3;   # InputMethod
+    PLG_TYPE_OVERLAY          = 4;   # Overlay
+    PLG_TYPE_NOTIFICATION     = 5;   # Notification
+    PLG_TYPE_DESKTOP_APP      = 6;   # DesktopApp
+}
+
+# rust: PluginState — lifecycle state.
+enum PLG_State {
+    PLG_STATE_STARTING  = 0;   # Starting
+    PLG_STATE_RUNNING   = 1;   # Running
+    PLG_STATE_SUSPENDED = 2;   # Suspended
+    PLG_STATE_CRASHED   = 3;   # Crashed
+    PLG_STATE_STOPPED   = 4;   # Stopped
+}
+
+# rust: PluginCapability — requested/granted capability.
+enum PLG_Capability {
+    PLG_CAP_FILESYSTEM_READ = 0;   # FilesystemRead
+    PLG_CAP_WAYLAND_SURFACE = 1;   # WaylandSurface
+    PLG_CAP_INPUT_EVENTS    = 2;   # InputEvents
+    PLG_CAP_NETWORK_ACCESS  = 3;   # NetworkAccess
+    PLG_CAP_OVERLAY         = 4;   # Overlay
+}
+
+# rust: PluginMessage variants — the JSON-RPC message TYPES exchanged over the
+# Unix socket. Each variant is a discriminant here; a message value is a heap
+# object (PLG_MsgOff) whose fields hold the variant payload.
+enum PLG_MsgKind {
+    PLG_MSG_INIT            = 0;   # Init { plugin_type, version, capabilities }
+    PLG_MSG_SURFACE_GRANT   = 1;   # SurfaceGrant { surface_id, x, y, w, h }
+    PLG_MSG_RENDER_REQUEST  = 2;   # RenderRequest { surface_id }
+    PLG_MSG_RENDER_RESPONSE = 3;   # RenderResponse { surface_id, format, w, h }
+    PLG_MSG_INPUT_EVENT     = 4;   # InputEvent { event_type, data }
+    PLG_MSG_THEME_UPDATE    = 5;   # ThemeUpdate { palette }
+    PLG_MSG_HEARTBEAT       = 6;   # Heartbeat
+    PLG_MSG_SHUTDOWN        = 7;   # Shutdown
+}
+
+# Health / timing constants (rust literals).
+enum PLG_Const {
+    PLG_HEALTHY_WINDOW_SECS = 30;   # is_healthy(): heartbeat within 30 s.
+}
+
+# ---------------------------------------------------------------------------
+# PluginInfo (rust: struct PluginInfo)
+# ---------------------------------------------------------------------------
+enum PLG_InfoOff {
+    PI_ID            = 0;    # i64 monotonic id (parity: Uuid)
+    PI_NAME          = 8;    # cstr / Str pointer (String name)
+    PI_VERSION       = 16;   # cstr / Str pointer (String version)
+    PI_TYPE          = 24;   # PLG_Type
+    PI_STATE         = 32;   # PLG_State
+    PI_CAPABILITIES  = 40;   # vec of PLG_Capability ints
+    PI_SOCKET_PATH   = 48;   # cstr / Str pointer (PathBuf socket_path)
+    PI_STARTED_AT    = 56;   # i64 epoch (chrono::DateTime started_at)
+    PI_RESTART_COUNT = 64;   # u32 restart_count
+    PI_LAST_HB       = 72;   # i64 epoch, 0 == None (Option<DateTime>)
+    PI_SZ            = 80;
+}
+
+# plug_info_new: allocate a PluginInfo. name/version/socket_path are pointers
+# (cstr literals or Str). capabilities is a vec (may be 0 -> fresh vec_new).
+# started_at is an epoch; last_heartbeat starts at 0 (None). -> *PluginInfo
+# (0 on OOM). rust: register_plugin builds this with state = Starting,
+# restart_count = 0, last_heartbeat = None.
+fn plug_info_new(id, name, version, ptype, capabilities, socket_path, started_at): i64 {
+    var p = alloc(PI_SZ);
+    if (p == 0) { return 0; }
+    var caps = capabilities;
+    if (caps == 0) { caps = vec_new(); }
+    store64(p + PI_ID, id);
+    store64(p + PI_NAME, name);
+    store64(p + PI_VERSION, version);
+    store64(p + PI_TYPE, ptype);
+    store64(p + PI_STATE, PLG_State.PLG_STATE_STARTING);
+    store64(p + PI_CAPABILITIES, caps);
+    store64(p + PI_SOCKET_PATH, socket_path);
+    store64(p + PI_STARTED_AT, started_at);
+    store64(p + PI_RESTART_COUNT, 0);
+    store64(p + PI_LAST_HB, 0);
+    return p;
+}
+
+fn plug_info_id(p)            { return load64(p + PI_ID); }
+fn plug_info_name(p)          { return load64(p + PI_NAME); }
+fn plug_info_version(p)       { return load64(p + PI_VERSION); }
+fn plug_info_type(p)          { return load64(p + PI_TYPE); }
+fn plug_info_state(p)         { return load64(p + PI_STATE); }
+fn plug_info_capabilities(p)  { return load64(p + PI_CAPABILITIES); }
+fn plug_info_socket_path(p)   { return load64(p + PI_SOCKET_PATH); }
+fn plug_info_started_at(p)    { return load64(p + PI_STARTED_AT); }
+fn plug_info_restart_count(p) { return load64(p + PI_RESTART_COUNT); }
+fn plug_info_last_heartbeat(p){ return load64(p + PI_LAST_HB); }
+
+fn plug_info_set_state(p, s)       { store64(p + PI_STATE, s); return 0; }
+fn plug_info_set_last_hb(p, ts)    { store64(p + PI_LAST_HB, ts); return 0; }
+fn plug_info_inc_restart(p): i64   {
+    var c = load64(p + PI_RESTART_COUNT);
+    store64(p + PI_RESTART_COUNT, c + 1);
+    return 0;
+}
+
+# rust: last_heartbeat.is_none() — sentinel 0 == None (epoch 0).
+fn plug_info_hb_is_none(p): i64 {
+    if (load64(p + PI_LAST_HB) == 0) { return 1; }
+    return 0;
+}
+
+# rust PluginInfo::is_healthy(&self): Running AND a heartbeat within 30 s of
+# `now`. `now` is the current epoch (Utc::now substitute). Returns 0/1.
+fn plug_info_is_healthy(p, now): i64 {
+    var st = load64(p + PI_STATE);
+    var running = (st == PLG_State.PLG_STATE_RUNNING);
+    if (running == 0) { return 0; }
+    var hb = load64(p + PI_LAST_HB);
+    if (hb == 0) { return 0; }
+    var elapsed = now - hb;
+    var window = PLG_Const.PLG_HEALTHY_WINDOW_SECS;
+    var fresh = (elapsed < window);
+    if (fresh) { return 1; }
+    return 0;
+}
+
+# rust PluginInfo::uptime(&self): now - started_at, clamped to >= 0 (rust
+# to_std().unwrap_or(ZERO) yields 0 for a negative/future start). Returns the
+# elapsed whole seconds. `now` is the current epoch.
+fn plug_info_uptime(p, now): i64 {
+    var started = load64(p + PI_STARTED_AT);
+    var elapsed = now - started;
+    if (elapsed < 0) { return 0; }
+    return elapsed;
+}
+
+# ---------------------------------------------------------------------------
+# PluginMessage (rust: enum PluginMessage) — heap object {kind, payload...}.
+#
+# The eight variants carry disjoint payloads. Rather than eight structs we use
+# one fixed-layout record with generic slots; each constructor fills only the
+# slots its variant uses (unused slots are 0 / null). Field meaning depends on
+# the kind (documented per constructor). This models the message TYPES; the
+# JSON wire form (serde) is stubbed — see plug_msg_to_json / plug_msg_from_json.
+# ---------------------------------------------------------------------------
+enum PLG_MsgOff {
+    M_KIND   = 0;    # PLG_MsgKind discriminant
+    M_A      = 8;    # i64 slot A  (surface_id / plugin_type)
+    M_B      = 16;   # i64 slot B  (x / width)
+    M_C      = 24;   # i64 slot C  (y / height)
+    M_D      = 32;   # i64 slot D  (width)
+    M_E      = 40;   # i64 slot E  (height)
+    M_S0     = 48;   # pointer slot 0 (version / format / event_type)
+    M_S1     = 56;   # pointer slot 1 (data)
+    M_PTR    = 64;   # pointer slot  (capabilities vec / palette map)
+    M_SZ     = 72;
+}
+
+# plug_msg_alloc: zero-initialised message record of the given kind.
+fn plug_msg_alloc(kind): i64 {
+    var p = alloc(M_SZ);
+    if (p == 0) { return 0; }
+    store64(p + M_KIND, kind);
+    store64(p + M_A, 0);
+    store64(p + M_B, 0);
+    store64(p + M_C, 0);
+    store64(p + M_D, 0);
+    store64(p + M_E, 0);
+    store64(p + M_S0, 0);
+    store64(p + M_S1, 0);
+    store64(p + M_PTR, 0);
+    return p;
+}
+
+fn plug_msg_kind(p) { return load64(p + M_KIND); }
+
+# rust: PluginMessage::Init { plugin_type, version, capabilities }.
+# version is a cstr/Str pointer; capabilities is a vec of PLG_Capability.
+fn plug_msg_init(plugin_type, version, capabilities): i64 {
+    var p = plug_msg_alloc(PLG_MsgKind.PLG_MSG_INIT);
+    if (p == 0) { return 0; }
+    store64(p + M_A, plugin_type);
+    store64(p + M_S0, version);
+    store64(p + M_PTR, capabilities);
+    return p;
+}
+fn plug_msg_init_type(p)  { return load64(p + M_A); }
+fn plug_msg_init_version(p) { return load64(p + M_S0); }
+fn plug_msg_init_caps(p)  { return load64(p + M_PTR); }
+
+# rust: PluginMessage::SurfaceGrant { surface_id, x, y, width, height }.
+fn plug_msg_surface_grant(surface_id, x, y, width, height): i64 {
+    var p = plug_msg_alloc(PLG_MsgKind.PLG_MSG_SURFACE_GRANT);
+    if (p == 0) { return 0; }
+    store64(p + M_A, surface_id);
+    store64(p + M_B, x);
+    store64(p + M_C, y);
+    store64(p + M_D, width);
+    store64(p + M_E, height);
+    return p;
+}
+fn plug_msg_grant_surface(p) { return load64(p + M_A); }
+fn plug_msg_grant_x(p)       { return load64(p + M_B); }
+fn plug_msg_grant_y(p)       { return load64(p + M_C); }
+fn plug_msg_grant_w(p)       { return load64(p + M_D); }
+fn plug_msg_grant_h(p)       { return load64(p + M_E); }
+
+# rust: PluginMessage::RenderRequest { surface_id }.
+fn plug_msg_render_request(surface_id): i64 {
+    var p = plug_msg_alloc(PLG_MsgKind.PLG_MSG_RENDER_REQUEST);
+    if (p == 0) { return 0; }
+    store64(p + M_A, surface_id);
+    return p;
+}
+fn plug_msg_req_surface(p) { return load64(p + M_A); }
+
+# rust: PluginMessage::RenderResponse { surface_id, format, width, height }.
+# format is a cstr/Str pointer.
+fn plug_msg_render_response(surface_id, format, width, height): i64 {
+    var p = plug_msg_alloc(PLG_MsgKind.PLG_MSG_RENDER_RESPONSE);
+    if (p == 0) { return 0; }
+    store64(p + M_A, surface_id);
+    store64(p + M_S0, format);
+    store64(p + M_D, width);
+    store64(p + M_E, height);
+    return p;
+}
+fn plug_msg_resp_surface(p) { return load64(p + M_A); }
+fn plug_msg_resp_format(p)  { return load64(p + M_S0); }
+fn plug_msg_resp_w(p)       { return load64(p + M_D); }
+fn plug_msg_resp_h(p)       { return load64(p + M_E); }
+
+# rust: PluginMessage::InputEvent { event_type, data }.
+# Both fields are cstr/Str pointers.
+fn plug_msg_input_event(event_type, data): i64 {
+    var p = plug_msg_alloc(PLG_MsgKind.PLG_MSG_INPUT_EVENT);
+    if (p == 0) { return 0; }
+    store64(p + M_S0, event_type);
+    store64(p + M_S1, data);
+    return p;
+}
+fn plug_msg_input_type(p) { return load64(p + M_S0); }
+fn plug_msg_input_data(p) { return load64(p + M_S1); }
+
+# rust: PluginMessage::ThemeUpdate { palette }.
+# palette is a cstr-keyed map (String -> String); stored in the pointer slot.
+fn plug_msg_theme_update(palette): i64 {
+    var p = plug_msg_alloc(PLG_MsgKind.PLG_MSG_THEME_UPDATE);
+    if (p == 0) { return 0; }
+    store64(p + M_PTR, palette);
+    return p;
+}
+fn plug_msg_theme_palette(p) { return load64(p + M_PTR); }
+
+# rust: PluginMessage::Heartbeat (no payload).
+fn plug_msg_heartbeat(): i64 {
+    return plug_msg_alloc(PLG_MsgKind.PLG_MSG_HEARTBEAT);
+}
+
+# rust: PluginMessage::Shutdown (no payload).
+fn plug_msg_shutdown(): i64 {
+    return plug_msg_alloc(PLG_MsgKind.PLG_MSG_SHUTDOWN);
+}
+
+# --- STUB: serde_json (de)serialization ------------------------------------
+# rust: PluginMessage::to_json / from_json use serde_json over the `type`-tagged
+# enum. There is no serde in Cyrius; a hand-rolled JSON codec that mirrors the
+# `#[serde(tag = "type")]` shape (e.g. {"type":"Heartbeat"}) is a parity TODO.
+# These stubs preserve the signatures so callers compile and the transport can
+# be layered on later.
+#
+# plug_msg_to_json(msg) -> Str (0 == would-be serde error). STUB returns 0.
+fn plug_msg_to_json(msg): i64 {
+    # TODO parity: serde_json::to_string over the tagged PluginMessage enum.
+    return 0;
+}
+# plug_msg_from_json(s) -> *PluginMessage, or 0 on parse failure
+# (rust: Err(PluginHostError::Serialization)). STUB returns 0.
+fn plug_msg_from_json(s): i64 {
+    # TODO parity: serde_json::from_str with #[serde(tag = "type")] dispatch.
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# PluginSandboxProfile (rust: struct PluginSandboxProfile)
+# ---------------------------------------------------------------------------
+enum PLG_SandboxOff {
+    SB_ALLOWED_PATHS    = 0;    # vec of cstr/Str pointers (Vec<PathBuf>)
+    SB_ALLOWED_SYSCALLS = 8;    # vec of cstr/Str pointers (Vec<String>)
+    SB_NETWORK_ALLOWED  = 16;   # bool (0/1) network_allowed
+    SB_MAX_MEMORY       = 24;   # u64 max_memory_bytes
+    SB_MAX_CPU_PERMILLE = 32;   # f32 max_cpu_percent -> permille (5.0 == 5000)
+    SB_SZ               = 40;
+}
+
+# plug_sandbox_new: allocate a PluginSandboxProfile. allowed_paths /
+# allowed_syscalls are vecs (may be 0 -> fresh vec_new). max_cpu is permille
+# (rust f32 percent * 1000; 5.0 -> 5000, 50.0 -> 50000). -> *profile (0 on OOM).
+fn plug_sandbox_new(allowed_paths, allowed_syscalls, network_allowed, max_memory, max_cpu_permille): i64 {
+    var p = alloc(SB_SZ);
+    if (p == 0) { return 0; }
+    var paths = allowed_paths;
+    if (paths == 0) { paths = vec_new(); }
+    var sc = allowed_syscalls;
+    if (sc == 0) { sc = vec_new(); }
+    store64(p + SB_ALLOWED_PATHS, paths);
+    store64(p + SB_ALLOWED_SYSCALLS, sc);
+    store64(p + SB_NETWORK_ALLOWED, network_allowed);
+    store64(p + SB_MAX_MEMORY, max_memory);
+    store64(p + SB_MAX_CPU_PERMILLE, max_cpu_permille);
+    return p;
+}
+
+fn plug_sandbox_paths(p)          { return load64(p + SB_ALLOWED_PATHS); }
+fn plug_sandbox_syscalls(p)       { return load64(p + SB_ALLOWED_SYSCALLS); }
+fn plug_sandbox_network_allowed(p){ return load64(p + SB_NETWORK_ALLOWED); }
+fn plug_sandbox_max_memory(p)     { return load64(p + SB_MAX_MEMORY); }
+fn plug_sandbox_max_cpu(p)        { return load64(p + SB_MAX_CPU_PERMILLE); }
+
+# plug_sandbox_base_syscalls: rust `base_syscalls` — the common seccomp
+# allowlist shared by every profile. Returns a fresh vec of cstr pointers in
+# the same order as the Rust source.
+fn plug_sandbox_base_syscalls(): i64 {
+    var v = vec_new();
+    vec_push(v, "read");
+    vec_push(v, "write");
+    vec_push(v, "close");
+    vec_push(v, "mmap");
+    vec_push(v, "munmap");
+    vec_push(v, "mprotect");
+    vec_push(v, "brk");
+    vec_push(v, "exit_group");
+    # Required for async runtimes (tokio/epoll) and time.
+    vec_push(v, "poll");
+    vec_push(v, "epoll_create1");
+    vec_push(v, "epoll_ctl");
+    vec_push(v, "epoll_wait");
+    vec_push(v, "clock_gettime");
+    vec_push(v, "futex");
+    vec_push(v, "sigaltstack");
+    vec_push(v, "rt_sigaction");
+    vec_push(v, "rt_sigprocmask");
+    return v;
+}
+
+# Memory-size helpers (rust literals): N megabytes in bytes.
+fn plug_mb(n): i64 { return n * 1024 * 1024; }
+
+# ---------------------------------------------------------------------------
+# PluginHost (rust: struct PluginHost)
+# ---------------------------------------------------------------------------
+enum PLG_HostOff {
+    PH_PLUGINS        = 0;    # map_u64: id -> *PluginInfo (HashMap<Uuid,_>)
+    PH_MAX_PLUGINS    = 8;    # usize max_plugins
+    PH_RENDER_TIMEOUT = 16;   # u64 render_timeout_ms
+    PH_HB_INTERVAL    = 24;   # u64 heartbeat_interval_secs
+    PH_NEXT_ID        = 32;   # i64 monotonic id counter (Uuid substitute)
+    PH_SZ             = 40;
+}
+
+# plug_host_new(max_plugins): rust PluginHost::new. render_timeout_ms = 16
+# (~60 fps), heartbeat_interval_secs = 10. -> *PluginHost (0 on OOM).
+fn plug_host_new(max_plugins): i64 {
+    var h = alloc(PH_SZ);
+    if (h == 0) { return 0; }
+    store64(h + PH_PLUGINS, map_u64_new());
+    store64(h + PH_MAX_PLUGINS, max_plugins);
+    store64(h + PH_RENDER_TIMEOUT, 16);
+    store64(h + PH_HB_INTERVAL, 10);
+    store64(h + PH_NEXT_ID, 1);
+    return h;
+}
+
+# plug_map_u64_values: iterate a u64-keyed map and collect its values into a
+# fresh vec. The stdlib provides map_values only for cstr-keyed maps, so we
+# walk the u64 map's backing store directly (same layout the stdlib uses:
+# header {entries@0, cap@8, count@16}; 16-byte entries {key@0, value@8};
+# empty key == 0, tombstone == 0xFFFF...FFFF). Plugin ids are minted from 1,
+# so key 0 never collides with the empty sentinel.
+fn plug_map_u64_values(m): i64 {
+    var out = vec_new();
+    var entries = load64(m);
+    var cap = load64(m + 8);
+    var i = 0;
+    while (i < cap) {
+        var ep = entries + i * 16;
+        var k = load64(ep);
+        var not_empty = (k != MAP_U64_EMPTY);
+        var not_tomb = (k != MAP_U64_TOMB);
+        var occupied = (not_empty && not_tomb);
+        if (occupied) { vec_push(out, load64(ep + 8)); }
+        i = i + 1;
+    }
+    return out;
+}
+
+fn plug_host_plugins(h)        { return load64(h + PH_PLUGINS); }
+fn plug_host_max_plugins(h)    { return load64(h + PH_MAX_PLUGINS); }
+fn plug_host_render_timeout(h) { return load64(h + PH_RENDER_TIMEOUT); }
+fn plug_host_hb_interval(h)    { return load64(h + PH_HB_INTERVAL); }
+
+# plug_host_next_id: mint a fresh monotonic plugin id (parity: Uuid::new_v4).
+fn plug_host_next_id(h): i64 {
+    var id = load64(h + PH_NEXT_ID);
+    store64(h + PH_NEXT_ID, id + 1);
+    return id;
+}
+
+# rust PluginHost::len(&self).
+fn plug_host_len(h): i64 { return map_u64_size(load64(h + PH_PLUGINS)); }
+
+# rust PluginHost::is_empty(&self).
+fn plug_host_is_empty(h): i64 {
+    if (map_u64_size(load64(h + PH_PLUGINS)) == 0) { return 1; }
+    return 0;
+}
+
+# plug_host_socket_path: rust format!("/run/agnos/plugins/{id}.sock").
+# id is an i64; builds the path as a Str.
+fn plug_host_socket_path(id): i64 {
+    var s = str_cat(str_from("/run/agnos/plugins/"), str_from_int(id));
+    s = str_cat(s, str_from(".sock"));
+    return s;
+}
+
+# plug_host_register_plugin: rust register_plugin. Enforces max_plugins, mints
+# an id, builds the socket path, inserts a Starting PluginInfo. name/version
+# are pointers; capabilities is a vec (may be 0). `now` is the epoch used for
+# started_at (Utc::now substitute).
+#
+# Returns the new plugin id (>= 1) on success, or a NEGATIVE error code
+# (0 - PLG_Err) so success ids and errors are distinguishable:
+#   -PLG_ERR_MAX_PLUGINS_REACHED when at capacity.
+#   0 on OOM (alloc failure).
+fn plug_host_register_plugin(h, name, version, ptype, capabilities, now): i64 {
+    var plugins = load64(h + PH_PLUGINS);
+    var count = map_u64_size(plugins);
+    var maxp = load64(h + PH_MAX_PLUGINS);
+    var full = (count >= maxp);
+    if (full) { return 0 - PLG_Err.PLG_ERR_MAX_PLUGINS_REACHED; }
+
+    var id = plug_host_next_id(h);
+    var sock = plug_host_socket_path(id);
+    var info = plug_info_new(id, name, version, ptype, capabilities, sock, now);
+    if (info == 0) { return 0; }
+    map_u64_set(plugins, id, info);
+    return id;
+}
+
+# rust PluginHost::unregister_plugin(id) -> Result<PluginInfo, _>. Removes and
+# returns the *PluginInfo, or 0 if not found (rust: Err(PluginNotFound)).
+fn plug_host_unregister_plugin(h, id): i64 {
+    var plugins = load64(h + PH_PLUGINS);
+    var info = map_u64_get(plugins, id);
+    if (info == 0) { return 0; }
+    map_u64_delete(plugins, id);
+    return info;
+}
+
+# rust PluginHost::get_plugin(id) -> Option<&PluginInfo>. -> *PluginInfo or 0.
+fn plug_host_get_plugin(h, id): i64 {
+    return map_u64_get(load64(h + PH_PLUGINS), id);
+}
+
+# rust PluginHost::list_plugins -> Vec<&PluginInfo>. Returns a vec of the live
+# *PluginInfo pointers (map_values order).
+fn plug_host_list_plugins(h): i64 {
+    return plug_map_u64_values(load64(h + PH_PLUGINS));
+}
+
+# rust PluginHost::list_by_type(plugin_type). Returns a fresh vec of the
+# *PluginInfo whose type matches.
+fn plug_host_list_by_type(h, ptype): i64 {
+    var all = plug_map_u64_values(load64(h + PH_PLUGINS));
+    var n = vec_len(all);
+    var out = vec_new();
+    var i = 0;
+    while (i < n) {
+        var p = vec_get(all, i);
+        var eq = (plug_info_type(p) == ptype);
+        if (eq) { vec_push(out, p); }
+        i = i + 1;
+    }
+    return out;
+}
+
+# rust PluginHost::list_by_state(state). Returns a fresh vec of the
+# *PluginInfo whose state matches.
+fn plug_host_list_by_state(h, state): i64 {
+    var all = plug_map_u64_values(load64(h + PH_PLUGINS));
+    var n = vec_len(all);
+    var out = vec_new();
+    var i = 0;
+    while (i < n) {
+        var p = vec_get(all, i);
+        var eq = (plug_info_state(p) == state);
+        if (eq) { vec_push(out, p); }
+        i = i + 1;
+    }
+    return out;
+}
+
+# plug_host_transition_valid: rust `matches!` state-transition table.
+# Returns 1 if `from -> to` is permitted, else 0.
+fn plug_host_transition_valid(from, to): i64 {
+    var starting = PLG_State.PLG_STATE_STARTING;
+    var running  = PLG_State.PLG_STATE_RUNNING;
+    var suspended = PLG_State.PLG_STATE_SUSPENDED;
+    var crashed  = PLG_State.PLG_STATE_CRASHED;
+    var stopped  = PLG_State.PLG_STATE_STOPPED;
+
+    # Starting -> Running | Crashed | Stopped
+    var a = (from == starting);
+    if (a) {
+        var ok = ((to == running) || (to == crashed));
+        var ok2 = (to == stopped);
+        if (ok || ok2) { return 1; }
+        return 0;
+    }
+    # Running -> Suspended | Crashed | Stopped
+    var b = (from == running);
+    if (b) {
+        var ok = ((to == suspended) || (to == crashed));
+        var ok2 = (to == stopped);
+        if (ok || ok2) { return 1; }
+        return 0;
+    }
+    # Suspended -> Running | Crashed | Stopped
+    var c = (from == suspended);
+    if (c) {
+        var ok = ((to == running) || (to == crashed));
+        var ok2 = (to == stopped);
+        if (ok || ok2) { return 1; }
+        return 0;
+    }
+    # Crashed -> Starting
+    var d = (from == crashed);
+    if (d) {
+        var ok = (to == starting);
+        if (ok) { return 1; }
+        return 0;
+    }
+    # Stopped -> Starting
+    var e = (from == stopped);
+    if (e) {
+        var ok = (to == starting);
+        if (ok) { return 1; }
+        return 0;
+    }
+    return 0;
+}
+
+# rust PluginHost::update_state(id, state). Validates the transition; on a
+# Crashed -> Starting transition increments restart_count. Returns PLG_OK,
+# PLG_ERR_PLUGIN_NOT_FOUND, or PLG_ERR_INVALID_TRANSITION.
+fn plug_host_update_state(h, id, state): i64 {
+    var p = map_u64_get(load64(h + PH_PLUGINS), id);
+    if (p == 0) { return PLG_Err.PLG_ERR_PLUGIN_NOT_FOUND; }
+    var cur = plug_info_state(p);
+    var valid = plug_host_transition_valid(cur, state);
+    if (valid == 0) { return PLG_Err.PLG_ERR_INVALID_TRANSITION; }
+    # rust: state == Starting && plugin.state == Crashed -> restart_count += 1
+    var to_starting = (state == PLG_State.PLG_STATE_STARTING);
+    var from_crashed = (cur == PLG_State.PLG_STATE_CRASHED);
+    var restart = (to_starting && from_crashed);
+    if (restart) { plug_info_inc_restart(p); }
+    plug_info_set_state(p, state);
+    return PLG_Err.PLG_OK;
+}
+
+# rust PluginHost::record_heartbeat(id). Stamps last_heartbeat = now.
+# Returns PLG_OK or PLG_ERR_PLUGIN_NOT_FOUND. `now` is the epoch.
+fn plug_host_record_heartbeat(h, id, now): i64 {
+    var p = map_u64_get(load64(h + PH_PLUGINS), id);
+    if (p == 0) { return PLG_Err.PLG_ERR_PLUGIN_NOT_FOUND; }
+    plug_info_set_last_hb(p, now);
+    return PLG_Err.PLG_OK;
+}
+
+# rust PluginHost::check_health(&self). A Running plugin is unhealthy if it has
+# missed a heartbeat for longer than heartbeat_interval_secs * 3 (or never sent
+# one). Returns a fresh vec of the offending plugin ids. `now` is the epoch.
+fn plug_host_check_health(h, now): i64 {
+    var timeout = load64(h + PH_HB_INTERVAL) * 3;
+    var all = plug_map_u64_values(load64(h + PH_PLUGINS));
+    var n = vec_len(all);
+    var out = vec_new();
+    var i = 0;
+    while (i < n) {
+        var p = vec_get(all, i);
+        var st = plug_info_state(p);
+        var running = (st == PLG_State.PLG_STATE_RUNNING);
+        if (running) {
+            var hb = plug_info_last_heartbeat(p);
+            var never = (hb == 0);
+            var stale = 0;
+            if (never == 0) {
+                var elapsed = now - hb;
+                stale = (elapsed > timeout);
+            }
+            var bad = (never || stale);
+            if (bad) { vec_push(out, plug_info_id(p)); }
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+# ---------------------------------------------------------------------------
+# Sandbox profiles per plugin type (rust: sandbox_profile_for)
+# ---------------------------------------------------------------------------
+
+# plug_host_sandbox_profile_for: rust sandbox_profile_for(plugin_type). Returns
+# a fresh *PluginSandboxProfile with the per-type paths, syscalls, network flag,
+# memory cap and cpu cap (permille). max_cpu 5.0 -> 5000, 10.0 -> 10000,
+# 15.0 -> 15000, 50.0 -> 50000. Falls back to the Theme profile for any
+# unknown discriminant (defensive; rust match is exhaustive).
+fn plug_host_sandbox_profile_for(h, ptype): i64 {
+    var base = plug_sandbox_base_syscalls();
+
+    var theme = (ptype == PLG_Type.PLG_TYPE_THEME);
+    if (theme) {
+        var paths = vec_new();
+        vec_push(paths, "/usr/share/themes");
+        return plug_sandbox_new(paths, base, 0, plug_mb(32), 5000);
+    }
+
+    var panel = (ptype == PLG_Type.PLG_TYPE_PANEL_WIDGET);
+    if (panel) {
+        var paths = vec_new();
+        vec_push(paths, "/usr/share/icons");
+        vec_push(paths, "/tmp");
+        return plug_sandbox_new(paths, base, 0, plug_mb(64), 10000);
+    }
+
+    var deco = (ptype == PLG_Type.PLG_TYPE_WINDOW_DECORATOR);
+    if (deco) {
+        var paths = vec_new();
+        vec_push(paths, "/usr/share/themes");
+        return plug_sandbox_new(paths, base, 0, plug_mb(32), 5000);
+    }
+
+    var ime = (ptype == PLG_Type.PLG_TYPE_INPUT_METHOD);
+    if (ime) {
+        var paths = vec_new();
+        vec_push(paths, "/usr/share/locale");
+        vec_push(paths, "/usr/share/ibus");
+        return plug_sandbox_new(paths, base, 0, plug_mb(128), 15000);
+    }
+
+    var overlay = (ptype == PLG_Type.PLG_TYPE_OVERLAY);
+    if (overlay) {
+        var paths = vec_new();
+        vec_push(paths, "/tmp");
+        return plug_sandbox_new(paths, base, 0, plug_mb(64), 10000);
+    }
+
+    var notif = (ptype == PLG_Type.PLG_TYPE_NOTIFICATION);
+    if (notif) {
+        var paths = vec_new();
+        vec_push(paths, "/usr/share/icons");
+        vec_push(paths, "/usr/share/sounds");
+        return plug_sandbox_new(paths, base, 0, plug_mb(32), 5000);
+    }
+
+    var app = (ptype == PLG_Type.PLG_TYPE_DESKTOP_APP);
+    if (app) {
+        var paths = vec_new();
+        vec_push(paths, "/tmp");
+        vec_push(paths, "/home");
+        # rust extends base_syscalls with the extra fs/net syscalls.
+        vec_push(base, "openat");
+        vec_push(base, "stat");
+        vec_push(base, "fstat");
+        vec_push(base, "getdents64");
+        vec_push(base, "socket");
+        vec_push(base, "connect");
+        return plug_sandbox_new(paths, base, 1, plug_mb(512), 50000);
+    }
+
+    # Defensive fallback (rust match is exhaustive): Theme profile.
+    var paths = vec_new();
+    vec_push(paths, "/usr/share/themes");
+    return plug_sandbox_new(paths, base, 0, plug_mb(32), 5000);
+}
+
+# ===========================================================================
+# STUBBED — Unix-domain-socket IPC transport (rust ADR-017: plugins run as
+# separate processes talking over per-plugin Unix sockets at socket_path).
+#
+# # TODO parity: socket IPC
+#
+# The Rust module models the message TYPES (PluginMessage) and their JSON
+# serialization; the ACTUAL socket transport (bind/listen/accept on the Unix
+# socket, framing, send/recv of serialized PluginMessage, per-plugin reader
+# tasks, crash isolation) lives in the runtime, not in this file. Cyrius has no
+# async runtime / tokio and this port keeps the pure data model, so the
+# transport is stubbed here as signatures returning "not implemented".
+#
+# plug_ipc_send(socket_path, msg) -> 0 == not implemented.
+fn plug_ipc_send(socket_path, msg): i64 {
+    # TODO parity: connect to the plugin's Unix socket, serialize `msg`
+    # (plug_msg_to_json), frame + write. Requires socket syscalls + serde.
+    return 0;
+}
+# plug_ipc_recv(socket_path) -> *PluginMessage, 0 == not implemented / no msg.
+fn plug_ipc_recv(socket_path): i64 {
+    # TODO parity: read a framed JSON message off the Unix socket and decode
+    # via plug_msg_from_json. Requires socket syscalls + serde.
+    return 0;
+}

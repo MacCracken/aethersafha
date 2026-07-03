@@ -1,27 +1,76 @@
 # aethersafha — compositor core
-# Parity: rust-old/src/compositor.rs  (Compositor: window list, focus, workspace)
+# Parity: rust-old/src/compositor.rs  (Compositor, Workspace, ContextType)
 #
-# The compositor owns the window stack (a vec of *Window), the focused index,
-# an id counter, and the active workspace. Native Wayland protocol dispatch is
-# the compositor's own job (does NOT move to bhumi/mehman) — this is where the
+# The compositor owns the window registry (a vec of *Window, z-order), the
+# focused index, an id counter, a set of workspaces + the active one, and the
+# secure / agent-aware mode flags. Native Wayland protocol dispatch is the
+# compositor's own job (does NOT move to bhumi/mehman) — this is where the
 # surface tree + window management live.
 
-enum CompOff {
-    C_WINDOWS   = 0;    # vec of *Window (z-order: last = top)
-    C_FOCUSED   = 8;    # index into windows, or -1
-    C_NEXTID    = 16;   # next surface id
-    C_WORKSPACE = 24;   # active workspace id
-    C_SZ        = 32;
+# Workspace context (parity: ContextType).
+enum CtxType {
+    CTX_DEVELOPMENT   = 0;
+    CTX_COMMUNICATION = 1;
+    CTX_DESIGN        = 2;
+    CTX_GENERAL       = 3;
+    CTX_AGENT_OP      = 4;
+    CTX_WINDOW        = 5;
+    CTX_APPLICATION   = 6;
+    CTX_SYSTEM        = 7;
+    CTX_USER          = 8;
 }
 
-# comp_new() -> *Compositor (0 on OOM)
+# Workspace (parity: Workspace { id, name, windows: Vec<SurfaceId>, active_window, context_type }).
+enum WspOff {
+    WSP_ID      = 0;    # workspace id (== index)
+    WSP_NAME    = 8;    # cstr
+    WSP_WINDOWS = 16;   # vec of surface ids
+    WSP_ACTIVE  = 24;   # active surface id, or -1
+    WSP_CONTEXT = 32;   # CtxType
+    WSP_SZ      = 40;
+}
+
+fn wsp_new(id, name, context): i64 {
+    var w = alloc(WSP_SZ);
+    if (w == 0) { return 0; }
+    store64(w + WSP_ID, id);
+    store64(w + WSP_NAME, name);
+    store64(w + WSP_WINDOWS, vec_new());
+    store64(w + WSP_ACTIVE, 0 - 1);
+    store64(w + WSP_CONTEXT, context);
+    return w;
+}
+fn wsp_id(w)       { return load64(w + WSP_ID); }
+fn wsp_name(w)     { return load64(w + WSP_NAME); }
+fn wsp_windows(w)  { return load64(w + WSP_WINDOWS); }
+fn wsp_active(w)   { return load64(w + WSP_ACTIVE); }
+fn wsp_context(w)  { return load64(w + WSP_CONTEXT); }
+fn wsp_count(w)    { return vec_len(load64(w + WSP_WINDOWS)); }
+
+enum CompOff {
+    C_WINDOWS    = 0;    # vec of *Window (z-order: last = top)
+    C_FOCUSED    = 8;    # index into windows, or -1
+    C_NEXTID     = 16;   # next surface id
+    C_ACTIVE_WS  = 24;   # active workspace index
+    C_WORKSPACES = 32;   # vec of *Workspace
+    C_AGENT      = 40;   # agent_aware_mode (0/1)
+    C_SECURE     = 48;   # secure_mode (0/1)
+    C_SZ         = 56;
+}
+
+# comp_new() -> *Compositor (0 on OOM). Starts with one default workspace.
 fn comp_new(): i64 {
     var c = alloc(C_SZ);
     if (c == 0) { return 0; }
     store64(c + C_WINDOWS, vec_new());
     store64(c + C_FOCUSED, 0 - 1);
     store64(c + C_NEXTID, 1);
-    store64(c + C_WORKSPACE, 0);
+    store64(c + C_ACTIVE_WS, 0);
+    var wss = vec_new();
+    vec_push(wss, wsp_new(0, "Main", CtxType.CTX_GENERAL));
+    store64(c + C_WORKSPACES, wss);
+    store64(c + C_AGENT, 0);
+    store64(c + C_SECURE, 0);
     return c;
 }
 
@@ -30,7 +79,56 @@ fn comp_count(c)    { return vec_len(load64(c + C_WINDOWS)); }
 fn comp_focused(c)  { return load64(c + C_FOCUSED); }
 fn comp_get(c, i)   { return vec_get(load64(c + C_WINDOWS), i); }
 
-# comp_create_window: assign next id, push (top of z-order), focus it. -> *Window
+# --- workspaces -----------------------------------------------------------
+fn comp_workspaces(c)      { return load64(c + C_WORKSPACES); }
+fn comp_workspace_count(c) { return vec_len(load64(c + C_WORKSPACES)); }
+fn comp_active_workspace(c){ return load64(c + C_ACTIVE_WS); }
+fn comp_get_workspace(c, i): i64 {
+    if (i < 0) { return 0; }
+    if (i >= comp_workspace_count(c)) { return 0; }
+    return vec_get(load64(c + C_WORKSPACES), i);
+}
+
+# comp_create_workspace(c, name, context) -> new workspace index.
+fn comp_create_workspace(c, name, context): i64 {
+    var wss = load64(c + C_WORKSPACES);
+    var id = vec_len(wss);
+    vec_push(wss, wsp_new(id, name, context));
+    return id;
+}
+
+# comp_switch_workspace(c, ws_id) -> 0 ok / -1 invalid (parity: switch_workspace).
+fn comp_switch_workspace(c, ws_id): i64 {
+    if (ws_id < 0) { return 0 - 1; }
+    if (ws_id >= comp_workspace_count(c)) { return 0 - 1; }
+    store64(c + C_ACTIVE_WS, ws_id);
+    return 0;
+}
+
+# comp_move_window_to_workspace(c, win_id, ws_id) -> 0 / -1 absent (parity).
+fn comp_move_window_to_workspace(c, win_id, ws_id): i64 {
+    if (comp_find_by_id(c, win_id) < 0) { return 0 - 1; }
+    var old = comp_get_workspace(c, load64(c + C_ACTIVE_WS));
+    if (old != 0) {
+        var idx = vec_find(wsp_windows(old), win_id);
+        if (idx >= 0) { vec_remove(wsp_windows(old), idx); }
+    }
+    var target = comp_get_workspace(c, ws_id);
+    if (target != 0) {
+        vec_push(wsp_windows(target), win_id);
+        store64(target + WSP_ACTIVE, win_id);
+    }
+    return 0;
+}
+
+# --- modes (parity: set_secure_mode / set_agent_aware_mode) ----------------
+fn comp_set_secure_mode(c, v)  { store64(c + C_SECURE, v); return 0; }
+fn comp_secure_mode(c)         { return load64(c + C_SECURE); }
+fn comp_set_agent_aware(c, v)  { store64(c + C_AGENT, v); return 0; }
+fn comp_agent_aware(c)         { return load64(c + C_AGENT); }
+
+# comp_create_window: assign next id, push (top of z-order), focus it, and add
+# it to the active workspace. -> *Window
 fn comp_create_window(c, x, y, w, h, title): i64 {
     var id = load64(c + C_NEXTID);
     store64(c + C_NEXTID, id + 1);
@@ -39,6 +137,11 @@ fn comp_create_window(c, x, y, w, h, title): i64 {
     var v = load64(c + C_WINDOWS);
     vec_push(v, win);
     store64(c + C_FOCUSED, vec_len(v) - 1);
+    var aw = comp_get_workspace(c, load64(c + C_ACTIVE_WS));
+    if (aw != 0) {
+        vec_push(wsp_windows(aw), id);
+        store64(aw + WSP_ACTIVE, id);
+    }
     return win;
 }
 
@@ -70,14 +173,41 @@ fn comp_find_by_id(c, id): i64 {
     return 0 - 1;
 }
 
-# comp_close_window(c, id): remove the window with this id. -> 0 ok / -1 absent
+# comp_close_window(c, id): remove the window from the registry + active
+# workspace. -> 0 ok / -1 absent
 fn comp_close_window(c, id): i64 {
     var idx = comp_find_by_id(c, id);
     if (idx < 0) { return 0 - 1; }
     var v = load64(c + C_WINDOWS);
     vec_remove(v, idx);
+    var aw = comp_get_workspace(c, load64(c + C_ACTIVE_WS));
+    if (aw != 0) {
+        var wi = vec_find(wsp_windows(aw), id);
+        if (wi >= 0) { vec_remove(wsp_windows(aw), wi); }
+    }
     # keep focus in range
     var f = load64(c + C_FOCUSED);
     if (f >= vec_len(v)) { store64(c + C_FOCUSED, vec_len(v) - 1); }
+    return 0;
+}
+
+# comp_window_at(c, px, py) -> topmost non-minimized *Window containing the
+# point, or 0. Top of z-order = last in the vec, so scan back-to-front.
+fn comp_window_at(c, px, py): i64 {
+    var v = load64(c + C_WINDOWS);
+    var i = vec_len(v) - 1;
+    while (i >= 0) {
+        var win = vec_get(v, i);
+        if (win_state(win) != WinState.WS_MINIMIZED) {
+            var x = win_x(win);
+            var y = win_y(win);
+            var inx = 0;
+            if ((px >= x) && (px < x + win_w(win))) { inx = 1; }
+            if (inx == 1) {
+                if ((py >= y) && (py < y + win_h(win))) { return win; }
+            }
+        }
+        i = i - 1;
+    }
     return 0;
 }
