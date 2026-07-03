@@ -24,6 +24,7 @@ include "src/security_ui.cyr"
 include "src/shell_integration.cyr"
 include "src/plugin_host.cyr"
 include "src/desktop.cyr"
+include "src/foreign.cyr"
 
 enum AeConfig {
     AE_W     = 1280;
@@ -58,6 +59,8 @@ fn main(): i64 {
     comp_create_window(comp, 80, 60, 420, 320, "Terminal");
     comp_create_window(comp, 240, 180, 520, 360, "Files");
     desktop_add_tray_item(desk, 1, "network", "Network");
+    # Host a foreign-ABI app as a kavach-sandboxed guest (mehman "swallow" seam).
+    desktop_host_foreign(desk, "xterm", 320, 200, 480, 300, "xterm (foreign)");
     var axn = desktop_sync_accessibility(desk);
     println("aethersafha: desktop up — windows:");
     println_int(comp_count(comp));

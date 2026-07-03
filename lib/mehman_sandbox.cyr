@@ -1,0 +1,88 @@
+# mehman — M1 sandboxed foreign host
+#
+# The swallow stage's core act: run one foreign-ABI binary as a guest inside a
+# kavach sandbox and reap it cleanly. This is XWayland's *actual* job done the
+# sovereign way — run a foreign binary sandboxed, not port X.Org, not translate
+# X11. mehman validates the guest against its bounded capability contract
+# (src/types.cyr), then drives kavach's PROCESS-backend lifecycle
+# (create → RUNNING → exec → reap) and maps kavach's failure signals onto the
+# MehmanError namespace so downstream (aethersafha) sees one error vocabulary.
+#
+# Requires `src/types.cyr` (the vocabulary) and the kavach surface
+# (`lib/kavach.cyr`) to be in scope — see the include order in src/main.cyr.
+
+# One-time kavach init. `kavach_init()` calls `alloc_init()` (idempotent since
+# stdlib 6.1.23 — a re-call is a no-op) and registers the sandbox backends. We
+# defer it to the first real run so a caller that only touches the foundation
+# vocabulary pays nothing for the heavy security engine.
+var _mehman_kavach_ready = 0;
+
+fn _mehman_kavach_ensure_init() {
+    if (_mehman_kavach_ready == 0) {
+        kavach_init();
+        _mehman_kavach_ready = 1;
+    }
+    return 0;
+}
+
+# Run one foreign guest under a kavach PROCESS-backend sandbox and reap it.
+#
+# Validates the spec against the swallow-stage capability contract FIRST — that
+# branch needs no kavach runtime, so a bad spec is rejected before the engine is
+# even initialized. Then: create the sandbox → transition to RUNNING → exec the
+# guest command → read kavach's exec status → destroy (reap).
+#
+# Writes kavach's ExecResult exit_code through `out_exit_code` (an i64*, or 0 to
+# ignore) once the run reaches exec. NOTE the PROCESS-backend semantics: that
+# value is 0 when the guest ran and its output was captured, 1 when exec itself
+# failed — it is NOT the guest's own exit status (WEXITSTATUS). kavach's PROCESS
+# backend captures output via exec_capture and does not propagate the child's
+# exit code; surfacing the true guest exit is a future concern (a kavach change,
+# or M2+ once the surface, not the exit, is what matters).
+#
+# Returns MehmanError.OK on a clean run+reap, or a MehmanError code identifying
+# the stage that failed.
+fn mehman_sandbox_run_guest(spec, out_exit_code): i64 {
+    if (guest_spec_is_valid(spec) == 0) {
+        mehman_err_print(MehmanError.INVALID_SPEC, 0);
+        return MehmanError.INVALID_SPEC;
+    }
+
+    _mehman_kavach_ensure_init();
+
+    # PROCESS backend: a real fork+exec+waitpid on a Linux host — the actual
+    # "runs sandboxed and is reaped cleanly". Pinned explicitly (not auto-
+    # resolved) for a deterministic, dependency-light reap.
+    var cfg = config_new();
+    config_backend(cfg, Backend.PROCESS);
+
+    var sb = sandbox_create(cfg);
+    if (sb == 0) {
+        mehman_err_print(MehmanError.SANDBOX_CREATE_FAILED, backend_name(Backend.PROCESS));
+        return MehmanError.SANDBOX_CREATE_FAILED;
+    }
+
+    sandbox_transition(sb, SandboxState.RUNNING);
+    var res = sandbox_exec(sb, MehmanGuestSpec_command(spec));
+    if (res == 0) {
+        # kavach returned no result: the externalization gate blocked/quarantined
+        # the run, or exec errored on a non-RUNNING sandbox. Reap before returning.
+        sandbox_destroy(sb);
+        mehman_err_print(MehmanError.EXEC_BLOCKED, 0);
+        return MehmanError.EXEC_BLOCKED;
+    }
+
+    if (out_exit_code != 0) {
+        # kavach's exec status (0 = ran + output captured; 1 = exec failed) —
+        # NOT the guest's WEXITSTATUS; see the fn doc.
+        store64(out_exit_code, ExecResult_exit_code(res));
+    }
+
+    var derr = sandbox_destroy(sb);
+    if (derr != KavachError.OK) {
+        mehman_err_print(MehmanError.GUEST_REAP_FAILED, 0);
+        return MehmanError.GUEST_REAP_FAILED;
+    }
+
+    return MehmanError.OK;
+}

@@ -1,0 +1,44 @@
+# aethersafha — mehman foreign-app hosting test (the "swallow" seam).
+# mehman/kavach/TLS surface is auto-prepended via cyrius.cyml [deps.*].
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/theme_bridge.cyr"
+include "src/gestures.cyr"
+include "src/accessibility.cyr"
+include "src/ai_features.cyr"
+include "src/shell.cyr"
+include "src/security_ui.cyr"
+include "src/shell_integration.cyr"
+include "src/plugin_host.cyr"
+include "src/desktop.cyr"
+include "src/foreign.cyr"
+
+fn t_ok(x): i64 {
+    if (x != 0) { return 1; }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("mehman — foreign guest spec + surface descriptor");
+    var f = foreign_new("xterm", 800, 600);
+    assert(t_ok(f), "foreign_new builds a hosted foreign app");
+    assert_eq(guest_spec_is_valid(foreign_guest(f)), 1, "guest spec valid (swallow caps)");
+    assert_eq(surface_is_valid(foreign_surface(f)), 1, "XRGB8888 surface descriptor valid");
+
+    test_group("mehman — host a foreign app as a compositor window");
+    var d = desktop_new();
+    var before = comp_count(desk_comp(d));
+    var fw = desktop_host_foreign(d, "gimp", 40, 40, 640, 480, "GIMP (foreign)");
+    assert(t_ok(fw), "desktop_host_foreign succeeds");
+    assert(t_ok(foreign_window(fw)), "a compositor window backs the foreign surface");
+    assert_eq(comp_count(desk_comp(d)), before + 1, "compositor gained the foreign window");
+    assert_eq(win_is_agent(foreign_window(fw)), 0, "foreign window is not agent-owned");
+
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);

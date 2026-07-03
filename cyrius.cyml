@@ -4,27 +4,28 @@ version = "0.3.0"
 description = "aethersafha — AI-augmented AGNOS compositor (Cyrius port, from 27207 lines of Rust)"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.3.38"
+cyrius = "6.3.39"
 
 [build]
 entry = "src/main.cyr"
 output = "aethersafha"
 
 # Stdlib is OPT-IN: declare exactly what the project + every active [deps.*]
-# needs, reviewed from each dep's `dist/<name>.deps` sidecar plus the symbols it
-# actually references. This UNION covers: compositor + M2 leaf; agnostik (trait);
-# agnodrm (ct). Adding a dep? Re-run this review and extend the list.
-#
-# NOTE re mehman: re-enabling it (below) drags in [deps.kavach] → sandhi → the
-# full tls_native TLS stack (sandhi needs TLS_BACKEND_LIBSSL). That's a large
-# surface for a types-only, unused dep — so mehman stays deferred until Bite G
-# actually hosts guests (at which point declare: net, sandhi, thread_local,
-# random, freelist, tls_native, + whatever the TLS cascade requires).
+# needs, reviewed from each dep's `dist/<name>.deps` sidecar + referenced symbols.
+# UNION covers: compositor + M2 leaf; agnostik (trait); agnodrm (ct); kashi
+# (freestanding, none); mehman → [deps.kavach] → sandhi → the tls_native TLS
+# stack + crypto (net/sandhi/thread_local/random/freelist + tls_native* + sha/keccak/sigil).
 [deps]
 stdlib = [
     "syscalls", "string", "alloc", "atomic", "fmt", "vec", "str", "slice",
     "hashmap", "fnptr", "io", "fs", "process", "args", "tagged", "result",
     "chrono", "math", "assert", "bench", "trait", "ct",
+    # mehman → kavach → sandhi → TLS cascade:
+    "net", "sandhi", "thread_local", "random", "freelist", "sync",
+    "async", "fdlopen", "dynlib", "mmap",
+    "tls", "tls_native", "tls_native_conn", "tls_native_ctx", "tls_native_lowlevel",
+    "tls_native_hs12", "tls_native_hs13", "tls_native_keysched",
+    "sha1", "keccak", "sigil", "sakshi",
 ]
 
 # --- Platform backend: DRM/KMS + libinput + logind → output/input/seat.
@@ -61,12 +62,22 @@ path = "../kashi"
 tag = "1.0.2"
 modules = ["src/font_data.cyr"]
 
-# --- DEFERRED to Bite G. mehman (XWayland-successor "swallow" backend) hosts
-# foreign-ABI surfaces in a kavach sandbox. Its manifest declares [deps.kavach],
-# so consuming even its types-only `src/types.cyr` prepends kavach → sandhi →
-# the full tls_native TLS stack into every build. Not worth it for a dep nothing
-# uses yet. Re-enable when the compositor actually hosts guests.
-#   mehman 0.2.1 — git = "https://github.com/MacCracken/mehman.git",
-#   path = "../mehman" (now ships src/{types,sandbox,surface,main}.cyr; still
-#   declares [deps.kavach], so the TLS-cascade defer still holds)
-#   then declare stdlib: net, sandhi, thread_local, random, freelist, tls_native, …
+# --- Compat / "swallow" backend: the XWayland successor — hosts foreign-ABI app
+# surfaces in a kavach sandbox. We consume its library modules (error/caps/guest
+# vocabulary, the foreign-surface descriptor, and the kavach-sandboxed guest
+# runner). Transitively pulls [deps.kavach] → sandhi → the tls_native TLS stack,
+# declared in [deps].stdlib above.
+[deps.mehman]
+git = "https://github.com/MacCracken/mehman.git"
+path = "../mehman"
+tag = "0.2.1"
+modules = ["src/types.cyr", "src/surface.cyr", "src/sandbox.cyr"]
+
+# --- Sandbox execution surface (mehman's guest backend). Declared explicitly so
+# kavach's dist is prepended — mehman_sandbox.cyr names kavach's Backend / config
+# / sandbox_* surface directly.
+[deps.kavach]
+git = "https://github.com/MacCracken/kavach.git"
+path = "../kavach"
+tag = "3.6.0"
+modules = ["dist/kavach.cyr"]

@@ -12,7 +12,7 @@ from Rust via `cyrius port`; 27,207 lines preserved at `rust-old/` as the parity
 
 ## Toolchain
 
-- **Cyrius pin**: `6.3.38` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.3.39` (in `cyrius.cyml [package].cyrius`)
 - Build: `cyrius lib sync --full && cyrius deps && cyrius build src/main.cyr build/aethersafha`
   (the `lib sync --full` is required — the declared stdlib set exceeds the incremental pin).
 
@@ -56,13 +56,15 @@ Active (auto-prepended; stdlib declared per each dep's reviewed needs):
 - **bhumi** 1.0.0 — platform backend (output/input/seat).
 - **agnostik** 1.3.3 — shared domain primitives (errors namespaced `STIK_ERR_*`).
 - **agnodrm** 1.4.5 — udev/DRM device model (errors namespaced `DRM_ERR_*`).
-- **kashi** 1.0.2 — bitmap console fonts; we consume the freestanding
-  `src/font_data.cyr` core (IBM VGA 8×16 + CGA 8×8 glyph tables).
+- **kashi** 1.0.2 — bitmap console fonts (freestanding `font_data.cyr`, VGA 8×16).
+- **mehman** 0.2.1 + **kavach** 3.6.0 — foreign-app "swallow" backend (the XWayland
+  successor). Consumed via `src/foreign.cyr`; pulls the full TLS/crypto stdlib
+  cascade (net, sandhi, thread_local, random, freelist, sync, async, fdlopen,
+  dynlib, mmap, tls, tls_native*, sha1, keccak, sigil, sakshi — all declared in
+  `[deps].stdlib`). `[deps.kavach]` is declared explicitly (its `Backend`/`config`/
+  `sandbox_*` surface is named directly by mehman's sandbox module).
 
-Deferred (mapping kept in `cyrius.cyml`, re-enable per the opt-in review):
-- **mehman** 0.2.1 — now ships `sandbox`/`surface` modules but still declares
-  `[deps.kavach]` → sandhi → the full `tls_native` TLS stack; too heavy until the
-  compositor actually hosts guests. Wire at Bite G.
+Deferred:
 - **mabda** 4.0.2 — GPU, off the v1.0 path.
 
 Opt-in stdlib: `cyrius build` prepends every `[deps.*]` module, so each dep's

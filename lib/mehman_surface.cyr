@@ -1,0 +1,88 @@
+# mehman — M2 foundation: foreign-surface descriptor
+#
+# The producer-side description of a foreign guest's rendered surface: what
+# mehman captures from a swallow-stage guest and hands to the compositor
+# (aethersafha) as a native surface. mehman OWNS this contract — aethersafha
+# imports mehman's types — so the descriptor lives here, value-aligned with
+# bhumi's pixel model (XRGB8888, the DRM primary-plane default) so a captured
+# surface needs no format remap on handoff.
+#
+# SCOPE (M2 foundation): the descriptor + its validation only. The actual buffer
+# capture (shared-memory handoff from a sandboxed guest) and the handoff to
+# aethersafha's surface-import path are DEFERRED — both are gated on aethersafha
+# consuming mehman ("Bite G", post-MVP) and on a guest producing pixels rather
+# than stdout. This module is dependency-free (stdlib alloc only).
+
+# Pixel format. XRGB8888 is the only format the swallow stage handles for now —
+# 32bpp, little-endian bytes [B,G,R,X], the DRM primary-plane default the
+# compositor draws into. The value MATCHES bhumi's BHUMI_FMT_XRGB8888 (= 0) on
+# purpose, so a mehman surface maps to a bhumi framebuffer without translation.
+enum MehmanPixelFormat {
+    XRGB8888 = 0;
+}
+
+var MEHMAN_XRGB8888_BPP = 4;         # bytes per pixel for XRGB8888 (matches bhumi bpp)
+var MEHMAN_SURFACE_MAX_DIM = 16384;  # per-axis pixel cap; guards i64 overflow in
+                                     # width*bpp*height (matches bhumi's BHUMI_FB_MAX_DIM)
+
+# The captured-surface descriptor. Fields (all i64):
+#   width   — pixels
+#   height  — pixels
+#   format  — MehmanPixelFormat
+#   stride  — bytes per row (>= width * bpp; may be padded)
+#   buffer  — ptr/handle to the guest's pixel data. The shared-memory handoff is
+#             deferred, so for now this is just an opaque i64 the capture path fills.
+#derive(accessors)
+struct MehmanSurface {
+    width;
+    height;
+    format;
+    stride;
+    buffer;
+}
+var MEHMAN_SURFACE_SIZE = 40;
+
+# Construct a surface descriptor. Returns MehmanSurface* (i64), 0 on OOM. Does
+# NOT validate — call surface_is_valid before handing a surface to the
+# compositor.
+fn surface_new(width, height, format, stride, buffer) {
+    var s = alloc(MEHMAN_SURFACE_SIZE);
+    if (s == 0) { return 0; }
+    MehmanSurface_set_width(s, width);
+    MehmanSurface_set_height(s, height);
+    MehmanSurface_set_format(s, format);
+    MehmanSurface_set_stride(s, stride);
+    MehmanSurface_set_buffer(s, buffer);
+    return s;
+}
+
+# Bytes per pixel for a pixel format; 0 for an unknown format.
+fn mehman_format_bpp(format): i64 {
+    if (format == MehmanPixelFormat.XRGB8888) { return MEHMAN_XRGB8888_BPP; }
+    return 0;
+}
+
+# A surface is presentable iff: a known pixel format; sane dimensions
+# (0 < w,h <= MAX_DIM, bounding i64 overflow); a stride that covers at least one
+# row of pixels (>= width * bpp); and a non-null pixel buffer. Returns 1 (valid)
+# / 0 (invalid). || / && short-circuit; conditions are parenthesized per the
+# mixed-expression rule. The format/bpp check comes first so a bad format is
+# rejected before any arithmetic on it.
+fn surface_is_valid(surface): i64 {
+    if (surface == 0) { return 0; }
+    var bpp = mehman_format_bpp(MehmanSurface_format(surface));
+    if (bpp == 0) { return 0; }
+    var w = MehmanSurface_width(surface);
+    var h = MehmanSurface_height(surface);
+    if ((w <= 0) || (h <= 0)) { return 0; }
+    if ((w > MEHMAN_SURFACE_MAX_DIM) || (h > MEHMAN_SURFACE_MAX_DIM)) { return 0; }
+    if (MehmanSurface_stride(surface) < (w * bpp)) { return 0; }
+    if (MehmanSurface_buffer(surface) == 0) { return 0; }
+    return 1;
+}
+
+# The pixel-buffer size implied by the descriptor: stride * height, in bytes.
+# (Uses stride, not width*bpp, so padded rows are counted.)
+fn surface_size_bytes(surface): i64 {
+    return MehmanSurface_stride(surface) * MehmanSurface_height(surface);
+}

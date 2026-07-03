@@ -1,0 +1,52 @@
+# aethersafha — foreign-app hosting via mehman (the "swallow" backend)
+# Parity: rust-old/src/xwayland.rs — the foreign-app compat path.
+#
+# mehman is the XWayland successor: it hosts foreign-ABI apps as kavach-sandboxed
+# guests and hands their surfaces to the compositor as native windows. This is
+# aethersafha's seam onto mehman — build a guest spec (swallow caps: non-native,
+# mediated I/O) + an XRGB8888 foreign-surface descriptor, and register a
+# compositor window backed by it. Actually running the guest is
+# `mehman_sandbox_run_guest` (kavach-sandboxed); the descriptor path is here.
+
+# A hosted foreign app: its mehman guest spec + surface descriptor + window.
+enum ForeignOff {
+    FGN_GUEST = 0;    # *MehmanGuestSpec
+    FGN_SURF  = 8;    # *MehmanSurface
+    FGN_WIN   = 16;   # *Window (in the compositor), or 0
+    FGN_SZ    = 24;
+}
+
+# foreign_new(command, w, h): build the mehman guest + XRGB8888 surface descriptor
+# for a foreign command. -> *Foreign (0 if the guest/surface are invalid or OOM).
+fn foreign_new(command, w, h): i64 {
+    var guest = guest_spec_new(command, caps_swallow_default());
+    if (guest_spec_is_valid(guest) == 0) { return 0; }
+    var stride = w * mehman_format_bpp(MehmanPixelFormat.XRGB8888);
+    # the foreign app's XRGB8888 pixel buffer (mehman captures the guest into it)
+    var buffer = alloc(stride * h);
+    if (buffer == 0) { return 0; }
+    var surf = surface_new(w, h, MehmanPixelFormat.XRGB8888, stride, buffer);
+    if (surface_is_valid(surf) == 0) { return 0; }
+    var f = alloc(FGN_SZ);
+    if (f == 0) { return 0; }
+    store64(f + FGN_GUEST, guest);
+    store64(f + FGN_SURF, surf);
+    store64(f + FGN_WIN, 0);
+    return f;
+}
+
+fn foreign_guest(f)   { return load64(f + FGN_GUEST); }
+fn foreign_surface(f) { return load64(f + FGN_SURF); }
+fn foreign_window(f)  { return load64(f + FGN_WIN); }
+
+# desktop_host_foreign(desk, command, x, y, w, h, title): host a foreign app —
+# create its mehman guest + surface and register a compositor window (flagged
+# non-agent / foreign) whose geometry matches the surface. -> *Foreign (0 fail).
+fn desktop_host_foreign(desk, command, x, y, w, h, title): i64 {
+    var f = foreign_new(command, w, h);
+    if (f == 0) { return 0; }
+    var win = comp_create_window(desk_comp(desk), x, y, w, h, title);
+    win_set_agent(win, 0);
+    store64(f + FGN_WIN, win);
+    return f;
+}

@@ -94,9 +94,11 @@ Rust: `wayland/{types,protocol,server,popups}` + client socket. From scratch.
 - **Accept**: a native Cyrius client can bind `wl_compositor`, create a surface,
   attach an shm buffer, and see it composited.
 
-### Bite G — mehman (XWayland successor) · ⛔ blocked · —
-Blocked on mehman shipping `sandbox`/`surface`/`shim`/`guest` (types-only today).
-Wire the guest lifecycle when available.
+### Bite G — mehman (XWayland successor) · 🚧 started
+mehman 0.2.1 + kavach 3.6.0 **wired** (`src/foreign.cyr`): guest-spec + foreign-surface
+descriptor + `desktop_host_foreign` → a compositor window; `main` hosts a demo guest.
+Remaining: run guests via `mehman_sandbox_run_guest`; capture the guest framebuffer
+into the surface buffer (M2 handoff); per-ABI shim.
 
 ### Bite H — GPU acceleration (mabda) · optional · —
 Wire mabda 4.0.2 (`[deps.mabda]`) when hardware accel is wanted. Off the v1.0 path.

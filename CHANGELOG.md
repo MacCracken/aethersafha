@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **mehman wired in (foreign-app hosting).** `src/foreign.cyr` — the "swallow" seam
+  onto **mehman** 0.2.1 + **kavach** 3.6.0 (the XWayland successor): builds a
+  sandboxed-guest spec (swallow caps) + an XRGB8888 foreign-surface descriptor, and
+  `desktop_host_foreign` registers a compositor window backed by it. `main` hosts a
+  demo foreign `xterm`. Required declaring the full TLS/crypto stdlib cascade for
+  kavach→sandhi (net/sandhi/thread_local/tls*/sha1/keccak/sigil/sakshi/…) and
+  `[deps.kavach]` explicitly. `tests/foreign.tcyr` (7 assertions). Pin → 6.3.39.
+
 ## [0.3.0] - 2026-07-03 — kashi fonts + desktop wiring
 
 Adds the `kashi` font dependency (real bitmap text) and completes the B3 desktop

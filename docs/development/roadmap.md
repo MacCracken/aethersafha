@@ -73,9 +73,12 @@ symbols), each compiling + smoke-tested. Driven by the parity workflow.
 - `plugin_host.cyr` (Unix-socket IPC, sandbox profiles, capability grants).
 - HUD widgets (`hud/{gpu,domain,crew}_status.cyr`) — HTTP polling of daimon MCP.
 
-### M5 — mehman (XWayland successor) (v0.5.0+)
-- Wire mehman guest lifecycle once its sandbox/surface/shim modules ship.
-- Host foreign-ABI app surfaces in a kavach sandbox → native surface handoff.
+### M5 — mehman (XWayland successor) — 🚧 started (v0.5.0+)
+- mehman 0.2.1 + kavach 3.6.0 **wired** via `src/foreign.cyr`: guest-spec +
+  foreign-surface descriptor + `desktop_host_foreign` → a compositor window;
+  `main` hosts a demo guest.
+- Remaining: run guests via `mehman_sandbox_run_guest` (kavach exec); capture the
+  guest framebuffer into the surface buffer (mehman M2 handoff); per-ABI shim.
 
 ## Known cleanup
 - **Deferred deps** (mehman / agnostik / agnodrm): `cyrius build` auto-prepends
