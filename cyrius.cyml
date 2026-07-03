@@ -1,6 +1,6 @@
 [package]
 name = "aethersafha"
-version = "0.1.0"
+version = "0.2.0"
 description = "aethersafha — AI-augmented AGNOS compositor (Cyrius port, from 27207 lines of Rust)"
 license = "GPL-3.0-only"
 language = "cyrius"

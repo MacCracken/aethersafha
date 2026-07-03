@@ -5,8 +5,9 @@
 
 ## Version
 
-**0.1.0** — ported from Rust (2026-07-03) via `cyrius port`. 27,207 lines of Rust
-preserved at `rust-old/` as the frozen parity oracle.
+**0.2.0** (2026-07-03) — parity milestone: compositor/renderer depth, all 8 M2 leaf
+modules, B3 desktop wiring, Bite A window interaction. Ported from Rust via
+`cyrius port`; 27,207 lines preserved at `rust-old/` as the frozen parity oracle.
 
 ## Toolchain
 

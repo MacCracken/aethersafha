@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-03 — parity milestone
+
+Compositor + renderer depth, the full M2 leaf-module set, B3 wiring (desktop
+aggregate), Bite A window interaction (decorations + input routing), and the
+sovereign-dependency de-collision (agnostik/agnodrm/aegis) landed on top of the
+0.1.0 port.
+
 ### Added
 
 - Compositor depth: workspaces + context types, move-window-to-workspace,
