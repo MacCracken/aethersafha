@@ -53,7 +53,10 @@ symbols), each compiling + smoke-tested. Driven by the parity workflow.
 - `shell_integration.cyr` (tray, window-mgmt, notification bridge)  ✅ ported
 - `plugin_host.cyr` (lifecycle, sandbox profiles, capabilities; IPC stubbed)  ✅ ported
 - Behavioral parity tests for all 8 leaf modules  ✅ (~670 assertions green)
-- Remaining (B3): wire the leaf modules into the compositor/shell surface.
+- **B3 wiring** — `desktop` aggregate owns compositor + all 8 leaf managers, created
+  by `main`; live compositor→accessibility sync.  ✅ first increment (14-assert test)
+- Remaining (B3 depth): shell panel render, notifications surface, input→gestures,
+  theme→renderer.
 
 ### M3 — Renderer + compositor depth (v0.3.0)
 - Damage tracking, scene graph, decorations, bitmap text (`renderer.rs` full).

@@ -1,0 +1,79 @@
+# aethersafha — desktop session aggregate
+# Parity: the assembly the Rust lib.rs / main.rs did across the subsystems.
+#
+# Wires the compositor together with the leaf subsystems — shell, AI features,
+# security UI, accessibility, gestures, theme, shell-integration tray, plugin
+# host — so they are instantiated, reachable, and connected from the running
+# binary (not just standalone modules). The one live cross-subsystem connection
+# so far is compositor → accessibility (the a11y tree mirrors the window stack);
+# deeper wiring (shell panel, notifications, input→gestures) follows.
+
+enum DeskOff {
+    DSK_COMP  = 0;    # *Compositor
+    DSK_SHELL = 8;    # DesktopShell
+    DSK_AI    = 16;   # AIDesktopFeatures
+    DSK_SEC   = 24;   # SecurityUI
+    DSK_A11Y  = 32;   # AccessibilityTree
+    DSK_GEST  = 40;   # GestureRecognizer
+    DSK_THEME = 48;   # HighContrastTheme
+    DSK_PLUG  = 56;   # PluginHost
+    DSK_TRAY  = 64;   # vec of *TrayItem (shell_integration)
+    DSK_SZ    = 72;
+}
+
+# Default gesture-recognizer config: tap 300ms, double-tap 400ms, long-press
+# 500ms, swipe threshold 50px, pinch threshold 100 permille.
+fn desk_default_gestures(): i64 {
+    return gest_recognizer_new(gest_config_new(300, 400, 500, 50, 100));
+}
+
+# desktop_new() -> *Desktop (0 on OOM). Instantiates the compositor + every leaf
+# subsystem, and initializes the ones with startup state (security perm defs).
+fn desktop_new(): i64 {
+    var d = alloc(DSK_SZ);
+    if (d == 0) { return 0; }
+    store64(d + DSK_COMP, comp_new());
+    store64(d + DSK_SHELL, shell_new());
+    store64(d + DSK_AI, ai_new());
+    store64(d + DSK_SEC, sec_ui_new());   # sec_ui_new seeds the permission definitions
+    store64(d + DSK_A11Y, a11y_tree_new());
+    store64(d + DSK_GEST, desk_default_gestures());
+    store64(d + DSK_THEME, theme_hc_new(0, 0xFFFFFF, 0x3366FF, 0xFF0000, 0xFFAA00, 0x00FF00, 1250));
+    store64(d + DSK_PLUG, plug_host_new(16));
+    store64(d + DSK_TRAY, vec_new());
+    return d;
+}
+
+fn desk_comp(d)  { return load64(d + DSK_COMP); }
+fn desk_shell(d) { return load64(d + DSK_SHELL); }
+fn desk_ai(d)    { return load64(d + DSK_AI); }
+fn desk_sec(d)   { return load64(d + DSK_SEC); }
+fn desk_a11y(d)  { return load64(d + DSK_A11Y); }
+fn desk_gest(d)  { return load64(d + DSK_GEST); }
+fn desk_theme(d) { return load64(d + DSK_THEME); }
+fn desk_plug(d)  { return load64(d + DSK_PLUG); }
+fn desk_tray(d)  { return load64(d + DSK_TRAY); }
+
+# desktop_sync_accessibility(d): rebuild the a11y tree from the compositor's
+# window stack — one AX_ROLE_WINDOW node per window (name = window title).
+# Returns the number of window nodes added. (compositor ↔ accessibility)
+fn desktop_sync_accessibility(d): i64 {
+    var tree = desk_a11y(d);
+    var v = comp_windows(desk_comp(d));
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        a11y_tree_add(tree, AxRole.AX_ROLE_WINDOW, win_title(vec_get(v, i)));
+        i = i + 1;
+    }
+    return n;
+}
+
+# desktop_add_tray_item(d, id, app, tooltip): register a system-tray item
+# (shell_integration) into the desktop's tray. -> *TrayItem
+fn desktop_add_tray_item(d, id, app, tooltip): i64 {
+    var item = shint_tray_item_new(id, app, "", tooltip, 1, vec_new());
+    vec_push(desk_tray(d), item);
+    return item;
+}
+fn desk_tray_count(d) { return vec_len(desk_tray(d)); }

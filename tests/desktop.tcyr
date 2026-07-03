@@ -1,0 +1,55 @@
+# aethersafha desktop-aggregate test (B3 wiring).
+# The Desktop owns the compositor + all 8 leaf subsystems and wires the live
+# compositor→accessibility connection. Stdlib + [deps.*] auto-included.
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/theme_bridge.cyr"
+include "src/gestures.cyr"
+include "src/accessibility.cyr"
+include "src/ai_features.cyr"
+include "src/shell.cyr"
+include "src/security_ui.cyr"
+include "src/shell_integration.cyr"
+include "src/plugin_host.cyr"
+include "src/desktop.cyr"
+
+fn t_ok(x): i64 {
+    if (x != 0) { return 1; }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("desktop — aggregate instantiates every subsystem");
+    var d = desktop_new();
+    assert(t_ok(d), "desktop_new");
+    assert(t_ok(desk_comp(d)), "compositor");
+    assert(t_ok(desk_shell(d)), "shell");
+    assert(t_ok(desk_ai(d)), "ai_features");
+    assert(t_ok(desk_sec(d)), "security_ui");
+    assert(t_ok(desk_a11y(d)), "accessibility");
+    assert(t_ok(desk_gest(d)), "gestures");
+    assert(t_ok(desk_theme(d)), "theme");
+    assert(t_ok(desk_plug(d)), "plugin_host");
+
+    test_group("desktop — a11y tree mirrors the compositor window stack");
+    var comp = desk_comp(d);
+    assert_eq(desktop_sync_accessibility(d), 0, "no windows -> no a11y nodes");
+    comp_create_window(comp, 0, 0, 100, 100, "A");
+    comp_create_window(comp, 0, 0, 100, 100, "B");
+    assert_eq(desktop_sync_accessibility(d), 2, "sync returns one node per window");
+    assert_eq(a11y_tree_len(desk_a11y(d)), 2, "a11y tree has a node per window");
+
+    test_group("desktop — shell-integration tray");
+    assert_eq(desk_tray_count(d), 0, "tray starts empty");
+    desktop_add_tray_item(d, 1, "net", "Network");
+    desktop_add_tray_item(d, 2, "vol", "Volume");
+    assert_eq(desk_tray_count(d), 2, "two tray items registered");
+
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);

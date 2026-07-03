@@ -14,6 +14,16 @@ include "src/window.cyr"
 include "src/compositor.cyr"
 include "src/render.cyr"
 include "src/input.cyr"
+# Leaf subsystems + the desktop aggregate that wires them into the compositor.
+include "src/theme_bridge.cyr"
+include "src/gestures.cyr"
+include "src/accessibility.cyr"
+include "src/ai_features.cyr"
+include "src/shell.cyr"
+include "src/security_ui.cyr"
+include "src/shell_integration.cyr"
+include "src/plugin_host.cyr"
+include "src/desktop.cyr"
 
 enum AeConfig {
     AE_W     = 1280;
@@ -40,12 +50,18 @@ fn main(): i64 {
     var fb = bhumi_backend_fb(be);
     println("aethersafha: bhumi backend up");
 
-    # Compositor state + a couple of seed windows (parity: Compositor::create_window)
-    var comp = comp_new();
+    # Desktop session: the compositor + all leaf subsystems (shell, AI, security,
+    # a11y, gestures, theme, tray, plugins) wired together.
+    var desk = desktop_new();
+    var comp = desk_comp(desk);
     comp_create_window(comp, 80, 60, 420, 320, "Terminal");
     comp_create_window(comp, 240, 180, 520, 360, "Files");
-    println("aethersafha: windows created:");
+    desktop_add_tray_item(desk, 1, "network", "Network");
+    var axn = desktop_sync_accessibility(desk);
+    println("aethersafha: desktop up — windows:");
     println_int(comp_count(comp));
+    println("aethersafha: a11y nodes synced:");
+    println_int(axn);
 
     # Frame loop: poll bhumi input, dispatch, render, scan out. Bounded so the
     # host build terminates; on agnos this becomes `while (running == 1)`.

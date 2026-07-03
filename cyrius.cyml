@@ -4,58 +4,60 @@ version = "0.1.0"
 description = "aethersafha — AI-augmented AGNOS compositor (Cyrius port, from 27207 lines of Rust)"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.3.36"
+cyrius = "6.3.37"
 
 [build]
 entry = "src/main.cyr"
 output = "aethersafha"
 
-# Stdlib modules auto-prepended by `cyrius build`. Kept to what the compositor
-# port + M2 leaf modules actually use — a minimal, self-consistent set that
-# `cyrius deps` can vendor without pulling the HTTP/thread_local/sigil cluster.
-# (The agnostik/agnodrm-only extras — trait, bayan, ct, net — were dropped when
-# those deps were deferred; re-add alongside them when consumed.)
-#   containers ....... vec, hashmap, str, slice
-#   dispatch ......... fnptr
-#   sum types ........ tagged, result   (Rust Result/Option port)
-#   runtime .......... io, fs, process, args, atomic
-#   time/geometry .... chrono (seat `now` gate), math
+# Stdlib is OPT-IN: declare exactly what the project + every active [deps.*]
+# needs, reviewed from each dep's `dist/<name>.deps` sidecar plus the symbols it
+# actually references. This UNION covers: compositor + M2 leaf; agnostik (trait);
+# agnodrm (ct). Adding a dep? Re-run this review and extend the list.
+#
+# NOTE re mehman: re-enabling it (below) drags in [deps.kavach] → sandhi → the
+# full tls_native TLS stack (sandhi needs TLS_BACKEND_LIBSSL). That's a large
+# surface for a types-only, unused dep — so mehman stays deferred until Bite G
+# actually hosts guests (at which point declare: net, sandhi, thread_local,
+# random, freelist, tls_native, + whatever the TLS cascade requires).
 [deps]
 stdlib = [
     "syscalls", "string", "alloc", "atomic", "fmt", "vec", "str", "slice",
-    "hashmap", "fnptr", "io", "fs", "process", "args",
-    "tagged", "result", "chrono", "math", "assert", "bench",
+    "hashmap", "fnptr", "io", "fs", "process", "args", "tagged", "result",
+    "chrono", "math", "assert", "bench", "trait", "ct",
 ]
 
-# --- Platform backend: replaces the Linux DRM/KMS + libinput + logind trio.
-# aethersafha sits directly on bhumi (output/input/seat vs the agnos kernel).
-# Was: wayland-server platform I/O + socket/credential handling in Rust.
+# --- Platform backend: DRM/KMS + libinput + logind → output/input/seat.
 [deps.bhumi]
 git = "https://github.com/MacCracken/bhumi.git"
 path = "../bhumi"
-tag = "0.7.0"
+tag = "1.0.0"
 modules = ["dist/bhumi.cyr"]
 
-# --- DEFERRED until consumed (Bite G, post-MVP). mehman is the "swallow"
-# backend — successor to XWayland's job, hosting foreign-ABI app surfaces in a
-# kavach sandbox. It transitively pulls [deps.kavach] → sigil/patra/sandhi,
-# whose reachable init drags in the HTTP/thread_local surface (sandhi_server_*,
-# thread_local_*) as undefined. It is types-only today and no code uses it, so
-# it only broke the build. Re-enable when the compositor actually hosts guests.
-#   mehman 0.1.0 — git = "https://github.com/MacCracken/mehman.git",
-#   path = "../mehman", modules = ["src/types.cyr"]  (needs [deps.kavach] too)
+# --- Shared AGNOS domain primitives (was Rust `agnostik` 0.90.0). Error family
+# namespaced STIK_ERR_*/stik_err_*/stik_syserr_* at 1.3.3 to end the ERR_*
+# collision with agnodrm.
+[deps.agnostik]
+git = "https://github.com/MacCracken/agnostik.git"
+path = "../agnostik"
+tag = "1.3.3"
+modules = ["dist/agnostik.cyr"]
 
-# --- DEFERRED until consumed (see docs/development/parity-plan.md "Bite 0").
-# The dependency MAPPING is recorded here, but these are NOT auto-prepended:
-# cyrius build prepends every [deps.*] module, and the full agnostik/agnodrm
-# `dist/*.cyr` bundles (a) both redefine the shared `ERR_*` module (duplicate
-# symbols) and (b) drag in their HTTP/thread_local surface (`sandhi_server_*`,
-# `thread_local_*`) as reachable-but-undefined. No current code uses them, so
-# they only broke the build. Re-enable with SELECTIVE `modules = [...]` (a core
-# subset) when M-level work actually consumes them.
-#
-#   agnostik 1.3.2 — shared AGNOS domain primitives (was Rust `agnostik` 0.90.0)
-#     git = "https://github.com/MacCracken/agnostik.git", path = "../agnostik"
-#   agnodrm  1.4.4 — udev + DRM/KMS device model (was Rust `agnosys` 0.50.0;
-#     agnosys decomposed 2026-06-19 → agnodrm; bhumi also sits on agnodrm)
-#     git = "https://github.com/MacCracken/agnodrm.git", path = "../agnodrm"
+# --- udev + DRM/KMS device model (was Rust `agnosys` 0.50.0; agnosys decomposed
+# 2026-06-19 → agnodrm). Error family namespaced DRM_ERR_*/drm_err_*/drm_syserr_*
+# at 1.4.5. bhumi also sits on agnodrm internally.
+[deps.agnodrm]
+git = "https://github.com/MacCracken/agnodrm.git"
+path = "../agnodrm"
+tag = "1.4.5"
+modules = ["dist/agnodrm.cyr"]
+
+# --- DEFERRED to Bite G. mehman (XWayland-successor "swallow" backend) hosts
+# foreign-ABI surfaces in a kavach sandbox. Its manifest declares [deps.kavach],
+# so consuming even its types-only `src/types.cyr` prepends kavach → sandhi →
+# the full tls_native TLS stack into every build. Not worth it for a dep nothing
+# uses yet. Re-enable when the compositor actually hosts guests.
+#   mehman 0.2.1 — git = "https://github.com/MacCracken/mehman.git",
+#   path = "../mehman" (now ships src/{types,sandbox,surface,main}.cyr; still
+#   declares [deps.kavach], so the TLS-cascade defer still holds)
+#   then declare stdlib: net, sandhi, thread_local, random, freelist, tls_native, …

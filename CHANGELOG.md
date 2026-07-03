@@ -14,15 +14,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `DamageTracker`).
 - Ported `shell_integration` + `plugin_host` — completes all 8 M2 leaf modules.
 - Behavioral parity test suites for all 8 leaf modules (~670 assertions, all green).
+- **B3 wiring**: a `desktop` aggregate owns the compositor + all 8 leaf managers and
+  is instantiated by `main`, so the subsystems are reachable + running. First live
+  cross-subsystem connection — compositor → accessibility
+  (`desktop_sync_accessibility` mirrors the window stack into the a11y tree).
+  `tests/desktop.tcyr` (14 assertions).
 
 ### Changed
 
-- Deferred `mehman` / `agnostik` / `agnodrm` from the active build (mapping kept in
-  `cyrius.cyml` comments). All are unused today and their full `dist` bundles break
-  the build: `cyrius build` prepends every `[deps.*]` module, and mehman→`[deps.kavach]`
-  drags in the HTTP/`thread_local` surface (`sandhi_server_*`) as reachable-undefined,
-  while agnostik+agnodrm collide on `ERR_*`. **bhumi is the only active dep** (clean,
-  no git sub-deps). Re-enable with selective `modules = [...]` when consumed.
+- **Toolchain 6.3.36 → 6.3.37; bhumi 0.7.0 → 1.0.0** (API-compatible bump).
+- **Dependency de-collision + re-enable.** agnostik + agnodrm namespaced their error
+  families (`STIK_ERR_*` / `DRM_ERR_*`) to end the `ERR_*` symbol collision — cut as
+  **agnostik 1.3.3** + **agnodrm 1.4.5** — and are now active deps (reviewed stdlib:
+  `+trait`, `+ct`). Active deps: **bhumi, agnostik, agnodrm**. The one downstream
+  consumer, `aegis`, was migrated to the new names + cut as 1.1.3.
+- **mehman deferred to Bite G.** Cyrius stdlib is opt-in (declare what each dep needs);
+  reviewing mehman showed its `[deps.kavach]` → sandhi → the full `tls_native` TLS
+  stack, too large a surface for a types-only, unused dep. Re-enable when the
+  compositor actually hosts guests.
 
 ## [0.1.0] - 2026-07-02 — Cyrius port
 
