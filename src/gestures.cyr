@@ -1,0 +1,611 @@
+# aethersafha — multi-touch gesture recognition
+# Parity: rust-old/src/gestures.rs
+#   (TouchPoint, SwipeDirection, GestureType, GestureEvent, GestureConfig,
+#    TouchTracker, GestureRecognizer)
+#
+# Recognises taps, double-taps, long-presses, swipes, pinch-to-zoom and
+# rotation from raw touch events. Feed events via gest_touch_down /
+# gest_touch_move / gest_touch_up, then drain with gest_recognized_gestures.
+#
+# NUMERIC MODEL (Cyrius has no first-class float in this idiom):
+#   * Rust f64 x / y            -> integer pixels (i64).   px == 1 unit.
+#   * Rust f64 pressure (0..1)  -> permille (0..1000).
+#   * Rust u64 timestamp_ms     -> i64 epoch millis.
+#   * Rust f64 pinch scale      -> permille  (1.0 == 1000).
+#   * Rust f64 rotate angle     -> milliradians (1 rad == 1000).
+#   * swipe_threshold_px        -> integer pixels.
+#   * pinch_threshold (0.1)     -> permille (100).
+#   * rotation threshold (0.1)  -> milliradians (100).
+# Distances use an integer sqrt (Newton), angles an integer atan2
+# (milliradians) — both defined below so the module is self-contained and
+# never touches float bit-patterns.
+
+# ============================================================================
+# Enums
+# ============================================================================
+
+# Direction of a swipe. Plain-integer enum (parity: SwipeDirection).
+enum G_SwipeDir {
+    G_SWIPE_UP    = 0;
+    G_SWIPE_DOWN  = 1;
+    G_SWIPE_LEFT  = 2;
+    G_SWIPE_RIGHT = 3;
+}
+
+# GestureType discriminant tags (parity: enum GestureType variants).
+# The recognised gesture is stored as a small heap record (see G_GEvOff) whose
+# G_KIND slot holds one of these tags and whose G_P0/G_P1 slots carry the
+# variant payload:
+#   G_TAP / G_DOUBLETAP / G_LONGPRESS : no payload
+#   G_SWIPE   : P0 = G_SwipeDir
+#   G_PINCH   : P0 = scale   (permille, 1000 == 1.0)
+#   G_ROTATE  : P0 = angle   (milliradians)
+#   G_PAN     : P0 = dx (px), P1 = dy (px)
+enum G_GestureKind {
+    G_TAP        = 0;
+    G_DOUBLETAP  = 1;
+    G_LONGPRESS  = 2;
+    G_SWIPE      = 3;
+    G_PINCH      = 4;
+    G_ROTATE     = 5;
+    G_PAN        = 6;
+}
+
+# ============================================================================
+# TouchPoint — a single touch contact (parity: struct TouchPoint)
+# ============================================================================
+
+enum G_TpOff {
+    G_TP_ID    = 0;    # u32 id
+    G_TP_X     = 8;    # px
+    G_TP_Y     = 16;   # px
+    G_TP_PRESS = 24;   # permille 0..1000
+    G_TP_TS    = 32;   # epoch millis
+    G_TP_SZ    = 40;
+}
+
+# gest_point(id, x, y, pressure_permille, ts_ms) -> *TouchPoint (0 on OOM)
+fn gest_point(id, x, y, pressure, ts): i64 {
+    var p = alloc(G_TP_SZ);
+    if (p == 0) { return 0; }
+    store64(p + G_TP_ID, id);
+    store64(p + G_TP_X, x);
+    store64(p + G_TP_Y, y);
+    store64(p + G_TP_PRESS, pressure);
+    store64(p + G_TP_TS, ts);
+    return p;
+}
+
+fn gest_point_id(p)       { return load64(p + G_TP_ID); }
+fn gest_point_x(p)        { return load64(p + G_TP_X); }
+fn gest_point_y(p)        { return load64(p + G_TP_Y); }
+fn gest_point_pressure(p) { return load64(p + G_TP_PRESS); }
+fn gest_point_ts(p)       { return load64(p + G_TP_TS); }
+
+# Shallow copy of a TouchPoint (the trackers keep their own start/current
+# snapshots, mirroring Rust's Copy semantics). -> *TouchPoint (0 on OOM)
+fn gest_point_copy(p): i64 {
+    if (p == 0) { return 0; }
+    return gest_point(load64(p + G_TP_ID), load64(p + G_TP_X), load64(p + G_TP_Y),
+                      load64(p + G_TP_PRESS), load64(p + G_TP_TS));
+}
+
+# ============================================================================
+# GestureEvent — a recognised gesture (parity: struct GestureEvent)
+#   surface_id : i64, -1 == None (parity: Option<SurfaceId>)
+# ============================================================================
+
+enum G_GEvOff {
+    G_GE_KIND    = 0;    # G_GestureKind
+    G_GE_P0      = 8;    # variant payload 0
+    G_GE_P1      = 16;   # variant payload 1
+    G_GE_TOUCHES = 24;   # vec of *TouchPoint
+    G_GE_SURFACE = 32;   # surface id, -1 == None
+    G_GE_TS      = 40;   # epoch millis
+    G_GE_SZ      = 48;
+}
+
+# gest_event_new(kind, p0, p1, touches_vec, surface_id, ts) -> *GestureEvent
+fn gest_event_new(kind, p0, p1, touches, surface_id, ts): i64 {
+    var e = alloc(G_GE_SZ);
+    if (e == 0) { return 0; }
+    store64(e + G_GE_KIND, kind);
+    store64(e + G_GE_P0, p0);
+    store64(e + G_GE_P1, p1);
+    store64(e + G_GE_TOUCHES, touches);
+    store64(e + G_GE_SURFACE, surface_id);
+    store64(e + G_GE_TS, ts);
+    return e;
+}
+
+fn gest_event_kind(e)     { return load64(e + G_GE_KIND); }
+fn gest_event_p0(e)       { return load64(e + G_GE_P0); }
+fn gest_event_p1(e)       { return load64(e + G_GE_P1); }
+fn gest_event_touches(e)  { return load64(e + G_GE_TOUCHES); }
+fn gest_event_surface(e)  { return load64(e + G_GE_SURFACE); }
+fn gest_event_ts(e)       { return load64(e + G_GE_TS); }
+
+# Convenience payload readers matching the Rust variant field names.
+fn gest_event_swipe_dir(e) { return load64(e + G_GE_P0); }   # G_SwipeDir
+fn gest_event_scale(e)     { return load64(e + G_GE_P0); }   # permille
+fn gest_event_angle(e)     { return load64(e + G_GE_P0); }   # milliradians
+fn gest_event_pan_dx(e)    { return load64(e + G_GE_P0); }   # px
+fn gest_event_pan_dy(e)    { return load64(e + G_GE_P1); }   # px
+
+# ============================================================================
+# GestureConfig — tuning parameters (parity: struct GestureConfig + Default)
+# ============================================================================
+
+enum G_GcOff {
+    G_GC_TAP_TIMEOUT    = 0;    # ms
+    G_GC_DBL_INTERVAL   = 8;    # ms
+    G_GC_LONG_PRESS     = 16;   # ms
+    G_GC_SWIPE_THRESH   = 24;   # px
+    G_GC_PINCH_THRESH   = 32;   # permille (0.1 -> 100)
+    G_GC_SZ             = 40;
+}
+
+# gest_config_new(...) -> *GestureConfig (0 on OOM)
+fn gest_config_new(tap_timeout, dbl_interval, long_press, swipe_thresh, pinch_thresh): i64 {
+    var c = alloc(G_GC_SZ);
+    if (c == 0) { return 0; }
+    store64(c + G_GC_TAP_TIMEOUT, tap_timeout);
+    store64(c + G_GC_DBL_INTERVAL, dbl_interval);
+    store64(c + G_GC_LONG_PRESS, long_press);
+    store64(c + G_GC_SWIPE_THRESH, swipe_thresh);
+    store64(c + G_GC_PINCH_THRESH, pinch_thresh);
+    return c;
+}
+
+# gest_config_default() — parity: GestureConfig::default()
+#   tap_timeout 300, double_tap 400, long_press 500,
+#   swipe_threshold 50 px, pinch_threshold 0.1 -> 100 permille.
+fn gest_config_default(): i64 {
+    return gest_config_new(300, 400, 500, 50, 100);
+}
+
+fn gest_config_tap_timeout(c)   { return load64(c + G_GC_TAP_TIMEOUT); }
+fn gest_config_dbl_interval(c)  { return load64(c + G_GC_DBL_INTERVAL); }
+fn gest_config_long_press(c)    { return load64(c + G_GC_LONG_PRESS); }
+fn gest_config_swipe_thresh(c)  { return load64(c + G_GC_SWIPE_THRESH); }
+fn gest_config_pinch_thresh(c)  { return load64(c + G_GC_PINCH_THRESH); }
+
+# ============================================================================
+# TouchTracker — one finger from down to up (parity: struct TouchTracker)
+#   start / current are *TouchPoint snapshots.
+#   release_time : i64, -1 == None (parity: Option<u64>)
+# ============================================================================
+
+enum G_TtOff {
+    G_TT_START    = 0;    # *TouchPoint
+    G_TT_CURRENT  = 8;    # *TouchPoint
+    G_TT_RELEASED = 16;   # 0/1
+    G_TT_RELTIME  = 24;   # ms, -1 == None
+    G_TT_SZ       = 32;
+}
+
+# gest_tracker_new(start_point) -> *TouchTracker (0 on OOM).
+# Takes independent snapshots for start and current (Rust: start=current=point).
+fn gest_tracker_new(point): i64 {
+    var t = alloc(G_TT_SZ);
+    if (t == 0) { return 0; }
+    store64(t + G_TT_START, gest_point_copy(point));
+    store64(t + G_TT_CURRENT, gest_point_copy(point));
+    store64(t + G_TT_RELEASED, 0);
+    store64(t + G_TT_RELTIME, 0 - 1);
+    return t;
+}
+
+fn gest_tracker_start(t)    { return load64(t + G_TT_START); }
+fn gest_tracker_current(t)  { return load64(t + G_TT_CURRENT); }
+fn gest_tracker_released(t) { return load64(t + G_TT_RELEASED); }
+fn gest_tracker_reltime(t)  { return load64(t + G_TT_RELTIME); }
+
+fn gest_tracker_set_current(t, point) {
+    store64(t + G_TT_CURRENT, gest_point_copy(point));
+    return 0;
+}
+fn gest_tracker_release(t, now) {
+    store64(t + G_TT_RELEASED, 1);
+    store64(t + G_TT_RELTIME, now);
+    return 0;
+}
+
+# ============================================================================
+# Integer math helpers (self-contained; no float bit-patterns).
+# ============================================================================
+
+# gest_iabs(v) -> |v|
+fn gest_iabs(v): i64 {
+    if (v < 0) { return 0 - v; }
+    return v;
+}
+
+# gest_isqrt(n) -> floor(sqrt(n)) for n >= 0 (Newton). n<0 -> 0.
+fn gest_isqrt(n): i64 {
+    if (n < 0) { return 0; }
+    if (n < 2) { return n; }
+    var x = n;
+    var y = (x + 1) / 2;
+    while (y < x) {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    return x;
+}
+
+# gest_dist(dx, dy) -> floor(sqrt(dx*dx + dy*dy))  (integer pixels).
+fn gest_dist(dx, dy): i64 {
+    var sq = dx * dx + dy * dy;
+    return gest_isqrt(sq);
+}
+
+# gest_saturating_sub(a, b) -> a-b, floored at 0 (parity: u64 saturating_sub).
+fn gest_saturating_sub(a, b): i64 {
+    if (a < b) { return 0; }
+    return a - b;
+}
+
+# gest_imax(a, b) -> larger of a,b.
+fn gest_imax(a, b): i64 {
+    if (a > b) { return a; }
+    return b;
+}
+
+# ---- integer atan2 in milliradians (parity substitute for f64 atan2) ----
+# Returns the angle of (y,x) in milliradians, range (-3142, 3142].
+# Uses the standard rational minimax on |y|/|x| in fixed point (1000 == 1.0).
+# HALF_PI = 1571 mR, PI = 3142 mR (rounded from pi/2, pi).
+
+# gest_atan_ratio(z) — atan(z) for 0<=z<=1000 (z in permille), result mR.
+# Approximation: atan(t) ~= t / (1 + 0.28125 t^2), t = z/1000 in 0..1
+# (Rajan's single-term form). Max error ~5 mR over the domain — far below
+# the 100 mR rotation-detection threshold, so parity outcomes are preserved.
+fn gest_atan_ratio(z): i64 {
+    # den (scaled 1e6) = 1e6 + 0.28125*(z^2)   [0.28125 == 281250/1e6]
+    var dens = 1000000 + (281250 * z * z) / 1000000;
+    # atan_rad = t/den; result in mR = z*1e6 / dens.
+    return (z * 1000000) / dens;
+}
+
+# gest_atan2(y, x) -> milliradians in (-3142, 3142].
+fn gest_atan2(y, x): i64 {
+    var half_pi = 1571;
+    var pi = 3142;
+    if (x == 0) {
+        if (y > 0) { return half_pi; }
+        if (y < 0) { return 0 - half_pi; }
+        return 0;
+    }
+    var ax = gest_iabs(x);
+    var ay = gest_iabs(y);
+    var ang = 0;
+    if (ax >= ay) {
+        # ratio = ay/ax in permille, in 0..1000
+        var z = (ay * 1000) / ax;
+        ang = gest_atan_ratio(z);
+    } else {
+        var z2 = (ax * 1000) / ay;
+        ang = half_pi - gest_atan_ratio(z2);
+    }
+    # Fold to correct quadrant using signs of x, y.
+    if (x > 0) {
+        if (y >= 0) { return ang; }
+        return 0 - ang;
+    }
+    # x < 0
+    if (y >= 0) { return pi - ang; }
+    return ang - pi;
+}
+
+# gest_angle_diff(a, b) -> a-b wrapped into (-3142, 3142]  (milliradians).
+fn gest_angle_diff(a, b): i64 {
+    var pi = 3142;
+    var two_pi = 6284;
+    var d = a - b;
+    while (d > pi) { d = d - two_pi; }
+    while (d < (0 - pi)) { d = d + two_pi; }
+    return d;
+}
+
+# ============================================================================
+# GestureRecognizer (parity: struct GestureRecognizer)
+#   last_tap_time : i64, -1 == None (parity: Option<u64>)
+#   last_tap_x/y  : with last_tap_valid flag (parity: Option<(f64,f64)>)
+# ============================================================================
+
+enum G_GrOff {
+    G_GR_CONFIG        = 0;    # *GestureConfig
+    G_GR_ACTIVE        = 8;    # vec of *TouchTracker
+    G_GR_RECOGNISED    = 16;   # vec of *GestureEvent
+    G_GR_LAST_TAP_TIME = 24;   # ms, -1 == None
+    G_GR_LAST_TAP_X    = 32;   # px
+    G_GR_LAST_TAP_Y    = 40;   # px
+    G_GR_LAST_TAP_VLD  = 48;   # 0/1 : is last_tap_position Some
+    G_GR_SZ            = 56;
+}
+
+# gest_recognizer_new(config) -> *GestureRecognizer (0 on OOM).
+fn gest_recognizer_new(config): i64 {
+    var r = alloc(G_GR_SZ);
+    if (r == 0) { return 0; }
+    store64(r + G_GR_CONFIG, config);
+    store64(r + G_GR_ACTIVE, vec_new());
+    store64(r + G_GR_RECOGNISED, vec_new());
+    store64(r + G_GR_LAST_TAP_TIME, 0 - 1);
+    store64(r + G_GR_LAST_TAP_X, 0);
+    store64(r + G_GR_LAST_TAP_Y, 0);
+    store64(r + G_GR_LAST_TAP_VLD, 0);
+    return r;
+}
+
+fn gest_recognizer_config(r) { return load64(r + G_GR_CONFIG); }
+fn gest_recognizer_active(r) { return load64(r + G_GR_ACTIVE); }
+
+# gest_active_find(r, id) -> *TouchTracker whose start.id == id, or 0.
+fn gest_active_find(r, id): i64 {
+    var v = load64(r + G_GR_ACTIVE);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var t = vec_get(v, i);
+        if (gest_point_id(gest_tracker_start(t)) == id) { return t; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# gest_touch_down(r, point) — register a new contact. (parity: touch_down)
+fn gest_touch_down(r, point): i64 {
+    var t = gest_tracker_new(point);
+    if (t == 0) { return 0 - 1; }
+    vec_push(load64(r + G_GR_ACTIVE), t);
+    return 0;
+}
+
+# gest_touch_move(r, point) — update an existing contact, then check two-finger.
+# (parity: touch_move)
+fn gest_touch_move(r, point): i64 {
+    var id = gest_point_id(point);
+    var t = gest_active_find(r, id);
+    if (t != 0) {
+        gest_tracker_set_current(t, point);
+    }
+    gest_check_two_finger_gestures(r);
+    return 0;
+}
+
+# gest_touch_up(r, id) — lift a finger; triggers single-finger recognition
+# when exactly one (now all-released) finger was involved. (parity: touch_up)
+fn gest_touch_up(r, id): i64 {
+    var v = load64(r + G_GR_ACTIVE);
+    # now = current.timestamp_ms of the matching tracker, else 0.
+    var now = 0;
+    var t = gest_active_find(r, id);
+    if (t != 0) {
+        now = gest_point_ts(gest_tracker_current(t));
+        gest_tracker_release(t, now);
+    }
+
+    var active_count = vec_len(v);
+    var all_released = gest_all_released(r);
+
+    var one_all = (active_count == 1) && (all_released == 1);
+    if (one_all) {
+        # recognise reads G_GR_ACTIVE, so clear (fresh vec) only afterwards.
+        gest_recognise_single_finger(r);
+        store64(r + G_GR_ACTIVE, vec_new());
+    } else {
+        if (all_released == 1) {
+            store64(r + G_GR_ACTIVE, vec_new());
+        }
+    }
+    return 0;
+}
+
+# gest_all_released(r) -> 1 if every active tracker is released (parity: all()).
+# Note: Rust's `iter().all()` on an empty slice is true; we match that.
+fn gest_all_released(r): i64 {
+    var v = load64(r + G_GR_ACTIVE);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        if (gest_tracker_released(vec_get(v, i)) == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# gest_recognized_gestures(r) -> vec of *GestureEvent, draining the buffer.
+# (parity: recognized_gestures / std::mem::take)
+fn gest_recognized_gestures(r): i64 {
+    var out = load64(r + G_GR_RECOGNISED);
+    store64(r + G_GR_RECOGNISED, vec_new());
+    return out;
+}
+
+# gest_active_touch_count(r) -> number of fingers still down (parity:
+# active_touch_count — counts trackers where !released).
+fn gest_active_touch_count(r): i64 {
+    var v = load64(r + G_GR_ACTIVE);
+    var n = vec_len(v);
+    var i = 0;
+    var count = 0;
+    while (i < n) {
+        if (gest_tracker_released(vec_get(v, i)) == 0) { count = count + 1; }
+        i = i + 1;
+    }
+    return count;
+}
+
+# gest_reset(r) — clear all state. (parity: reset)
+fn gest_reset(r): i64 {
+    store64(r + G_GR_ACTIVE, vec_new());
+    store64(r + G_GR_RECOGNISED, vec_new());
+    store64(r + G_GR_LAST_TAP_TIME, 0 - 1);
+    store64(r + G_GR_LAST_TAP_X, 0);
+    store64(r + G_GR_LAST_TAP_Y, 0);
+    store64(r + G_GR_LAST_TAP_VLD, 0);
+    return 0;
+}
+
+# -- private helpers --
+
+# gest_recognise_single_finger(r) — parity: recognise_single_finger.
+fn gest_recognise_single_finger(r): i64 {
+    var v = load64(r + G_GR_ACTIVE);
+    if (vec_len(v) == 0) { return 0; }
+    var tracker = vec_get(v, 0);
+
+    var start = gest_tracker_start(tracker);
+    var cur = gest_tracker_current(tracker);
+    var cfg = load64(r + G_GR_CONFIG);
+
+    var dx = gest_point_x(cur) - gest_point_x(start);
+    var dy = gest_point_y(cur) - gest_point_y(start);
+    var distance = gest_dist(dx, dy);
+
+    # duration = release_time.unwrap_or(current.ts).saturating_sub(start.ts)
+    var reltime = gest_tracker_reltime(tracker);
+    var end_ts = reltime;
+    if (reltime < 0) { end_ts = gest_point_ts(cur); }
+    var duration = gest_saturating_sub(end_ts, gest_point_ts(start));
+
+    var swipe_thresh = gest_config_swipe_thresh(cfg);
+    var recog = load64(r + G_GR_RECOGNISED);
+
+    if (distance > swipe_thresh) {
+        # Swipe: pick direction by dominant axis.
+        var direction = G_SwipeDir.G_SWIPE_UP;
+        var adx = gest_iabs(dx);
+        var ady = gest_iabs(dy);
+        if (adx > ady) {
+            if (dx > 0) { direction = G_SwipeDir.G_SWIPE_RIGHT; }
+            else { direction = G_SwipeDir.G_SWIPE_LEFT; }
+        } else {
+            if (dy > 0) { direction = G_SwipeDir.G_SWIPE_DOWN; }
+            else { direction = G_SwipeDir.G_SWIPE_UP; }
+        }
+        var tv = vec_new();
+        vec_push(tv, gest_point_copy(start));
+        vec_push(tv, gest_point_copy(cur));
+        var ev = gest_event_new(G_GestureKind.G_SWIPE, direction, 0, tv,
+                                0 - 1, gest_point_ts(cur));
+        vec_push(recog, ev);
+        return 0;
+    }
+
+    var long_press = gest_config_long_press(cfg);
+    if (duration >= long_press) {
+        var tvl = vec_new();
+        vec_push(tvl, gest_point_copy(start));
+        var evl = gest_event_new(G_GestureKind.G_LONGPRESS, 0, 0, tvl,
+                                 0 - 1, gest_point_ts(cur));
+        vec_push(recog, evl);
+        return 0;
+    }
+
+    var tap_timeout = gest_config_tap_timeout(cfg);
+    if (duration < tap_timeout) {
+        # Tap (possibly double-tap).
+        var is_double = 0;
+        var last_time = load64(r + G_GR_LAST_TAP_TIME);
+        var last_vld = load64(r + G_GR_LAST_TAP_VLD);
+        var have_last = (last_time >= 0) && (last_vld == 1);
+        if (have_last) {
+            var interval = gest_saturating_sub(gest_point_ts(start), last_time);
+            var tdx = gest_point_x(start) - load64(r + G_GR_LAST_TAP_X);
+            var tdy = gest_point_y(start) - load64(r + G_GR_LAST_TAP_Y);
+            var tap_dist = gest_dist(tdx, tdy);
+            var dbl_interval = gest_config_dbl_interval(cfg);
+            var in_time = (interval <= dbl_interval);
+            var in_space = (tap_dist < swipe_thresh);
+            if (in_time && in_space) { is_double = 1; }
+        }
+
+        if (is_double == 1) {
+            var tvd = vec_new();
+            vec_push(tvd, gest_point_copy(start));
+            var evd = gest_event_new(G_GestureKind.G_DOUBLETAP, 0, 0, tvd,
+                                     0 - 1, gest_point_ts(cur));
+            vec_push(recog, evd);
+            store64(r + G_GR_LAST_TAP_TIME, 0 - 1);
+            store64(r + G_GR_LAST_TAP_VLD, 0);
+        } else {
+            var tvt = vec_new();
+            vec_push(tvt, gest_point_copy(start));
+            var evt = gest_event_new(G_GestureKind.G_TAP, 0, 0, tvt,
+                                     0 - 1, gest_point_ts(cur));
+            vec_push(recog, evt);
+            store64(r + G_GR_LAST_TAP_TIME, gest_point_ts(cur));
+            store64(r + G_GR_LAST_TAP_X, gest_point_x(start));
+            store64(r + G_GR_LAST_TAP_Y, gest_point_y(start));
+            store64(r + G_GR_LAST_TAP_VLD, 1);
+        }
+    }
+    return 0;
+}
+
+# gest_check_two_finger_gestures(r) — parity: check_two_finger_gestures.
+# Emits Pinch (scale permille) and/or Rotate (angle milliradians) events.
+fn gest_check_two_finger_gestures(r): i64 {
+    var v = load64(r + G_GR_ACTIVE);
+    if (vec_len(v) != 2) { return 0; }
+    var t0 = vec_get(v, 0);
+    var t1 = vec_get(v, 1);
+
+    var r0 = gest_tracker_released(t0);
+    var r1 = gest_tracker_released(t1);
+    if ((r0 == 1) || (r1 == 1)) { return 0; }
+
+    var s0 = gest_tracker_start(t0);
+    var s1 = gest_tracker_start(t1);
+    var c0 = gest_tracker_current(t0);
+    var c1 = gest_tracker_current(t1);
+    var cfg = load64(r + G_GR_CONFIG);
+    var recog = load64(r + G_GR_RECOGNISED);
+
+    # Initial distance.
+    var start_dx = gest_point_x(s0) - gest_point_x(s1);
+    var start_dy = gest_point_y(s0) - gest_point_y(s1);
+    var start_dist = gest_dist(start_dx, start_dy);
+
+    # Current distance.
+    var cur_dx = gest_point_x(c0) - gest_point_x(c1);
+    var cur_dy = gest_point_y(c0) - gest_point_y(c1);
+    var cur_dist = gest_dist(cur_dx, cur_dy);
+
+    var ts = gest_imax(gest_point_ts(c0), gest_point_ts(c1));
+
+    if (start_dist > 0) {
+        # scale = cur_dist / start_dist, in permille (1000 == 1.0).
+        var scale = (cur_dist * 1000) / start_dist;
+        # |scale - 1.0| > pinch_threshold  -> |scale - 1000| > thresh(permille)
+        var pinch_thresh = gest_config_pinch_thresh(cfg);
+        var scale_off = gest_iabs(scale - 1000);
+        if (scale_off > pinch_thresh) {
+            var tvp = vec_new();
+            vec_push(tvp, gest_point_copy(c0));
+            vec_push(tvp, gest_point_copy(c1));
+            var evp = gest_event_new(G_GestureKind.G_PINCH, scale, 0, tvp,
+                                     0 - 1, ts);
+            vec_push(recog, evp);
+        }
+    }
+
+    # Rotation: change in angle between the two fingers (milliradians).
+    var start_angle = gest_atan2(start_dy, start_dx);
+    var cur_angle = gest_atan2(cur_dy, cur_dx);
+    var angle_diff = gest_angle_diff(cur_angle, start_angle);
+    # Rust threshold 0.1 rad -> 100 mR.
+    var ad_abs = gest_iabs(angle_diff);
+    if (ad_abs > 100) {
+        var tvr = vec_new();
+        vec_push(tvr, gest_point_copy(c0));
+        vec_push(tvr, gest_point_copy(c1));
+        var evr = gest_event_new(G_GestureKind.G_ROTATE, angle_diff, 0, tvr,
+                                 0 - 1, ts);
+        vec_push(recog, evr);
+    }
+    return 0;
+}

@@ -1,0 +1,990 @@
+# aethersafha — security UI model
+# Parity: rust-old/src/security_ui.rs
+#   (SecurityUI, SecurityAlert, ThreatLevel, PermissionRequest,
+#    PermissionDefinition, PermissionCategory, AgentPermission,
+#    SecurityLevel, SecurityDashboard, OverrideRequest,
+#    WindowBadgeManager + trust/sandbox/badge enums)
+#
+# Every Rust struct behind Arc<RwLock<..>> becomes a heap object: a named
+# offset enum + alloc(SZ) + load64/store64 accessors — the same convention as
+# src/window.cyr / src/compositor.cyr / lib/bhumi.cyr. The Arc<RwLock<..>>
+# concurrency wrapper is dropped: this is a single-threaded port (the compositor
+# is the sole owner). Collections are the stdlib untyped vec / hashmap.
+#
+# Substitutions (see stubbed[] in the port summary):
+#   - Uuid              -> i64 id (monotonic counter in the SecurityUI, or a
+#                          caller-supplied i64). Uuid::nil() == 0.
+#   - chrono DateTime   -> i64 epoch (seconds). Caller passes `now`; stored raw.
+#                          expires_at Option<DateTime> -> i64, 0 == None.
+#   - f32               -> not used by this module.
+#   - String            -> cstr pointer (char*). Ownership: caller keeps literals
+#                          alive; heap objects store the pointer, not a copy.
+#   - tracing macros     -> println(cstr) audit lines (best-effort, no-op-able).
+#   - serde / reqwest / tokio / libc::kill / fs — external effects; stubbed as
+#     commented parity notes in sec_emergency_kill_agent / sec_write_audit_log.
+#
+# LIBRARY MODULE: definitions only, no main / no top-level statements.
+
+# ---------------------------------------------------------------------------
+# Ring-buffer capacity caps (Rust consts).
+# ---------------------------------------------------------------------------
+enum SecCap {
+    SEC_MAX_ALERTS              = 500;
+    SEC_MAX_PERMISSION_REQUESTS = 200;
+    SEC_MAX_OVERRIDE_REQUESTS   = 100;
+}
+
+# ---------------------------------------------------------------------------
+# ThreatLevel — ordered enum (Info < Low < Medium < High < Critical).
+# Explicit ascending values preserve Rust's PartialOrd/Ord so `max` works via
+# plain integer >.
+# ---------------------------------------------------------------------------
+enum SecThreatLevel {
+    SEC_TL_INFO     = 0;
+    SEC_TL_LOW      = 1;
+    SEC_TL_MEDIUM   = 2;
+    SEC_TL_HIGH     = 3;
+    SEC_TL_CRITICAL = 4;
+}
+
+# ---------------------------------------------------------------------------
+# PermissionCategory.
+# ---------------------------------------------------------------------------
+enum SecPermCategory {
+    SEC_PC_FILESYSTEM = 0;
+    SEC_PC_NETWORK    = 1;
+    SEC_PC_PROCESS    = 2;
+    SEC_PC_HARDWARE   = 3;
+    SEC_PC_AGENT      = 4;
+    SEC_PC_SYSTEM     = 5;
+}
+
+# ---------------------------------------------------------------------------
+# SecurityLevel (Default == Standard).
+# ---------------------------------------------------------------------------
+enum SecLevel {
+    SEC_LVL_STANDARD = 0;
+    SEC_LVL_ELEVATED = 1;
+    SEC_LVL_LOCKDOWN = 2;
+}
+
+# ---------------------------------------------------------------------------
+# SecurityUIError discriminants (Rust enum). Ports of fns that return
+# Result<(), SecurityUIError> return an i64 error code: 0 == Ok, else one of
+# these. Error payload strings are dropped (see stubbed[]).
+# ---------------------------------------------------------------------------
+enum SecErr {
+    SEC_ERR_OK                 = 0;
+    SEC_ERR_PERMISSION_NOT_FOUND = 1;
+    SEC_ERR_ALERT_NOT_FOUND    = 2;
+    SEC_ERR_ACTION_BLOCKED     = 3;
+}
+
+# ---------------------------------------------------------------------------
+# Window ownership badge enums (TrustLevel / SandboxStatus / BadgeIcon).
+# ---------------------------------------------------------------------------
+enum SecTrustLevel {
+    SEC_TRUST_SYSTEM     = 0;
+    SEC_TRUST_VERIFIED   = 1;
+    SEC_TRUST_UNVERIFIED = 2;
+    SEC_TRUST_UNTRUSTED  = 3;
+    SEC_TRUST_SANDBOXED  = 4;
+}
+
+enum SecSandboxStatus {
+    SEC_SB_FULL    = 0;
+    SEC_SB_PARTIAL = 1;
+    SEC_SB_NONE    = 2;
+}
+
+enum SecBadgeIcon {
+    SEC_ICON_SHIELD  = 0;
+    SEC_ICON_LOCK    = 1;
+    SEC_ICON_WARNING = 2;
+    SEC_ICON_AGENT   = 3;
+    SEC_ICON_SYSTEM  = 4;
+}
+
+# ===========================================================================
+# SecurityAlert — heap object.
+# ===========================================================================
+enum SecAlertOff {
+    SEC_SA_ID           = 0;    # i64 id (0 == nil)
+    SEC_SA_TITLE        = 8;    # cstr
+    SEC_SA_DESCRIPTION  = 16;   # cstr
+    SEC_SA_THREAT       = 24;   # SecThreatLevel
+    SEC_SA_SOURCE       = 32;   # cstr
+    SEC_SA_TIMESTAMP    = 40;   # i64 epoch secs
+    SEC_SA_REQ_ACTION   = 48;   # bool (0/1)
+    SEC_SA_RESOLVED     = 56;   # bool (0/1)
+    SEC_SA_SZ           = 64;
+}
+
+# sec_alert_new: full constructor. -> *SecurityAlert (0 on OOM)
+fn sec_alert_new(id, title, description, threat, source, ts, req_action, resolved): i64 {
+    var p = alloc(SEC_SA_SZ);
+    if (p == 0) { return 0; }
+    store64(p + SEC_SA_ID, id);
+    store64(p + SEC_SA_TITLE, title);
+    store64(p + SEC_SA_DESCRIPTION, description);
+    store64(p + SEC_SA_THREAT, threat);
+    store64(p + SEC_SA_SOURCE, source);
+    store64(p + SEC_SA_TIMESTAMP, ts);
+    store64(p + SEC_SA_REQ_ACTION, req_action);
+    store64(p + SEC_SA_RESOLVED, resolved);
+    return p;
+}
+
+# sec_alert_default(id, ts): Rust SecurityAlert::default() — empty strings,
+# ThreatLevel::Low, not requiring action, unresolved. Caller supplies id/ts
+# (Rust generates Uuid::new_v4() + Utc::now()).
+fn sec_alert_default(id, ts): i64 {
+    return sec_alert_new(id, "", "", SecThreatLevel.SEC_TL_LOW, "", ts, 0, 0);
+}
+
+fn sec_alert_id(p)          { return load64(p + SEC_SA_ID); }
+fn sec_alert_title(p)       { return load64(p + SEC_SA_TITLE); }
+fn sec_alert_description(p) { return load64(p + SEC_SA_DESCRIPTION); }
+fn sec_alert_threat(p)      { return load64(p + SEC_SA_THREAT); }
+fn sec_alert_source(p)      { return load64(p + SEC_SA_SOURCE); }
+fn sec_alert_timestamp(p)   { return load64(p + SEC_SA_TIMESTAMP); }
+fn sec_alert_requires_action(p) { return load64(p + SEC_SA_REQ_ACTION); }
+fn sec_alert_is_resolved(p) { return load64(p + SEC_SA_RESOLVED); }
+
+fn sec_alert_set_resolved(p, v) { store64(p + SEC_SA_RESOLVED, v); return 0; }
+fn sec_alert_set_threat(p, v)   { store64(p + SEC_SA_THREAT, v); return 0; }
+fn sec_alert_set_title(p, v)    { store64(p + SEC_SA_TITLE, v); return 0; }
+
+# ===========================================================================
+# PermissionRequest — heap object.
+# ===========================================================================
+enum SecPermReqOff {
+    SEC_PR_ID         = 0;    # i64 request id
+    SEC_PR_AGENT_ID   = 8;    # i64 agent id
+    SEC_PR_AGENT_NAME = 16;   # cstr
+    SEC_PR_PERMISSION = 24;   # cstr
+    SEC_PR_RESOURCE   = 32;   # cstr
+    SEC_PR_REASON     = 40;   # cstr
+    SEC_PR_TIMESTAMP  = 48;   # i64 epoch secs
+    SEC_PR_GRANTED    = 56;   # bool (0/1)
+    SEC_PR_SZ         = 64;
+}
+
+fn sec_permreq_new(id, agent_id, agent_name, permission, resource, reason, ts, granted): i64 {
+    var p = alloc(SEC_PR_SZ);
+    if (p == 0) { return 0; }
+    store64(p + SEC_PR_ID, id);
+    store64(p + SEC_PR_AGENT_ID, agent_id);
+    store64(p + SEC_PR_AGENT_NAME, agent_name);
+    store64(p + SEC_PR_PERMISSION, permission);
+    store64(p + SEC_PR_RESOURCE, resource);
+    store64(p + SEC_PR_REASON, reason);
+    store64(p + SEC_PR_TIMESTAMP, ts);
+    store64(p + SEC_PR_GRANTED, granted);
+    return p;
+}
+
+fn sec_permreq_id(p)         { return load64(p + SEC_PR_ID); }
+fn sec_permreq_agent_id(p)   { return load64(p + SEC_PR_AGENT_ID); }
+fn sec_permreq_agent_name(p) { return load64(p + SEC_PR_AGENT_NAME); }
+fn sec_permreq_permission(p) { return load64(p + SEC_PR_PERMISSION); }
+fn sec_permreq_resource(p)   { return load64(p + SEC_PR_RESOURCE); }
+fn sec_permreq_reason(p)     { return load64(p + SEC_PR_REASON); }
+fn sec_permreq_timestamp(p)  { return load64(p + SEC_PR_TIMESTAMP); }
+fn sec_permreq_is_granted(p) { return load64(p + SEC_PR_GRANTED); }
+fn sec_permreq_set_granted(p, v) { store64(p + SEC_PR_GRANTED, v); return 0; }
+
+# ===========================================================================
+# PermissionDefinition — heap object.
+# ===========================================================================
+enum SecPermDefOff {
+    SEC_PD_NAME        = 0;    # cstr
+    SEC_PD_DESCRIPTION = 8;    # cstr
+    SEC_PD_CATEGORY    = 16;   # SecPermCategory
+    SEC_PD_REQ_CONFIRM = 24;   # bool (0/1)
+    SEC_PD_SZ          = 32;
+}
+
+fn sec_permdef_new(name, description, category, req_confirm): i64 {
+    var p = alloc(SEC_PD_SZ);
+    if (p == 0) { return 0; }
+    store64(p + SEC_PD_NAME, name);
+    store64(p + SEC_PD_DESCRIPTION, description);
+    store64(p + SEC_PD_CATEGORY, category);
+    store64(p + SEC_PD_REQ_CONFIRM, req_confirm);
+    return p;
+}
+
+fn sec_permdef_name(p)        { return load64(p + SEC_PD_NAME); }
+fn sec_permdef_description(p) { return load64(p + SEC_PD_DESCRIPTION); }
+fn sec_permdef_category(p)    { return load64(p + SEC_PD_CATEGORY); }
+fn sec_permdef_requires_confirmation(p) { return load64(p + SEC_PD_REQ_CONFIRM); }
+
+# ===========================================================================
+# AgentPermission — heap object. `permissions` is a vec of cstr.
+# ===========================================================================
+enum SecAgentPermOff {
+    SEC_AP_AGENT_ID    = 0;    # i64
+    SEC_AP_AGENT_NAME  = 8;    # cstr
+    SEC_AP_PERMISSIONS = 16;   # vec of cstr
+    SEC_AP_GRANTED_AT  = 24;   # i64 epoch secs
+    SEC_AP_EXPIRES_AT  = 32;   # i64 epoch secs (0 == None)
+    SEC_AP_SZ          = 40;
+}
+
+# permissions_vec may be 0 -> a fresh empty vec is created.
+fn sec_agentperm_new(agent_id, agent_name, permissions_vec, granted_at, expires_at): i64 {
+    var p = alloc(SEC_AP_SZ);
+    if (p == 0) { return 0; }
+    var v = permissions_vec;
+    if (v == 0) { v = vec_new(); }
+    store64(p + SEC_AP_AGENT_ID, agent_id);
+    store64(p + SEC_AP_AGENT_NAME, agent_name);
+    store64(p + SEC_AP_PERMISSIONS, v);
+    store64(p + SEC_AP_GRANTED_AT, granted_at);
+    store64(p + SEC_AP_EXPIRES_AT, expires_at);
+    return p;
+}
+
+fn sec_agentperm_agent_id(p)    { return load64(p + SEC_AP_AGENT_ID); }
+fn sec_agentperm_agent_name(p)  { return load64(p + SEC_AP_AGENT_NAME); }
+fn sec_agentperm_permissions(p) { return load64(p + SEC_AP_PERMISSIONS); }
+fn sec_agentperm_granted_at(p)  { return load64(p + SEC_AP_GRANTED_AT); }
+fn sec_agentperm_expires_at(p)  { return load64(p + SEC_AP_EXPIRES_AT); }
+fn sec_agentperm_set_expires_at(p, v) { store64(p + SEC_AP_EXPIRES_AT, v); return 0; }
+
+# sec_agentperm_is_expired(p, now): expires_at is Option<DateTime>; 0 == None
+# means never expires. Returns 1 if now >= expires_at (and it is set), else 0.
+# (Not in the Rust source directly, but implied by the expires_at field — the
+# i64-epoch compare the module focus calls out.)
+fn sec_agentperm_is_expired(p, now): i64 {
+    var exp = load64(p + SEC_AP_EXPIRES_AT);
+    if (exp == 0) { return 0; }
+    if (now >= exp) { return 1; }
+    return 0;
+}
+
+# sec_agentperm_has(p, permission_cstr): does the permission list contain it?
+fn sec_agentperm_has(p, permission_cstr): i64 {
+    var v = load64(p + SEC_AP_PERMISSIONS);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var eq = streq(vec_get(v, i), permission_cstr);
+        if (eq == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# sec_agentperm_add(p, permission_cstr): push if not already present (Rust
+# grant_permission_enforced dedup). Returns 1 if added, 0 if already present.
+fn sec_agentperm_add(p, permission_cstr): i64 {
+    var present = sec_agentperm_has(p, permission_cstr);
+    if (present == 1) { return 0; }
+    vec_push(load64(p + SEC_AP_PERMISSIONS), permission_cstr);
+    return 1;
+}
+
+# sec_agentperm_remove(p, permission_cstr): retain(|x| x != perm). Removes all
+# matching entries. Returns count removed.
+fn sec_agentperm_remove(p, permission_cstr): i64 {
+    var v = load64(p + SEC_AP_PERMISSIONS);
+    var removed = 0;
+    var i = 0;
+    while (i < vec_len(v)) {
+        var eq = streq(vec_get(v, i), permission_cstr);
+        if (eq == 1) {
+            vec_remove(v, i);
+            removed = removed + 1;
+        } else {
+            i = i + 1;
+        }
+    }
+    return removed;
+}
+
+# ===========================================================================
+# SecurityDashboard — heap object (returned by get_security_dashboard).
+# ===========================================================================
+enum SecDashOff {
+    SEC_SD_THREAT       = 0;   # SecThreatLevel
+    SEC_SD_ACTIVE       = 8;   # usize active_alerts
+    SEC_SD_PENDING      = 16;  # usize pending_permissions
+    SEC_SD_RUNNING      = 24;  # usize running_agents
+    SEC_SD_LAST_SCAN    = 32;  # i64 epoch secs
+    SEC_SD_SZ           = 40;
+}
+
+fn sec_dash_new(threat, active, pending, running, last_scan): i64 {
+    var p = alloc(SEC_SD_SZ);
+    if (p == 0) { return 0; }
+    store64(p + SEC_SD_THREAT, threat);
+    store64(p + SEC_SD_ACTIVE, active);
+    store64(p + SEC_SD_PENDING, pending);
+    store64(p + SEC_SD_RUNNING, running);
+    store64(p + SEC_SD_LAST_SCAN, last_scan);
+    return p;
+}
+
+fn sec_dash_threat_level(p)        { return load64(p + SEC_SD_THREAT); }
+fn sec_dash_active_alerts(p)       { return load64(p + SEC_SD_ACTIVE); }
+fn sec_dash_pending_permissions(p) { return load64(p + SEC_SD_PENDING); }
+fn sec_dash_running_agents(p)      { return load64(p + SEC_SD_RUNNING); }
+fn sec_dash_last_scan(p)           { return load64(p + SEC_SD_LAST_SCAN); }
+
+# ===========================================================================
+# OverrideRequest — heap object.
+# ===========================================================================
+enum SecOverrideOff {
+    SEC_OR_ID          = 0;    # i64 request id
+    SEC_OR_AGENT_NAME  = 8;    # cstr
+    SEC_OR_ACTION      = 16;   # cstr
+    SEC_OR_REASON      = 24;   # cstr
+    SEC_OR_TIMESTAMP   = 32;   # i64 epoch secs
+    SEC_OR_APPROVED    = 40;   # bool (0/1)
+    SEC_OR_APPROVED_BY = 48;   # cstr (0 == None)
+    SEC_OR_SZ          = 56;
+}
+
+fn sec_override_new(id, agent_name, action, reason, ts, approved, approved_by): i64 {
+    var p = alloc(SEC_OR_SZ);
+    if (p == 0) { return 0; }
+    store64(p + SEC_OR_ID, id);
+    store64(p + SEC_OR_AGENT_NAME, agent_name);
+    store64(p + SEC_OR_ACTION, action);
+    store64(p + SEC_OR_REASON, reason);
+    store64(p + SEC_OR_TIMESTAMP, ts);
+    store64(p + SEC_OR_APPROVED, approved);
+    store64(p + SEC_OR_APPROVED_BY, approved_by);
+    return p;
+}
+
+fn sec_override_id(p)          { return load64(p + SEC_OR_ID); }
+fn sec_override_agent_name(p)  { return load64(p + SEC_OR_AGENT_NAME); }
+fn sec_override_action(p)      { return load64(p + SEC_OR_ACTION); }
+fn sec_override_reason(p)      { return load64(p + SEC_OR_REASON); }
+fn sec_override_timestamp(p)   { return load64(p + SEC_OR_TIMESTAMP); }
+fn sec_override_is_approved(p) { return load64(p + SEC_OR_APPROVED); }
+fn sec_override_approved_by(p) { return load64(p + SEC_OR_APPROVED_BY); }
+fn sec_override_set_approved(p, v) { store64(p + SEC_OR_APPROVED, v); return 0; }
+fn sec_override_set_approved_by(p, v) { store64(p + SEC_OR_APPROVED_BY, v); return 0; }
+
+# ===========================================================================
+# SecurityUI — the aggregate manager.
+# Rust holds each field behind Arc<RwLock<..>>; here they are plain owned
+# pointers (vecs / hashmap / scalars). Ring buffers are vecs with cap eviction.
+# ===========================================================================
+enum SecUIOff {
+    SEC_U_ALERTS        = 0;    # vec of *SecurityAlert (front == oldest)
+    SEC_U_PERM_REQUESTS = 8;    # vec of *PermissionRequest
+    SEC_U_AGENT_PERMS   = 16;   # u64 map: agent_id -> *AgentPermission
+    SEC_U_OVERRIDES     = 24;   # vec of *OverrideRequest
+    SEC_U_PERM_DEFS     = 32;   # vec of *PermissionDefinition
+    SEC_U_SEC_LEVEL     = 40;   # SecLevel
+    SEC_U_EMERGENCY     = 48;   # bool (0/1)
+    SEC_U_HUMAN_OVER    = 56;   # bool (0/1) human_override_enabled
+    SEC_U_NEXT_ID       = 64;   # i64 monotonic id counter (Uuid substitute)
+    SEC_U_SZ            = 72;
+}
+
+# sec_ui_new(): construct + seed the six built-in permission definitions.
+# -> *SecurityUI (0 on OOM)
+fn sec_ui_new(): i64 {
+    var u = alloc(SEC_U_SZ);
+    if (u == 0) { return 0; }
+    store64(u + SEC_U_ALERTS, vec_new());
+    store64(u + SEC_U_PERM_REQUESTS, vec_new());
+    store64(u + SEC_U_AGENT_PERMS, map_u64_new());
+    store64(u + SEC_U_OVERRIDES, vec_new());
+    store64(u + SEC_U_PERM_DEFS, vec_new());
+    store64(u + SEC_U_SEC_LEVEL, SecLevel.SEC_LVL_STANDARD);
+    store64(u + SEC_U_EMERGENCY, 0);
+    store64(u + SEC_U_HUMAN_OVER, 1);
+    store64(u + SEC_U_NEXT_ID, 1);
+    sec_ui_initialize_permission_definitions(u);
+    return u;
+}
+
+# sec_ui_next_id(u): allocate a fresh monotonic id (Uuid::new_v4 substitute).
+fn sec_ui_next_id(u): i64 {
+    var id = load64(u + SEC_U_NEXT_ID);
+    store64(u + SEC_U_NEXT_ID, id + 1);
+    return id;
+}
+
+fn sec_ui_alerts(u)      { return load64(u + SEC_U_ALERTS); }
+fn sec_ui_perm_requests(u) { return load64(u + SEC_U_PERM_REQUESTS); }
+fn sec_ui_agent_perms(u) { return load64(u + SEC_U_AGENT_PERMS); }
+fn sec_ui_overrides(u)   { return load64(u + SEC_U_OVERRIDES); }
+fn sec_ui_perm_defs(u)   { return load64(u + SEC_U_PERM_DEFS); }
+
+# initialize_permission_definitions: seed the six built-in defs (parity order).
+fn sec_ui_initialize_permission_definitions(u): i64 {
+    var defs = load64(u + SEC_U_PERM_DEFS);
+    vec_push(defs, sec_permdef_new("file:read",
+        "Read files in specified directories", SecPermCategory.SEC_PC_FILESYSTEM, 0));
+    vec_push(defs, sec_permdef_new("file:write",
+        "Create or modify files", SecPermCategory.SEC_PC_FILESYSTEM, 1));
+    vec_push(defs, sec_permdef_new("file:delete",
+        "Delete files and directories", SecPermCategory.SEC_PC_FILESYSTEM, 1));
+    vec_push(defs, sec_permdef_new("network:outbound",
+        "Make outbound network connections", SecPermCategory.SEC_PC_NETWORK, 0));
+    vec_push(defs, sec_permdef_new("process:spawn",
+        "Start new processes", SecPermCategory.SEC_PC_PROCESS, 1));
+    vec_push(defs, sec_permdef_new("agent:delegate",
+        "Delegate tasks to other agents", SecPermCategory.SEC_PC_AGENT, 1));
+    println("security-ui: initialized 6 permission definitions");
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Alerts.
+# ---------------------------------------------------------------------------
+
+# Internal: evict resolved alerts when at MAX_ALERTS, then drop oldest if still
+# full. Mirrors Rust's retain(|a| !a.is_resolved) + pop_front().
+fn sec_ui_evict_alerts(v): i64 {
+    var cap = SecCap.SEC_MAX_ALERTS;
+    if (vec_len(v) < cap) { return 0; }
+    # retain unresolved (drop resolved)
+    var i = 0;
+    while (i < vec_len(v)) {
+        var resolved = sec_alert_is_resolved(vec_get(v, i));
+        if (resolved == 1) {
+            vec_remove(v, i);
+        } else {
+            i = i + 1;
+        }
+    }
+    if (vec_len(v) >= cap) { vec_remove(v, 0); }  # pop_front
+    return 0;
+}
+
+# sec_ui_show_security_alert(u, alert): evict, log-if-critical, push_back.
+fn sec_ui_show_security_alert(u, alert): i64 {
+    var v = load64(u + SEC_U_ALERTS);
+    sec_ui_evict_alerts(v);
+    var threat = sec_alert_threat(alert);
+    if (threat == SecThreatLevel.SEC_TL_CRITICAL) {
+        println("security-ui: CRITICAL SECURITY ALERT");
+    }
+    vec_push(v, alert);
+    return 0;
+}
+
+# sec_ui_dismiss_alert(u, alert_id): mark matching alert resolved. Rust returns
+# Ok(()) even when not found. -> SEC_ERR_OK always.
+fn sec_ui_dismiss_alert(u, alert_id): i64 {
+    var v = load64(u + SEC_U_ALERTS);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var a = vec_get(v, i);
+        if (sec_alert_id(a) == alert_id) {
+            sec_alert_set_resolved(a, 1);
+            return SecErr.SEC_ERR_OK;
+        }
+        i = i + 1;
+    }
+    return SecErr.SEC_ERR_OK;
+}
+
+# ---------------------------------------------------------------------------
+# Permission requests.
+# ---------------------------------------------------------------------------
+
+# Internal: evict granted requests at MAX, then oldest. Mirrors Rust.
+fn sec_ui_evict_perm_requests(v): i64 {
+    var cap = SecCap.SEC_MAX_PERMISSION_REQUESTS;
+    if (vec_len(v) < cap) { return 0; }
+    var i = 0;
+    while (i < vec_len(v)) {
+        var granted = sec_permreq_is_granted(vec_get(v, i));
+        if (granted == 1) {
+            vec_remove(v, i);
+        } else {
+            i = i + 1;
+        }
+    }
+    if (vec_len(v) >= cap) { vec_remove(v, 0); }
+    return 0;
+}
+
+# sec_ui_request_permission(u, request): evict then push_back.
+fn sec_ui_request_permission(u, request): i64 {
+    var v = load64(u + SEC_U_PERM_REQUESTS);
+    sec_ui_evict_perm_requests(v);
+    vec_push(v, request);
+    println("security-ui: permission request");
+    return 0;
+}
+
+# sec_ui_grant_permission(u, request_id): set is_granted on matching request.
+# Rust returns Ok(()) even when not found. -> SEC_ERR_OK.
+fn sec_ui_grant_permission(u, request_id): i64 {
+    var v = load64(u + SEC_U_PERM_REQUESTS);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var r = vec_get(v, i);
+        if (sec_permreq_id(r) == request_id) {
+            sec_permreq_set_granted(r, 1);
+            println("security-ui: permission granted");
+            return SecErr.SEC_ERR_OK;
+        }
+        i = i + 1;
+    }
+    return SecErr.SEC_ERR_OK;
+}
+
+# sec_ui_deny_permission(u, request_id): retain(|r| r.id != id). -> SEC_ERR_OK.
+fn sec_ui_deny_permission(u, request_id): i64 {
+    var v = load64(u + SEC_U_PERM_REQUESTS);
+    var i = 0;
+    while (i < vec_len(v)) {
+        var r = vec_get(v, i);
+        if (sec_permreq_id(r) == request_id) {
+            vec_remove(v, i);
+        } else {
+            i = i + 1;
+        }
+    }
+    println("security-ui: permission denied");
+    return SecErr.SEC_ERR_OK;
+}
+
+# ---------------------------------------------------------------------------
+# Agent permissions (u64 map keyed by agent_id).
+# ---------------------------------------------------------------------------
+
+# sec_ui_set_agent_permissions(u, agent_id, agent_name, permissions_vec, now):
+# insert/overwrite. permissions_vec may be 0 (empty). granted_at = now,
+# expires_at = None(0).
+fn sec_ui_set_agent_permissions(u, agent_id, agent_name, permissions_vec, now): i64 {
+    var m = load64(u + SEC_U_AGENT_PERMS);
+    var ap = sec_agentperm_new(agent_id, agent_name, permissions_vec, now, 0);
+    map_u64_set(m, agent_id, ap);
+    println("security-ui: agent permissions set");
+    return 0;
+}
+
+# sec_ui_get_agent_permission(u, agent_id): -> *AgentPermission or 0.
+fn sec_ui_get_agent_permission(u, agent_id): i64 {
+    return map_u64_get(load64(u + SEC_U_AGENT_PERMS), agent_id);
+}
+
+# sec_ui_revoke_agent_permissions(u, agent_id): remove. -> SEC_ERR_OK if
+# present, SEC_ERR_PERMISSION_NOT_FOUND otherwise.
+fn sec_ui_revoke_agent_permissions(u, agent_id): i64 {
+    var m = load64(u + SEC_U_AGENT_PERMS);
+    var removed = map_u64_delete(m, agent_id);
+    if (removed == 1) {
+        println("security-ui: permissions revoked");
+        return SecErr.SEC_ERR_OK;
+    }
+    return SecErr.SEC_ERR_PERMISSION_NOT_FOUND;
+}
+
+# ---------------------------------------------------------------------------
+# Override requests.
+# ---------------------------------------------------------------------------
+
+# Internal: evict approved overrides at MAX, then oldest.
+fn sec_ui_evict_overrides(v): i64 {
+    var cap = SecCap.SEC_MAX_OVERRIDE_REQUESTS;
+    if (vec_len(v) < cap) { return 0; }
+    var i = 0;
+    while (i < vec_len(v)) {
+        var approved = sec_override_is_approved(vec_get(v, i));
+        if (approved == 1) {
+            vec_remove(v, i);
+        } else {
+            i = i + 1;
+        }
+    }
+    if (vec_len(v) >= cap) { vec_remove(v, 0); }
+    return 0;
+}
+
+# sec_ui_request_human_override(u, agent_name, action, reason, now): create a
+# fresh unapproved override, evict, push_back. -> new request id.
+fn sec_ui_request_human_override(u, agent_name, action, reason, now): i64 {
+    var id = sec_ui_next_id(u);
+    println("security-ui: human override requested");
+    var req = sec_override_new(id, agent_name, action, reason, now, 0, 0);
+    var v = load64(u + SEC_U_OVERRIDES);
+    sec_ui_evict_overrides(v);
+    vec_push(v, req);
+    return id;
+}
+
+# sec_ui_approve_override(u, request_id, approver): set approved + approved_by.
+# -> SEC_ERR_OK if found, SEC_ERR_ALERT_NOT_FOUND otherwise (Rust reuses
+# AlertNotFound for the override case).
+fn sec_ui_approve_override(u, request_id, approver): i64 {
+    var v = load64(u + SEC_U_OVERRIDES);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var r = vec_get(v, i);
+        if (sec_override_id(r) == request_id) {
+            sec_override_set_approved(r, 1);
+            println("security-ui: override approved");
+            sec_override_set_approved_by(r, approver);
+            return SecErr.SEC_ERR_OK;
+        }
+        i = i + 1;
+    }
+    return SecErr.SEC_ERR_ALERT_NOT_FOUND;
+}
+
+# ---------------------------------------------------------------------------
+# Emergency mode / security level.
+# ---------------------------------------------------------------------------
+
+# sec_ui_emergency_kill_switch(u): set emergency, keep human override enabled,
+# un-approve every pending override.
+fn sec_ui_emergency_kill_switch(u): i64 {
+    store64(u + SEC_U_EMERGENCY, 1);
+    store64(u + SEC_U_HUMAN_OVER, 1);
+    var v = load64(u + SEC_U_OVERRIDES);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        sec_override_set_approved(vec_get(v, i), 0);
+        i = i + 1;
+    }
+    println("security-ui: EMERGENCY KILL SWITCH ACTIVATED");
+    return 0;
+}
+
+# sec_ui_deactivate_emergency(u): clear emergency flag.
+fn sec_ui_deactivate_emergency(u): i64 {
+    store64(u + SEC_U_EMERGENCY, 0);
+    println("security-ui: emergency mode deactivated");
+    return 0;
+}
+
+fn sec_ui_is_emergency_mode(u): i64 { return load64(u + SEC_U_EMERGENCY); }
+fn sec_ui_human_override_enabled(u): i64 { return load64(u + SEC_U_HUMAN_OVER); }
+
+# sec_ui_set_security_level(u, level): store + level-specific log line.
+fn sec_ui_set_security_level(u, level): i64 {
+    store64(u + SEC_U_SEC_LEVEL, level);
+    if (level == SecLevel.SEC_LVL_STANDARD) {
+        println("security-ui: Security level: Standard");
+    } elif (level == SecLevel.SEC_LVL_ELEVATED) {
+        println("security-ui: Security level: Elevated");
+    } else {
+        println("security-ui: SECURITY LEVEL: LOCKDOWN");
+    }
+    return 0;
+}
+
+fn sec_ui_get_security_level(u): i64 { return load64(u + SEC_U_SEC_LEVEL); }
+
+# ---------------------------------------------------------------------------
+# Dashboard + queries.
+# ---------------------------------------------------------------------------
+
+# sec_ui_get_security_dashboard(u, now): aggregate active alerts, pending
+# permissions, running agents, and max active threat (default Low). -> *Dashboard.
+fn sec_ui_get_security_dashboard(u, now): i64 {
+    var alerts = load64(u + SEC_U_ALERTS);
+    var reqs = load64(u + SEC_U_PERM_REQUESTS);
+    var agents = load64(u + SEC_U_AGENT_PERMS);
+
+    var active_alerts = 0;
+    var max_threat = SecThreatLevel.SEC_TL_LOW;
+    var na = vec_len(alerts);
+    var i = 0;
+    while (i < na) {
+        var a = vec_get(alerts, i);
+        var resolved = sec_alert_is_resolved(a);
+        if (resolved == 0) {
+            active_alerts = active_alerts + 1;
+            var t = sec_alert_threat(a);
+            if (t > max_threat) { max_threat = t; }
+        }
+        i = i + 1;
+    }
+
+    var pending = 0;
+    var nr = vec_len(reqs);
+    var j = 0;
+    while (j < nr) {
+        var granted = sec_permreq_is_granted(vec_get(reqs, j));
+        if (granted == 0) { pending = pending + 1; }
+        j = j + 1;
+    }
+
+    var running = map_u64_size(agents);
+    return sec_dash_new(max_threat, active_alerts, pending, running, now);
+}
+
+# sec_ui_get_active_alerts(u): vec of unresolved *SecurityAlert (clones dropped
+# — returns the live pointers, matching read-only intent).
+fn sec_ui_get_active_alerts(u): i64 {
+    var out = vec_new();
+    var v = load64(u + SEC_U_ALERTS);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var a = vec_get(v, i);
+        var resolved = sec_alert_is_resolved(a);
+        if (resolved == 0) { vec_push(out, a); }
+        i = i + 1;
+    }
+    return out;
+}
+
+# sec_ui_get_pending_permissions(u): vec of ungranted *PermissionRequest.
+fn sec_ui_get_pending_permissions(u): i64 {
+    var out = vec_new();
+    var v = load64(u + SEC_U_PERM_REQUESTS);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var r = vec_get(v, i);
+        var granted = sec_permreq_is_granted(r);
+        if (granted == 0) { vec_push(out, r); }
+        i = i + 1;
+    }
+    return out;
+}
+
+# sec_ui_get_override_requests(u): vec of unapproved *OverrideRequest.
+fn sec_ui_get_override_requests(u): i64 {
+    var out = vec_new();
+    var v = load64(u + SEC_U_OVERRIDES);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var r = vec_get(v, i);
+        var approved = sec_override_is_approved(r);
+        if (approved == 0) { vec_push(out, r); }
+        i = i + 1;
+    }
+    return out;
+}
+
+# ---------------------------------------------------------------------------
+# Enforcement paths.
+# ---------------------------------------------------------------------------
+
+# Internal: find a permission definition by name. -> *PermissionDefinition or 0.
+fn sec_ui_find_perm_def(u, permission_cstr): i64 {
+    var defs = load64(u + SEC_U_PERM_DEFS);
+    var n = vec_len(defs);
+    var i = 0;
+    while (i < n) {
+        var d = vec_get(defs, i);
+        var eq = streq(sec_permdef_name(d), permission_cstr);
+        if (eq == 1) { return d; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# sec_ui_grant_permission_enforced(u, agent_id, agent_name, permission, now):
+# validate permission exists; if it requires confirmation and level==Lockdown,
+# block. Otherwise get-or-create the agent entry and dedup-add the permission.
+# -> SEC_ERR_OK / SEC_ERR_PERMISSION_NOT_FOUND / SEC_ERR_ACTION_BLOCKED.
+fn sec_ui_grant_permission_enforced(u, agent_id, agent_name, permission, now): i64 {
+    var def = sec_ui_find_perm_def(u, permission);
+    if (def == 0) { return SecErr.SEC_ERR_PERMISSION_NOT_FOUND; }
+
+    var requires_confirmation = sec_permdef_requires_confirmation(def);
+    if (requires_confirmation == 1) {
+        var level = load64(u + SEC_U_SEC_LEVEL);
+        if (level == SecLevel.SEC_LVL_LOCKDOWN) {
+            return SecErr.SEC_ERR_ACTION_BLOCKED;
+        }
+    }
+
+    var m = load64(u + SEC_U_AGENT_PERMS);
+    var entry = map_u64_get(m, agent_id);
+    if (entry == 0) {
+        entry = sec_agentperm_new(agent_id, agent_name, 0, now, 0);
+        map_u64_set(m, agent_id, entry);
+    }
+    sec_agentperm_add(entry, permission);
+
+    # parity: write_audit_log("permission_granted", agent_id, ...)
+    sec_write_audit_log("permission_granted", agent_id, permission);
+    println("security-ui: permission granted to agent (enforced)");
+    return SecErr.SEC_ERR_OK;
+}
+
+# sec_ui_revoke_permission_enforced(u, agent_id, permission, pid): remove the
+# permission from the agent's entry; SIGHUP-to-pid is stubbed. -> SEC_ERR_OK if
+# the agent entry exists, SEC_ERR_PERMISSION_NOT_FOUND otherwise. pid==0 == None.
+fn sec_ui_revoke_permission_enforced(u, agent_id, permission, pid): i64 {
+    var m = load64(u + SEC_U_AGENT_PERMS);
+    var entry = map_u64_get(m, agent_id);
+    if (entry == 0) { return SecErr.SEC_ERR_PERMISSION_NOT_FOUND; }
+
+    sec_agentperm_remove(entry, permission);
+
+    # TODO parity: if pid != 0 -> libc::kill(pid, SIGHUP) to reload agent config.
+    # No process-signal binding wired into this port; pid is accepted + ignored.
+
+    sec_write_audit_log("permission_revoked", agent_id, permission);
+    println("security-ui: permission revoked from agent (enforced)");
+    return SecErr.SEC_ERR_OK;
+}
+
+# sec_ui_emergency_kill_agent(u, agent_id, pid, now): the enforced kill path.
+# SIGKILL / cgroup removal / HTTP deregister are stubbed (see TODO parity);
+# the observable in-model effect is a resolved CRITICAL alert + audit line.
+# pid==0 == None (skip SIGKILL). -> SEC_ERR_OK.
+fn sec_ui_emergency_kill_agent(u, agent_id, pid, now): i64 {
+    println("security-ui: EMERGENCY KILL agent");
+
+    # TODO parity: if pid != 0 && pid > 0 -> unsafe libc::kill(pid, SIGKILL);
+    #   invalid pid -> return SEC_ERR_ACTION_BLOCKED. No signal binding here.
+    # TODO parity: remove cgroup /sys/fs/cgroup/agnos/<agent_id> (fs.remove_dir_all).
+    # TODO parity: fire-and-forget reqwest DELETE http://localhost:8090/v1/agents/<id>
+    #   guarded by a tokio runtime check. No HTTP/async in this port.
+
+    sec_write_audit_log("emergency_kill", agent_id, "Agent killed via emergency kill switch");
+
+    # Record a resolved CRITICAL alert (Rust builds one with is_resolved: true).
+    var id = sec_ui_next_id(u);
+    var alert = sec_alert_new(id, "Emergency Kill: Agent",
+        "Agent was terminated via emergency kill switch",
+        SecThreatLevel.SEC_TL_CRITICAL, "security-ui", now, 0, 1);
+    sec_ui_show_security_alert(u, alert);
+    return SecErr.SEC_ERR_OK;
+}
+
+# sec_write_audit_log(event_type, agent_id, details): Rust writes a JSON line to
+# /var/log/agnos/audit.log via serde_json + OpenOptions. Stubbed to a stdout
+# line — no serde, and file IO/path are left as a parity TODO.
+fn sec_write_audit_log(event_type, agent_id, details): i64 {
+    # TODO parity: serde_json::json!({timestamp, event_type, source, agent_id,
+    #   details}) appended to /var/log/agnos/audit.log; warn-on-failure, never fail.
+    println("security-ui: audit:");
+    println(event_type);
+    return 0;
+}
+
+# ===========================================================================
+# WindowOwnerBadge — heap object.
+# ===========================================================================
+enum SecBadgeOff {
+    SEC_WB_AGENT_ID     = 0;    # cstr (0 == None)
+    SEC_WB_AGENT_NAME   = 8;    # cstr
+    SEC_WB_TRUST        = 16;   # SecTrustLevel
+    SEC_WB_SANDBOX      = 24;   # SecSandboxStatus
+    SEC_WB_COLOR        = 32;   # u32 argb (stored in i64)
+    SEC_WB_ICON         = 40;   # SecBadgeIcon
+    SEC_WB_SZ           = 48;
+}
+
+fn sec_badge_new(agent_id, agent_name, trust, sandbox, color, icon): i64 {
+    var p = alloc(SEC_WB_SZ);
+    if (p == 0) { return 0; }
+    store64(p + SEC_WB_AGENT_ID, agent_id);
+    store64(p + SEC_WB_AGENT_NAME, agent_name);
+    store64(p + SEC_WB_TRUST, trust);
+    store64(p + SEC_WB_SANDBOX, sandbox);
+    store64(p + SEC_WB_COLOR, color);
+    store64(p + SEC_WB_ICON, icon);
+    return p;
+}
+
+fn sec_badge_agent_id(p)      { return load64(p + SEC_WB_AGENT_ID); }
+fn sec_badge_agent_name(p)    { return load64(p + SEC_WB_AGENT_NAME); }
+fn sec_badge_trust_level(p)   { return load64(p + SEC_WB_TRUST); }
+fn sec_badge_sandbox_status(p){ return load64(p + SEC_WB_SANDBOX); }
+fn sec_badge_color(p)         { return load64(p + SEC_WB_COLOR); }
+fn sec_badge_icon(p)          { return load64(p + SEC_WB_ICON); }
+
+# sec_badge_color_for_trust(level): default ARGB color per trust level.
+# (0xFF......  — matches Rust's constants.)
+fn sec_badge_color_for_trust(level): i64 {
+    if (level == SecTrustLevel.SEC_TRUST_SYSTEM)     { return 0xFF4488FF; }
+    if (level == SecTrustLevel.SEC_TRUST_VERIFIED)   { return 0xFF44CC44; }
+    if (level == SecTrustLevel.SEC_TRUST_UNVERIFIED) { return 0xFFCCCC44; }
+    if (level == SecTrustLevel.SEC_TRUST_UNTRUSTED)  { return 0xFFCC4444; }
+    if (level == SecTrustLevel.SEC_TRUST_SANDBOXED)  { return 0xFFCC8844; }
+    return 0xFF44CC44;  # unreachable; mirror Verified
+}
+
+# ===========================================================================
+# WindowBadgeManager — heap object. badges: surface_id(i64) -> *WindowOwnerBadge.
+# ===========================================================================
+enum SecBadgeMgrOff {
+    SEC_BM_BADGES = 0;    # u64 map: surface_id -> *WindowOwnerBadge
+    SEC_BM_SZ     = 8;
+}
+
+fn sec_badge_mgr_new(): i64 {
+    var p = alloc(SEC_BM_SZ);
+    if (p == 0) { return 0; }
+    store64(p + SEC_BM_BADGES, map_u64_new());
+    return p;
+}
+
+fn sec_badge_mgr_badges(p) { return load64(p + SEC_BM_BADGES); }
+
+# sec_badge_mgr_assign(mgr, surface_id, badge): insert/overwrite.
+fn sec_badge_mgr_assign(mgr, surface_id, badge): i64 {
+    map_u64_set(load64(mgr + SEC_BM_BADGES), surface_id, badge);
+    return 0;
+}
+
+# sec_badge_mgr_get(mgr, surface_id): -> *WindowOwnerBadge or 0.
+fn sec_badge_mgr_get(mgr, surface_id): i64 {
+    return map_u64_get(load64(mgr + SEC_BM_BADGES), surface_id);
+}
+
+# sec_badge_mgr_remove(mgr, surface_id): remove; -> the removed badge or 0.
+fn sec_badge_mgr_remove(mgr, surface_id): i64 {
+    var m = load64(mgr + SEC_BM_BADGES);
+    var b = map_u64_get(m, surface_id);
+    if (b == 0) { return 0; }
+    map_u64_delete(m, surface_id);
+    return b;
+}
+
+# sec_badge_mgr_len(mgr): number of assigned badges.
+fn sec_badge_mgr_len(mgr): i64 { return map_u64_size(load64(mgr + SEC_BM_BADGES)); }
+
+# sec_badge_mgr_is_empty(mgr): 1 if no badges.
+fn sec_badge_mgr_is_empty(mgr): i64 {
+    if (map_u64_size(load64(mgr + SEC_BM_BADGES)) == 0) { return 1; }
+    return 0;
+}
+
+# sec_badge_mgr_badges_by_trust(mgr, level): vec of *WindowOwnerBadge matching
+# the trust level. (Rust returns (SurfaceId, &Badge) pairs; the u64 map here is
+# iteration-free, so the count-by-trust is computed by scanning the value set.
+# We return the matching badge pointers — surface ids are recoverable via the
+# badge's own agent metadata if needed.)
+#
+# NOTE: lib/hashmap.cyr's u64 map has no iterator, so this scans the raw slot
+# array directly (16-byte slots: key@0, value@8; empty==0, tomb==MAX).
+fn sec_badge_mgr_badges_by_trust(mgr, level): i64 {
+    var out = vec_new();
+    var m = load64(mgr + SEC_BM_BADGES);
+    var entries = load64(m);
+    var cap = load64(m + 8);
+    var i = 0;
+    while (i < cap) {
+        var ep = entries + i * 16;
+        var k = load64(ep);
+        if (k != MAP_U64_EMPTY) {
+            if (k != MAP_U64_TOMB) {
+                var badge = load64(ep + 8);
+                if (sec_badge_trust_level(badge) == level) {
+                    vec_push(out, badge);
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return out;
+}

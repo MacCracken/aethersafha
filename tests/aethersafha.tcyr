@@ -1,0 +1,52 @@
+# aethersafha test suite — foundational compositor core.
+# Includes the bhumi-free core modules directly (geom/window/compositor);
+# render/input/main bind bhumi and are exercised by the smoke program.
+# Stdlib + [deps.*] auto-included via cyrius.cyml.
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+
+fn main() {
+    alloc_init();
+
+    test_group("geom — Rectangle");
+    var r = rect_new(10, 20, 100, 50);
+    assert_eq(rect_x(r), 10, "rect x");
+    assert_eq(rect_w(r), 100, "rect w");
+    assert_eq(rect_contains(r, 50, 40), 1, "point inside");
+    assert_eq(rect_contains(r, 5, 40), 0, "point left of rect");
+    assert_eq(rect_contains(r, 50, 200), 0, "point below rect");
+
+    test_group("window — Window model");
+    var w = win_new(7, 0, 0, 400, 300, "term");
+    assert_eq(win_id(w), 7, "win id");
+    assert_eq(win_w(w), 400, "win width");
+    assert_eq(win_state(w), WinState.WS_NORMAL, "default state NORMAL");
+    win_set_state(w, WinState.WS_MAXIMIZED);
+    assert_eq(win_state(w), WinState.WS_MAXIMIZED, "state mutates");
+    win_move(w, 15, 25);
+    assert_eq(win_x(w), 15, "window moves");
+
+    test_group("compositor — window stack + focus");
+    var c = comp_new();
+    assert_eq(comp_count(c), 0, "starts empty");
+    assert_eq(comp_focused(c), 0 - 1, "no focus when empty");
+    var w1 = comp_create_window(c, 0, 0, 100, 100, "a");
+    var w2 = comp_create_window(c, 0, 0, 100, 100, "b");
+    assert_eq(comp_count(c), 2, "two windows");
+    assert_eq(win_id(w1), 1, "ids assigned from 1");
+    assert_eq(win_id(w2), 2, "ids increment");
+    assert_eq(comp_focused(c), 1, "focus follows newest window");
+    comp_focus(c, 0);
+    assert_eq(comp_focused(c), 0, "focus can be set");
+    assert_eq(comp_find_by_id(c, 2), 1, "find by id");
+    assert_eq(comp_find_by_id(c, 99), 0 - 1, "missing id -> -1");
+    comp_close_window(c, 1);
+    assert_eq(comp_count(c), 1, "count drops after close");
+    assert_eq(comp_find_by_id(c, 1), 0 - 1, "closed window gone");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

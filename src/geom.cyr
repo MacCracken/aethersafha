@@ -1,0 +1,38 @@
+# aethersafha — geometry primitives
+# Parity: rust-old/src/compositor.rs  (Rectangle, SurfaceId)
+#
+# Cyrius has no generics/derive; a Rect is a 4-field raw record (x,y,w,h),
+# each an i64, laid out by hand. Allocated on the arena via alloc().
+
+enum RectLayout {
+    RECT_X = 0;
+    RECT_Y = 8;
+    RECT_W = 16;
+    RECT_H = 24;
+    RECT_SIZE = 32;
+}
+
+# rect_new(x,y,w,h) -> *Rect (0 on OOM)
+fn rect_new(x, y, w, h) {
+    var r = alloc(RECT_SIZE);
+    if (r == 0) { return 0; }
+    store64(r + RECT_X, x);
+    store64(r + RECT_Y, y);
+    store64(r + RECT_W, w);
+    store64(r + RECT_H, h);
+    return r;
+}
+
+fn rect_x(r) { return load64(r + RECT_X); }
+fn rect_y(r) { return load64(r + RECT_Y); }
+fn rect_w(r) { return load64(r + RECT_W); }
+fn rect_h(r) { return load64(r + RECT_H); }
+
+# Point (px,py) inside rect? (half-open [x, x+w))
+fn rect_contains(r, px, py) {
+    if (px < load64(r + RECT_X)) { return 0; }
+    if (py < load64(r + RECT_Y)) { return 0; }
+    if (px >= load64(r + RECT_X) + load64(r + RECT_W)) { return 0; }
+    if (py >= load64(r + RECT_Y) + load64(r + RECT_H)) { return 0; }
+    return 1;
+}

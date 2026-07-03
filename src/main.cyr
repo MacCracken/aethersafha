@@ -1,0 +1,73 @@
+# aethersafha — AI-augmented AGNOS compositor (Cyrius port)
+# Ported from 27207 lines of Rust (parity oracle frozen at rust-old/).
+#
+# Sits directly on the bhumi platform backend (output/input/seat vs the agnos
+# kernel) — the sovereign replacement for DRM/KMS + libinput + logind. Native
+# Wayland protocol dispatch stays in aethersafha proper; foreign-app surfaces
+# (was XWayland) move to the mehman swallow backend, post-MVP.
+#
+# Stdlib + [deps.*] (bhumi/mehman/agnostik/agnodrm) auto-prepended via cyrius.cyml.
+
+include "lib/bhumi.cyr"
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/render.cyr"
+include "src/input.cyr"
+
+enum AeConfig {
+    AE_W     = 1280;
+    AE_H     = 720;
+    AE_MAXEV = 64;
+}
+
+# Open the bhumi backend under a full output+input capability. -> *BhumiBackend (0 fail)
+fn ae_backend_open(w, h): i64 {
+    var cap = bhumi_cap_new(1, BHUMI_DEV_OUTPUT | BHUMI_DEV_INPUT, 0, 0);
+    if (cap == 0) { return 0; }
+    return bhumi_backend_open(cap, w, h);
+}
+
+fn main(): i64 {
+    alloc_init();
+    println("aethersafha: AI-augmented AGNOS compositor (Cyrius port)");
+
+    var be = ae_backend_open(AE_W, AE_H);
+    if (be == 0) {
+        println("aethersafha: bhumi backend open failed");
+        return 1;
+    }
+    var fb = bhumi_backend_fb(be);
+    println("aethersafha: bhumi backend up");
+
+    # Compositor state + a couple of seed windows (parity: Compositor::create_window)
+    var comp = comp_new();
+    comp_create_window(comp, 80, 60, 420, 320, "Terminal");
+    comp_create_window(comp, 240, 180, 520, 360, "Files");
+    println("aethersafha: windows created:");
+    println_int(comp_count(comp));
+
+    # Frame loop: poll bhumi input, dispatch, render, scan out. Bounded so the
+    # host build terminates; on agnos this becomes `while (running == 1)`.
+    var events[512];   # AE_MAXEV (64) * 8 bytes
+    var now = 1;
+    var frame = 0;
+    var running = 1;
+    while ((running == 1) && (frame < 3)) {
+        var n = bhumi_backend_poll(be, &events, AE_MAXEV, now);
+        if (n != BHUMI_SEAT_DENIED) {
+            var i = 0;
+            while (i < n) {
+                var ev = load64(&events + i * 8);
+                if (input_handle(comp, ev) == InputAction.IA_QUIT) { running = 0; }
+                i = i + 1;
+            }
+        }
+        render_frame(comp, fb);
+        bhumi_backend_present(be, now);
+        frame = frame + 1;
+    }
+
+    println("aethersafha: frame loop ok");
+    return 0;
+}

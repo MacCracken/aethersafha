@@ -1,0 +1,608 @@
+# aethersafha — accessibility (a11y) infrastructure
+# Parity: rust-old/src/accessibility.rs
+#
+# AT-SPI2-compatible accessibility tree: roles, per-node dynamic state,
+# focus tracking, tab-order navigation, screen-reader announcement queue,
+# and high-contrast theme definitions.
+#
+# Cyrius port notes (toolchain 6.3.35):
+#   - Every Rust struct is a heap object: alloc(_SZ) + named-offset enum,
+#     accessed via load64/store64 (same idiom as src/window.cyr,
+#     src/compositor.cyr, lib/bhumi.cyr).
+#   - Uuid has no analog → nodes carry a monotonic i64 id assigned by the
+#     tree (see AX_T_NEXTID), mirroring the compositor's C_NEXTID scheme.
+#     A node id of 0 is the "unset / not-present" sentinel.
+#   - Rust Option<bool> `checked` → tri-state i64: AX_TRISTATE_FALSE(0) ==
+#     Some(false), AX_TRISTATE_TRUE(1) == Some(true), AX_TRISTATE_NONE(2) ==
+#     None. (All non-negative so the enum grammar accepts plain int literals;
+#     the default state is NONE, matching Option::None.)
+#   - Rust Option<String> `value` → cstr pointer, 0 == None.
+#   - Rust f32 `font_scale` → integer permille (1250 == 1.25).
+#   - Names / descriptions are cstr pointers (borrowed, not owned copies).
+#   - Case-insensitive search folds ASCII bytes inline (no Str tolower
+#     helper exists for fat-pointer strings).
+
+# ============================================================================
+# Roles and actions (Rust enums → Cyrius enums)
+# ============================================================================
+
+# Semantic role of an accessible UI element (AT-SPI2 compatible). 24 variants.
+enum AxRole {
+    AX_ROLE_WINDOW       = 0;
+    AX_ROLE_BUTTON       = 1;
+    AX_ROLE_LABEL        = 2;
+    AX_ROLE_TEXT_INPUT   = 3;
+    AX_ROLE_MENU         = 4;
+    AX_ROLE_MENU_ITEM    = 5;
+    AX_ROLE_LIST         = 6;
+    AX_ROLE_LIST_ITEM    = 7;
+    AX_ROLE_TOOLBAR      = 8;
+    AX_ROLE_STATUS_BAR   = 9;
+    AX_ROLE_DIALOG       = 10;
+    AX_ROLE_ALERT        = 11;
+    AX_ROLE_IMAGE        = 12;
+    AX_ROLE_LINK         = 13;
+    AX_ROLE_SEPARATOR    = 14;
+    AX_ROLE_SLIDER       = 15;
+    AX_ROLE_CHECKBOX     = 16;
+    AX_ROLE_RADIO_BUTTON = 17;
+    AX_ROLE_TAB          = 18;
+    AX_ROLE_TAB_PANEL    = 19;
+    AX_ROLE_TREE         = 20;
+    AX_ROLE_TREE_ITEM    = 21;
+    AX_ROLE_SCROLL_BAR   = 22;
+    AX_ROLE_PROGRESS_BAR = 23;
+}
+
+# Actions that can be performed on an accessible node. 8 variants.
+enum AxAction {
+    AX_ACT_CLICK     = 0;
+    AX_ACT_FOCUS     = 1;
+    AX_ACT_EXPAND    = 2;
+    AX_ACT_COLLAPSE  = 3;
+    AX_ACT_SELECT    = 4;
+    AX_ACT_SCROLL_TO = 5;
+    AX_ACT_ACTIVATE  = 6;
+    AX_ACT_DISMISS   = 7;
+}
+
+# Tri-state encoding for Rust Option<bool> (`checked`):
+#   FALSE(0) = Some(false), TRUE(1) = Some(true), NONE(2) = None.
+# (Non-negative members only — the toolchain's enum grammar takes plain
+# int literals, not arithmetic expressions, for member values.)
+enum AxTristate {
+    AX_TRISTATE_FALSE = 0;
+    AX_TRISTATE_TRUE  = 1;
+    AX_TRISTATE_NONE  = 2;
+}
+
+# ============================================================================
+# AccessibilityState (Rust struct → heap object)
+# ============================================================================
+
+enum AxStateOff {
+    AX_S_FOCUSED     = 0;    # bool 0/1
+    AX_S_SELECTED    = 8;    # bool 0/1
+    AX_S_EXPANDED    = 16;   # bool 0/1
+    AX_S_CHECKED     = 24;   # tri-state (AxTristate)
+    AX_S_DISABLED    = 32;   # bool 0/1
+    AX_S_HIDDEN      = 40;   # bool 0/1
+    AX_S_VALUE       = 48;   # cstr ptr, 0 == None
+    AX_S_DESCRIPTION = 56;   # cstr ptr (empty cstr, not 0, when unset)
+    AX_S_SZ          = 64;
+}
+
+# a11y_state_new() -> *AxState with Rust Default values (0 on OOM).
+# Rust default: all bools false, checked None, value None, description "".
+fn a11y_state_new(): i64 {
+    var s = alloc(AX_S_SZ);
+    if (s == 0) { return 0; }
+    store64(s + AX_S_FOCUSED, 0);
+    store64(s + AX_S_SELECTED, 0);
+    store64(s + AX_S_EXPANDED, 0);
+    store64(s + AX_S_CHECKED, AxTristate.AX_TRISTATE_NONE);   # Option<bool>::None
+    store64(s + AX_S_DISABLED, 0);
+    store64(s + AX_S_HIDDEN, 0);
+    store64(s + AX_S_VALUE, 0);
+    store64(s + AX_S_DESCRIPTION, "");
+    return s;
+}
+
+fn a11y_state_focused(s)     { return load64(s + AX_S_FOCUSED); }
+fn a11y_state_selected(s)    { return load64(s + AX_S_SELECTED); }
+fn a11y_state_expanded(s)    { return load64(s + AX_S_EXPANDED); }
+fn a11y_state_checked(s)     { return load64(s + AX_S_CHECKED); }
+fn a11y_state_disabled(s)    { return load64(s + AX_S_DISABLED); }
+fn a11y_state_hidden(s)      { return load64(s + AX_S_HIDDEN); }
+fn a11y_state_value(s)       { return load64(s + AX_S_VALUE); }
+fn a11y_state_description(s) { return load64(s + AX_S_DESCRIPTION); }
+
+fn a11y_state_set_focused(s, v)     { store64(s + AX_S_FOCUSED, v); return 0; }
+fn a11y_state_set_selected(s, v)    { store64(s + AX_S_SELECTED, v); return 0; }
+fn a11y_state_set_expanded(s, v)    { store64(s + AX_S_EXPANDED, v); return 0; }
+fn a11y_state_set_checked(s, v)     { store64(s + AX_S_CHECKED, v); return 0; }
+fn a11y_state_set_disabled(s, v)    { store64(s + AX_S_DISABLED, v); return 0; }
+fn a11y_state_set_hidden(s, v)      { store64(s + AX_S_HIDDEN, v); return 0; }
+fn a11y_state_set_value(s, cstr)    { store64(s + AX_S_VALUE, cstr); return 0; }
+fn a11y_state_set_description(s, c) { store64(s + AX_S_DESCRIPTION, c); return 0; }
+
+# ============================================================================
+# AccessibleNode (Rust struct → heap object)
+# ============================================================================
+
+enum AxNodeOff {
+    AX_N_ID       = 0;    # i64 node id (0 == unset)
+    AX_N_ROLE     = 8;    # AxRole
+    AX_N_NAME     = 16;   # cstr ptr
+    AX_N_STATE    = 24;   # *AxState
+    AX_N_CHILDREN = 32;   # vec of child ids (i64)
+    AX_N_PARENT   = 40;   # parent id, 0 == None
+    AX_N_BOUNDS   = 48;   # *Rect (src/geom.cyr), 0 == default/none
+    AX_N_ACTIONS  = 56;   # vec of AxAction values
+    AX_N_SZ       = 64;
+}
+
+# a11y_node_new(id, role, name_cstr) -> *AxNode (0 on OOM).
+# Parity: AccessibleNode::new — fresh default state, empty children/actions,
+# no parent, default bounds. Rust generates a Uuid here; the Cyrius port takes
+# the id explicitly (the tree assigns it via a11y_tree_next_id).
+fn a11y_node_new(id, role, name): i64 {
+    var n = alloc(AX_N_SZ);
+    if (n == 0) { return 0; }
+    var st = a11y_state_new();
+    if (st == 0) { return 0; }
+    var kids = vec_new();
+    if (kids == 0) { return 0; }
+    var acts = vec_new();
+    if (acts == 0) { return 0; }
+    store64(n + AX_N_ID, id);
+    store64(n + AX_N_ROLE, role);
+    store64(n + AX_N_NAME, name);
+    store64(n + AX_N_STATE, st);
+    store64(n + AX_N_CHILDREN, kids);
+    store64(n + AX_N_PARENT, 0);
+    store64(n + AX_N_BOUNDS, 0);
+    store64(n + AX_N_ACTIONS, acts);
+    return n;
+}
+
+fn a11y_node_id(n)       { return load64(n + AX_N_ID); }
+fn a11y_node_role(n)     { return load64(n + AX_N_ROLE); }
+fn a11y_node_name(n)     { return load64(n + AX_N_NAME); }
+fn a11y_node_state(n)    { return load64(n + AX_N_STATE); }
+fn a11y_node_children(n) { return load64(n + AX_N_CHILDREN); }
+fn a11y_node_parent(n)   { return load64(n + AX_N_PARENT); }
+fn a11y_node_bounds(n)   { return load64(n + AX_N_BOUNDS); }
+fn a11y_node_actions(n)  { return load64(n + AX_N_ACTIONS); }
+
+fn a11y_node_set_id(n, id)     { store64(n + AX_N_ID, id); return 0; }
+fn a11y_node_set_role(n, r)    { store64(n + AX_N_ROLE, r); return 0; }
+fn a11y_node_set_name(n, c)    { store64(n + AX_N_NAME, c); return 0; }
+fn a11y_node_set_parent(n, p)  { store64(n + AX_N_PARENT, p); return 0; }
+fn a11y_node_set_bounds(n, r)  { store64(n + AX_N_BOUNDS, r); return 0; }
+
+# Append a child id to this node's children vec. Parity: node.children.push.
+fn a11y_node_add_child(n, child_id): i64 {
+    vec_push(load64(n + AX_N_CHILDREN), child_id);
+    return 0;
+}
+
+# Append an action to this node's actions vec. Parity: node.actions.push.
+fn a11y_node_add_action(n, action): i64 {
+    vec_push(load64(n + AX_N_ACTIONS), action);
+    return 0;
+}
+
+# Convenience: is this node focused? Reads through to its state.
+fn a11y_node_is_focused(n): i64 {
+    return load64(load64(n + AX_N_STATE) + AX_S_FOCUSED);
+}
+
+# ============================================================================
+# AccessibilityTree (Rust struct → heap object)
+# ============================================================================
+
+enum AxTreeOff {
+    AX_T_NODES         = 0;    # vec of *AxNode (insertion order == tab order)
+    AX_T_FOCUSED_ID    = 8;    # focused node id, 0 == None
+    AX_T_ANNOUNCEMENTS = 16;   # vec of cstr (announcement queue)
+    AX_T_NEXTID        = 24;   # monotonic id counter (Uuid substitute)
+    AX_T_SZ            = 32;
+}
+
+# a11y_tree_new() -> *AxTree (0 on OOM). Parity: AccessibilityTree::new /
+# Default::default — empty nodes, no focus, empty announcement queue.
+fn a11y_tree_new(): i64 {
+    var t = alloc(AX_T_SZ);
+    if (t == 0) { return 0; }
+    var nodes = vec_new();
+    if (nodes == 0) { return 0; }
+    var ann = vec_new();
+    if (ann == 0) { return 0; }
+    store64(t + AX_T_NODES, nodes);
+    store64(t + AX_T_FOCUSED_ID, 0);
+    store64(t + AX_T_ANNOUNCEMENTS, ann);
+    store64(t + AX_T_NEXTID, 1);
+    return t;
+}
+
+fn a11y_tree_nodes(t)      { return load64(t + AX_T_NODES); }
+fn a11y_tree_focused_id(t) { return load64(t + AX_T_FOCUSED_ID); }
+
+# a11y_tree_next_id(t) -> a fresh unique node id (Uuid::new_v4 substitute).
+# Assign this to a node before / at insertion time.
+fn a11y_tree_next_id(t): i64 {
+    var id = load64(t + AX_T_NEXTID);
+    store64(t + AX_T_NEXTID, id + 1);
+    return id;
+}
+
+# Total number of nodes. Parity: AccessibilityTree::len.
+fn a11y_tree_len(t): i64 {
+    return vec_len(load64(t + AX_T_NODES));
+}
+
+# Whether the tree has no nodes. Parity: AccessibilityTree::is_empty.
+fn a11y_tree_is_empty(t): i64 {
+    var n = vec_len(load64(t + AX_T_NODES));
+    if (n == 0) { return 1; }
+    return 0;
+}
+
+# Internal: index of node with `id` in the nodes vec, or -1.
+fn a11y_tree_index_of(t, id): i64 {
+    var v = load64(t + AX_T_NODES);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        if (a11y_node_id(vec_get(v, i)) == id) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Add a node to the tree. Returns the node's id. Parity: add_node.
+# The node must already carry its id (assign via a11y_tree_next_id).
+fn a11y_tree_add_node(t, node): i64 {
+    var id = a11y_node_id(node);
+    vec_push(load64(t + AX_T_NODES), node);
+    return id;
+}
+
+# Convenience constructor mirroring the common Rust pattern
+# `tree.add_node(AccessibleNode::new(role, name))`: allocates a node with a
+# freshly minted id, inserts it, and returns the id. 0 on OOM.
+fn a11y_tree_add(t, role, name): i64 {
+    var id = a11y_tree_next_id(t);
+    var node = a11y_node_new(id, role, name);
+    if (node == 0) { return 0; }
+    return a11y_tree_add_node(t, node);
+}
+
+# Remove a node by id. Returns the removed *AxNode, or 0 if not found.
+# Parity: remove_node — also clears focus if the focused node was removed.
+fn a11y_tree_remove_node(t, id): i64 {
+    var idx = a11y_tree_index_of(t, id);
+    if (idx < 0) { return 0; }
+    var v = load64(t + AX_T_NODES);
+    var node = vec_get(v, idx);
+    vec_remove(v, idx);
+    if (load64(t + AX_T_FOCUSED_ID) == id) {
+        store64(t + AX_T_FOCUSED_ID, 0);
+    }
+    return node;
+}
+
+# Get a *AxNode by id, or 0 if absent. Parity: get_node.
+fn a11y_tree_get_node(t, id): i64 {
+    var idx = a11y_tree_index_of(t, id);
+    if (idx < 0) { return 0; }
+    return vec_get(load64(t + AX_T_NODES), idx);
+}
+
+# Get the currently focused *AxNode, or 0 if none. Parity: get_focused.
+fn a11y_tree_get_focused(t): i64 {
+    var fid = load64(t + AX_T_FOCUSED_ID);
+    if (fid == 0) { return 0; }
+    return a11y_tree_get_node(t, fid);
+}
+
+# Move keyboard focus to node `id`. Returns 0 on success, -1 if `id` is not in
+# the tree (Rust returns anyhow::Result — Err on missing node). Parity:
+# set_focus — unfocuses the previously focused node, focuses the new one.
+fn a11y_tree_set_focus(t, id): i64 {
+    var idx = a11y_tree_index_of(t, id);
+    if (idx < 0) { return 0 - 1; }
+    var prev = load64(t + AX_T_FOCUSED_ID);
+    if (prev != 0) {
+        var pnode = a11y_tree_get_node(t, prev);
+        if (pnode != 0) {
+            a11y_state_set_focused(a11y_node_state(pnode), 0);
+        }
+    }
+    var node = vec_get(load64(t + AX_T_NODES), idx);
+    a11y_state_set_focused(a11y_node_state(node), 1);
+    store64(t + AX_T_FOCUSED_ID, id);
+    return 0;
+}
+
+# Internal: is node index `i` focusable (not hidden, not disabled)?
+fn a11y_tree_is_focusable(t, node): i64 {
+    var st = a11y_node_state(node);
+    if (load64(st + AX_S_HIDDEN) != 0) { return 0; }
+    if (load64(st + AX_S_DISABLED) != 0) { return 0; }
+    return 1;
+}
+
+# Internal: build a vec of node-indices that are focusable (in tab order).
+fn a11y_tree_focusable_indices(t): i64 {
+    var out = vec_new();
+    if (out == 0) { return 0; }
+    var v = load64(t + AX_T_NODES);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var node = vec_get(v, i);
+        if (a11y_tree_is_focusable(t, node) == 1) {
+            vec_push(out, i);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+# Internal: position within `focusable` (a vec of node-indices) whose node id
+# equals `fid`, or -1.
+fn a11y_tree_focusable_pos(t, focusable, fid): i64 {
+    var v = load64(t + AX_T_NODES);
+    var fcount = vec_len(focusable);
+    var i = 0;
+    while (i < fcount) {
+        var ni = vec_get(focusable, i);
+        if (a11y_node_id(vec_get(v, ni)) == fid) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Internal: commit focus to the node at nodes-vec index `target`, clearing the
+# previously focused node. Returns the *AxNode now focused.
+fn a11y_tree_commit_focus(t, target): i64 {
+    var v = load64(t + AX_T_NODES);
+    var prev = load64(t + AX_T_FOCUSED_ID);
+    if (prev != 0) {
+        var pnode = a11y_tree_get_node(t, prev);
+        if (pnode != 0) {
+            a11y_state_set_focused(a11y_node_state(pnode), 0);
+        }
+    }
+    var node = vec_get(v, target);
+    a11y_state_set_focused(a11y_node_state(node), 1);
+    store64(t + AX_T_FOCUSED_ID, a11y_node_id(node));
+    return node;
+}
+
+# Navigate to the next focusable node in tab order (wraps). Returns the newly
+# focused *AxNode, or 0 if there are no focusable nodes. Parity: navigate_next.
+fn a11y_tree_navigate_next(t): i64 {
+    var focusable = a11y_tree_focusable_indices(t);
+    if (focusable == 0) { return 0; }
+    var fcount = vec_len(focusable);
+    if (fcount == 0) { return 0; }
+    var fid = load64(t + AX_T_FOCUSED_ID);
+    var ci = 0 - 1;
+    if (fid != 0) { ci = a11y_tree_focusable_pos(t, focusable, fid); }
+    var target = 0;
+    if (ci < 0) {
+        target = vec_get(focusable, 0);
+    } else {
+        var pos = (ci + 1) % fcount;
+        target = vec_get(focusable, pos);
+    }
+    return a11y_tree_commit_focus(t, target);
+}
+
+# Navigate to the previous focusable node in tab order (wraps). Returns the
+# newly focused *AxNode, or 0 if none. Parity: navigate_prev.
+# Note: with no current focus, Rust goes to the LAST focusable node.
+fn a11y_tree_navigate_prev(t): i64 {
+    var focusable = a11y_tree_focusable_indices(t);
+    if (focusable == 0) { return 0; }
+    var fcount = vec_len(focusable);
+    if (fcount == 0) { return 0; }
+    var fid = load64(t + AX_T_FOCUSED_ID);
+    var ci = 0 - 1;
+    if (fid != 0) { ci = a11y_tree_focusable_pos(t, focusable, fid); }
+    var target = 0;
+    if (ci < 0) {
+        target = vec_get(focusable, fcount - 1);
+    } else {
+        if (ci == 0) {
+            target = vec_get(focusable, fcount - 1);
+        } else {
+            target = vec_get(focusable, ci - 1);
+        }
+    }
+    return a11y_tree_commit_focus(t, target);
+}
+
+# ============================================================================
+# Search
+# ============================================================================
+
+# Fold one ASCII byte to lowercase (A..Z -> a..z), pass through otherwise.
+fn a11y_ascii_lower(c): i64 {
+    if (c >= 65) {
+        if (c <= 90) { return c + 32; }
+    }
+    return c;
+}
+
+# Case-insensitive substring test: does cstr `hay` contain cstr `needle`?
+# Both are NUL-terminated. Returns 1 if contained (or needle empty), else 0.
+# Parity substitute for `n.name.to_lowercase().contains(&name.to_lowercase())`.
+fn a11y_cstr_icontains(hay, needle): i64 {
+    var hlen = strlen(hay);
+    var nlen = strlen(needle);
+    if (nlen == 0) { return 1; }
+    if (nlen > hlen) { return 0; }
+    var i = 0;
+    while (i <= hlen - nlen) {
+        var j = 0;
+        var hit = 1;
+        while (j < nlen) {
+            var a = a11y_ascii_lower(load8(hay + i + j));
+            var b = a11y_ascii_lower(load8(needle + j));
+            if (a != b) { hit = 0; j = nlen; }
+            else { j = j + 1; }
+        }
+        if (hit == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Find nodes whose name contains `name` (case-insensitive). Returns a fresh vec
+# of *AxNode (0 on OOM). Parity: search_by_name.
+fn a11y_tree_search_by_name(t, name): i64 {
+    var out = vec_new();
+    if (out == 0) { return 0; }
+    var v = load64(t + AX_T_NODES);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var node = vec_get(v, i);
+        if (a11y_cstr_icontains(a11y_node_name(node), name) == 1) {
+            vec_push(out, node);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+# Find all nodes with the given role. Returns a fresh vec of *AxNode (0 on OOM).
+# Parity: search_by_role.
+fn a11y_tree_search_by_role(t, role): i64 {
+    var out = vec_new();
+    if (out == 0) { return 0; }
+    var v = load64(t + AX_T_NODES);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var node = vec_get(v, i);
+        if (a11y_node_role(node) == role) {
+            vec_push(out, node);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+# ============================================================================
+# Announcements (screen-reader queue)
+# ============================================================================
+
+# Queue a screen-reader announcement (cstr, borrowed). Parity: announce.
+fn a11y_tree_announce(t, message): i64 {
+    vec_push(load64(t + AX_T_ANNOUNCEMENTS), message);
+    return 0;
+}
+
+# Number of pending announcements (not part of Rust API; helper for draining).
+fn a11y_tree_announcement_count(t): i64 {
+    return vec_len(load64(t + AX_T_ANNOUNCEMENTS));
+}
+
+# Drain and return all pending announcements as a vec of cstr; the tree's queue
+# is reset to empty. Parity: pending_announcements (std::mem::take).
+fn a11y_tree_pending_announcements(t): i64 {
+    var old = load64(t + AX_T_ANNOUNCEMENTS);
+    var fresh = vec_new();
+    if (fresh == 0) { return old; }
+    store64(t + AX_T_ANNOUNCEMENTS, fresh);
+    return old;
+}
+
+# ============================================================================
+# High-contrast themes (Rust struct → heap object)
+# ============================================================================
+
+enum AxThemeOff {
+    AX_TH_BACKGROUND       = 0;    # ARGB u32 (stored in i64)
+    AX_TH_FOREGROUND       = 8;
+    AX_TH_ACCENT           = 16;
+    AX_TH_ERROR            = 24;
+    AX_TH_WARNING          = 32;
+    AX_TH_FOCUS_RING_WIDTH = 40;   # px
+    AX_TH_FONT_SCALE       = 48;   # permille: 1250 == 1.25 (f32 substitute)
+    AX_TH_SZ               = 56;
+}
+
+fn a11y_theme_background(th)       { return load64(th + AX_TH_BACKGROUND); }
+fn a11y_theme_foreground(th)       { return load64(th + AX_TH_FOREGROUND); }
+fn a11y_theme_accent(th)           { return load64(th + AX_TH_ACCENT); }
+fn a11y_theme_error(th)            { return load64(th + AX_TH_ERROR); }
+fn a11y_theme_warning(th)          { return load64(th + AX_TH_WARNING); }
+fn a11y_theme_focus_ring_width(th) { return load64(th + AX_TH_FOCUS_RING_WIDTH); }
+# font_scale returned as permille (1250 == 1.25).
+fn a11y_theme_font_scale(th)       { return load64(th + AX_TH_FONT_SCALE); }
+
+# Internal: allocate + populate a theme. font_scale is permille.
+fn a11y_theme_make(bg, fg, accent, err, warn, ring, scale_permille): i64 {
+    var th = alloc(AX_TH_SZ);
+    if (th == 0) { return 0; }
+    store64(th + AX_TH_BACKGROUND, bg);
+    store64(th + AX_TH_FOREGROUND, fg);
+    store64(th + AX_TH_ACCENT, accent);
+    store64(th + AX_TH_ERROR, err);
+    store64(th + AX_TH_WARNING, warn);
+    store64(th + AX_TH_FOCUS_RING_WIDTH, ring);
+    store64(th + AX_TH_FONT_SCALE, scale_permille);
+    return th;
+}
+
+# Default light high-contrast theme (dark on white). Parity:
+# HighContrastTheme::default_high_contrast. font_scale 1.25 -> 1250 permille.
+fn a11y_theme_default_high_contrast(): i64 {
+    return a11y_theme_make(0xFFFFFFFF, 0xFF000000, 0xFF0000FF, 0xFFFF0000, 0xFFFF8800, 3, 1250);
+}
+
+# Default dark high-contrast theme (light on black). Parity:
+# HighContrastTheme::default_dark_high_contrast.
+fn a11y_theme_default_dark_high_contrast(): i64 {
+    return a11y_theme_make(0xFF000000, 0xFFFFFFFF, 0xFF00CCFF, 0xFFFF4444, 0xFFFFCC00, 3, 1250);
+}
+
+# ============================================================================
+# Keyboard navigation config (Rust struct → heap object)
+# ============================================================================
+
+enum AxKbdNavOff {
+    AX_K_TAB_CYCLE            = 0;    # bool 0/1
+    AX_K_ARROW_NAVIGATION     = 8;
+    AX_K_ESCAPE_CLOSES_DIALOG = 16;
+    AX_K_ENTER_ACTIVATES      = 24;
+    AX_K_SZ                   = 32;
+}
+
+# Default keyboard-nav config (everything enabled). Parity:
+# KeyboardNavConfig::default.
+fn a11y_kbdnav_default(): i64 {
+    var k = alloc(AX_K_SZ);
+    if (k == 0) { return 0; }
+    store64(k + AX_K_TAB_CYCLE, 1);
+    store64(k + AX_K_ARROW_NAVIGATION, 1);
+    store64(k + AX_K_ESCAPE_CLOSES_DIALOG, 1);
+    store64(k + AX_K_ENTER_ACTIVATES, 1);
+    return k;
+}
+
+fn a11y_kbdnav_tab_cycle(k)            { return load64(k + AX_K_TAB_CYCLE); }
+fn a11y_kbdnav_arrow_navigation(k)     { return load64(k + AX_K_ARROW_NAVIGATION); }
+fn a11y_kbdnav_escape_closes_dialog(k) { return load64(k + AX_K_ESCAPE_CLOSES_DIALOG); }
+fn a11y_kbdnav_enter_activates(k)      { return load64(k + AX_K_ENTER_ACTIVATES); }
+
+fn a11y_kbdnav_set_tab_cycle(k, v)            { store64(k + AX_K_TAB_CYCLE, v); return 0; }
+fn a11y_kbdnav_set_arrow_navigation(k, v)     { store64(k + AX_K_ARROW_NAVIGATION, v); return 0; }
+fn a11y_kbdnav_set_escape_closes_dialog(k, v) { store64(k + AX_K_ESCAPE_CLOSES_DIALOG, v); return 0; }
+fn a11y_kbdnav_set_enter_activates(k, v)      { store64(k + AX_K_ENTER_ACTIVATES, v); return 0; }

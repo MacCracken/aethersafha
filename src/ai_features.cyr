@@ -1,0 +1,778 @@
+# aethersafha — AI desktop features
+# Parity: rust-old/src/ai_features.rs  (AIDesktopFeatures, AISuggestion,
+#   AgentHUDState, ResourceMetrics, DesktopContext, ContextEvent)
+#
+# Everything is a heap object (arena-allocated); fields via named-offset enum +
+# load64/store64, the same convention as src/window.cyr / src/compositor.cyr.
+#
+# Type substitutions (documented in the port task):
+#   - Uuid            -> i64 opaque id (caller supplies; agent HUD keyed on it).
+#   - chrono DateTime -> i64 epoch seconds (lib/chrono clock_epoch_secs()).
+#   - f32 confidence / progress / cpu_percent -> i64 PERMILLE (0..1000).
+#       0.5 -> 500, 0.75 -> 750, 0.65 -> 650. Threshold `> 0.5` -> `> 500`.
+#   - Option<f32> gpu_percent -> i64 with AI_GPU_NONE (-1) sentinel for None.
+#   - String title/description/app -> Str (lib/str.cyr) for real == / contains.
+#   - HashMap<String,String> metadata -> cstr-keyed map (Str values).
+#   - VecDeque history / Vec suggestions -> stdlib vec.
+#   - Arc<RwLock<..>> -> plain field (single-threaded arena model; see stubbed).
+#
+# Depends (auto-prepended via cyrius.cyml / included by main.cyr):
+#   lib/alloc, lib/str, lib/string, lib/vec, lib/hashmap, lib/chrono.
+
+# ---------------------------------------------------------------------------
+# Enums (Rust enums -> Cyrius enums)
+# ---------------------------------------------------------------------------
+
+# AIFeatureError — parity: rust `AIFeatureError`. Discriminant-only here; the
+# String/Uuid payloads are surfaced as separate accessor args at the call site.
+enum AI_FeatureError {
+    AI_ERR_CONTEXT_NOT_FOUND = 0;
+    AI_ERR_AGENT_NOT_FOUND   = 1;
+    AI_ERR_MODEL             = 2;
+}
+
+# SuggestionType — parity: rust `SuggestionType`.
+enum AI_SuggestionType {
+    AI_ST_WINDOW_PLACEMENT      = 0;
+    AI_ST_CONTEXT_SWITCH        = 1;
+    AI_ST_TASK_RECOMMENDATION   = 2;
+    AI_ST_RESOURCE_OPTIMIZATION = 3;
+    AI_ST_SECURITY_ALERT        = 4;
+    AI_ST_PRODUCTIVITY          = 5;
+}
+
+# AgentStatus — parity: rust `AgentStatus`.
+enum AI_AgentStatus {
+    AI_AS_IDLE     = 0;
+    AI_AS_THINKING = 1;
+    AI_AS_ACTING   = 2;
+    AI_AS_WAITING  = 3;
+    AI_AS_ERROR    = 4;
+}
+
+# ContextEventType — parity: rust `ContextEventType`.
+enum AI_ContextEventType {
+    AI_CE_WINDOW_OPENED    = 0;
+    AI_CE_WINDOW_CLOSED    = 1;
+    AI_CE_APP_SWITCHED     = 2;
+    AI_CE_FILE_OPENED      = 3;
+    AI_CE_COMMAND_EXECUTED = 4;
+    AI_CE_MEETING_STARTED  = 5;
+    AI_CE_MEETING_ENDED    = 6;
+    AI_CE_USER_AWAY        = 7;
+    AI_CE_USER_PRESENT     = 8;
+}
+
+# ContextType — parity: rust `ContextType`.
+enum AI_ContextType {
+    AI_CT_DEVELOPMENT   = 0;
+    AI_CT_WRITING       = 1;
+    AI_CT_DESIGN        = 2;
+    AI_CT_COMMUNICATION = 3;
+    AI_CT_BROWSING      = 4;
+    AI_CT_GAMING        = 5;
+    AI_CT_IDLE          = 6;
+    AI_CT_MEETING       = 7;
+}
+
+# TimeOfDay — parity: rust `TimeOfDay`.
+enum AI_TimeOfDay {
+    AI_TOD_MORNING   = 0;
+    AI_TOD_AFTERNOON = 1;
+    AI_TOD_EVENING   = 2;
+    AI_TOD_NIGHT     = 3;
+}
+
+# ActivityLevel — parity: rust `ActivityLevel`.
+enum AI_ActivityLevel {
+    AI_AL_HIGH   = 0;
+    AI_AL_MEDIUM = 1;
+    AI_AL_LOW    = 2;
+    AI_AL_IDLE   = 3;
+}
+
+# Shared constants. Confidence/progress are PERMILLE (0..1000).
+# Kept as top-level vars (not an enum) so the -1 sentinel can use `0 - 1` —
+# enum members in this toolchain take plain literals only.
+var AI_GPU_NONE       = 0 - 1;   # Option<f32>::None sentinel for gpu_percent
+var AI_CONF_THRESHOLD = 500;     # rust `confidence > 0.5`
+var AI_HISTORY_CAP    = 100;     # context_history VecDeque cap
+var AI_OPEN_FILES_CAP = 10;      # DesktopContext.open_files cap
+var AI_WS_SWITCH_CONF = 750;     # suggest_workspace_switch 0.75
+var AI_OPT_RES_CONF   = 650;     # optimize_resources 0.65
+
+# ---------------------------------------------------------------------------
+# AISuggestion  (rust `AISuggestion`)
+# ---------------------------------------------------------------------------
+# Fields: id, suggestion_type, title(Str), description(Str), confidence(permille),
+#         action(Str or 0 for None), is_dismissed(0/1), timestamp(epoch secs).
+
+enum AI_SugOff {
+    AI_SUG_ID       = 0;    # i64 uuid
+    AI_SUG_TYPE     = 8;    # AI_SuggestionType
+    AI_SUG_TITLE    = 16;   # Str*
+    AI_SUG_DESC     = 24;   # Str*
+    AI_SUG_CONF     = 32;   # permille
+    AI_SUG_ACTION   = 40;   # Str* or 0 (None)
+    AI_SUG_DISMISS  = 48;   # 0/1
+    AI_SUG_TS       = 56;   # epoch secs
+    AI_SUG_SZ       = 64;
+}
+
+# ai_suggestion_new — full constructor. action=0 for None.
+# -> *AISuggestion (0 on OOM)
+fn ai_suggestion_new(id, styp, title, desc, conf, action, dismissed, ts): i64 {
+    var p = alloc(AI_SUG_SZ);
+    if (p == 0) { return 0; }
+    store64(p + AI_SUG_ID, id);
+    store64(p + AI_SUG_TYPE, styp);
+    store64(p + AI_SUG_TITLE, title);
+    store64(p + AI_SUG_DESC, desc);
+    store64(p + AI_SUG_CONF, conf);
+    store64(p + AI_SUG_ACTION, action);
+    store64(p + AI_SUG_DISMISS, dismissed);
+    store64(p + AI_SUG_TS, ts);
+    return p;
+}
+
+# ai_suggestion_default — parity: `AISuggestion::default()`.
+# Productivity, empty strings, confidence 0, not dismissed, now().
+fn ai_suggestion_default(id): i64 {
+    var empty = str_from("");
+    return ai_suggestion_new(id, AI_SuggestionType.AI_ST_PRODUCTIVITY,
+        empty, empty, 0, 0, 0, clock_epoch_secs());
+}
+
+fn ai_suggestion_id(p)        { return load64(p + AI_SUG_ID); }
+fn ai_suggestion_type(p)      { return load64(p + AI_SUG_TYPE); }
+fn ai_suggestion_title(p)     { return load64(p + AI_SUG_TITLE); }
+fn ai_suggestion_desc(p)      { return load64(p + AI_SUG_DESC); }
+fn ai_suggestion_conf(p)      { return load64(p + AI_SUG_CONF); }
+fn ai_suggestion_action(p)    { return load64(p + AI_SUG_ACTION); }
+fn ai_suggestion_dismissed(p) { return load64(p + AI_SUG_DISMISS); }
+fn ai_suggestion_ts(p)        { return load64(p + AI_SUG_TS); }
+fn ai_suggestion_has_action(p): i64 {
+    if (load64(p + AI_SUG_ACTION) == 0) { return 0; }
+    return 1;
+}
+fn ai_suggestion_set_dismissed(p, v): i64 {
+    store64(p + AI_SUG_DISMISS, v);
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# ResourceMetrics  (rust `ResourceMetrics`)
+# ---------------------------------------------------------------------------
+# cpu_percent(permille), memory_mb(u64), gpu_percent(permille or AI_GPU_NONE).
+
+enum AI_ResOff {
+    AI_RES_CPU = 0;    # permille
+    AI_RES_MEM = 8;    # u64 mb
+    AI_RES_GPU = 16;   # permille or AI_GPU_NONE
+    AI_RES_SZ  = 24;
+}
+
+fn ai_res_new(cpu, mem, gpu): i64 {
+    var p = alloc(AI_RES_SZ);
+    if (p == 0) { return 0; }
+    store64(p + AI_RES_CPU, cpu);
+    store64(p + AI_RES_MEM, mem);
+    store64(p + AI_RES_GPU, gpu);
+    return p;
+}
+
+fn ai_res_cpu(p) { return load64(p + AI_RES_CPU); }
+fn ai_res_mem(p) { return load64(p + AI_RES_MEM); }
+fn ai_res_gpu(p) { return load64(p + AI_RES_GPU); }
+# Option<f32>::is_some for gpu_percent.
+fn ai_res_has_gpu(p): i64 {
+    if (load64(p + AI_RES_GPU) == AI_GPU_NONE) { return 0; }
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# AgentHUDState  (rust `AgentHUDState`)
+# ---------------------------------------------------------------------------
+
+enum AI_HudOff {
+    AI_HUD_ID       = 0;    # i64 uuid
+    AI_HUD_NAME     = 8;    # Str*
+    AI_HUD_STATUS   = 16;   # AI_AgentStatus
+    AI_HUD_TASK     = 24;   # Str*
+    AI_HUD_PROGRESS = 32;   # permille
+    AI_HUD_ACTIVITY = 40;   # epoch secs
+    AI_HUD_RES      = 48;   # *ResourceMetrics
+    AI_HUD_SZ       = 56;
+}
+
+fn ai_hud_new(id, name, status, task, progress, activity, res): i64 {
+    var p = alloc(AI_HUD_SZ);
+    if (p == 0) { return 0; }
+    store64(p + AI_HUD_ID, id);
+    store64(p + AI_HUD_NAME, name);
+    store64(p + AI_HUD_STATUS, status);
+    store64(p + AI_HUD_TASK, task);
+    store64(p + AI_HUD_PROGRESS, progress);
+    store64(p + AI_HUD_ACTIVITY, activity);
+    store64(p + AI_HUD_RES, res);
+    return p;
+}
+
+fn ai_hud_id(p)       { return load64(p + AI_HUD_ID); }
+fn ai_hud_name(p)     { return load64(p + AI_HUD_NAME); }
+fn ai_hud_status(p)   { return load64(p + AI_HUD_STATUS); }
+fn ai_hud_task(p)     { return load64(p + AI_HUD_TASK); }
+fn ai_hud_progress(p) { return load64(p + AI_HUD_PROGRESS); }
+fn ai_hud_activity(p) { return load64(p + AI_HUD_ACTIVITY); }
+fn ai_hud_res(p)      { return load64(p + AI_HUD_RES); }
+
+# ---------------------------------------------------------------------------
+# ContextEvent  (rust `ContextEvent`)
+# ---------------------------------------------------------------------------
+# metadata is a cstr-keyed map (map_new) with Str values.
+
+enum AI_EvtOff {
+    AI_EVT_ID       = 0;    # i64 uuid
+    AI_EVT_TYPE     = 8;    # AI_ContextEventType
+    AI_EVT_SOURCE   = 16;   # Str*
+    AI_EVT_TS       = 24;   # epoch secs
+    AI_EVT_META     = 32;   # *map (cstr key -> Str value), or 0
+    AI_EVT_SZ       = 40;
+}
+
+fn ai_event_new(id, etyp, source, ts, meta): i64 {
+    var p = alloc(AI_EVT_SZ);
+    if (p == 0) { return 0; }
+    store64(p + AI_EVT_ID, id);
+    store64(p + AI_EVT_TYPE, etyp);
+    store64(p + AI_EVT_SOURCE, source);
+    store64(p + AI_EVT_TS, ts);
+    store64(p + AI_EVT_META, meta);
+    return p;
+}
+
+fn ai_event_id(p)     { return load64(p + AI_EVT_ID); }
+fn ai_event_type(p)   { return load64(p + AI_EVT_TYPE); }
+fn ai_event_source(p) { return load64(p + AI_EVT_SOURCE); }
+fn ai_event_ts(p)     { return load64(p + AI_EVT_TS); }
+fn ai_event_meta(p)   { return load64(p + AI_EVT_META); }
+
+# ai_event_meta_get — metadata.get(key). key is a cstr. Returns a Str* value
+# or 0 if absent (map_get returns 0 for missing; None <-> 0).
+fn ai_event_meta_get(p, key): i64 {
+    var m = load64(p + AI_EVT_META);
+    if (m == 0) { return 0; }
+    return map_get(m, key);
+}
+
+# ---------------------------------------------------------------------------
+# DesktopContext  (rust `DesktopContext`)
+# ---------------------------------------------------------------------------
+# active_apps / open_files / recent_commands are vecs of Str*.
+
+enum AI_CtxOff {
+    AI_CTX_TYPE      = 0;    # AI_ContextType
+    AI_CTX_APPS      = 8;    # vec<Str*>
+    AI_CTX_FILES     = 16;   # vec<Str*>
+    AI_CTX_CMDS      = 24;   # vec<Str*>
+    AI_CTX_TOD       = 32;   # AI_TimeOfDay
+    AI_CTX_ACTIVITY  = 40;   # AI_ActivityLevel
+    AI_CTX_SZ        = 48;
+}
+
+# ai_context_default — parity: `DesktopContext::default()`.
+# Idle, empty vecs, Afternoon, Medium activity.
+fn ai_context_default(): i64 {
+    var p = alloc(AI_CTX_SZ);
+    if (p == 0) { return 0; }
+    store64(p + AI_CTX_TYPE, AI_ContextType.AI_CT_IDLE);
+    store64(p + AI_CTX_APPS, vec_new());
+    store64(p + AI_CTX_FILES, vec_new());
+    store64(p + AI_CTX_CMDS, vec_new());
+    store64(p + AI_CTX_TOD, AI_TimeOfDay.AI_TOD_AFTERNOON);
+    store64(p + AI_CTX_ACTIVITY, AI_ActivityLevel.AI_AL_MEDIUM);
+    return p;
+}
+
+fn ai_context_type(p)     { return load64(p + AI_CTX_TYPE); }
+fn ai_context_apps(p)     { return load64(p + AI_CTX_APPS); }
+fn ai_context_files(p)    { return load64(p + AI_CTX_FILES); }
+fn ai_context_cmds(p)     { return load64(p + AI_CTX_CMDS); }
+fn ai_context_tod(p)      { return load64(p + AI_CTX_TOD); }
+fn ai_context_activity(p) { return load64(p + AI_CTX_ACTIVITY); }
+fn ai_context_set_type(p, t) { store64(p + AI_CTX_TYPE, t); return 0; }
+fn ai_context_set_tod(p, t)  { store64(p + AI_CTX_TOD, t); return 0; }
+
+# ai_context_apps_contains — active_apps.contains(app). app is a Str*.
+# Returns 1 if any element str_eq's app.
+fn ai_context_apps_contains(p, app): i64 {
+    var v = load64(p + AI_CTX_APPS);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var eq = str_eq(vec_get(v, i), app);
+        if (eq == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# AIDesktopFeatures  (rust `AIDesktopFeatures`)
+# ---------------------------------------------------------------------------
+# The Arc<RwLock<..>> wrappers collapse to plain owned fields — see stubbed[].
+
+enum AI_FeatOff {
+    AI_FEAT_SUGGESTIONS = 0;    # vec<*AISuggestion>
+    AI_FEAT_HUD         = 8;    # map<uuid -> *AgentHUDState> (u64-keyed)
+    AI_FEAT_HISTORY     = 16;   # vec<*ContextEvent>
+    AI_FEAT_CONTEXT     = 24;   # *DesktopContext
+    AI_FEAT_PROACTIVE   = 32;   # bool 0/1
+    AI_FEAT_AMBIENT     = 40;   # bool 0/1
+    AI_FEAT_SZ          = 48;
+}
+
+# ai_new — parity: `AIDesktopFeatures::new()`. proactive & ambient default true.
+fn ai_new(): i64 {
+    var f = alloc(AI_FEAT_SZ);
+    if (f == 0) { return 0; }
+    store64(f + AI_FEAT_SUGGESTIONS, vec_new());
+    store64(f + AI_FEAT_HUD, map_u64_new());
+    store64(f + AI_FEAT_HISTORY, vec_new());
+    store64(f + AI_FEAT_CONTEXT, ai_context_default());
+    store64(f + AI_FEAT_PROACTIVE, 1);
+    store64(f + AI_FEAT_AMBIENT, 1);
+    return f;
+}
+
+fn ai_suggestions(f)      { return load64(f + AI_FEAT_SUGGESTIONS); }
+fn ai_hud_map(f)          { return load64(f + AI_FEAT_HUD); }
+fn ai_history(f)          { return load64(f + AI_FEAT_HISTORY); }
+fn ai_current_context(f)  { return load64(f + AI_FEAT_CONTEXT); }
+fn ai_proactive_mode(f)   { return load64(f + AI_FEAT_PROACTIVE); }
+fn ai_ambient_enabled(f)  { return load64(f + AI_FEAT_AMBIENT); }
+
+# ---------------------------------------------------------------------------
+# Time-of-day classification — parity: `analyze_context` hour ranges.
+# 5..=11 Morning, 12..=16 Afternoon, 17..=20 Evening, else Night.
+# ---------------------------------------------------------------------------
+fn ai_time_of_day_for_hour(hour): i64 {
+    if (hour >= 5) {
+        if (hour <= 11) { return AI_TimeOfDay.AI_TOD_MORNING; }
+    }
+    if (hour >= 12) {
+        if (hour <= 16) { return AI_TimeOfDay.AI_TOD_AFTERNOON; }
+    }
+    if (hour >= 17) {
+        if (hour <= 20) { return AI_TimeOfDay.AI_TOD_EVENING; }
+    }
+    return AI_TimeOfDay.AI_TOD_NIGHT;
+}
+
+# Current UTC hour from epoch seconds (0..23) via lib/chrono epoch_to_date.
+fn ai_current_hour(): i64 {
+    var d = epoch_to_date(clock_epoch_secs());
+    return load64(d + 24);   # hour component (see chrono.epoch_to_date layout)
+}
+
+# ai_analyze_context — parity: `analyze_context`. Updates current context's
+# time_of_day from the current hour and returns the context pointer.
+# (Rust returns a clone; here we return the live context — single-owner model.)
+fn ai_analyze_context(f): i64 {
+    var ctx = load64(f + AI_FEAT_CONTEXT);
+    var hour = ai_current_hour();
+    store64(ctx + AI_CTX_TOD, ai_time_of_day_for_hour(hour));
+    return ctx;
+}
+
+# ---------------------------------------------------------------------------
+# Context detection — parity: `detect_context_type`.
+# Substring match over active_apps app names (Str contains cstr).
+# ---------------------------------------------------------------------------
+
+# Helper: does any active app's name contain the given cstr needle?
+fn ai_apps_any_contains(v, needle): i64 {
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var hit = str_contains_cstr(vec_get(v, i), needle);
+        if (hit == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn ai_detect_context_type(f): i64 {
+    var ctx = load64(f + AI_FEAT_CONTEXT);
+    var apps = load64(ctx + AI_CTX_APPS);
+
+    var has_dev = 0;
+    if (ai_apps_any_contains(apps, "code") == 1) { has_dev = 1; }
+    if (ai_apps_any_contains(apps, "terminal") == 1) { has_dev = 1; }
+    if (ai_apps_any_contains(apps, "editor") == 1) { has_dev = 1; }
+
+    var has_design = 0;
+    if (ai_apps_any_contains(apps, "gimp") == 1) { has_design = 1; }
+    if (ai_apps_any_contains(apps, "figma") == 1) { has_design = 1; }
+    if (ai_apps_any_contains(apps, "blender") == 1) { has_design = 1; }
+
+    var has_comm = 0;
+    if (ai_apps_any_contains(apps, "slack") == 1) { has_comm = 1; }
+    if (ai_apps_any_contains(apps, "discord") == 1) { has_comm = 1; }
+    if (ai_apps_any_contains(apps, "mail") == 1) { has_comm = 1; }
+
+    var has_browser = ai_apps_any_contains(apps, "browser");
+
+    # if/elif chain mirrors rust precedence: dev > design > comm > browsing > idle.
+    if (has_dev == 1) {
+        store64(ctx + AI_CTX_TYPE, AI_ContextType.AI_CT_DEVELOPMENT);
+    } elif (has_design == 1) {
+        store64(ctx + AI_CTX_TYPE, AI_ContextType.AI_CT_DESIGN);
+    } elif (has_comm == 1) {
+        store64(ctx + AI_CTX_TYPE, AI_ContextType.AI_CT_COMMUNICATION);
+    } elif (has_browser == 1) {
+        store64(ctx + AI_CTX_TYPE, AI_ContextType.AI_CT_BROWSING);
+    } else {
+        store64(ctx + AI_CTX_TYPE, AI_ContextType.AI_CT_IDLE);
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# update_context — parity: `update_context`.
+# Push event onto history (cap 100), mutate context by event type, redetect.
+# ---------------------------------------------------------------------------
+fn ai_update_context(f, event): i64 {
+    # --- history push + cap at AI_HISTORY_CAP ---
+    var history = load64(f + AI_FEAT_HISTORY);
+    vec_push(history, event);
+    var len = vec_len(history);
+    if (len > AI_HISTORY_CAP) {
+        # drain(..len-100): remove from the front until length == cap.
+        var drop = len - AI_HISTORY_CAP;
+        var d = 0;
+        while (d < drop) {
+            vec_remove(history, 0);
+            d = d + 1;
+        }
+    }
+
+    # --- context mutation by event type ---
+    var ctx = load64(f + AI_FEAT_CONTEXT);
+    var etyp = ai_event_type(event);
+
+    if (etyp == AI_ContextEventType.AI_CE_WINDOW_OPENED) {
+        var app = ai_event_meta_get(event, "app");
+        # Some(app) && !active_apps.contains(app) => push
+        if (app != 0) {
+            var dup = ai_context_apps_contains(ctx, app);
+            if (dup == 0) {
+                vec_push(load64(ctx + AI_CTX_APPS), app);
+            }
+        }
+    } elif (etyp == AI_ContextEventType.AI_CE_FILE_OPENED) {
+        var file = ai_event_meta_get(event, "file");
+        if (file != 0) {
+            var files = load64(ctx + AI_CTX_FILES);
+            vec_push(files, file);
+            var flen = vec_len(files);
+            if (flen > AI_OPEN_FILES_CAP) {
+                # drain(0..len-10): drop oldest until length == cap.
+                var fdrop = flen - AI_OPEN_FILES_CAP;
+                var fd = 0;
+                while (fd < fdrop) {
+                    vec_remove(files, 0);
+                    fd = fd + 1;
+                }
+            }
+        }
+    }
+    # all other event types: no context field change (rust `_ => {}`).
+
+    ai_detect_context_type(f);
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Suggestions
+# ---------------------------------------------------------------------------
+
+# ai_generate_suggestion — parity: `generate_suggestion`. action = None (0).
+# conf is PERMILLE (0..1000). Caller supplies id + now (epoch secs).
+fn ai_generate_suggestion(id, styp, title, desc, conf): i64 {
+    return ai_suggestion_new(id, styp, title, desc, conf, 0, 0, clock_epoch_secs());
+}
+
+# _ai_sug_swap — swap two entries of the suggestions vec (sort helper).
+fn _ai_sug_swap(v, i, j): i64 {
+    var a = vec_get(v, i);
+    var b = vec_get(v, j);
+    vec_set(v, i, b);
+    vec_set(v, j, a);
+    return 0;
+}
+
+# ai_add_suggestion — parity: `add_suggestion`.
+# 1. retain: drop existing entries with same (type AND title).
+# 2. push new.
+# 3. sort by confidence DESCENDING (stable-ish insertion via bubble; N small).
+fn ai_add_suggestion(f, suggestion): i64 {
+    var v = load64(f + AI_FEAT_SUGGESTIONS);
+    var styp = ai_suggestion_type(suggestion);
+    var title = ai_suggestion_title(suggestion);
+
+    # retain(|s| s.type != new.type || s.title != new.title)
+    # i.e. remove where (type == new.type && title == new.title).
+    var i = 0;
+    while (i < vec_len(v)) {
+        var s = vec_get(v, i);
+        var same_type = (ai_suggestion_type(s) == styp);
+        var same_title = str_eq(ai_suggestion_title(s), title);
+        var drop = (same_type && (same_title == 1));
+        if (drop) {
+            vec_remove(v, i);
+        } else {
+            i = i + 1;
+        }
+    }
+
+    vec_push(v, suggestion);
+
+    # sort_by confidence descending — insertion/bubble sort (vec is tiny).
+    var n = vec_len(v);
+    var a = 0;
+    while (a < n) {
+        var b = a + 1;
+        while (b < n) {
+            var ca = ai_suggestion_conf(vec_get(v, a));
+            var cb = ai_suggestion_conf(vec_get(v, b));
+            if (cb > ca) { _ai_sug_swap(v, a, b); }
+            b = b + 1;
+        }
+        a = a + 1;
+    }
+    return 0;
+}
+
+# ai_proactive_suggestions — parity: `proactive_suggestions`.
+# Runs analyze_context (side effect), then returns a fresh vec of the
+# suggestions that are !is_dismissed && confidence > threshold (>500).
+fn ai_proactive_suggestions(f): i64 {
+    ai_analyze_context(f);
+    var v = load64(f + AI_FEAT_SUGGESTIONS);
+    var out = vec_new();
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var s = vec_get(v, i);
+        var live = (ai_suggestion_dismissed(s) == 0);
+        var conf = ai_suggestion_conf(s);
+        var strong = (conf > AI_CONF_THRESHOLD);
+        if (live && strong) { vec_push(out, s); }
+        i = i + 1;
+    }
+    return out;
+}
+
+# ai_dismiss_suggestion — parity: `dismiss_suggestion`. Mark first match.
+fn ai_dismiss_suggestion(f, suggestion_id): i64 {
+    var v = load64(f + AI_FEAT_SUGGESTIONS);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var s = vec_get(v, i);
+        if (ai_suggestion_id(s) == suggestion_id) {
+            ai_suggestion_set_dismissed(s, 1);
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Smart window placement — parity: `smart_window_placement`.
+# Returns a 4-slot arena tuple [x, y, w, h] keyed on current context type.
+# (Rust returns (i32,i32,u32,u32); >16B by-value return is avoided per idiom.)
+# ---------------------------------------------------------------------------
+fn ai_smart_window_placement(f): i64 {
+    var ctx = load64(f + AI_FEAT_CONTEXT);
+    var t = load64(ctx + AI_CTX_TYPE);
+    var r = alloc(32);
+    if (r == 0) { return 0; }
+    if (t == AI_ContextType.AI_CT_DEVELOPMENT) {
+        store64(r, 100); store64(r + 8, 100); store64(r + 16, 1400); store64(r + 24, 900);
+    } elif (t == AI_ContextType.AI_CT_DESIGN) {
+        store64(r, 50); store64(r + 8, 50); store64(r + 16, 1820); store64(r + 24, 1000);
+    } elif (t == AI_ContextType.AI_CT_COMMUNICATION) {
+        store64(r, 200); store64(r + 8, 500); store64(r + 16, 600); store64(r + 24, 400);
+    } else {
+        store64(r, 100); store64(r + 8, 100); store64(r + 16, 1200); store64(r + 24, 800);
+    }
+    return r;
+}
+# Accessors for the placement tuple.
+fn ai_place_x(r) { return load64(r); }
+fn ai_place_y(r) { return load64(r + 8); }
+fn ai_place_w(r) { return load64(r + 16); }
+fn ai_place_h(r) { return load64(r + 24); }
+
+# ---------------------------------------------------------------------------
+# Agent HUD registry — keyed on agent uuid (u64 map).
+# ---------------------------------------------------------------------------
+
+# ai_register_agent_hud — parity: `register_agent_hud`. Overwrites existing.
+# Initial: Idle, empty task, progress 0, now(), zeroed metrics, gpu None.
+fn ai_register_agent_hud(f, agent_id, name): i64 {
+    var hud = load64(f + AI_FEAT_HUD);
+    var res = ai_res_new(0, 0, AI_GPU_NONE);
+    var empty_task = str_from("");
+    var state = ai_hud_new(agent_id, name, AI_AgentStatus.AI_AS_IDLE,
+        empty_task, 0, clock_epoch_secs(), res);
+    map_u64_set(hud, agent_id, state);
+    return 0;
+}
+
+# ai_update_agent_hud — parity: `update_agent_hud`. No-op if absent.
+fn ai_update_agent_hud(f, agent_id, status, task, progress): i64 {
+    var hud = load64(f + AI_FEAT_HUD);
+    var state = map_u64_get(hud, agent_id);
+    if (state == 0) { return 0; }
+    store64(state + AI_HUD_STATUS, status);
+    store64(state + AI_HUD_TASK, task);
+    store64(state + AI_HUD_PROGRESS, progress);
+    store64(state + AI_HUD_ACTIVITY, clock_epoch_secs());
+    return 0;
+}
+
+# ai_unregister_agent_hud — parity: `unregister_agent_hud`.
+fn ai_unregister_agent_hud(f, agent_id): i64 {
+    var hud = load64(f + AI_FEAT_HUD);
+    map_u64_delete(hud, agent_id);
+    return 0;
+}
+
+# ai_agent_hud_count — number of registered agents.
+fn ai_agent_hud_count(f): i64 {
+    return map_u64_size(load64(f + AI_FEAT_HUD));
+}
+
+# ai_get_agent_hud_state — lookup a single agent's state (0 if absent).
+fn ai_get_agent_hud_state(f, agent_id): i64 {
+    return map_u64_get(load64(f + AI_FEAT_HUD), agent_id);
+}
+
+# ai_get_agent_hud_states — parity: `get_agent_hud_states`. Returns a fresh
+# vec of every registered *AgentHUDState (order unspecified, like rust's
+# HashMap::values()). Walks the map_u64 backing store directly:
+#   header: entries@+0, cap@+8, count@+16; slot stride 16 (key@+0, val@+8).
+#   skip empty (key==0) and tombstone (key==MAP_U64_TOMB) slots — the same
+#   skip predicate _map_u64_grow_a uses.
+fn ai_get_agent_hud_states(f): i64 {
+    var hud = load64(f + AI_FEAT_HUD);
+    var out = vec_new();
+    var entries = load64(hud);
+    var cap = load64(hud + 8);
+    var i = 0;
+    while (i < cap) {
+        var ep = entries + i * 16;
+        var k = load64(ep);
+        var empty = (k == MAP_U64_EMPTY);
+        var tomb = (k == MAP_U64_TOMB);
+        var occupied = ((empty == 0) && (tomb == 0));
+        if (occupied == 1) { vec_push(out, load64(ep + 8)); }
+        i = i + 1;
+    }
+    return out;
+}
+
+# ---------------------------------------------------------------------------
+# Toggles — parity: `set_proactive_mode`, `set_ambient_enabled`.
+# ---------------------------------------------------------------------------
+fn ai_set_proactive_mode(f, enabled): i64 {
+    store64(f + AI_FEAT_PROACTIVE, enabled);
+    return 0;
+}
+fn ai_set_ambient_enabled(f, enabled): i64 {
+    store64(f + AI_FEAT_AMBIENT, enabled);
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# get_context — parity: `get_context`. Returns the live context pointer
+# (rust clones; single-owner model here).
+# ---------------------------------------------------------------------------
+fn ai_get_context(f): i64 {
+    return load64(f + AI_FEAT_CONTEXT);
+}
+
+# ---------------------------------------------------------------------------
+# Canned suggestions — parity: `suggest_workspace_switch`, `optimize_resources`.
+# ---------------------------------------------------------------------------
+
+# ai_suggest_workspace_switch — parity: `suggest_workspace_switch`.
+# ContextSwitch, title "Switch to Workspace {to+1}", reason desc, conf 0.75.
+# Caller supplies id.
+fn ai_suggest_workspace_switch(id, to, reason): i64 {
+    # title = "Switch to Workspace " + (to + 1)
+    var prefix = str_from("Switch to Workspace ");
+    var num = str_from_int(to + 1);
+    var title = str_cat(prefix, num);
+    return ai_generate_suggestion(id, AI_SuggestionType.AI_ST_CONTEXT_SWITCH,
+        title, reason, AI_WS_SWITCH_CONF);
+}
+
+# ai_optimize_resources — parity: `optimize_resources`.
+# ResourceOptimization, fixed title/desc, conf 0.65. Caller supplies id.
+fn ai_optimize_resources(id): i64 {
+    var title = str_from("Resource Optimization");
+    var desc = str_from("Consider suspending idle agents to free resources");
+    return ai_generate_suggestion(id, AI_SuggestionType.AI_ST_RESOURCE_OPTIMIZATION,
+        title, desc, AI_OPT_RES_CONF);
+}
+
+# ---------------------------------------------------------------------------
+# TODO parity: start_hud_polling / poll_agents.
+# The rust impl spawns a tokio task that polls http://localhost:8090/v1/agents
+# with reqwest + serde_json and refreshes the HUD map every `interval`.
+# No async/tokio/reqwest/serde analog in this module — deferred. See stubbed[].
+# A synchronous refresh entry point is provided so the caller (which owns the
+# HTTP transport via lib/http.cyr) can push already-parsed agent states in.
+#
+# ai_hud_refresh_replace — clear the HUD map and repopulate from a vec of
+# *AgentHUDState (mirrors poll_agents' "clear stale entries, insert fresh").
+fn ai_hud_refresh_replace(f, states): i64 {
+    var hud = load64(f + AI_FEAT_HUD);
+    map_u64_clear(hud);
+    var n = vec_len(states);
+    var i = 0;
+    while (i < n) {
+        var st = vec_get(states, i);
+        map_u64_set(hud, ai_hud_id(st), st);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ai_status_from_str — parity: poll_agents status string mapping.
+# "running"->Acting, "registered"->Idle, "error"/"failed"->Error,
+# "waiting"->Waiting, else Idle. Arg is a cstr.
+fn ai_status_from_str(s): i64 {
+    var running = str_from("running");
+    var registered = str_from("registered");
+    var err = str_from("error");
+    var failed = str_from("failed");
+    var waiting = str_from("waiting");
+    var sv = str_from(s);
+    var is_running = str_eq(sv, running);
+    if (is_running == 1) { return AI_AgentStatus.AI_AS_ACTING; }
+    var is_reg = str_eq(sv, registered);
+    if (is_reg == 1) { return AI_AgentStatus.AI_AS_IDLE; }
+    var is_err = str_eq(sv, err);
+    if (is_err == 1) { return AI_AgentStatus.AI_AS_ERROR; }
+    var is_failed = str_eq(sv, failed);
+    if (is_failed == 1) { return AI_AgentStatus.AI_AS_ERROR; }
+    var is_wait = str_eq(sv, waiting);
+    if (is_wait == 1) { return AI_AgentStatus.AI_AS_WAITING; }
+    return AI_AgentStatus.AI_AS_IDLE;
+}

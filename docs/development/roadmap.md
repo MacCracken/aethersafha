@@ -1,106 +1,84 @@
-# Development Roadmap
+# aethersafha — Roadmap
 
-## v0.1.0 — Initial Extraction (complete)
+> Milestone plan through v1.0. State lives in [`state.md`](state.md); this file
+> is the sequencing — what ships, in what order, against which dependency gates.
+> The bar is **parity with `rust-old/`** (the frozen 27,207-line Rust oracle).
 
-- [x] Extract from agnosticos/userland/desktop-environment
-- [x] Standalone Cargo.toml with path deps to agnostik + agnosys
-- [x] All existing source, benchmarks, and tests carried over
-- [x] Verify `cargo check --all-features` passes standalone
-- [x] Verify `cargo test --all-features` passes standalone
-- [x] First benchmark baseline via `./scripts/bench-history.sh`
+## v1.0 criteria
 
-## v0.2.0 — Standalone Hardening (complete)
+- [ ] Rust → Cyrius surface parity verified (module-by-module against `rust-old/`)
+- [ ] Test coverage adequate for the surface area (≥80% target)
+- [ ] Benchmarks captured in `docs/benchmarks.md`
+- [ ] Runs on the agnos kernel via bhumi (real scanout + input)
+- [ ] CHANGELOG complete from v0.1.0 onward
+- [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`)
 
-- [x] P(-1) scaffold hardening pass
-- [x] Full clippy + fmt + audit + deny clean
-- [x] agnostik + agnosys as git deps with pinned tags
-- [x] CI workflows (ci.yml, release.yml)
-- [x] Integration tests in `tests/`
-- [x] Example in `examples/`
-- [x] Narrow blanket `#[allow(dead_code)]` — targeted per-module allows
-- [x] 90.2% line coverage (target 80%+)
+## Backend seam (the wayland → bhumi/mehman split)
 
-### P(-1) Audit Observations (deferred to future milestones)
+| Rust concern | Cyrius home | Notes |
+|---|---|---|
+| DRM/KMS + libinput + logind (platform I/O) | **bhumi** 0.7.0 | `bhumi_backend_open/fb/poll/present`, seat/cap gating. MVP. |
+| Wayland protocol dispatch, surface tree, window mgmt | **aethersafha** | The compositor's *native* language — stays here. |
+| XWayland (foreign-app surface hosting) | **mehman** 0.1.0 | kavach-sandboxed guests. Post-MVP (types-only today). |
+| Shared domain primitives / errors / wire format | **agnostik** 1.3.2 | was Rust `agnostik`. |
+| udev + DRM/KMS device model | **agnodrm** 1.4.4 | was Rust `agnosys` (decomposed 2026-06-19). |
 
-**Compositor architecture:**
-- Every field in `Compositor` is individually `Arc<RwLock<_>>` — no consistent
-  lock ordering, latent deadlock risk under real concurrency. Restructure into
-  fewer lock-protected groups before wiring real Wayland clients (v0.4.0).
-- `wayland/protocol.rs` `ProtocolBridge` has `pub` fields that should be
-  `pub(crate)` or private with accessors — tighten before API stabilisation.
+## Milestones
 
-**Unbounded growth:**
-- `AccessibilityTree::announcements` grows without bound.
-- `DamageTracker::regions` grows without bound between flushes.
-- `ProtocolBridge::pending_actions` grows without bound between drains.
-- All three need caps or ring buffers before production use (v0.4.0).
+### M0 — Port scaffold (v0.1.0) — ✅ 2026-07-03
+- `cyrius port` ran; Rust → `rust-old/`; Cyrius scaffold + docs + CI.
 
-**Data structure upgrades:**
-- `AccessibilityTree` uses `Vec<AccessibleNode>` with linear scan for
-  lookup/removal — switch to `HashMap<Uuid, AccessibleNode>` when window
-  counts matter (v0.4.0).
-- `shell.rs` `search_launcher` lowercases every item on every keystroke —
-  pre-compute lowercase names for responsive search (v0.5.0).
+### M1 — Foundational base (v0.1.x) — ✅ in progress
+Compiling, tested compositor core on the live bhumi seam:
+- `src/geom.cyr` — Rectangle primitives.  ✅
+- `src/window.cyr` — Window model + WinState.  ✅
+- `src/compositor.cyr` — window stack, focus, workspace, CRUD.  ✅
+- `src/render.cyr` — software renderer over the bhumi XRGB framebuffer.  ✅
+- `src/input.cyr` — bhumi HID → compositor input actions.  ✅
+- `src/main.cyr` — entry: open bhumi backend, seed windows, frame loop.  ✅
+- `tests/aethersafha.tcyr` — 21 core assertions green.  ✅
 
-**Renderer:**
-- `blit_clipped` still uses per-pixel blending (only `blit` got the row-level
-  fast path) — extend the optimisation when damage-clipped blits are hot (v0.4.0).
-- `screen_capture` clones entire pixel buffer (`fb.pixels.clone()`) for
-  full-screen capture — encode directly from borrowed slice (v0.5.0).
+### M2 — Leaf feature parity (v0.2.0) — 🚧 first batch landed
+Self-contained data-model modules (no deep compositor/bhumi coupling), ported
+module-by-module against `rust-old/` (heap offset-accessor structs, module-prefixed
+symbols), each compiling + smoke-tested. Driven by the parity workflow.
+- `theme_bridge.cyr` (AGNOS→Flutter theme translation)  ✅ ported + smoke
+- `gestures.cyr` (tap/swipe/pinch recognition)  ✅ ported + smoke
+- `accessibility.cyr` (a11y tree, focus/keyboard nav, high-contrast theme)  ✅
+- `ai_features.cyr` (context engine, suggestions, agent HUD, resource metrics)  ✅
+- `shell.cyr` (notifications, quick settings, system status, launcher)  ✅
+- `security_ui.cyr` (permission model, alerts, dashboard)  ✅
+- `shell_integration.cyr` (tray, window-mgmt requests, notification bridge)  ⬜ next
+- Remaining: deeper behavioral parity tests per module; wire modules into the
+  compositor/shell surface.
 
-**Concurrency / lifecycle:**
-- `ai_features::start_hud_polling` spawns a tokio loop with no cancellation —
-  multiple calls accumulate zombie tasks. Return + track `JoinHandle`, abort
-  previous before starting new (v0.6.0).
+### M3 — Renderer + compositor depth (v0.3.0)
+- Damage tracking, scene graph, decorations, bitmap text (`renderer.rs` full).
+- Input routing to focused surface, drag/resize state machines, workspaces.
+- Native Wayland protocol surface (`wayland/{types,protocol,server,popups}.rs`)
+  — the compositor's own job; incremental, one protocol object at a time.
 
-## v0.3.0 — Independent Build
+### M4 — Apps + capture + plugins (v0.4.0)
+- `apps.cyr` (Terminal allowlist exec, FileManager, AgentManager, ModelManager, AuditViewer).
+- `screen_capture.cyr` / `screen_recording.cyr` (permission + rate-limit + ring buffer).
+- `plugin_host.cyr` (Unix-socket IPC, sandbox profiles, capability grants).
+- HUD widgets (`hud/{gpu,domain,crew}_status.cyr`) — HTTP polling of daimon MCP.
 
-- [ ] Own Cargo.lock, independent of agnosticos workspace
+### M5 — mehman (XWayland successor) (v0.5.0+)
+- Wire mehman guest lifecycle once its sandbox/surface/shim modules ship.
+- Host foreign-ABI app surfaces in a kavach sandbox → native surface handoff.
 
-## v0.4.0 — Real Compositor
+## Known cleanup
+- **agnostik/agnodrm `ERR_*` overlap**: both dist bundles carry the shared AGNOS
+  error module → duplicate-symbol warnings ("last wins", benign today). Resolve
+  when first consumed (selective `modules = [...]` or upstream ownership split).
+- `cyrius lib sync --full` is required before `cyrius deps` because the declared
+  stdlib set exceeds the incremental pin. Documented in CLAUDE.md quick-start.
 
-- [ ] DRM/KMS backend (scanout to real displays)
-- [ ] Wayland socket listener — accept client connections
-- [ ] Wire xdg_shell, wl_compositor, wlr_layer_shell handlers
-- [ ] XWayland launch and surface mapping
-- [ ] GPU-accelerated rendering path (EGL/Vulkan)
-- [ ] Input event routing from libinput
-- [ ] Restructure `Compositor` locking (fewer Arc<RwLock<_>> groups)
-- [ ] Cap unbounded vectors (announcements, damage regions, pending_actions)
-- [ ] AccessibilityTree: Vec → HashMap for O(1) node lookup
-- [ ] Extend blit_clipped with row-level fast path
-- [ ] Tighten ProtocolBridge field visibility
-
-## v0.5.0 — Desktop Integration
-
-- [ ] Plugin host: dynamic loading (dlopen / WASM)
-- [ ] Screen capture: real buffer source from compositor
-- [ ] Screen capture: encode from borrowed slice (no full-buffer clone)
-- [ ] Screen recording: encoder pipeline (ffmpeg / GStreamer)
-- [ ] Gesture recognizer wired to libinput
-- [ ] Theme bridge: live sync with Flutter shell
-- [ ] App launcher: pre-computed lowercase for search
-
-## v0.6.0 — AI Features
-
-- [ ] Agent runtime integration (model inference)
-- [ ] Context engine: real window/app tracking
-- [ ] Agent HUD: live overlay rendering
-- [ ] AI suggestion pipeline (context → model → UI)
-- [ ] HUD polling: cancellable task with JoinHandle tracking
-
-## v0.7.0 — Security Hardening
-
-- [ ] Landlock sandbox for plugins (via agnosys)
-- [ ] Seccomp filters for compositor process
-- [ ] Per-agent permission enforcement (not just UI)
-- [ ] Audit log persistence
-
-## v1.0.0 Criteria
-
-- [ ] All protocol handlers production-tested
-- [ ] Plugin host API stable
-- [ ] Screen capture/recording API stable
-- [ ] Accessibility API stable
-- [ ] 80%+ code coverage
-- [ ] Independent ark package: `ark upgrade aethersafha`
+## Out of scope (for v1.0)
+- Rust `system_tests.rs` port (verification code, not runtime) — re-expressed as
+  `.tcyr` suites per module instead.
+- GPU acceleration — the software renderer is the v1.0 path. **mabda 4.0.2 is
+  already Cyrius-ported** (`dist/mabda.cyr`, also folded into the cyrius stdlib as
+  `lib/mabda.cyr`); wire it via `[deps.mabda]` (or a `gpu` build path) when
+  hardware acceleration is wanted. No blocker — just deferred.

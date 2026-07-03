@@ -1,0 +1,61 @@
+# aethersafha leaf-module integration test (M2 parity batch).
+# Includes all 6 ported leaf modules + the core together — proves they coexist
+# (no symbol collisions) and their top-level constructors work.
+# Stdlib + [deps.*] auto-included via cyrius.cyml.
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/theme_bridge.cyr"
+include "src/gestures.cyr"
+include "src/accessibility.cyr"
+include "src/ai_features.cyr"
+include "src/shell.cyr"
+include "src/security_ui.cyr"
+
+# assert(cond) passes only when cond == 1; normalize a non-zero pointer to 1.
+fn t_ok(x): i64 {
+    if (x != 0) { return 1; }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("theme_bridge — parity: HighContrastTheme -> FlutterThemeData");
+    var th = theme_hc_new(0, 0xFFFFFF, 0x3366FF, 0xFF0000, 0xFFAA00, 0x00FF00, 1250);
+    assert(t_ok(th), "theme_hc_new");
+    var fd = theme_bridge_convert_to_flutter(th);
+    assert(t_ok(fd), "convert_to_flutter");
+
+    test_group("gestures — parity: GestureRecognizer");
+    var gc = gest_config_new(300, 250, 500, 10, 20);
+    assert(t_ok(gc), "gest_config_new");
+    var gr = gest_recognizer_new(gc);
+    assert(t_ok(gr), "gest_recognizer_new");
+    assert_eq(gest_active_touch_count(gr), 0, "no active touches at start");
+
+    test_group("accessibility — parity: AccessibilityTree");
+    var tree = a11y_tree_new();
+    assert(t_ok(tree), "a11y_tree_new");
+    var node = a11y_tree_add(tree, 0, "button");
+    assert(t_ok(node), "a11y_tree_add");
+
+    test_group("ai_features — parity: AIDesktopFeatures");
+    var ai = ai_new();
+    assert(t_ok(ai), "ai_new");
+
+    test_group("shell — parity: DesktopShell");
+    var sh = shell_new();
+    assert(t_ok(sh), "shell_new");
+    var st = shell_status_new(10, 20, 30, 90, 1, 3);
+    assert(t_ok(st), "shell_status_new");
+
+    test_group("security_ui — parity: SecurityUI");
+    var ui = sec_ui_new();
+    assert(t_ok(ui), "sec_ui_new");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

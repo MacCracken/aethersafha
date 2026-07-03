@@ -1,0 +1,61 @@
+# aethersafha — software renderer over the bhumi framebuffer
+# Parity: rust-old/src/renderer.rs  (Framebuffer, window decorations, damage)
+#
+# Draws the compositor's window stack into the bhumi XRGB8888 framebuffer.
+# Minimal skeleton: solid desktop bg + per-window body + titlebar (focus-tinted).
+# Damage tracking / scene graph / bitmap text are follow-on parity work.
+
+enum RenderK {
+    TITLEBAR_H = 30;
+}
+
+# fill_rect: fill [x,x+w) x [y,y+h) with color, clamped to framebuffer bounds.
+fn fill_rect(fb, x, y, w, h, color): i64 {
+    var fw = bhumi_fb_width(fb);
+    var fh = bhumi_fb_height(fb);
+    var yy = y;
+    var y1 = y + h;
+    while (yy < y1) {
+        if ((yy >= 0) && (yy < fh)) {
+            var xx = x;
+            var x1 = x + w;
+            while (xx < x1) {
+                if ((xx >= 0) && (xx < fw)) {
+                    bhumi_fb_set(fb, xx, yy, color);
+                }
+                xx = xx + 1;
+            }
+        }
+        yy = yy + 1;
+    }
+    return 0;
+}
+
+fn render_window(fb, win, focused): i64 {
+    var x = win_x(win);
+    var y = win_y(win);
+    var w = win_w(win);
+    var h = win_h(win);
+    # body
+    fill_rect(fb, x, y + TITLEBAR_H, w, h - TITLEBAR_H, bhumi_xrgb(40, 44, 52));
+    # titlebar (tinted when focused)
+    var tb = bhumi_xrgb(50, 54, 62);
+    if (focused == 1) { tb = bhumi_xrgb(70, 90, 140); }
+    fill_rect(fb, x, y, w, TITLEBAR_H, tb);
+    return 0;
+}
+
+# render_frame: clear to desktop bg, then paint windows bottom-to-top.
+fn render_frame(comp, fb): i64 {
+    bhumi_fb_clear(fb, bhumi_xrgb(18, 18, 28));
+    var v = comp_windows(comp);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var focused = 0;
+        if (i == comp_focused(comp)) { focused = 1; }
+        render_window(fb, vec_get(v, i), focused);
+        i = i + 1;
+    }
+    return 0;
+}

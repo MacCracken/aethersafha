@@ -1,0 +1,467 @@
+# aethersafha — high-contrast theme -> Flutter ThemeData bridge
+# Parity: rust-old/src/theme_bridge.rs
+#   (FlutterThemeData, PlatformChannelMessage, ThemeOverrides, ThemeBridge,
+#    color_u32_to_hex / color_hex_to_u32, HighContrastTheme -> ThemeData)
+#
+# Propagates an AGNOS HighContrastTheme (accessibility.rs) to Flutter's
+# ThemeData across a platform-channel JSON message. Pure data transforms:
+#   * color u32 (0xAARRGGBB) <-> "#RRGGBB" hex string
+#   * background luminance -> "light"/"dark" brightness (linear RGB formula)
+#
+# Cyrius idiom notes:
+#   * Each Rust struct is a heap object: alloc(F_SZ) + named-offset enum,
+#     load64/store64 per field (see src/window.cyr, src/compositor.cyr).
+#   * All color/brightness/channel strings are `Str` values (lib/str.cyr),
+#     stored as pointers in the object slots.
+#   * Rust f32 font_scale / font_size_multiplier -> integer PERMILLE
+#     (1.25 -> 1250, 2.0 -> 2000). No float math is needed; the luminance
+#     formula is done in integer fixed-point (coefficients x1000).
+#   * color_hex_to_u32's Result<u32,String> -> a tagged Option-ish return:
+#     theme_color_hex_to_u32 returns a *Result heap cell (Ok(u32)/Err(msg))
+#     via lib/result.cyr so callers can distinguish parse failure.
+#
+# Requires (transitively via src/main.cyr include order / cyrius.cyml):
+#   lib/alloc.cyr, lib/string.cyr, lib/str.cyr, lib/vec.cyr, lib/result.cyr
+
+# ============================================================================
+# HighContrastTheme (parity: accessibility.rs HighContrastTheme)
+# ============================================================================
+# Only the fields theme_bridge reads (background/foreground/accent/error/
+# font_scale) plus warning/focus_ring_width for full accessibility parity.
+# Colors are u32 (0xAARRGGBB); font_scale is PERMILLE (1.25 -> 1250).
+
+enum ThemeHcOff {
+    TH_HC_BG      = 0;    # u32 background   0xAARRGGBB
+    TH_HC_FG      = 8;    # u32 foreground
+    TH_HC_ACCENT  = 16;   # u32 accent
+    TH_HC_ERROR   = 24;   # u32 error
+    TH_HC_WARNING = 32;   # u32 warning
+    TH_HC_RING    = 40;   # u32 focus_ring_width (px)
+    TH_HC_FONT    = 48;   # font_scale in PERMILLE (1000 == 1.0)
+    TH_HC_SZ      = 56;
+}
+
+# theme_hc_new(bg, fg, accent, error, warning, ring, font_permille) -> *HighContrastTheme (0 OOM)
+fn theme_hc_new(bg, fg, accent, error, warning, ring, font_permille): i64 {
+    var p = alloc(TH_HC_SZ);
+    if (p == 0) { return 0; }
+    store64(p + TH_HC_BG, bg);
+    store64(p + TH_HC_FG, fg);
+    store64(p + TH_HC_ACCENT, accent);
+    store64(p + TH_HC_ERROR, error);
+    store64(p + TH_HC_WARNING, warning);
+    store64(p + TH_HC_RING, ring);
+    store64(p + TH_HC_FONT, font_permille);
+    return p;
+}
+
+fn theme_hc_background(p) { return load64(p + TH_HC_BG); }
+fn theme_hc_foreground(p) { return load64(p + TH_HC_FG); }
+fn theme_hc_accent(p)     { return load64(p + TH_HC_ACCENT); }
+fn theme_hc_error(p)      { return load64(p + TH_HC_ERROR); }
+fn theme_hc_warning(p)    { return load64(p + TH_HC_WARNING); }
+fn theme_hc_ring_width(p) { return load64(p + TH_HC_RING); }
+fn theme_hc_font_scale(p) { return load64(p + TH_HC_FONT); }
+
+# Parity: HighContrastTheme::default_high_contrast() (light: dark on white).
+#   background 0xFFFFFFFF, foreground 0xFF000000, accent 0xFF0000FF,
+#   error 0xFFFF0000, warning 0xFFFF8800, focus_ring_width 3, font_scale 1.25.
+fn theme_hc_default_high_contrast(): i64 {
+    return theme_hc_new(0xFFFFFFFF, 0xFF000000, 0xFF0000FF, 0xFFFF0000, 0xFFFF8800, 3, 1250);
+}
+
+# Parity: HighContrastTheme::default_dark_high_contrast() (dark: light on black).
+#   background 0xFF000000, foreground 0xFFFFFFFF, accent 0xFF00CCFF,
+#   error 0xFFFF4444, warning 0xFFFFCC00, focus_ring_width 3, font_scale 1.25.
+fn theme_hc_default_dark_high_contrast(): i64 {
+    return theme_hc_new(0xFF000000, 0xFFFFFFFF, 0xFF00CCFF, 0xFFFF4444, 0xFFFFCC00, 3, 1250);
+}
+
+# ============================================================================
+# FlutterThemeData (parity: theme_bridge.rs FlutterThemeData)
+# ============================================================================
+# Every color / brightness field is a `Str` pointer (lib/str.cyr). Booleans
+# are 0/1. font_size_multiplier is PERMILLE (1000 == 1.0).
+
+enum ThemeFdOff {
+    TH_FD_BRIGHTNESS  = 0;    # Str "light"|"dark"
+    TH_FD_PRIMARY     = 8;    # Str "#RRGGBB"
+    TH_FD_BACKGROUND  = 16;   # Str
+    TH_FD_SURFACE     = 24;   # Str
+    TH_FD_ERROR       = 32;   # Str
+    TH_FD_ON_PRIMARY  = 40;   # Str
+    TH_FD_ON_BG       = 48;   # Str  (on_background)
+    TH_FD_ON_SURFACE  = 56;   # Str
+    TH_FD_ON_ERROR    = 64;   # Str
+    TH_FD_FONT        = 72;   # font_size_multiplier PERMILLE (1000 == 1.0)
+    TH_FD_M3          = 80;   # use_material3  (0|1)
+    TH_FD_SZ          = 88;
+}
+
+# theme_flutter_new(...) -> *FlutterThemeData (0 OOM). All string args are Str
+# pointers; caller owns their lifetime (bump-allocated Strs live to reset).
+fn theme_flutter_new(brightness, primary, background, surface, error, on_primary, on_bg, on_surface, on_error, font_permille, use_m3): i64 {
+    var p = alloc(TH_FD_SZ);
+    if (p == 0) { return 0; }
+    store64(p + TH_FD_BRIGHTNESS, brightness);
+    store64(p + TH_FD_PRIMARY, primary);
+    store64(p + TH_FD_BACKGROUND, background);
+    store64(p + TH_FD_SURFACE, surface);
+    store64(p + TH_FD_ERROR, error);
+    store64(p + TH_FD_ON_PRIMARY, on_primary);
+    store64(p + TH_FD_ON_BG, on_bg);
+    store64(p + TH_FD_ON_SURFACE, on_surface);
+    store64(p + TH_FD_ON_ERROR, on_error);
+    store64(p + TH_FD_FONT, font_permille);
+    store64(p + TH_FD_M3, use_m3);
+    return p;
+}
+
+fn theme_flutter_brightness(p)      { return load64(p + TH_FD_BRIGHTNESS); }
+fn theme_flutter_primary_color(p)   { return load64(p + TH_FD_PRIMARY); }
+fn theme_flutter_background_color(p) { return load64(p + TH_FD_BACKGROUND); }
+fn theme_flutter_surface_color(p)   { return load64(p + TH_FD_SURFACE); }
+fn theme_flutter_error_color(p)     { return load64(p + TH_FD_ERROR); }
+fn theme_flutter_on_primary(p)      { return load64(p + TH_FD_ON_PRIMARY); }
+fn theme_flutter_on_background(p)   { return load64(p + TH_FD_ON_BG); }
+fn theme_flutter_on_surface(p)      { return load64(p + TH_FD_ON_SURFACE); }
+fn theme_flutter_on_error(p)        { return load64(p + TH_FD_ON_ERROR); }
+fn theme_flutter_font_multiplier(p) { return load64(p + TH_FD_FONT); }
+fn theme_flutter_use_material3(p)   { return load64(p + TH_FD_M3); }
+
+# theme_flutter_eq: structural equality (parity: derive(PartialEq) on
+# FlutterThemeData). All Str fields compared by content, scalars by value.
+fn theme_flutter_eq(a, b): i64 {
+    if (a == b) { return 1; }
+    if (a == 0) { return 0; }
+    if (b == 0) { return 0; }
+    var e1 = str_eq(load64(a + TH_FD_BRIGHTNESS), load64(b + TH_FD_BRIGHTNESS)); if (e1 == 0) { return 0; }
+    var e2 = str_eq(load64(a + TH_FD_PRIMARY),    load64(b + TH_FD_PRIMARY));    if (e2 == 0) { return 0; }
+    var e3 = str_eq(load64(a + TH_FD_BACKGROUND), load64(b + TH_FD_BACKGROUND)); if (e3 == 0) { return 0; }
+    var e4 = str_eq(load64(a + TH_FD_SURFACE),    load64(b + TH_FD_SURFACE));    if (e4 == 0) { return 0; }
+    var e5 = str_eq(load64(a + TH_FD_ERROR),      load64(b + TH_FD_ERROR));      if (e5 == 0) { return 0; }
+    var e6 = str_eq(load64(a + TH_FD_ON_PRIMARY), load64(b + TH_FD_ON_PRIMARY)); if (e6 == 0) { return 0; }
+    var e7 = str_eq(load64(a + TH_FD_ON_BG),      load64(b + TH_FD_ON_BG));      if (e7 == 0) { return 0; }
+    var e8 = str_eq(load64(a + TH_FD_ON_SURFACE), load64(b + TH_FD_ON_SURFACE)); if (e8 == 0) { return 0; }
+    var e9 = str_eq(load64(a + TH_FD_ON_ERROR),   load64(b + TH_FD_ON_ERROR));   if (e9 == 0) { return 0; }
+    if (load64(a + TH_FD_FONT) != load64(b + TH_FD_FONT)) { return 0; }
+    if (load64(a + TH_FD_M3) != load64(b + TH_FD_M3)) { return 0; }
+    return 1;
+}
+
+# ============================================================================
+# PlatformChannelMessage (parity: theme_bridge.rs PlatformChannelMessage)
+# ============================================================================
+# Rust's `args: serde_json::Value` has no Cyrius analog (no serde). We store
+# the *FlutterThemeData that produced the message in the ARGS slot, and expose
+# theme_message_args_json() to serialize it to a JSON `Str` on demand — the
+# documented substitute for `serde_json::to_value(theme_data)`.
+
+enum ThemeMsgOff {
+    TH_MSG_CHANNEL = 0;   # Str  "agnos/theme"
+    TH_MSG_METHOD  = 8;   # Str  "setTheme"
+    TH_MSG_ARGS    = 16;  # *FlutterThemeData (JSON source; see args_json)
+    TH_MSG_SZ      = 24;
+}
+
+fn theme_message_new(channel, method, args_flutter): i64 {
+    var p = alloc(TH_MSG_SZ);
+    if (p == 0) { return 0; }
+    store64(p + TH_MSG_CHANNEL, channel);
+    store64(p + TH_MSG_METHOD, method);
+    store64(p + TH_MSG_ARGS, args_flutter);
+    return p;
+}
+
+fn theme_message_channel(p) { return load64(p + TH_MSG_CHANNEL); }
+fn theme_message_method(p)  { return load64(p + TH_MSG_METHOD); }
+fn theme_message_args(p)    { return load64(p + TH_MSG_ARGS); }
+
+# ============================================================================
+# ThemeOverrides (parity: theme_bridge.rs ThemeOverrides — all Option<T>)
+# ============================================================================
+# Rust Option<T> is modeled by sentinel "unset":
+#   * Str fields:  0 (null Str pointer)  == None; a Str pointer == Some.
+#   * font_size_multiplier (permille): -1 == None; >= 0 == Some.
+#   * use_material3: -1 == None; 0|1 == Some (0/1 are both valid values).
+# theme_overrides_default() zeroes/sentinels every field (parity: Default).
+
+enum ThemeOvOff {
+    TH_OV_BRIGHTNESS = 0;    # Str | 0
+    TH_OV_PRIMARY    = 8;    # Str | 0
+    TH_OV_BACKGROUND = 16;   # Str | 0
+    TH_OV_SURFACE    = 24;   # Str | 0
+    TH_OV_ERROR      = 32;   # Str | 0
+    TH_OV_ON_PRIMARY = 40;   # Str | 0
+    TH_OV_ON_BG      = 48;   # Str | 0
+    TH_OV_ON_SURFACE = 56;   # Str | 0
+    TH_OV_ON_ERROR   = 64;   # Str | 0
+    TH_OV_FONT       = 72;   # permille | -1
+    TH_OV_M3         = 80;   # 0|1 | -1
+    TH_OV_SZ         = 88;
+}
+
+# theme_overrides_default() -> *ThemeOverrides with every field unset (0 / -1).
+fn theme_overrides_default(): i64 {
+    var p = alloc(TH_OV_SZ);
+    if (p == 0) { return 0; }
+    store64(p + TH_OV_BRIGHTNESS, 0);
+    store64(p + TH_OV_PRIMARY, 0);
+    store64(p + TH_OV_BACKGROUND, 0);
+    store64(p + TH_OV_SURFACE, 0);
+    store64(p + TH_OV_ERROR, 0);
+    store64(p + TH_OV_ON_PRIMARY, 0);
+    store64(p + TH_OV_ON_BG, 0);
+    store64(p + TH_OV_ON_SURFACE, 0);
+    store64(p + TH_OV_ON_ERROR, 0);
+    store64(p + TH_OV_FONT, 0 - 1);
+    store64(p + TH_OV_M3, 0 - 1);
+    return p;
+}
+
+# Per-field setters (Some(v)). Str setters take a Str pointer; font takes
+# permille; m3 takes 0|1. Setting to None: pass 0 (Str) / -1 (font, m3).
+fn theme_overrides_set_brightness(p, s)     { store64(p + TH_OV_BRIGHTNESS, s); return 0; }
+fn theme_overrides_set_primary(p, s)        { store64(p + TH_OV_PRIMARY, s); return 0; }
+fn theme_overrides_set_background(p, s)      { store64(p + TH_OV_BACKGROUND, s); return 0; }
+fn theme_overrides_set_surface(p, s)         { store64(p + TH_OV_SURFACE, s); return 0; }
+fn theme_overrides_set_error(p, s)           { store64(p + TH_OV_ERROR, s); return 0; }
+fn theme_overrides_set_on_primary(p, s)      { store64(p + TH_OV_ON_PRIMARY, s); return 0; }
+fn theme_overrides_set_on_background(p, s)   { store64(p + TH_OV_ON_BG, s); return 0; }
+fn theme_overrides_set_on_surface(p, s)      { store64(p + TH_OV_ON_SURFACE, s); return 0; }
+fn theme_overrides_set_on_error(p, s)        { store64(p + TH_OV_ON_ERROR, s); return 0; }
+fn theme_overrides_set_font(p, permille)     { store64(p + TH_OV_FONT, permille); return 0; }
+fn theme_overrides_set_material3(p, m3)      { store64(p + TH_OV_M3, m3); return 0; }
+
+# ============================================================================
+# Helpers: color u32 <-> hex (parity: color_u32_to_hex / color_hex_to_u32)
+# ============================================================================
+
+# Uppercase hex digit for a nibble 0..15 -> byte code ('0'..'9','A'..'F').
+fn theme_hex_digit(nibble): i64 {
+    var n = nibble & 0xF;
+    if (n < 10) { return 48 + n; }     # '0' + n
+    return 55 + n;                      # 'A' + (n-10) == 65 + n - 10
+}
+
+# theme_color_u32_to_hex(color) -> Str "#RRGGBB" (alpha ignored).
+# Parity: color_u32_to_hex — format!("#{:02X}{:02X}{:02X}", r, g, b).
+fn theme_color_u32_to_hex(color): i64 {
+    var r = (color >> 16) & 0xFF;
+    var g = (color >> 8) & 0xFF;
+    var b = color & 0xFF;
+    var sb = str_builder_new();
+    str_builder_putc(sb, 35);                        # '#'
+    str_builder_putc(sb, theme_hex_digit(r >> 4));
+    str_builder_putc(sb, theme_hex_digit(r & 0xF));
+    str_builder_putc(sb, theme_hex_digit(g >> 4));
+    str_builder_putc(sb, theme_hex_digit(g & 0xF));
+    str_builder_putc(sb, theme_hex_digit(b >> 4));
+    str_builder_putc(sb, theme_hex_digit(b & 0xF));
+    return str_builder_build(sb);
+}
+
+# Parse a single ASCII hex byte -> 0..15, or -1 if not a hex digit.
+fn theme_hex_val(c): i64 {
+    if (c >= 48) { if (c <= 57) { return c - 48; } }    # '0'..'9'
+    if (c >= 65) { if (c <= 70) { return c - 55; } }    # 'A'..'F'
+    if (c >= 97) { if (c <= 102) { return c - 87; } }   # 'a'..'f'
+    return 0 - 1;
+}
+
+# theme_color_hex_to_u32(hex_str) -> *Result (Ok(0xFF_RRGGBB) | Err(Str msg)).
+# Parity: color_hex_to_u32 — requires a '#' prefix and exactly 6 hex digits;
+# returns 0xFF000000 | rgb on success. Uses lib/result.cyr Ok()/Err().
+#   * missing '#'      -> Err("Expected '#' prefix ...")
+#   * len != 6         -> Err("Expected 6 hex digits ...")
+#   * non-hex char     -> Err("Invalid hex color ...")
+fn theme_color_hex_to_u32(hex): i64 {
+    var slen = str_len(hex);
+    var sd = str_data(hex);
+    # strip_prefix('#')
+    var has_hash = 0;
+    if (slen > 0) { if (load8(sd) == 35) { has_hash = 1; } }
+    if (has_hash == 0) {
+        return Err(str_from("Expected '#' prefix in color string"));
+    }
+    var body_len = slen - 1;
+    if (body_len != 6) {
+        return Err(str_from("Expected 6 hex digits after '#'"));
+    }
+    var rgb = 0;
+    var i = 0;
+    while (i < 6) {
+        var v = theme_hex_val(load8(sd + 1 + i));
+        if (v < 0) {
+            return Err(str_from("Invalid hex color"));
+        }
+        rgb = (rgb << 4) | v;
+        i = i + 1;
+    }
+    return Ok(0xFF000000 | rgb);
+}
+
+# ============================================================================
+# ThemeBridge (parity: theme_bridge.rs ThemeBridge — free functions here)
+# ============================================================================
+
+# theme_bridge_luminance_x1000(color) -> integer luminance scaled x1000.
+# Parity fixed-point of: 0.299*R + 0.587*G + 0.114*B  (coefficients x1000).
+# The Rust "> 127.5" threshold becomes "> 127500" against this scaled value.
+fn theme_bridge_luminance_x1000(color): i64 {
+    var r = (color >> 16) & 0xFF;
+    var g = (color >> 8) & 0xFF;
+    var b = color & 0xFF;
+    return 299 * r + 587 * g + 114 * b;
+}
+
+# theme_bridge_convert_to_flutter(*HighContrastTheme) -> *FlutterThemeData.
+# Parity: ThemeBridge::convert_to_flutter.
+#   * primary   = accent
+#   * background = surface = background hex
+#   * on_primary/on_background/on_surface = foreground hex (contrast color)
+#   * on_error  = background hex (readable against error)
+#   * brightness from background luminance (light if > 127.5, else dark)
+#   * font_size_multiplier = theme.font_scale, use_material3 = true
+fn theme_bridge_convert_to_flutter(theme): i64 {
+    var bg = theme_color_u32_to_hex(theme_hc_background(theme));
+    var fg = theme_color_u32_to_hex(theme_hc_foreground(theme));
+    var accent = theme_color_u32_to_hex(theme_hc_accent(theme));
+    var error = theme_color_u32_to_hex(theme_hc_error(theme));
+
+    var lum = theme_bridge_luminance_x1000(theme_hc_background(theme));
+    var brightness = str_from("dark");
+    if (lum > 127500) { brightness = str_from("light"); }
+
+    # on_* colors: contrasting foreground; on_error uses background.
+    # bg/fg are reused directly (immutable Str views; safe to share).
+    return theme_flutter_new(brightness, accent, bg, bg, error, fg, fg, fg, bg, theme_hc_font_scale(theme), 1);
+}
+
+# theme_bridge_create_platform_message(*FlutterThemeData) -> *PlatformChannelMessage.
+# Parity: ThemeBridge::create_platform_message. channel "agnos/theme",
+# method "setTheme", args = the theme data (serialized on demand — see
+# theme_message_args_json / substitute for serde_json::to_value).
+fn theme_bridge_create_platform_message(theme_data): i64 {
+    return theme_message_new(str_from("agnos/theme"), str_from("setTheme"), theme_data);
+}
+
+# _theme_ov_str: pick override Str field if set (nonzero), else base Str.
+# Parity: overrides.field.clone().unwrap_or_else(|| base.field.clone()).
+fn _theme_ov_str(ov_field, base_field): i64 {
+    if (ov_field != 0) { return ov_field; }
+    return base_field;
+}
+
+# theme_bridge_apply_theme_override(*base FlutterThemeData, *ThemeOverrides)
+#   -> *FlutterThemeData. Parity: ThemeBridge::apply_theme_override — every
+# field falls back to base when the override is unset (0 / -1 sentinel).
+fn theme_bridge_apply_theme_override(base, ov): i64 {
+    var brightness = _theme_ov_str(load64(ov + TH_OV_BRIGHTNESS), load64(base + TH_FD_BRIGHTNESS));
+    var primary    = _theme_ov_str(load64(ov + TH_OV_PRIMARY),    load64(base + TH_FD_PRIMARY));
+    var background = _theme_ov_str(load64(ov + TH_OV_BACKGROUND), load64(base + TH_FD_BACKGROUND));
+    var surface    = _theme_ov_str(load64(ov + TH_OV_SURFACE),    load64(base + TH_FD_SURFACE));
+    var error      = _theme_ov_str(load64(ov + TH_OV_ERROR),      load64(base + TH_FD_ERROR));
+    var on_primary = _theme_ov_str(load64(ov + TH_OV_ON_PRIMARY), load64(base + TH_FD_ON_PRIMARY));
+    var on_bg      = _theme_ov_str(load64(ov + TH_OV_ON_BG),      load64(base + TH_FD_ON_BG));
+    var on_surface = _theme_ov_str(load64(ov + TH_OV_ON_SURFACE), load64(base + TH_FD_ON_SURFACE));
+    var on_error   = _theme_ov_str(load64(ov + TH_OV_ON_ERROR),   load64(base + TH_FD_ON_ERROR));
+
+    var ov_font = load64(ov + TH_OV_FONT);
+    var font = ov_font;
+    if (ov_font < 0) { font = load64(base + TH_FD_FONT); }
+
+    var ov_m3 = load64(ov + TH_OV_M3);
+    var m3 = ov_m3;
+    if (ov_m3 < 0) { m3 = load64(base + TH_FD_M3); }
+
+    return theme_flutter_new(brightness, primary, background, surface, error, on_primary, on_bg, on_surface, on_error, font, m3);
+}
+
+# ============================================================================
+# JSON serialization (substitute for serde_json::to_value / to_string)
+# ============================================================================
+# Rust derives Serialize on FlutterThemeData; serde_json emits an object with
+# snake_case keys. There is no serde in Cyrius, so we hand-roll the same object
+# shape via a str_builder. font_size_multiplier is emitted as a decimal from
+# the permille value (1250 -> "1.25"); use_material3 as a JSON bool.
+# This is the documented substitute referenced by TH_MSG_ARGS.
+
+# Append a Str field as  "key":"value"  (value JSON-quoted via lib/str.cyr).
+fn _theme_json_str_field(sb, key, val): i64 {
+    str_builder_putc(sb, 34);
+    str_builder_add_cstr(sb, key);
+    str_builder_putc(sb, 34);
+    str_builder_putc(sb, 58);                 # ':'
+    str_builder_add_json_str(sb, val);
+    return 0;
+}
+
+# Append a permille value as an unquoted JSON number "X.YYY" (trailing zeros
+# kept minimal: whole.remainder/1000). 1250 -> 1.25, 1000 -> 1, 2000 -> 2.
+fn _theme_json_permille(sb, permille): i64 {
+    var whole = permille / 1000;
+    var frac = permille - whole * 1000;       # 0..999
+    str_builder_add_int(sb, whole);
+    if (frac != 0) {
+        str_builder_putc(sb, 46);             # '.'
+        # emit exactly the significant fractional digits (strip trailing 0s)
+        var d0 = frac / 100;                  # tenths
+        var d1 = (frac / 10) - d0 * 10;       # hundredths
+        var d2 = frac - (frac / 10) * 10;     # thousandths
+        str_builder_putc(sb, 48 + d0);
+        if ((d1 != 0) || (d2 != 0)) { str_builder_putc(sb, 48 + d1); }
+        if (d2 != 0) { str_builder_putc(sb, 48 + d2); }
+    }
+    return 0;
+}
+
+# theme_flutter_to_json(*FlutterThemeData) -> Str — a JSON object matching the
+# serde(FlutterThemeData) shape. Substitute for serde_json::to_value/to_string.
+fn theme_flutter_to_json(fd): i64 {
+    var sb = str_builder_new();
+    str_builder_putc(sb, 123);                # '{'
+    _theme_json_str_field(sb, "brightness", load64(fd + TH_FD_BRIGHTNESS));
+    str_builder_putc(sb, 44);                 # ','
+    _theme_json_str_field(sb, "primary_color", load64(fd + TH_FD_PRIMARY));
+    str_builder_putc(sb, 44);
+    _theme_json_str_field(sb, "background_color", load64(fd + TH_FD_BACKGROUND));
+    str_builder_putc(sb, 44);
+    _theme_json_str_field(sb, "surface_color", load64(fd + TH_FD_SURFACE));
+    str_builder_putc(sb, 44);
+    _theme_json_str_field(sb, "error_color", load64(fd + TH_FD_ERROR));
+    str_builder_putc(sb, 44);
+    _theme_json_str_field(sb, "on_primary", load64(fd + TH_FD_ON_PRIMARY));
+    str_builder_putc(sb, 44);
+    _theme_json_str_field(sb, "on_background", load64(fd + TH_FD_ON_BG));
+    str_builder_putc(sb, 44);
+    _theme_json_str_field(sb, "on_surface", load64(fd + TH_FD_ON_SURFACE));
+    str_builder_putc(sb, 44);
+    _theme_json_str_field(sb, "on_error", load64(fd + TH_FD_ON_ERROR));
+    str_builder_putc(sb, 44);
+    # font_size_multiplier: JSON number from permille
+    str_builder_putc(sb, 34);
+    str_builder_add_cstr(sb, "font_size_multiplier");
+    str_builder_putc(sb, 34);
+    str_builder_putc(sb, 58);
+    _theme_json_permille(sb, load64(fd + TH_FD_FONT));
+    str_builder_putc(sb, 44);
+    # use_material3: JSON bool
+    str_builder_putc(sb, 34);
+    str_builder_add_cstr(sb, "use_material3");
+    str_builder_putc(sb, 34);
+    str_builder_putc(sb, 58);
+    if (load64(fd + TH_FD_M3) != 0) { str_builder_add_cstr(sb, "true"); }
+    else { str_builder_add_cstr(sb, "false"); }
+    str_builder_putc(sb, 125);                # '}'
+    return str_builder_build(sb);
+}
+
+# theme_message_args_json(*PlatformChannelMessage) -> Str. Serializes the
+# message's stored *FlutterThemeData to JSON (the `args` value). Substitute
+# for reading serde_json::Value out of PlatformChannelMessage.args.
+fn theme_message_args_json(msg): i64 {
+    var args = load64(msg + TH_MSG_ARGS);
+    if (args == 0) { return str_from("null"); }
+    return theme_flutter_to_json(args);
+}

@@ -1,0 +1,54 @@
+# aethersafha — window model
+# Parity: rust-old/src/compositor.rs  (Window, WindowState)
+#
+# A Window is a heap object (arena-allocated); fields via named-offset enum +
+# load64/store64 — the same layout convention lib/bhumi.cyr and the stdlib use.
+
+enum WinState {
+    WS_NORMAL     = 0;
+    WS_MINIMIZED  = 1;
+    WS_MAXIMIZED  = 2;
+    WS_FULLSCREEN = 3;
+    WS_FLOATING   = 4;
+}
+
+enum WinOff {
+    W_ID    = 0;    # i64 surface id
+    W_X     = 8;
+    W_Y     = 16;
+    W_W     = 24;
+    W_H     = 32;
+    W_STATE = 40;   # WinState
+    W_TITLE = 48;   # cstr pointer
+    W_AGENT = 56;   # 1 = agent-owned window
+    W_SZ    = 64;
+}
+
+# win_new(id, x, y, w, h, title_cstr) -> *Window (0 on OOM)
+fn win_new(id, x, y, w, h, title): i64 {
+    var p = alloc(W_SZ);
+    if (p == 0) { return 0; }
+    store64(p + W_ID, id);
+    store64(p + W_X, x);
+    store64(p + W_Y, y);
+    store64(p + W_W, w);
+    store64(p + W_H, h);
+    store64(p + W_STATE, WinState.WS_NORMAL);
+    store64(p + W_TITLE, title);
+    store64(p + W_AGENT, 0);
+    return p;
+}
+
+fn win_id(p)    { return load64(p + W_ID); }
+fn win_x(p)     { return load64(p + W_X); }
+fn win_y(p)     { return load64(p + W_Y); }
+fn win_w(p)     { return load64(p + W_W); }
+fn win_h(p)     { return load64(p + W_H); }
+fn win_state(p) { return load64(p + W_STATE); }
+fn win_title(p) { return load64(p + W_TITLE); }
+fn win_is_agent(p) { return load64(p + W_AGENT); }
+
+fn win_set_state(p, s) { store64(p + W_STATE, s); return 0; }
+fn win_set_agent(p, a) { store64(p + W_AGENT, a); return 0; }
+fn win_move(p, x, y)   { store64(p + W_X, x); store64(p + W_Y, y); return 0; }
+fn win_resize(p, w, h) { store64(p + W_W, w); store64(p + W_H, h); return 0; }

@@ -1,0 +1,83 @@
+# aethersafha — compositor core
+# Parity: rust-old/src/compositor.rs  (Compositor: window list, focus, workspace)
+#
+# The compositor owns the window stack (a vec of *Window), the focused index,
+# an id counter, and the active workspace. Native Wayland protocol dispatch is
+# the compositor's own job (does NOT move to bhumi/mehman) — this is where the
+# surface tree + window management live.
+
+enum CompOff {
+    C_WINDOWS   = 0;    # vec of *Window (z-order: last = top)
+    C_FOCUSED   = 8;    # index into windows, or -1
+    C_NEXTID    = 16;   # next surface id
+    C_WORKSPACE = 24;   # active workspace id
+    C_SZ        = 32;
+}
+
+# comp_new() -> *Compositor (0 on OOM)
+fn comp_new(): i64 {
+    var c = alloc(C_SZ);
+    if (c == 0) { return 0; }
+    store64(c + C_WINDOWS, vec_new());
+    store64(c + C_FOCUSED, 0 - 1);
+    store64(c + C_NEXTID, 1);
+    store64(c + C_WORKSPACE, 0);
+    return c;
+}
+
+fn comp_windows(c)  { return load64(c + C_WINDOWS); }
+fn comp_count(c)    { return vec_len(load64(c + C_WINDOWS)); }
+fn comp_focused(c)  { return load64(c + C_FOCUSED); }
+fn comp_get(c, i)   { return vec_get(load64(c + C_WINDOWS), i); }
+
+# comp_create_window: assign next id, push (top of z-order), focus it. -> *Window
+fn comp_create_window(c, x, y, w, h, title): i64 {
+    var id = load64(c + C_NEXTID);
+    store64(c + C_NEXTID, id + 1);
+    var win = win_new(id, x, y, w, h, title);
+    if (win == 0) { return 0; }
+    var v = load64(c + C_WINDOWS);
+    vec_push(v, win);
+    store64(c + C_FOCUSED, vec_len(v) - 1);
+    return win;
+}
+
+# comp_focus(c, i): set focus to window index i if valid.
+fn comp_focus(c, i): i64 {
+    if (i < 0) { return 0 - 1; }
+    if (i >= comp_count(c)) { return 0 - 1; }
+    store64(c + C_FOCUSED, i);
+    return 0;
+}
+
+# comp_focused_window(c) -> *Window (0 if none focused)
+fn comp_focused_window(c): i64 {
+    var f = load64(c + C_FOCUSED);
+    if (f < 0) { return 0; }
+    if (f >= comp_count(c)) { return 0; }
+    return comp_get(c, f);
+}
+
+# comp_find_by_id(c, id) -> index, or -1
+fn comp_find_by_id(c, id): i64 {
+    var v = load64(c + C_WINDOWS);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        if (win_id(vec_get(v, i)) == id) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# comp_close_window(c, id): remove the window with this id. -> 0 ok / -1 absent
+fn comp_close_window(c, id): i64 {
+    var idx = comp_find_by_id(c, id);
+    if (idx < 0) { return 0 - 1; }
+    var v = load64(c + C_WINDOWS);
+    vec_remove(v, idx);
+    # keep focus in range
+    var f = load64(c + C_FOCUSED);
+    if (f >= vec_len(v)) { store64(c + C_FOCUSED, vec_len(v) - 1); }
+    return 0;
+}

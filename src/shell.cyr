@@ -1,0 +1,765 @@
+# aethersafha — desktop shell
+# Parity: rust-old/src/shell.rs  (DesktopShell + notifications, quick
+# settings, system status, app registry, launcher).
+#
+# Heap-object idiom: every Rust struct is arena-allocated with a named-offset
+# enum; fields via load64/store64 (same convention as src/window.cyr,
+# src/compositor.cyr, lib/bhumi.cyr). Rust enums -> Cyrius enums. Rust
+# collections -> stdlib vec / hashmap. Every symbol is prefixed shell_/SH_.
+#
+# Parity substitutions (no clean Cyrius analog):
+#   - Uuid notification id           -> monotonic i64 (SH_ counter in the shell)
+#   - Box<dyn Fn> QuickSetting cb     -> action-id i64 (on_action)
+#   - chrono::DateTime<Utc> timestamp -> i64 epoch (caller passes `now`)
+#   - f32 relevance_score / usages    -> integer permille (1.0 == 1000)
+#   - Option<u8> battery_level        -> i64, sentinel -1 == None
+#   - HashMap<Uuid,Notification>      -> vec of *Notification (linear id lookup;
+#                                        eviction already scans by timestamp)
+#   - thiserror ShellError            -> i64 error codes (SH_ERR_*)
+#   - tracing info!/warn!             -> dropped (no side-effect logging here)
+
+# Maximum number of notifications kept in memory (rust: MAX_NOTIFICATIONS).
+enum SH_Limits {
+    SH_MAX_NOTIFICATIONS = 200;
+}
+
+# Result / error codes (rust: ShellError). 0 == Ok.
+enum SH_Err {
+    SH_OK                    = 0;
+    SH_ERR_NOTIF_NOT_FOUND   = 1;   # NotificationNotFound(id)
+    SH_ERR_APP_NOT_FOUND     = 2;   # AppNotFound(name) / setting not found
+    SH_ERR_PERMISSION_DENIED = 3;   # PermissionDenied(_)
+}
+
+# rust: NotificationPriority
+enum SH_NotifPriority {
+    SH_PRIO_LOW      = 0;
+    SH_PRIO_NORMAL   = 1;
+    SH_PRIO_HIGH     = 2;
+    SH_PRIO_CRITICAL = 3;
+}
+
+# rust: NetworkStatus
+enum SH_NetStatus {
+    SH_NET_CONNECTED    = 0;
+    SH_NET_DISCONNECTED = 1;
+    SH_NET_CONNECTING   = 2;
+    SH_NET_ERROR        = 3;
+}
+
+# rust: AppCategory
+enum SH_AppCategory {
+    SH_CAT_SYSTEM        = 0;
+    SH_CAT_INTERNET      = 1;
+    SH_CAT_OFFICE        = 2;
+    SH_CAT_DEVELOPMENT   = 3;
+    SH_CAT_COMMUNICATION = 4;
+    SH_CAT_MEDIA         = 5;
+    SH_CAT_GRAPHICS      = 6;
+    SH_CAT_AI            = 7;
+    SH_CAT_OTHER         = 8;
+}
+
+# rust: LauncherAction — modeled as a heap object {kind, arg-cstr}.
+enum SH_LauncherActionKind {
+    SH_ACT_OPEN_APP     = 0;   # OpenApp(String)
+    SH_ACT_RUN_COMMAND  = 1;   # RunCommand(String)
+    SH_ACT_SEARCH_FILES = 2;   # SearchFiles(String)
+    SH_ACT_WEB_SEARCH   = 3;   # WebSearch(String)
+}
+
+# ================================================================
+# Notification (rust: struct Notification)
+# ================================================================
+enum SH_NotifOff {
+    N_ID           = 0;    # i64 monotonic id (parity: Uuid)
+    N_APP_NAME     = 8;    # cstr / Str-data pointer
+    N_TITLE        = 16;   # cstr / Str-data pointer
+    N_BODY         = 24;   # cstr / Str-data pointer
+    N_PRIORITY     = 32;   # SH_NotifPriority
+    N_TIMESTAMP    = 40;   # i64 epoch (parity: chrono::DateTime)
+    N_REQ_ACTION   = 48;   # bool (0/1) requires_action
+    N_IS_AGENT     = 56;   # bool (0/1) is_agent_related
+    N_SZ           = 64;
+}
+
+# shell_notif_new: allocate a Notification. app_name/title/body are
+# pointers (cstr literals or Str structs). -> *Notification (0 on OOM)
+fn shell_notif_new(id, app_name, title, body, priority, timestamp, requires_action, is_agent): i64 {
+    var p = alloc(N_SZ);
+    if (p == 0) { return 0; }
+    store64(p + N_ID, id);
+    store64(p + N_APP_NAME, app_name);
+    store64(p + N_TITLE, title);
+    store64(p + N_BODY, body);
+    store64(p + N_PRIORITY, priority);
+    store64(p + N_TIMESTAMP, timestamp);
+    store64(p + N_REQ_ACTION, requires_action);
+    store64(p + N_IS_AGENT, is_agent);
+    return p;
+}
+
+# shell_notif_default(id, now): rust Notification::default() — empty
+# strings, Normal priority, not action / not agent.
+fn shell_notif_default(id, now): i64 {
+    return shell_notif_new(id, "", "", "", SH_NotifPriority.SH_PRIO_NORMAL, now, 0, 0);
+}
+
+fn shell_notif_id(p)            { return load64(p + N_ID); }
+fn shell_notif_app_name(p)      { return load64(p + N_APP_NAME); }
+fn shell_notif_title(p)         { return load64(p + N_TITLE); }
+fn shell_notif_body(p)          { return load64(p + N_BODY); }
+fn shell_notif_priority(p)      { return load64(p + N_PRIORITY); }
+fn shell_notif_timestamp(p)     { return load64(p + N_TIMESTAMP); }
+fn shell_notif_requires_action(p) { return load64(p + N_REQ_ACTION); }
+fn shell_notif_is_agent(p)      { return load64(p + N_IS_AGENT); }
+
+# ================================================================
+# QuickSetting (rust: struct QuickSetting). Box<dyn Fn> -> on_action i64.
+# ================================================================
+enum SH_QsOff {
+    Q_ID        = 0;    # cstr pointer (setting id, e.g. "wifi")
+    Q_NAME      = 8;    # cstr pointer (display name)
+    Q_ICON      = 16;   # cstr pointer
+    Q_IS_ACTIVE = 24;   # bool (0/1)
+    Q_ON_ACTION = 32;   # i64 action-id (parity: on_activate closure)
+    Q_SZ        = 40;
+}
+
+fn shell_qs_new(id, name, icon, is_active, on_action): i64 {
+    var p = alloc(Q_SZ);
+    if (p == 0) { return 0; }
+    store64(p + Q_ID, id);
+    store64(p + Q_NAME, name);
+    store64(p + Q_ICON, icon);
+    store64(p + Q_IS_ACTIVE, is_active);
+    store64(p + Q_ON_ACTION, on_action);
+    return p;
+}
+
+fn shell_qs_id(p)        { return load64(p + Q_ID); }
+fn shell_qs_name(p)      { return load64(p + Q_NAME); }
+fn shell_qs_icon(p)      { return load64(p + Q_ICON); }
+fn shell_qs_is_active(p) { return load64(p + Q_IS_ACTIVE); }
+fn shell_qs_on_action(p) { return load64(p + Q_ON_ACTION); }
+fn shell_qs_set_active(p, v) { store64(p + Q_IS_ACTIVE, v); return 0; }
+
+# ================================================================
+# SystemStatus (rust: struct SystemStatus). f32 -> permille, Option<u8>
+# battery -> i64 sentinel -1.
+# ================================================================
+enum SH_StatusOff {
+    S_CPU        = 0;    # cpu_usage permille (0..1000; rust f32 percent)
+    S_MEM        = 8;    # memory_usage permille
+    S_DISK       = 16;   # disk_usage permille
+    S_BATTERY    = 24;   # battery_level: i64, -1 == None else 0..100
+    S_NET        = 32;   # SH_NetStatus
+    S_AGENTS     = 40;   # agent_count
+    S_SZ         = 48;
+}
+
+# battery sentinel for None (rust: Option<u8> == None). Enum members in
+# this toolchain are non-negative literals only, so the -1 sentinel is a fn.
+fn shell_battery_none(): i64 { return 0 - 1; }
+
+fn shell_status_new(cpu, mem, disk, battery, net, agents): i64 {
+    var p = alloc(S_SZ);
+    if (p == 0) { return 0; }
+    store64(p + S_CPU, cpu);
+    store64(p + S_MEM, mem);
+    store64(p + S_DISK, disk);
+    store64(p + S_BATTERY, battery);
+    store64(p + S_NET, net);
+    store64(p + S_AGENTS, agents);
+    return p;
+}
+
+fn shell_status_cpu(p)     { return load64(p + S_CPU); }
+fn shell_status_mem(p)     { return load64(p + S_MEM); }
+fn shell_status_disk(p)    { return load64(p + S_DISK); }
+fn shell_status_battery(p) { return load64(p + S_BATTERY); }
+fn shell_status_net(p)     { return load64(p + S_NET); }
+fn shell_status_agents(p)  { return load64(p + S_AGENTS); }
+
+# rust: battery_level.is_none()
+fn shell_status_battery_is_none(p): i64 {
+    var b = load64(p + S_BATTERY);
+    var none = shell_battery_none();
+    if (b == none) { return 1; }
+    return 0;
+}
+
+fn shell_status_set_agents(p, count) { store64(p + S_AGENTS, count); return 0; }
+
+# ================================================================
+# AppEntry (rust: struct AppEntry)
+# ================================================================
+enum SH_AppOff {
+    A_ID       = 0;    # cstr pointer (app id)
+    A_NAME     = 8;    # cstr pointer (display name)
+    A_ICON     = 16;   # cstr pointer
+    A_CATEGORY = 24;   # SH_AppCategory
+    A_IS_AI    = 32;   # bool (0/1) is_ai_app
+    A_SZ       = 40;
+}
+
+fn shell_app_new(id, name, icon, category, is_ai): i64 {
+    var p = alloc(A_SZ);
+    if (p == 0) { return 0; }
+    store64(p + A_ID, id);
+    store64(p + A_NAME, name);
+    store64(p + A_ICON, icon);
+    store64(p + A_CATEGORY, category);
+    store64(p + A_IS_AI, is_ai);
+    return p;
+}
+
+fn shell_app_id(p)       { return load64(p + A_ID); }
+fn shell_app_name(p)     { return load64(p + A_NAME); }
+fn shell_app_icon(p)     { return load64(p + A_ICON); }
+fn shell_app_category(p) { return load64(p + A_CATEGORY); }
+fn shell_app_is_ai(p)    { return load64(p + A_IS_AI); }
+
+# ================================================================
+# LauncherAction (rust: enum LauncherAction) — heap object {kind, arg}.
+# ================================================================
+enum SH_ActionOff {
+    LA_KIND = 0;   # SH_LauncherActionKind
+    LA_ARG  = 8;   # cstr pointer (the wrapped String)
+    LA_SZ   = 16;
+}
+
+fn shell_action_new(kind, arg): i64 {
+    var p = alloc(LA_SZ);
+    if (p == 0) { return 0; }
+    store64(p + LA_KIND, kind);
+    store64(p + LA_ARG, arg);
+    return p;
+}
+
+fn shell_action_kind(p) { return load64(p + LA_KIND); }
+fn shell_action_arg(p)  { return load64(p + LA_ARG); }
+
+# ================================================================
+# LauncherItem (rust: struct LauncherItem)
+# ================================================================
+enum SH_ItemOff {
+    L_ID         = 0;    # cstr / Str-data pointer
+    L_NAME       = 8;    # cstr / Str-data pointer
+    L_DESC       = 16;   # cstr / Str-data pointer
+    L_ICON       = 24;   # cstr / Str-data pointer
+    L_APP        = 32;   # *AppEntry or 0 (parity: Option<AppEntry>)
+    L_ACTION     = 40;   # *LauncherAction or 0 (parity: Option<LauncherAction>)
+    L_SUGGESTED  = 48;   # bool (0/1)
+    L_RELEVANCE  = 56;   # relevance_score permille (rust f32; 1.0 == 1000)
+    L_SZ         = 64;
+}
+
+fn shell_item_new(id, name, desc, icon, app, action, suggested, relevance): i64 {
+    var p = alloc(L_SZ);
+    if (p == 0) { return 0; }
+    store64(p + L_ID, id);
+    store64(p + L_NAME, name);
+    store64(p + L_DESC, desc);
+    store64(p + L_ICON, icon);
+    store64(p + L_APP, app);
+    store64(p + L_ACTION, action);
+    store64(p + L_SUGGESTED, suggested);
+    store64(p + L_RELEVANCE, relevance);
+    return p;
+}
+
+fn shell_item_id(p)         { return load64(p + L_ID); }
+fn shell_item_name(p)       { return load64(p + L_NAME); }
+fn shell_item_desc(p)       { return load64(p + L_DESC); }
+fn shell_item_icon(p)       { return load64(p + L_ICON); }
+fn shell_item_app(p)        { return load64(p + L_APP); }
+fn shell_item_action(p)     { return load64(p + L_ACTION); }
+fn shell_item_suggested(p)  { return load64(p + L_SUGGESTED); }
+fn shell_item_relevance(p)  { return load64(p + L_RELEVANCE); }
+fn shell_item_set_relevance(p, v) { store64(p + L_RELEVANCE, v); return 0; }
+# rust: item.app.is_some() / item.action.is_some()
+fn shell_item_has_app(p): i64    { if (load64(p + L_APP) != 0) { return 1; } return 0; }
+fn shell_item_has_action(p): i64 { if (load64(p + L_ACTION) != 0) { return 1; } return 0; }
+
+# shell_item_clone: shallow copy of a *LauncherItem (rust: LauncherItem
+# derives Clone; search_launcher clones matched items before boosting the
+# clones' relevance so the live items are never mutated). Str / *AppEntry /
+# *LauncherAction fields are shared pointers — fine for read-only results.
+# -> *LauncherItem (0 on OOM).
+fn shell_item_clone(p): i64 {
+    if (p == 0) { return 0; }
+    return shell_item_new(load64(p + L_ID), load64(p + L_NAME), load64(p + L_DESC),
+                          load64(p + L_ICON), load64(p + L_APP), load64(p + L_ACTION),
+                          load64(p + L_SUGGESTED), load64(p + L_RELEVANCE));
+}
+
+# ================================================================
+# DesktopShell (rust: struct DesktopShell)
+# ================================================================
+enum SH_ShellOff {
+    SH_NOTIFS      = 0;    # vec of *Notification (rust: HashMap<Uuid,_>)
+    SH_QSETTINGS   = 8;    # vec of *QuickSetting
+    SH_STATUS      = 16;   # *SystemStatus
+    SH_ITEMS       = 24;   # vec of *LauncherItem
+    SH_REGISTRY    = 32;   # cstr-keyed map: app id -> *AppEntry
+    SH_LOCKED      = 40;   # bool (0/1) is_locked
+    SH_PANEL       = 48;   # bool (0/1) panel_visible
+    SH_NEXT_NOTIF  = 56;   # monotonic notification id counter (parity: Uuid)
+    SH_SZ          = 64;
+}
+
+# shell_new(): rust DesktopShell::new() — build state, then seed quick
+# settings, app registry, launcher items. -> *DesktopShell (0 on OOM)
+fn shell_new(): i64 {
+    var sh = alloc(SH_SZ);
+    if (sh == 0) { return 0; }
+    store64(sh + SH_NOTIFS, vec_new());
+    store64(sh + SH_QSETTINGS, vec_new());
+    # initial SystemStatus: cpu/mem/disk 0, no battery, Connected, 0 agents
+    var st = shell_status_new(0, 0, 0, shell_battery_none(), SH_NetStatus.SH_NET_CONNECTED, 0);
+    if (st == 0) { return 0; }
+    store64(sh + SH_STATUS, st);
+    store64(sh + SH_ITEMS, vec_new());
+    store64(sh + SH_REGISTRY, map_new());
+    store64(sh + SH_LOCKED, 0);
+    store64(sh + SH_PANEL, 1);
+    store64(sh + SH_NEXT_NOTIF, 1);
+
+    shell_init_quick_settings(sh);
+    shell_init_app_registry(sh);
+    shell_populate_launcher_items(sh);
+    return sh;
+}
+
+fn shell_notifs(sh)    { return load64(sh + SH_NOTIFS); }
+fn shell_qsettings(sh) { return load64(sh + SH_QSETTINGS); }
+fn shell_status(sh)    { return load64(sh + SH_STATUS); }
+fn shell_items(sh)     { return load64(sh + SH_ITEMS); }
+fn shell_registry(sh)  { return load64(sh + SH_REGISTRY); }
+
+# shell_next_notif_id: mint a fresh monotonic notification id (parity: Uuid::new_v4).
+fn shell_next_notif_id(sh): i64 {
+    var id = load64(sh + SH_NEXT_NOTIF);
+    store64(sh + SH_NEXT_NOTIF, id + 1);
+    return id;
+}
+
+# rust: initialize_quick_settings — five toggles. on_activate closures
+# become action-ids 0..4 (parity substitute).
+fn shell_init_quick_settings(sh): i64 {
+    var qs = load64(sh + SH_QSETTINGS);
+    vec_push(qs, shell_qs_new("wifi",       "Wi-Fi",          "wifi",       1, 0));
+    vec_push(qs, shell_qs_new("bluetooth",  "Bluetooth",      "bluetooth",  0, 1));
+    vec_push(qs, shell_qs_new("airplane",   "Airplane Mode",  "airplane",   0, 2));
+    vec_push(qs, shell_qs_new("dnd",        "Do Not Disturb", "dnd",        0, 3));
+    vec_push(qs, shell_qs_new("nightlight", "Night Light",    "nightlight", 1, 4));
+    return 0;
+}
+
+# shell_registry_put: helper — insert one AppEntry keyed by its id cstr.
+fn shell_registry_put(sh, id, name, icon, category, is_ai): i64 {
+    var reg = load64(sh + SH_REGISTRY);
+    var app = shell_app_new(id, name, icon, category, is_ai);
+    if (app == 0) { return 0 - 1; }
+    map_set(reg, id, app);
+    return 0;
+}
+
+# rust: initialize_app_registry — 14 entries (order matches rust array).
+fn shell_init_app_registry(sh): i64 {
+    shell_registry_put(sh, "terminal",      "Terminal",      "terminal",     SH_AppCategory.SH_CAT_SYSTEM,   1);
+    shell_registry_put(sh, "filemanager",   "File Manager",  "folder",       SH_AppCategory.SH_CAT_SYSTEM,   0);
+    shell_registry_put(sh, "settings",      "Settings",      "settings",     SH_AppCategory.SH_CAT_SYSTEM,   0);
+    shell_registry_put(sh, "agent-manager", "Agent Manager", "bot",          SH_AppCategory.SH_CAT_AI,       1);
+    shell_registry_put(sh, "audit-viewer",  "Audit Viewer",  "shield",       SH_AppCategory.SH_CAT_SYSTEM,   1);
+    shell_registry_put(sh, "model-manager", "Model Manager", "cpu",          SH_AppCategory.SH_CAT_AI,       1);
+    shell_registry_put(sh, "firefox",       "Firefox",       "firefox",      SH_AppCategory.SH_CAT_INTERNET, 0);
+    shell_registry_put(sh, "chromium",      "Chromium",      "chromium",     SH_AppCategory.SH_CAT_INTERNET, 0);
+    shell_registry_put(sh, "zen-browser",   "Zen Browser",   "zen-browser",  SH_AppCategory.SH_CAT_INTERNET, 0);
+    shell_registry_put(sh, "brave",         "Brave",         "brave",        SH_AppCategory.SH_CAT_INTERNET, 0);
+    shell_registry_put(sh, "librewolf",     "LibreWolf",     "librewolf",    SH_AppCategory.SH_CAT_INTERNET, 0);
+    shell_registry_put(sh, "vivaldi",       "Vivaldi",       "vivaldi",      SH_AppCategory.SH_CAT_INTERNET, 0);
+    shell_registry_put(sh, "falkon",        "Falkon",        "falkon",       SH_AppCategory.SH_CAT_INTERNET, 0);
+    shell_registry_put(sh, "midori",        "Midori",        "midori",       SH_AppCategory.SH_CAT_INTERNET, 0);
+    return 0;
+}
+
+# shell_launcher_desc: build "Launch <name>" description as a Str (rust:
+# format!("Launch {}", app.name)). name is a cstr pointer.
+fn shell_launcher_desc(name): i64 {
+    var prefix = str_from("Launch ");
+    var nm = str_from(name);
+    return str_cat(prefix, nm);
+}
+
+# shell_launcher_id: build "app-<id>" id as a Str (rust: format!("app-{}", app.id)).
+fn shell_launcher_id(id): i64 {
+    var prefix = str_from("app-");
+    var ids = str_from(id);
+    return str_cat(prefix, ids);
+}
+
+# rust: populate_launcher_items — one item per registered app, plus a
+# "Search Files" item. relevance_score 1.0 -> 1000, 0.8 -> 800.
+fn shell_populate_launcher_items(sh): i64 {
+    var reg = load64(sh + SH_REGISTRY);
+    var items = load64(sh + SH_ITEMS);
+    var apps = map_values(reg);
+    var n = vec_len(apps);
+    var i = 0;
+    # Launcher fields are stored uniformly as Str fat pointers so search
+    # (shell_str_lower_str / str_contains) can treat every field the same.
+    while (i < n) {
+        var app = vec_get(apps, i);
+        var lid = shell_launcher_id(shell_app_id(app));
+        var name = str_from(shell_app_name(app));
+        var desc = shell_launcher_desc(shell_app_name(app));
+        var icon = str_from(shell_app_icon(app));
+        var action = shell_action_new(SH_LauncherActionKind.SH_ACT_OPEN_APP, shell_app_id(app));
+        var it = shell_item_new(lid, name, desc, icon, app, action, 0, 1000);
+        vec_push(items, it);
+        i = i + 1;
+    }
+
+    var sfa = shell_action_new(SH_LauncherActionKind.SH_ACT_SEARCH_FILES, "");
+    var sf_id = str_from("search-files");
+    var sf_name = str_from("Search Files");
+    var sf_desc = str_from("Search for files on the system");
+    var sf_icon = str_from("search");
+    var sf = shell_item_new(sf_id, sf_name, sf_desc, sf_icon, 0, sfa, 0, 800);
+    vec_push(items, sf);
+    return 0;
+}
+
+# ================================================================
+# Notification lifecycle
+# ================================================================
+
+# shell_notif_find_index: linear scan for a notification id. -> index or -1.
+fn shell_notif_find_index(sh, id): i64 {
+    var v = load64(sh + SH_NOTIFS);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        if (shell_notif_id(vec_get(v, i)) == id) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# _shell_evict_oldest_non_action: rust eviction — remove the oldest
+# (min timestamp) notification whose requires_action == 0. -1 if none.
+fn shell_evict_oldest_non_action(sh): i64 {
+    var v = load64(sh + SH_NOTIFS);
+    var n = vec_len(v);
+    var best = 0 - 1;
+    var best_ts = 0;
+    var i = 0;
+    while (i < n) {
+        var notif = vec_get(v, i);
+        var not_action = (shell_notif_requires_action(notif) == 0);
+        if (not_action) {
+            var ts = shell_notif_timestamp(notif);
+            var take = (best < 0);
+            var older = (ts < best_ts);
+            if (take || older) {
+                best = i;
+                best_ts = ts;
+            }
+        }
+        i = i + 1;
+    }
+    if (best < 0) { return 0 - 1; }
+    vec_remove(v, best);
+    return 0;
+}
+
+# rust: show_notification — evict when at capacity, then insert. The
+# notification's id is already set (mint via shell_next_notif_id).
+fn shell_show_notification(sh, notif): i64 {
+    var v = load64(sh + SH_NOTIFS);
+    var len = vec_len(v);
+    var at_cap = (len >= SH_Limits.SH_MAX_NOTIFICATIONS);
+    if (at_cap) {
+        shell_evict_oldest_non_action(sh);
+    }
+    vec_push(v, notif);
+    return 0;
+}
+
+# rust: dismiss_notification — remove by id. -> SH_OK or SH_ERR_NOTIF_NOT_FOUND.
+fn shell_dismiss_notification(sh, id): i64 {
+    var idx = shell_notif_find_index(sh, id);
+    if (idx < 0) { return SH_Err.SH_ERR_NOTIF_NOT_FOUND; }
+    var v = load64(sh + SH_NOTIFS);
+    vec_remove(v, idx);
+    return SH_Err.SH_OK;
+}
+
+# rust: show_agent_notification. requires_action -> High else Normal
+# priority; app_name "AGNOS Agent"; is_agent_related = true. title/body
+# are pointers. now is the epoch timestamp. -> *Notification (0 on OOM).
+fn shell_show_agent_notification(sh, title, body, requires_action, now): i64 {
+    var prio = SH_NotifPriority.SH_PRIO_NORMAL;
+    if (requires_action == 1) { prio = SH_NotifPriority.SH_PRIO_HIGH; }
+    var id = shell_next_notif_id(sh);
+    var notif = shell_notif_new(id, "AGNOS Agent", title, body, prio, now, requires_action, 1);
+    if (notif == 0) { return 0; }
+    shell_show_notification(sh, notif);
+    return notif;
+}
+
+# shell_override_app_name: rust format!("Agent: {}", agent_name). -> Str.
+fn shell_override_app_name(agent_name): i64 {
+    var prefix = str_from("Agent: ");
+    var an = str_from(agent_name);
+    return str_cat(prefix, an);
+}
+
+# shell_override_body: rust format!("{}\n\nAction: {}\nReason: {}",
+# agent_name, action, reason). All args cstr pointers. -> Str.
+fn shell_override_body(agent_name, action, reason): i64 {
+    var s = str_cat(str_from(agent_name), str_from("\n\nAction: "));
+    s = str_cat(s, str_from(action));
+    s = str_cat(s, str_from("\nReason: "));
+    s = str_cat(s, str_from(reason));
+    return s;
+}
+
+# rust: request_human_override — Critical, requires_action, agent-related.
+# -> *Notification (0 on OOM).
+fn shell_request_human_override(sh, agent_name, action, reason, now): i64 {
+    var app_name = shell_override_app_name(agent_name);
+    var body = shell_override_body(agent_name, action, reason);
+    var id = shell_next_notif_id(sh);
+    var notif = shell_notif_new(id, app_name, "Human Override Requested", body, SH_NotifPriority.SH_PRIO_CRITICAL, now, 1, 1);
+    if (notif == 0) { return 0; }
+    shell_show_notification(sh, notif);
+    return notif;
+}
+
+# rust: get_notifications — returns the live vec of *Notification.
+fn shell_get_notifications(sh): i64 {
+    return load64(sh + SH_NOTIFS);
+}
+
+fn shell_notification_count(sh): i64 {
+    return vec_len(load64(sh + SH_NOTIFS));
+}
+
+# ================================================================
+# Quick settings
+# ================================================================
+
+# shell_qs_find: linear scan for a setting whose id (cstr) equals setting_id.
+# -> *QuickSetting or 0.
+fn shell_qs_find(sh, setting_id): i64 {
+    var v = load64(sh + SH_QSETTINGS);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var s = vec_get(v, i);
+        var eq = streq(shell_qs_id(s), setting_id);
+        if (eq == 1) { return s; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# rust: toggle_quick_setting — flip is_active and fire on_activate. The
+# closure has no Cyrius analog; we just return the action-id via out state
+# (caller can dispatch). -> SH_OK / SH_ERR_APP_NOT_FOUND.
+fn shell_toggle_quick_setting(sh, setting_id): i64 {
+    var s = shell_qs_find(sh, setting_id);
+    if (s == 0) { return SH_Err.SH_ERR_APP_NOT_FOUND; }
+    var cur = shell_qs_is_active(s);
+    var next = 1;
+    if (cur == 1) { next = 0; }
+    shell_qs_set_active(s, next);
+    # parity: (setting.on_activate)() — action-id substitute; no-op dispatch.
+    return SH_Err.SH_OK;
+}
+
+# rust: get_quick_settings — returns the live vec of *QuickSetting.
+fn shell_get_quick_settings(sh): i64 {
+    return load64(sh + SH_QSETTINGS);
+}
+
+fn shell_quick_settings_count(sh): i64 {
+    return vec_len(load64(sh + SH_QSETTINGS));
+}
+
+# ================================================================
+# Launcher search
+# ================================================================
+
+# shell_ascii_lower_byte: ASCII lowercase one byte ('A'..'Z' -> +32).
+fn shell_ascii_lower_byte(c): i64 {
+    var upper = ((c >= 65) && (c <= 90));
+    if (upper) { return c + 32; }
+    return c;
+}
+
+# shell_str_lower: allocate a new Str that is `s` (a cstr pointer)
+# ASCII-lowercased. rust: to_lowercase() (ASCII subset). -> Str.
+fn shell_str_lower(s): i64 {
+    var n = strlen(s);
+    var buf = alloc(n + 1);
+    if (buf == 0) { return str_from(""); }
+    var i = 0;
+    while (i < n) {
+        store8(buf + i, shell_ascii_lower_byte(load8(s + i)));
+        i = i + 1;
+    }
+    store8(buf + n, 0);
+    return str_new(buf, n);
+}
+
+# shell_str_lower_str: lowercase a Str (fat pointer). -> Str.
+fn shell_str_lower_str(s): i64 {
+    var n = str_len(s);
+    var data = str_data(s);
+    var buf = alloc(n + 1);
+    if (buf == 0) { return str_from(""); }
+    var i = 0;
+    while (i < n) {
+        store8(buf + i, shell_ascii_lower_byte(load8(data + i)));
+        i = i + 1;
+    }
+    store8(buf + n, 0);
+    return str_new(buf, n);
+}
+
+# rust: search_launcher — case-insensitive contains match on name/desc,
+# prefix boost (*1.5), sort by relevance desc. Returns a NEW vec of CLONED
+# matching *LauncherItem. Rust does `.cloned().collect()` then boosts the
+# clones, leaving the live launcher_items untouched — we clone each match
+# (shell_item_clone) and boost only the clone, so repeated searches never
+# compound the relevance of the shared items.
+#
+# query is a cstr pointer. -> vec of *LauncherItem (relevance-sorted).
+fn shell_search_launcher(sh, query): i64 {
+    var items = load64(sh + SH_ITEMS);
+    var n = vec_len(items);
+    var qlc = shell_str_lower(query);
+    var qlen = str_len(qlc);
+    var qempty = (qlen == 0);
+
+    var results = vec_new();
+    var i = 0;
+    while (i < n) {
+        var it = vec_get(items, i);
+        var name_lc = shell_str_lower_str(shell_item_name(it));
+        var desc_lc = shell_str_lower_str(shell_item_desc(it));
+        var in_name = str_contains(name_lc, qlc);
+        var in_desc = str_contains(desc_lc, qlc);
+        var hit = ((in_name == 1) || (in_desc == 1));
+        if (hit) {
+            var clone = shell_item_clone(it);
+            vec_push(results, clone);
+            # prefix boost: name starts with query -> *1.5 (permille * 3 / 2).
+            # Applied to the clone only; the live item keeps its base score.
+            if (qempty == 0) {
+                var pref = str_starts_with(name_lc, qlc);
+                if (pref == 1) {
+                    var rel = shell_item_relevance(clone);
+                    shell_item_set_relevance(clone, rel * 3 / 2);
+                }
+            }
+        }
+        i = i + 1;
+    }
+
+    shell_sort_by_relevance(results);
+    return results;
+}
+
+# shell_sort_by_relevance: descending insertion sort on relevance permille
+# (rust: sort_by relevance desc; stable enough for the small item set).
+fn shell_sort_by_relevance(v): i64 {
+    var n = vec_len(v);
+    var i = 1;
+    while (i < n) {
+        var cur = vec_get(v, i);
+        var cur_rel = shell_item_relevance(cur);
+        var j = i - 1;
+        var placed = 0;
+        while ((j >= 0) && (placed == 0)) {
+            var other = vec_get(v, j);
+            var other_rel = shell_item_relevance(other);
+            var swap = (other_rel < cur_rel);
+            if (swap) {
+                vec_set(v, j + 1, other);
+                j = j - 1;
+            } else {
+                placed = 1;
+            }
+        }
+        vec_set(v, j + 1, cur);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# App launch + registry
+# ================================================================
+
+# rust: launch_app — must exist in registry. -> SH_OK / SH_ERR_APP_NOT_FOUND.
+fn shell_launch_app(sh, app_id): i64 {
+    var reg = load64(sh + SH_REGISTRY);
+    var has = map_has(reg, app_id);
+    if (has == 0) { return SH_Err.SH_ERR_APP_NOT_FOUND; }
+    return SH_Err.SH_OK;
+}
+
+# shell_registry_get: fetch an *AppEntry by id, or 0.
+fn shell_registry_get(sh, app_id): i64 {
+    return map_get(load64(sh + SH_REGISTRY), app_id);
+}
+
+fn shell_registry_count(sh): i64 {
+    return map_size(load64(sh + SH_REGISTRY));
+}
+
+# ================================================================
+# Screen lock / panel
+# ================================================================
+
+fn shell_lock_screen(sh)   { store64(sh + SH_LOCKED, 1); return 0; }
+fn shell_unlock_screen(sh) { store64(sh + SH_LOCKED, 0); return 0; }
+fn shell_is_locked(sh)     { return load64(sh + SH_LOCKED); }
+
+# rust: toggle_panel — flip visibility. -> new visibility (0/1).
+fn shell_toggle_panel(sh): i64 {
+    var cur = load64(sh + SH_PANEL);
+    var next = 1;
+    if (cur == 1) { next = 0; }
+    store64(sh + SH_PANEL, next);
+    return next;
+}
+
+fn shell_panel_visible(sh) { return load64(sh + SH_PANEL); }
+
+# ================================================================
+# System status
+# ================================================================
+
+# rust: get_system_status — returns the live *SystemStatus.
+fn shell_get_system_status(sh): i64 {
+    return load64(sh + SH_STATUS);
+}
+
+# rust: update_system_status — replace the *SystemStatus pointer.
+fn shell_update_system_status(sh, status): i64 {
+    store64(sh + SH_STATUS, status);
+    return 0;
+}
+
+# rust: set_agent_count — mutate agent_count on the current status.
+fn shell_set_agent_count(sh, count): i64 {
+    var st = load64(sh + SH_STATUS);
+    shell_status_set_agents(st, count);
+    return 0;
+}

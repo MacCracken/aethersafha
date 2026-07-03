@@ -1,0 +1,35 @@
+# aethersafha — input routing
+# Parity: rust-old/src/compositor.rs (route_input_event) + gestures.rs
+#
+# Translates bhumi HID key events (physical press/release + USB HID usage) into
+# compositor actions. Keyboard layout / keysym / compose belong here (the
+# compositor's job, above bhumi's raw evdev-equivalent) — mirrors libxkbcommon.
+
+enum InputAction {
+    IA_NONE       = 0;
+    IA_QUIT       = 1;
+    IA_FOCUS_NEXT = 2;
+}
+
+# USB HID usage IDs (Keyboard/Keypad page 0x07) — see lib/bhumi.cyr
+enum HidUsage {
+    HID_ESC = 0x29;
+    HID_TAB = 0x2B;
+}
+
+# input_handle: consume one bhumi key event, mutate compositor focus, return action.
+fn input_handle(comp, ev): i64 {
+    if (bhumi_key_pressed(ev) == 0) { return InputAction.IA_NONE; }
+    var u = bhumi_key_usage(ev);
+    if (u == HidUsage.HID_ESC) { return InputAction.IA_QUIT; }
+    if (u == HidUsage.HID_TAB) {
+        var n = comp_count(comp);
+        if (n > 0) {
+            var f = comp_focused(comp) + 1;
+            if (f >= n) { f = 0; }
+            comp_focus(comp, f);
+        }
+        return InputAction.IA_FOCUS_NEXT;
+    }
+    return InputAction.IA_NONE;
+}
