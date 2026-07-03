@@ -25,7 +25,7 @@ lines preserved at `rust-old/` as the parity oracle.
 ## Source
 
 - Rust reference: 27,207 lines at `rust-old/` (frozen, do not edit).
-- Cyrius port: **18 modules**; compiles clean + runs on the bhumi seam.
+- Cyrius port: **19 modules**; compiles clean + runs on the bhumi seam.
   - **Core (M1/Bite A)** — `geom`, `window`, `compositor`, `render`, `input`, `main`.
     compositor: workspaces + context types + move/switch + secure/agent-aware modes
     + window-at-point hit-test; renderer: alpha blend + damage tracking + window
@@ -58,17 +58,23 @@ lines preserved at `rust-old/` as the parity oracle.
     machine, a per-session frame ring buffer (cap 100; `frame_count`/`total_bytes` count
     all frames ever), one-recording-per-agent, and `capture_frame` → `scap_mgr_capture` →
     `RecordedFrame`. Caps use `-1 == None` (so `Some(0)` is distinct). Not yet wired.
+  - **Apps (M4/Bite C1, standalone)** — `apps` framework (`AppError`/`AppType`/`AppWindow`
+    + the `DesktopApplications` aggregate: open/close/list windows, live sub-app getters)
+    + data-model apps (FileManager, AgentManager, AuditViewer, ModelManager) + 8 WebBrowser
+    factory configs + Shruti + the **Terminal** allowlist + path-traversal basename-strip.
+    Process-spawn (C2) and fs/net effect bodies (C3) stubbed to clean-env fallback. Not wired.
 
 ## Tests
 
-- **16 `.tcyr` files, all green.** Core: `aethersafha` (38), `render` (34 — decoration
+- **17 `.tcyr` files, all green.** Core: `aethersafha` (38), `render` (34 — decoration
   hit-test + shell-panel bars + bitmap text pixel test), `input` (13), `leaf_modules`
   (11), `desktop` (15). mehman: `foreign` (23 — guest spec/surface + host-as-window +
   sandboxed run + capture + **presentation pixel test**). capture: `screen_capture`
   (90 — permissions / rate-limit / secure-mode / region-clamp / window / history +
   RAW/BMP/PNG encoder checksums), `screen_recording` (72 — session lifecycle / state
-  machine / frame + duration limits / ring buffer / one-per-agent / queries).
-  Behavioral per-module: `theme_bridge`, `gestures`,
+  machine / frame + duration limits / ring buffer / one-per-agent / queries). apps:
+  `apps` (125 — framework / data-model apps / aggregate open-close-list / Terminal
+  allowlist + basename security). Behavioral per-module: `theme_bridge`, `gestures`,
   `accessibility`, `ai_features`, `shell`, `security_ui`, `shell_integration`, `plugin_host`.
 - Run: `cyrius tests tests/` (or a single `cyrius test tests/<file>.tcyr`).
 
@@ -105,10 +111,12 @@ _None yet (top-level application, `publish = false`)._
 
 ## Next
 
-**Bite D (capture + recording) complete** — both `screen_capture` (D1) and
-`screen_recording` (D2) are ported + tested; **wiring** them into the compositor/desktop
-surface is the follow-on. Remaining large unported layers: built-in apps (Bite C, 2986
-lines), HUD widgets (Bite E), the native Wayland protocol surface (Bite F, highest-risk).
-**mehman track**: 1.0.0 ships the per-ABI `guest`/`shim` modules — consuming them (+ real
-XRGB pixel fidelity beyond the stdout MVP, mehman ADR 0004) is the remaining Bite G / M5
-work. See [`roadmap.md`](roadmap.md) / [`parity-plan.md`](parity-plan.md).
+**Bite C started** — **C1** (app framework + data-model apps + aggregate + the Terminal
+security logic) is ported + tested (125 assertions). Next on the apps track: **C2** (the
+process-spawn bodies — Terminal exec, browser/Shruti launch — through the kavach/mehman
+sandbox seam, a security-reviewed sub-bite) and **C3** (the fs/net effect bodies —
+agent-socket scan, audit-log parse, model gateway). Also complete + awaiting wiring: Bite D
+(capture + recording). Other large unported layers: HUD widgets (Bite E), the native
+Wayland protocol surface (Bite F, highest-risk). **mehman track (Bite G)**: consume 1.0.0's
+per-ABI `guest`/`shim` + real XRGB pixel fidelity (mehman ADR 0004). See
+[`roadmap.md`](roadmap.md) / [`parity-plan.md`](parity-plan.md).

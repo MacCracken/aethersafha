@@ -1,0 +1,238 @@
+# aethersafha — apps (Bite C, slice C1) BEHAVIORAL parity test.
+# Mirrors the pure/data-model + aggregate tests of rust-old/src/apps.rs.
+# Process-spawning bodies (Terminal spawn, browser/shruti launch) + fs/net effect
+# bodies are deferred to C2/C3; C1 covers the framework + data model + security logic.
+include "src/apps.cyr"
+
+fn t_ok(x): i64 {
+    if (x != 0) { return 1; }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    var NOW = 1000000000;
+
+    # -----------------------------------------------------------------------
+    test_group("apps — enums + display + module constants");
+    assert_eq(streq(app_type_debug_name(AppType.APP_TERMINAL), "Terminal"), 1, "AppType Terminal debug");
+    assert_eq(streq(app_type_debug_name(AppType.APP_FILE_MANAGER), "FileManager"), 1, "FileManager debug");
+    assert_eq(streq(app_type_debug_name(AppType.APP_TEXT_EDITOR), "TextEditor"), 1, "TextEditor debug");
+    assert_eq(streq(app_type_debug_name(AppType.APP_WEB_BROWSER), "WebBrowser"), 1, "WebBrowser debug");
+    assert_eq(streq(app_type_debug_name(AppType.APP_AGENT_MANAGER), "AgentManager"), 1, "AgentManager debug");
+    assert_eq(streq(app_type_debug_name(AppType.APP_AUDIT_VIEWER), "AuditViewer"), 1, "AuditViewer debug");
+    assert_eq(streq(app_type_debug_name(AppType.APP_MODEL_MANAGER), "ModelManager"), 1, "ModelManager debug");
+    assert_eq(streq(app_type_debug_name(AppType.APP_SETTINGS), "Settings"), 1, "Settings debug");
+    assert_eq(streq(app_type_debug_name(AppType.APP_CUSTOM), "Custom"), 1, "Custom debug");
+    assert_eq(streq(app_error_display(AppErr.APP_ERR_NOT_FOUND, "xyz"), "App not found: xyz"), 1, "not-found display");
+    assert_eq(streq(app_error_display(AppErr.APP_ERR_WINDOW, "oops"), "Window error: oops"), 1, "window-error display");
+    var pd = app_error_display(AppErr.APP_ERR_PERM_DENIED, "sudo");
+    assert_eq(streq(pd, "Permission denied: sudo"), 1, "perm display");
+    assert_eq(streq(app_llm_gateway_addr(), "http://localhost:8088"), 1, "llm gateway addr");
+    assert_eq(streq(app_agent_socket_dir(), "/run/agnos/agents"), 1, "agent socket dir");
+    assert_eq(streq(app_audit_log_path(), "/var/log/agnos/audit.log"), 1, "audit log path");
+
+    # -----------------------------------------------------------------------
+    test_group("apps — AppWindow");
+    var w = app_window_new(1, AppType.APP_TERMINAL, "Test Terminal");
+    assert_eq(app_window_id(w), 1, "window id");
+    assert_eq(app_window_type(w), AppType.APP_TERMINAL, "window type");
+    assert_eq(streq(app_window_title(w), "Test Terminal"), 1, "window title");
+    assert_eq(app_window_width(w), 800, "default width 800");
+    assert_eq(app_window_height(w), 600, "default height 600");
+    assert_eq(app_window_ai_enabled(w), 0, "default ai off");
+    app_window_set_ai(w, 1);
+    assert_eq(app_window_ai_enabled(w), 1, "set ai on");
+    app_window_set_width(w, 1920);
+    app_window_set_height(w, 1080);
+    assert_eq(app_window_width(w), 1920, "set width");
+    assert_eq(app_window_height(w), 1080, "set height");
+    var wc = app_window_clone(w);
+    assert_eq(app_window_id(wc), app_window_id(w), "clone preserves id");
+    assert_eq(app_window_width(wc), 1920, "clone copies width");
+    var we = app_window_new(2, AppType.APP_CUSTOM, "");
+    assert_eq(streq(app_window_title(we), ""), 1, "empty title ok");
+    var wu = app_window_new(3, AppType.APP_TEXT_EDITOR, "Editor 📝");
+    assert_eq(streq(app_window_title(wu), "Editor 📝"), 1, "unicode title ok");
+
+    # -----------------------------------------------------------------------
+    test_group("apps — FileManager");
+    var fm = app_filemgr_new();
+    assert_eq(streq(app_filemgr_id(fm), "filemanager"), 1, "fm id");
+    assert_eq(streq(app_filemgr_name(fm), "File Manager"), 1, "fm name");
+    assert_eq(streq(app_filemgr_current_path(fm), "/home"), 1, "fm default path /home");
+    assert_eq(app_filemgr_agent_assistance(fm), 1, "fm agent assist on");
+    assert_eq(app_filemgr_navigate(fm, "/tmp"), AppErr.APP_OK, "navigate ok");
+    assert_eq(streq(app_filemgr_current_path(fm), "/tmp"), 1, "navigated to /tmp");
+    app_filemgr_navigate(fm, "");
+    assert_eq(streq(app_filemgr_current_path(fm), ""), 1, "navigate accepts empty");
+    var sr = app_filemgr_search_with_agent(fm, "config.toml");
+    assert_eq(vec_len(sr), 1, "search returns one element");
+    assert_eq(streq(vec_get(sr, 0), "Found: config.toml"), 1, "search result text");
+
+    # -----------------------------------------------------------------------
+    test_group("apps — AgentManager");
+    var am = app_agentmgr_new();
+    assert_eq(streq(app_agentmgr_id(am), "agent-manager"), 1, "am id");
+    assert_eq(app_agentmgr_agent_count(am), 0, "am starts empty");
+    var caps = vec_new();
+    vec_push(caps, "read");
+    vec_push(caps, "write");
+    var aid1 = app_agentmgr_start_agent(am, "test-agent", caps);
+    assert_eq(aid1, 1, "first agent id 1");
+    assert_eq(app_agentmgr_agent_count(am), 1, "one agent after start");
+    var aid2 = app_agentmgr_start_agent(am, "second", 0);
+    assert_eq(aid2, 2, "second agent id 2");
+    assert_eq(app_agentmgr_stop_agent(am, aid1), AppErr.APP_OK, "stop agent ok");
+    assert_eq(app_agentmgr_agent_count(am), 1, "one left after stop");
+    assert_eq(app_agentinfo_id(vec_get(app_agentmgr_running_agents(am), 0)), aid2, "survivor is agent 2 (by id)");
+    assert_eq(app_agentmgr_stop_agent(am, 9999), AppErr.APP_OK, "stop nonexistent is ok no-op");
+    assert_eq(app_agentmgr_agent_count(am), 1, "count unchanged by no-op stop");
+    var am2 = app_agentmgr_new();
+    var k = 0;
+    while (k < 20) {
+        app_agentmgr_start_agent(am2, "a", 0);
+        k = k + 1;
+    }
+    assert_eq(app_agentmgr_agent_count(am2), 20, "start 20 agents");
+    assert_eq(vec_len(app_agentmgr_list_agents(am2)), 20, "list_agents stub returns local");
+
+    # -----------------------------------------------------------------------
+    test_group("apps — AuditViewer");
+    var af = app_auditfilters_default();
+    assert_eq(app_auditfilters_include_agent(af), 1, "default include agent");
+    assert_eq(app_auditfilters_time_range(af), TimeRange.TR_LAST_DAY, "default range LastDay");
+    var av = app_auditview_new();
+    assert_eq(streq(app_auditview_id(av), "audit-viewer"), 1, "av id");
+    assert_eq(app_auditview_filter_cutoff(av, NOW), NOW - 86400, "LastDay cutoff = now-86400");
+    store64(app_auditview_filters(av) + AF_TIME_RANGE, TimeRange.TR_LAST_HOUR);
+    assert_eq(app_auditview_filter_cutoff(av, NOW), NOW - 3600, "LastHour cutoff = now-3600");
+    store64(app_auditview_filters(av) + AF_TIME_RANGE, TimeRange.TR_LAST_WEEK);
+    assert_eq(app_auditview_filter_cutoff(av, NOW), NOW - 604800, "LastWeek cutoff = now-604800");
+    store64(app_auditview_filters(av) + AF_TIME_RANGE, TimeRange.TR_CUSTOM);
+    assert_eq(app_auditview_filter_cutoff(av, NOW), 0 - 1, "Custom cutoff = -1 (None)");
+    assert_eq(vec_len(app_auditview_get_logs(av)), 0, "get_logs stub empty");
+
+    # -----------------------------------------------------------------------
+    test_group("apps — ModelManager");
+    var big = 0 - 1;   # u64::MAX bit-pattern
+    var mi = app_modelinfo_new("m", "M", big, "p", 0);
+    assert_eq(app_modelinfo_size(mi), big, "model size round-trips u64::MAX");
+    assert_eq(streq(app_modelinfo_id(mi), "m"), 1, "model id");
+    var mm = app_modelmgr_new();
+    assert_eq(streq(app_modelmgr_id(mm), "model-manager"), 1, "mm id");
+    assert_eq(app_modelmgr_active_model(mm), 0, "no active model initially");
+    vec_push(app_modelmgr_installed_models(mm), app_modelinfo_new("llama2-7b", "Llama", 100, "meta", 1));
+    assert_eq(app_modelmgr_select_model(mm, "llama2-7b"), AppErr.APP_OK, "select installed model");
+    assert_eq(streq(app_modelmgr_active_model(mm), "llama2-7b"), 1, "active model set");
+    assert_eq(app_modelmgr_select_model(mm, "ghost-model"), AppErr.APP_ERR_NOT_FOUND, "select missing -> NotFound");
+    assert_eq(vec_len(app_modelmgr_list_models(mm)), 1, "list_models stub returns installed");
+    assert_eq(app_modelmgr_download_model(mm, "x"), AppErr.APP_ERR_WINDOW, "download stub -> WindowError");
+
+    # -----------------------------------------------------------------------
+    test_group("apps — WebBrowser + Shruti + Terminal (pure)");
+    var fx = app_browser_firefox();
+    assert_eq(streq(app_browser_id(fx), "firefox"), 1, "firefox id");
+    assert_eq(streq(app_browser_binary(fx), "/usr/bin/firefox"), 1, "firefox binary");
+    assert_eq(streq(app_browser_id(app_browser_zen()), "zen-browser"), 1, "zen id");
+    assert_eq(streq(app_browser_name(app_browser_falkon()), "Falkon"), 1, "falkon name");
+    assert_eq(streq(app_browser_id(app_browser_default()), "firefox"), 1, "default browser is firefox");
+    # is_installed must not crash (binary likely absent -> 0)
+    var inst = app_browser_is_installed(fx);
+    assert(t_ok(inst + 1), "is_installed returns without crash");
+    var sh = app_shruti_new();
+    assert_eq(streq(app_shruti_id(sh), "shruti"), 1, "shruti id");
+    assert_eq(app_shruti_is_running(sh), 0, "shruti not running");
+    var sc = app_shrutisurf_default();
+    assert_eq(app_shrutisurf_width(sc), 1400, "shruti surface width 1400");
+    assert_eq(app_shrutisurf_height(sc), 900, "shruti surface height 900");
+    var tm = app_term_new();
+    assert_eq(streq(app_term_name(tm), "AGNOS Terminal"), 1, "terminal name");
+    assert_eq(app_term_ai_integration(tm), 1, "terminal ai on");
+    # allowlist + path-traversal neutralisation (security-critical)
+    assert_eq(app_term_is_allowed("ls"), 1, "ls allowed");
+    assert_eq(app_term_is_allowed("/evil/bin/ls"), 1, "basename-strip: /evil/bin/ls allowed as ls");
+    assert_eq(app_term_is_allowed("sudo"), 0, "sudo not allowed");
+    assert_eq(app_term_is_allowed("/x/sudo"), 0, "basename-strip: /x/sudo still not allowed");
+    # Path::file_name() parity: trailing slash / dot components resolve to the basename
+    assert_eq(app_term_is_allowed("ls/"), 1, "ls/ -> ls allowed");
+    assert_eq(app_term_is_allowed("/bin/ls/"), 1, "/bin/ls/ -> ls allowed");
+    assert_eq(app_term_is_allowed("echo/./"), 1, "echo/./ -> echo allowed");
+    assert_eq(app_term_is_allowed("cat/."), 1, "cat/. -> cat allowed");
+    assert_eq(app_term_is_allowed("sudo/"), 0, "sudo/ still denied");
+    assert_eq(app_term_execute_command(tm, ""), AppErr.APP_ERR_WINDOW, "empty command -> WindowError");
+    assert_eq(app_term_execute_command(tm, "   "), AppErr.APP_ERR_WINDOW, "whitespace command -> WindowError");
+    assert_eq(app_term_execute_command(tm, "badcmd"), AppErr.APP_ERR_PERM_DENIED, "non-allowlisted denied");
+    assert_eq(app_term_execute_command(tm, "echo hi"), AppErr.APP_OK, "allowlisted echo passes pre-checks");
+    # split_whitespace() parity: newline is a delimiter, not part of the token
+    var nlcmd = alloc(4);
+    store8(nlcmd + 0, 10);
+    store8(nlcmd + 1, 108);
+    store8(nlcmd + 2, 115);
+    store8(nlcmd + 3, 0);
+    assert_eq(app_term_execute_command(tm, nlcmd), AppErr.APP_OK, "newline-led 'ls' allowed");
+    var wsonly = alloc(4);
+    store8(wsonly + 0, 10);
+    store8(wsonly + 1, 10);
+    store8(wsonly + 2, 0);
+    assert_eq(app_term_execute_command(tm, wsonly), AppErr.APP_ERR_WINDOW, "newlines-only -> WindowError");
+
+    # -----------------------------------------------------------------------
+    test_group("apps — DesktopApplications aggregate");
+    var d = app_desk_new();
+    assert_eq(vec_len(app_desk_get_open_windows(d)), 0, "no windows initially");
+    var wt = app_desk_open_terminal(d);
+    assert_eq(app_window_type(wt), AppType.APP_TERMINAL, "terminal window type");
+    assert_eq(streq(app_window_title(wt), "AGNOS Terminal"), 1, "terminal window title");
+    assert_eq(vec_len(app_desk_get_open_windows(d)), 1, "one window open");
+    var wfm = app_desk_open_file_manager(d, 0);
+    assert_eq(app_window_ai_enabled(wfm), 1, "file manager window ai on");
+    var wag = app_desk_open_agent_manager(d);
+    assert_eq(app_window_ai_enabled(wag), 1, "agent manager window ai on");
+    app_desk_open_audit_viewer(d);
+    app_desk_open_model_manager(d);
+    var wb = app_desk_open_web_browser(d, 0, 0);
+    assert_eq(app_window_type(wb), AppType.APP_WEB_BROWSER, "browser window type");
+    assert_eq(app_window_width(wb), 1280, "browser window width 1280");
+    assert_eq(streq(app_window_title(wb), "Firefox"), 1, "default browser title Firefox");
+    var wburl = app_desk_open_web_browser(d, "firefox", "https://agnos.org");
+    var expected = app_cstr_cat3("Firefox", " — ", "https://agnos.org");
+    assert_eq(streq(app_window_title(wburl), expected), 1, "browser title includes url (em-dash)");
+    var wbad = app_desk_open_web_browser(d, "netscape", 0);
+    assert_eq(wbad, 0, "unknown browser -> 0");
+    assert_eq(app_desk_last_err(d), AppErr.APP_ERR_NOT_FOUND, "unknown browser -> NotFound");
+    var wsh = app_desk_open_shruti(d, 0);
+    assert_eq(app_window_type(wsh), AppType.APP_CUSTOM, "shruti window type is Custom");
+    assert_eq(app_window_width(wsh), 1400, "shruti window width 1400");
+    var wshp = app_desk_open_shruti(d, "/home/user/song.shruti");
+    var shexp = app_cstr_cat3("Shruti", " — ", "/home/user/song.shruti");
+    assert_eq(streq(app_window_title(wshp), shexp), 1, "shruti title includes session path");
+    # absolute window count after the 9 successful opens (netscape returned 0)
+    assert_eq(vec_len(app_desk_get_open_windows(d)), 9, "9 windows after 9 opens");
+    # close window (returns Ok; removes one; Ok even if absent)
+    var before = vec_len(app_desk_get_open_windows(d));
+    assert_eq(app_desk_close_window(d, app_window_id(wt)), AppErr.APP_OK, "close returns OK");
+    assert_eq(vec_len(app_desk_get_open_windows(d)), before - 1, "close removes one window");
+    assert_eq(app_desk_close_window(d, 999999), AppErr.APP_OK, "close nonexistent is ok");
+    # sub-app getters return live owned objects (mutations persist)
+    app_agentmgr_start_agent(app_desk_get_agent_manager(d), "via-desktop", 0);
+    assert_eq(app_agentmgr_agent_count(app_desk_get_agent_manager(d)), 1, "agent mgr mutation persists");
+    vec_push(app_modelmgr_installed_models(app_desk_get_model_manager(d)), app_modelinfo_new("test-m", "T", 1, "p", 0));
+    assert_eq(app_modelmgr_model_count(app_desk_get_model_manager(d)), 1, "model mgr mutation persists");
+    assert_eq(streq(app_browser_id(app_desk_get_browser(d, 0)), "firefox"), 1, "get_browser default firefox");
+    assert_eq(streq(app_browser_id(app_desk_get_browser(d, "vivaldi")), "vivaldi"), 1, "get_browser by id");
+    assert_eq(streq(app_browser_id(app_desk_get_browser(d, "chromium")), "chromium"), 1, "get chromium");
+    assert_eq(streq(app_browser_id(app_desk_get_browser(d, "zen-browser")), "zen-browser"), 1, "get zen");
+    assert_eq(streq(app_browser_id(app_desk_get_browser(d, "brave")), "brave"), 1, "get brave");
+    assert_eq(streq(app_browser_id(app_desk_get_browser(d, "librewolf")), "librewolf"), 1, "get librewolf");
+    assert_eq(streq(app_browser_id(app_desk_get_browser(d, "falkon")), "falkon"), 1, "get falkon");
+    assert_eq(streq(app_browser_id(app_desk_get_browser(d, "midori")), "midori"), 1, "get midori");
+    assert_eq(app_desk_get_browser(d, "opera"), 0, "get_browser unknown -> 0");
+    assert_eq(vec_len(app_desk_list_browsers(d)), 8, "eight browsers seeded");
+    assert_eq(streq(app_shruti_id(app_desk_get_shruti(d)), "shruti"), 1, "get_shruti");
+
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);

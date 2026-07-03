@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Built-in apps — first slice (`src/apps.cyr`, Bite C1)** — port of the app framework
+  + pure data-model apps from Rust `apps.rs` (2986 lines): `AppError` / `AppType` /
+  `AppWindow`, the **`DesktopApplications`** aggregate (open / close / list windows,
+  live sub-app getters), and the data-model apps **FileManager**, **AgentManager**,
+  **AuditViewer**, **ModelManager**, plus the 8 **WebBrowser** factory configs,
+  **Shruti**, and the **Terminal** security surface — the 30-program allowlist +
+  path-traversal-neutralising **basename-strip** + pre-spawn command validation. The
+  process-spawning bodies (Terminal exec, browser / Shruti launch) and the
+  filesystem / network effect bodies (`list_agents`, `get_logs`, the model gateway) are
+  stubbed to their clean-env fallback and deferred to **C2** (a dedicated
+  security-reviewed spawn sub-bite) / **C3** (fs+net). `tests/apps.tcyr`
+  (**125 assertions**, all green). Standalone; compositor wiring is follow-on.
+
 ## [0.4.2] - 2026-07-03 — screen capture + recording (Bite D)
 
 ### Added

@@ -1,0 +1,763 @@
+# aethersafha — built-in applications (Bite C, slice C1)
+# Parity: rust-old/src/apps.rs
+#   (AppError, AppType, AppWindow, DesktopApplications + the sub-apps:
+#    FileManager, AgentManager, AuditViewer, ModelManager, WebBrowser, Shruti,
+#    Terminal). C1 = the app framework + pure data-model apps + the aggregate.
+#
+# Convention (same as src/screen_capture.cyr / src/security_ui.cyr): heap objects
+# = offset enum + alloc + load64/store64 accessors. Substitutions: Uuid -> i64 id
+# (0 == nil), minted by the owning object's NEXT_ID; String -> cstr char*; built
+# strings -> bare-cstr concatenation (app_cstr_cat3); Vec -> stdlib vec;
+# HashMap<Uuid,_> -> map_u64; Option<String> -> cstr (0 == None); Option<numeric>
+# -> -1 sentinel; Result<_,AppError> -> i64 code (0 == Ok); bool -> 0/1; tracing dropped.
+#
+# DEFERRED (C2/C3, marked `# PARITY (C2/C3)`): process spawning
+# (Terminal.execute_command spawn body, WebBrowser/Shruti launch) and the
+# filesystem/network effect bodies (list_agents, get_logs, list/download_model).
+# C1 ships the pure logic incl. the security-critical allowlist + path-strip.
+#
+# LIBRARY MODULE: definitions only, no main / no top-level statements.
+
+# ---------------------------------------------------------------------------
+# Value enums.
+# ---------------------------------------------------------------------------
+enum AppErr {           # AppError -> i64 (payload strings dropped)
+    APP_OK              = 0;
+    APP_ERR_NOT_FOUND   = 1;   # AppNotFound(String)
+    APP_ERR_WINDOW      = 2;   # WindowError(String) — empty command, spawn/exit failure
+    APP_ERR_PERM_DENIED = 3;   # PermissionDenied(String) — program not in allowlist
+}
+enum AppType {          # AppType (9 variants; Shruti uses APP_CUSTOM)
+    APP_TERMINAL      = 0;
+    APP_FILE_MANAGER  = 1;
+    APP_TEXT_EDITOR   = 2;
+    APP_WEB_BROWSER   = 3;
+    APP_AGENT_MANAGER = 4;
+    APP_AUDIT_VIEWER  = 5;
+    APP_MODEL_MANAGER = 6;
+    APP_SETTINGS      = 7;
+    APP_CUSTOM        = 8;
+}
+enum TimeRange {        # AuditViewer time filter
+    TR_LAST_HOUR = 0;
+    TR_LAST_DAY  = 1;
+    TR_LAST_WEEK = 2;
+    TR_CUSTOM    = 3;
+}
+
+# ---------------------------------------------------------------------------
+# Offset enums (heap layouts; 8-byte slots).
+# ---------------------------------------------------------------------------
+enum AppWinOff {        # AppWindow
+    AWIN_ID         = 0;   # i64 id (0 == nil)
+    AWIN_TYPE       = 8;   # AppType
+    AWIN_TITLE      = 16;  # cstr
+    AWIN_WIDTH      = 24;  # i64 (default 800)
+    AWIN_HEIGHT     = 32;  # i64 (default 600)
+    AWIN_AI_ENABLED = 40;  # 0/1 (default 0)
+    AWIN_SZ         = 48;
+}
+enum FileMgrOff {       # FileManagerApp
+    FM_ID           = 0;   # cstr "filemanager"
+    FM_NAME         = 8;   # cstr "File Manager"
+    FM_CURRENT_PATH = 16;  # cstr "/home"
+    FM_AGENT_ASSIST = 24;  # 0/1 (default 1)
+    FM_SZ           = 32;
+}
+enum AgentInfoOff {     # AgentInfo
+    AI_ID           = 0;   # i64
+    AI_NAME         = 8;   # cstr
+    AI_STATUS       = 16;  # cstr ("Starting" / "Running" / ...)
+    AI_CAPABILITIES = 24;  # *vec of cstr
+    AI_SZ           = 32;
+}
+enum AgentMgrOff {      # AgentManagerApp
+    AM_ID      = 0;   # cstr "agent-manager"
+    AM_NAME    = 8;   # cstr "Agent Manager"
+    AM_AGENTS  = 16;  # *vec of *AgentInfo
+    AM_NEXT_ID = 24;  # i64 monotonic, init 1
+    AM_SZ      = 32;
+}
+enum AuditFiltOff {     # AuditFilters
+    AF_INCLUDE_AGENT    = 0;   # 0/1
+    AF_INCLUDE_SECURITY = 8;   # 0/1
+    AF_INCLUDE_SYSTEM   = 16;  # 0/1
+    AF_TIME_RANGE       = 24;  # TimeRange
+    AF_SZ               = 32;
+}
+enum AuditEntryOff {    # AuditEntry
+    AE_ID          = 0;   # i64
+    AE_TIMESTAMP   = 8;   # i64 epoch
+    AE_EVENT_TYPE  = 16;  # cstr
+    AE_DESCRIPTION = 24;  # cstr
+    AE_SOURCE      = 32;  # cstr
+    AE_SZ          = 40;
+}
+enum AuditViewOff {     # AuditViewerApp
+    AV_ID      = 0;   # cstr "audit-viewer"
+    AV_NAME    = 8;   # cstr "Audit Log Viewer"
+    AV_FILTERS = 16;  # *AuditFilters
+    AV_SZ      = 24;
+}
+enum ModelInfoOff {     # ModelInfo
+    MI_ID            = 0;   # cstr
+    MI_NAME          = 8;   # cstr
+    MI_SIZE          = 16;  # i64 (holds u64, incl. u64::MAX bit-pattern)
+    MI_PROVIDER      = 24;  # cstr
+    MI_IS_DOWNLOADED = 32;  # 0/1
+    MI_SZ            = 40;
+}
+enum ModelMgrOff {      # ModelManagerApp
+    MM_ID           = 0;   # cstr "model-manager"
+    MM_NAME         = 8;   # cstr "Model Manager"
+    MM_INSTALLED    = 16;  # *vec of *ModelInfo
+    MM_ACTIVE_MODEL = 24;  # cstr (0 == None)
+    MM_SZ           = 32;
+}
+enum BrowOff {          # WebBrowserApp
+    BROW_ID     = 0;   # cstr
+    BROW_NAME   = 8;   # cstr
+    BROW_BINARY = 16;  # cstr
+    BROW_ENV    = 24;  # cstr "KEY=VALUE" or 0 (None)
+    BROW_DEFURL = 32;  # cstr or 0
+    BROW_SZ     = 40;
+}
+enum ShrCfgOff {        # ShrutiSurfaceConfig
+    SHRCFG_W      = 0;   # i64 (1400)
+    SHRCFG_H      = 8;   # i64 (900)
+    SHRCFG_EXCL   = 16;  # 0/1 exclusive audio (0)
+    SHRCFG_PWNODE = 24;  # cstr "shruti-main"
+    SHRCFG_SZ     = 32;
+}
+enum ShrOff {           # ShrutiApp
+    SHR_ID      = 0;   # cstr "shruti"
+    SHR_NAME    = 8;   # cstr "Shruti"
+    SHR_BINARY  = 16;  # cstr "/usr/local/bin/shruti"
+    SHR_DATADIR = 24;  # cstr "~/.local/share/shruti"
+    SHR_CFG     = 32;  # *ShrutiSurfaceConfig
+    SHR_RUNNING = 40;  # 0/1
+    SHR_SZ      = 48;
+}
+enum TermOff {          # TerminalApp
+    TERM_ID   = 0;   # cstr "terminal"
+    TERM_NAME = 8;   # cstr "AGNOS Terminal"
+    TERM_AI   = 16;  # 0/1 (1)
+    TERM_SZ   = 24;
+}
+enum AppDeskOff {       # DesktopApplications
+    AD_TERMINAL     = 0;   # *TerminalApp
+    AD_FILE_MGR     = 8;   # *FileManagerApp
+    AD_BROWSERS     = 16;  # *vec of *WebBrowserApp (8)
+    AD_AGENT_MGR    = 24;  # *AgentManagerApp
+    AD_AUDIT_VIEW   = 32;  # *AuditViewerApp
+    AD_MODEL_MGR    = 40;  # *ModelManagerApp
+    AD_SHRUTI       = 48;  # *ShrutiApp
+    AD_OPEN_WINDOWS = 56;  # *vec of *AppWindow (linear-scan by id; map_u64 has no values() iterator)
+    AD_NEXT_ID      = 64;  # i64 monotonic, init 1
+    AD_LAST_ERR     = 72;  # AppErr of the last fallible call
+    AD_SZ           = 80;
+}
+
+# ---------------------------------------------------------------------------
+# String helper — concat three bare cstrs into a fresh NUL-terminated buffer.
+# (Used for the two built window titles + search_with_agent's "Found: {q}".)
+# ---------------------------------------------------------------------------
+fn app_cstr_cat3(a, b, c): i64 {
+    var la = strlen(a);
+    var lb = strlen(b);
+    var lc = strlen(c);
+    var out = alloc(la + lb + lc + 1);
+    if (out == 0) { return 0; }
+    var i = 0;
+    while (i < la) { store8(out + i, load8(a + i)); i = i + 1; }
+    var j = 0;
+    while (j < lb) { store8(out + la + j, load8(b + j)); j = j + 1; }
+    var k = 0;
+    while (k < lc) { store8(out + la + lb + k, load8(c + k)); k = k + 1; }
+    store8(out + la + lb + lc, 0);
+    return out;
+}
+# app_substr(s, start, len): a fresh NUL-terminated copy of s[start .. start+len].
+fn app_substr(s, start, len): i64 {
+    var out = alloc(len + 1);
+    if (out == 0) { return 0; }
+    var i = 0;
+    while (i < len) { store8(out + i, load8(s + start + i)); i = i + 1; }
+    store8(out + len, 0);
+    return out;
+}
+# app_is_ws(ch): the ASCII subset of Rust split_whitespace() — space, tab, LF, VT,
+# FF, CR. (Full Unicode whitespace is out of scope for shell input.)
+fn app_is_ws(ch): i64 {
+    if (ch == 32) { return 1; }
+    if (ch == 9) { return 1; }
+    if (ch == 10) { return 1; }
+    if (ch == 11) { return 1; }
+    if (ch == 12) { return 1; }
+    if (ch == 13) { return 1; }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Enum display helpers.
+# ---------------------------------------------------------------------------
+fn app_type_debug_name(t): i64 {
+    if (t == AppType.APP_TERMINAL)      { return "Terminal"; }
+    if (t == AppType.APP_FILE_MANAGER)  { return "FileManager"; }
+    if (t == AppType.APP_TEXT_EDITOR)   { return "TextEditor"; }
+    if (t == AppType.APP_WEB_BROWSER)   { return "WebBrowser"; }
+    if (t == AppType.APP_AGENT_MANAGER) { return "AgentManager"; }
+    if (t == AppType.APP_AUDIT_VIEWER)  { return "AuditViewer"; }
+    if (t == AppType.APP_MODEL_MANAGER) { return "ModelManager"; }
+    if (t == AppType.APP_SETTINGS)      { return "Settings"; }
+    return "Custom";
+}
+# app_error_display(code, arg): the Rust Display string, as a fresh cstr.
+fn app_error_display(code, arg): i64 {
+    if (code == AppErr.APP_ERR_NOT_FOUND)   { return app_cstr_cat3("App not found: ", arg, ""); }
+    if (code == AppErr.APP_ERR_WINDOW)      { return app_cstr_cat3("Window error: ", arg, ""); }
+    if (code == AppErr.APP_ERR_PERM_DENIED) { return app_cstr_cat3("Permission denied: ", arg, ""); }
+    return app_cstr_cat3("", arg, "");
+}
+
+# ---------------------------------------------------------------------------
+# Module constants (C1 stubs never open these paths; C3 does).
+# ---------------------------------------------------------------------------
+fn app_llm_gateway_addr(): i64 { return "http://localhost:8088"; }
+fn app_agent_socket_dir(): i64 { return "/run/agnos/agents"; }
+fn app_audit_log_path(): i64   { return "/var/log/agnos/audit.log"; }
+
+# ---------------------------------------------------------------------------
+# AppWindow.
+# ---------------------------------------------------------------------------
+fn app_window_new(id, app_type, title): i64 {
+    var w = alloc(AWIN_SZ);
+    if (w == 0) { return 0; }
+    store64(w + AWIN_ID, id);
+    store64(w + AWIN_TYPE, app_type);
+    store64(w + AWIN_TITLE, title);
+    store64(w + AWIN_WIDTH, 800);
+    store64(w + AWIN_HEIGHT, 600);
+    store64(w + AWIN_AI_ENABLED, 0);
+    return w;
+}
+fn app_window_id(w)         { return load64(w + AWIN_ID); }
+fn app_window_type(w)       { return load64(w + AWIN_TYPE); }
+fn app_window_title(w)      { return load64(w + AWIN_TITLE); }
+fn app_window_width(w)      { return load64(w + AWIN_WIDTH); }
+fn app_window_height(w)     { return load64(w + AWIN_HEIGHT); }
+fn app_window_ai_enabled(w) { return load64(w + AWIN_AI_ENABLED); }
+fn app_window_set_width(w, v)  { store64(w + AWIN_WIDTH, v); return 0; }
+fn app_window_set_height(w, v) { store64(w + AWIN_HEIGHT, v); return 0; }
+fn app_window_set_ai(w, v)     { store64(w + AWIN_AI_ENABLED, v); return 0; }
+# app_window_clone(w): field-copy that REUSES the id (test asserts same id).
+fn app_window_clone(w): i64 {
+    var c = app_window_new(app_window_id(w), app_window_type(w), app_window_title(w));
+    store64(c + AWIN_WIDTH, app_window_width(w));
+    store64(c + AWIN_HEIGHT, app_window_height(w));
+    store64(c + AWIN_AI_ENABLED, app_window_ai_enabled(w));
+    return c;
+}
+
+# ---------------------------------------------------------------------------
+# FileManagerApp.
+# ---------------------------------------------------------------------------
+fn app_filemgr_new(): i64 {
+    var p = alloc(FM_SZ);
+    if (p == 0) { return 0; }
+    store64(p + FM_ID, "filemanager");
+    store64(p + FM_NAME, "File Manager");
+    store64(p + FM_CURRENT_PATH, "/home");
+    store64(p + FM_AGENT_ASSIST, 1);
+    return p;
+}
+fn app_filemgr_id(p)               { return load64(p + FM_ID); }
+fn app_filemgr_name(p)             { return load64(p + FM_NAME); }
+fn app_filemgr_current_path(p)     { return load64(p + FM_CURRENT_PATH); }
+fn app_filemgr_agent_assistance(p) { return load64(p + FM_AGENT_ASSIST); }
+# navigate: store the path verbatim (no fs touch; accepts any path). -> Ok(0).
+fn app_filemgr_navigate(p, path): i64 {
+    store64(p + FM_CURRENT_PATH, path);
+    return AppErr.APP_OK;
+}
+# search_with_agent: a one-element vec ["Found: {query}"].
+fn app_filemgr_search_with_agent(p, query): i64 {
+    var v = vec_new();
+    vec_push(v, app_cstr_cat3("Found: ", query, ""));
+    return v;
+}
+
+# ---------------------------------------------------------------------------
+# AgentInfo + AgentManagerApp.
+# ---------------------------------------------------------------------------
+fn app_agentinfo_new(id, name, status, caps): i64 {
+    var p = alloc(AI_SZ);
+    if (p == 0) { return 0; }
+    if (caps == 0) { caps = vec_new(); }
+    store64(p + AI_ID, id);
+    store64(p + AI_NAME, name);
+    store64(p + AI_STATUS, status);
+    store64(p + AI_CAPABILITIES, caps);
+    return p;
+}
+fn app_agentinfo_id(p)           { return load64(p + AI_ID); }
+fn app_agentinfo_name(p)         { return load64(p + AI_NAME); }
+fn app_agentinfo_status(p)       { return load64(p + AI_STATUS); }
+fn app_agentinfo_capabilities(p) { return load64(p + AI_CAPABILITIES); }
+fn app_agentinfo_set_status(p, s) { store64(p + AI_STATUS, s); return 0; }
+
+fn app_agentmgr_new(): i64 {
+    var p = alloc(AM_SZ);
+    if (p == 0) { return 0; }
+    store64(p + AM_ID, "agent-manager");
+    store64(p + AM_NAME, "Agent Manager");
+    store64(p + AM_AGENTS, vec_new());
+    store64(p + AM_NEXT_ID, 1);
+    return p;
+}
+fn app_agentmgr_id(p)             { return load64(p + AM_ID); }
+fn app_agentmgr_name(p)           { return load64(p + AM_NAME); }
+fn app_agentmgr_running_agents(p) { return load64(p + AM_AGENTS); }
+fn app_agentmgr_agent_count(p)    { return vec_len(load64(p + AM_AGENTS)); }
+fn app_agentmgr_next_id(p): i64 {
+    var id = load64(p + AM_NEXT_ID);
+    store64(p + AM_NEXT_ID, id + 1);
+    return id;
+}
+# start_agent: append an AgentInfo ("Starting"), return its new id (never fails).
+fn app_agentmgr_start_agent(p, name, caps): i64 {
+    var id = app_agentmgr_next_id(p);
+    vec_push(load64(p + AM_AGENTS), app_agentinfo_new(id, name, "Starting", caps));
+    return id;
+}
+# stop_agent: remove the agent with that id; Ok(0) even if absent (no-op).
+fn app_agentmgr_stop_agent(p, id): i64 {
+    var v = load64(p + AM_AGENTS);
+    var i = 0;
+    while (i < vec_len(v)) {
+        if (app_agentinfo_id(vec_get(v, i)) == id) {
+            vec_remove(v, i);
+        } else {
+            i = i + 1;
+        }
+    }
+    return AppErr.APP_OK;
+}
+# list_agents — PARITY (C3): real body scans /run/agnos/agents + UnixStream.
+# In a clean env read_dir errors and Rust returns the untouched local vec.
+fn app_agentmgr_list_agents(p): i64 { return load64(p + AM_AGENTS); }
+
+# ---------------------------------------------------------------------------
+# AuditFilters + AuditEntry + AuditViewerApp.
+# ---------------------------------------------------------------------------
+fn app_auditfilters_new(agent, security, system, time_range): i64 {
+    var p = alloc(AF_SZ);
+    if (p == 0) { return 0; }
+    store64(p + AF_INCLUDE_AGENT, agent);
+    store64(p + AF_INCLUDE_SECURITY, security);
+    store64(p + AF_INCLUDE_SYSTEM, system);
+    store64(p + AF_TIME_RANGE, time_range);
+    return p;
+}
+fn app_auditfilters_default(): i64 {
+    return app_auditfilters_new(1, 1, 1, TimeRange.TR_LAST_DAY);
+}
+fn app_auditfilters_include_agent(p)    { return load64(p + AF_INCLUDE_AGENT); }
+fn app_auditfilters_include_security(p) { return load64(p + AF_INCLUDE_SECURITY); }
+fn app_auditfilters_include_system(p)   { return load64(p + AF_INCLUDE_SYSTEM); }
+fn app_auditfilters_time_range(p)       { return load64(p + AF_TIME_RANGE); }
+
+fn app_auditentry_new(id, ts, event_type, description, source): i64 {
+    var p = alloc(AE_SZ);
+    if (p == 0) { return 0; }
+    store64(p + AE_ID, id);
+    store64(p + AE_TIMESTAMP, ts);
+    store64(p + AE_EVENT_TYPE, event_type);
+    store64(p + AE_DESCRIPTION, description);
+    store64(p + AE_SOURCE, source);
+    return p;
+}
+fn app_auditentry_id(p)          { return load64(p + AE_ID); }
+fn app_auditentry_timestamp(p)   { return load64(p + AE_TIMESTAMP); }
+fn app_auditentry_event_type(p)  { return load64(p + AE_EVENT_TYPE); }
+fn app_auditentry_description(p) { return load64(p + AE_DESCRIPTION); }
+fn app_auditentry_source(p)      { return load64(p + AE_SOURCE); }
+
+fn app_auditview_new(): i64 {
+    var p = alloc(AV_SZ);
+    if (p == 0) { return 0; }
+    store64(p + AV_ID, "audit-viewer");
+    store64(p + AV_NAME, "Audit Log Viewer");
+    store64(p + AV_FILTERS, app_auditfilters_default());
+    return p;
+}
+fn app_auditview_id(p)      { return load64(p + AV_ID); }
+fn app_auditview_name(p)    { return load64(p + AV_NAME); }
+fn app_auditview_filters(p) { return load64(p + AV_FILTERS); }
+# filter_cutoff(now): epoch cutoff for the active time range; -1 == None (Custom).
+fn app_auditview_filter_cutoff(p, now): i64 {
+    var tr = app_auditfilters_time_range(app_auditview_filters(p));
+    if (tr == TimeRange.TR_LAST_HOUR) { return now - 3600; }
+    if (tr == TimeRange.TR_LAST_DAY)  { return now - 86400; }
+    if (tr == TimeRange.TR_LAST_WEEK) { return now - 604800; }
+    return 0 - 1;
+}
+# get_logs — PARITY (C3): real body reads /var/log/agnos/audit.log + JSON parse.
+# Clean-env file-missing branch returns empty.
+fn app_auditview_get_logs(p): i64 { return vec_new(); }
+
+# ---------------------------------------------------------------------------
+# ModelInfo + ModelManagerApp.
+# ---------------------------------------------------------------------------
+fn app_modelinfo_new(id, name, size, provider, is_downloaded): i64 {
+    var p = alloc(MI_SZ);
+    if (p == 0) { return 0; }
+    store64(p + MI_ID, id);
+    store64(p + MI_NAME, name);
+    store64(p + MI_SIZE, size);
+    store64(p + MI_PROVIDER, provider);
+    store64(p + MI_IS_DOWNLOADED, is_downloaded);
+    return p;
+}
+fn app_modelinfo_id(p)            { return load64(p + MI_ID); }
+fn app_modelinfo_name(p)          { return load64(p + MI_NAME); }
+fn app_modelinfo_size(p)          { return load64(p + MI_SIZE); }
+fn app_modelinfo_provider(p)      { return load64(p + MI_PROVIDER); }
+fn app_modelinfo_is_downloaded(p) { return load64(p + MI_IS_DOWNLOADED); }
+
+fn app_modelmgr_new(): i64 {
+    var p = alloc(MM_SZ);
+    if (p == 0) { return 0; }
+    store64(p + MM_ID, "model-manager");
+    store64(p + MM_NAME, "Model Manager");
+    store64(p + MM_INSTALLED, vec_new());
+    store64(p + MM_ACTIVE_MODEL, 0);
+    return p;
+}
+fn app_modelmgr_id(p)              { return load64(p + MM_ID); }
+fn app_modelmgr_name(p)            { return load64(p + MM_NAME); }
+fn app_modelmgr_installed_models(p){ return load64(p + MM_INSTALLED); }
+fn app_modelmgr_active_model(p)    { return load64(p + MM_ACTIVE_MODEL); }
+fn app_modelmgr_model_count(p)     { return vec_len(load64(p + MM_INSTALLED)); }
+# select_model: local hit -> set active, Ok(0). Miss -> NotFound (gateway C3).
+fn app_modelmgr_select_model(p, model_id): i64 {
+    var v = load64(p + MM_INSTALLED);
+    var i = 0;
+    while (i < vec_len(v)) {
+        if (streq(app_modelinfo_id(vec_get(v, i)), model_id) == 1) {
+            store64(p + MM_ACTIVE_MODEL, model_id);
+            return AppErr.APP_OK;
+        }
+        i = i + 1;
+    }
+    # PARITY (C3): full Rust consults the LLM gateway before failing; a clean env
+    # is unreachable -> same NotFound.
+    return AppErr.APP_ERR_NOT_FOUND;
+}
+# list_models — PARITY (C3): real body GETs the gateway /v1/models + merges.
+fn app_modelmgr_list_models(p): i64 { return load64(p + MM_INSTALLED); }
+# download_model — PARITY (C3): real body POSTs the gateway /api/pull.
+fn app_modelmgr_download_model(p, id): i64 { return AppErr.APP_ERR_WINDOW; }
+
+# ---------------------------------------------------------------------------
+# WebBrowserApp — 8 factories (launch deferred to C2).
+# ---------------------------------------------------------------------------
+fn app_browser_new(id, name, binary, env, defurl): i64 {
+    var p = alloc(BROW_SZ);
+    if (p == 0) { return 0; }
+    store64(p + BROW_ID, id);
+    store64(p + BROW_NAME, name);
+    store64(p + BROW_BINARY, binary);
+    store64(p + BROW_ENV, env);
+    store64(p + BROW_DEFURL, defurl);
+    return p;
+}
+fn app_browser_id(p)     { return load64(p + BROW_ID); }
+fn app_browser_name(p)   { return load64(p + BROW_NAME); }
+fn app_browser_binary(p) { return load64(p + BROW_BINARY); }
+fn app_browser_env(p)    { return load64(p + BROW_ENV); }
+fn app_browser_default_url(p) { return load64(p + BROW_DEFURL); }
+fn app_browser_firefox(): i64 {
+    return app_browser_new("firefox", "Firefox", "/usr/bin/firefox", "MOZ_ENABLE_WAYLAND=1", 0);
+}
+fn app_browser_chromium(): i64 { return app_browser_new("chromium", "Chromium", "/usr/bin/chromium", 0, 0); }
+fn app_browser_zen(): i64 {
+    return app_browser_new("zen-browser", "Zen Browser", "/usr/bin/zen-browser", "MOZ_ENABLE_WAYLAND=1", 0);
+}
+fn app_browser_brave(): i64 { return app_browser_new("brave", "Brave", "/usr/bin/brave", 0, 0); }
+fn app_browser_librewolf(): i64 {
+    return app_browser_new("librewolf", "LibreWolf", "/usr/bin/librewolf", "MOZ_ENABLE_WAYLAND=1", 0);
+}
+fn app_browser_vivaldi(): i64 { return app_browser_new("vivaldi", "Vivaldi", "/usr/bin/vivaldi", 0, 0); }
+fn app_browser_falkon(): i64 {
+    return app_browser_new("falkon", "Falkon", "/usr/bin/falkon", "QT_QPA_PLATFORM=wayland", 0);
+}
+fn app_browser_midori(): i64 { return app_browser_new("midori", "Midori", "/usr/bin/midori", 0, 0); }
+fn app_browser_default(): i64   { return app_browser_firefox(); }
+# is_installed: real fs probe of the binary path (test only asserts no-crash).
+fn app_browser_is_installed(p): i64 {
+    if (file_exists(app_browser_binary(p)) != 0) { return 1; }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# ShrutiSurfaceConfig + ShrutiApp (launch deferred to C2).
+# ---------------------------------------------------------------------------
+fn app_shrutisurf_new(w, h, exclusive, pw_node): i64 {
+    var p = alloc(SHRCFG_SZ);
+    if (p == 0) { return 0; }
+    store64(p + SHRCFG_W, w);
+    store64(p + SHRCFG_H, h);
+    store64(p + SHRCFG_EXCL, exclusive);
+    store64(p + SHRCFG_PWNODE, pw_node);
+    return p;
+}
+fn app_shrutisurf_default(): i64 { return app_shrutisurf_new(1400, 900, 0, "shruti-main"); }
+fn app_shrutisurf_width(p)     { return load64(p + SHRCFG_W); }
+fn app_shrutisurf_height(p)    { return load64(p + SHRCFG_H); }
+fn app_shrutisurf_exclusive(p) { return load64(p + SHRCFG_EXCL); }
+fn app_shrutisurf_pw_node(p)   { return load64(p + SHRCFG_PWNODE); }
+
+fn app_shruti_new(): i64 {
+    var p = alloc(SHR_SZ);
+    if (p == 0) { return 0; }
+    store64(p + SHR_ID, "shruti");
+    store64(p + SHR_NAME, "Shruti");
+    store64(p + SHR_BINARY, "/usr/local/bin/shruti");
+    store64(p + SHR_DATADIR, "~/.local/share/shruti");
+    store64(p + SHR_CFG, app_shrutisurf_default());
+    store64(p + SHR_RUNNING, 0);
+    return p;
+}
+fn app_shruti_id(p)        { return load64(p + SHR_ID); }
+fn app_shruti_name(p)      { return load64(p + SHR_NAME); }
+fn app_shruti_binary(p)    { return load64(p + SHR_BINARY); }
+fn app_shruti_data_dir(p)  { return load64(p + SHR_DATADIR); }
+fn app_shruti_cfg(p)       { return load64(p + SHR_CFG); }
+fn app_shruti_is_running(p){ return load64(p + SHR_RUNNING); }
+
+# ---------------------------------------------------------------------------
+# TerminalApp — pure part: allowlist + basename-strip + pre-spawn checks.
+# The security-critical logic ports NOW; the actual spawn is deferred to C2.
+# ---------------------------------------------------------------------------
+fn app_term_new(): i64 {
+    var p = alloc(TERM_SZ);
+    if (p == 0) { return 0; }
+    store64(p + TERM_ID, "terminal");
+    store64(p + TERM_NAME, "AGNOS Terminal");
+    store64(p + TERM_AI, 1);
+    return p;
+}
+fn app_term_id(p)   { return load64(p + TERM_ID); }
+fn app_term_name(p) { return load64(p + TERM_NAME); }
+fn app_term_ai_integration(p) { return load64(p + TERM_AI); }
+# The 32-entry allowlist (Rust ALLOWED_PROGRAMS).
+fn app_term_allowlist(): i64 {
+    var v = vec_new();
+    vec_push(v, "ls"); vec_push(v, "cat"); vec_push(v, "echo"); vec_push(v, "pwd");
+    vec_push(v, "whoami"); vec_push(v, "date"); vec_push(v, "uname"); vec_push(v, "env");
+    vec_push(v, "printenv"); vec_push(v, "id"); vec_push(v, "df"); vec_push(v, "du");
+    vec_push(v, "free"); vec_push(v, "uptime"); vec_push(v, "head"); vec_push(v, "tail");
+    vec_push(v, "wc"); vec_push(v, "sort"); vec_push(v, "uniq"); vec_push(v, "grep");
+    vec_push(v, "find"); vec_push(v, "which"); vec_push(v, "file"); vec_push(v, "stat");
+    vec_push(v, "basename"); vec_push(v, "dirname"); vec_push(v, "realpath"); vec_push(v, "true");
+    vec_push(v, "false"); vec_push(v, "expr");
+    return v;
+}
+# app_term_basename(program): the final path component, replicating Rust
+# std::path::Path::file_name() — strips trailing '/' and a trailing "." component;
+# an empty / all-slashes / ".." path yields None (-> the raw program). This is the
+# path-traversal neutralisation feeding the allowlist check.
+fn app_term_basename(program): i64 {
+    var end = strlen(program);
+    while ((end > 0) && (load8(program + end - 1) == 47)) { end = end - 1; }   # trim trailing '/'
+    if (end == 0) { return program; }
+    var start = end;
+    while ((start > 0) && (load8(program + start - 1) != 47)) { start = start - 1; }
+    var clen = end - start;
+    # a trailing "." component -> use the preceding component (Path drops "./")
+    if ((clen == 1) && (load8(program + start) == 46)) {
+        var e2 = start;
+        while ((e2 > 0) && (load8(program + e2 - 1) == 47)) { e2 = e2 - 1; }
+        if (e2 == 0) { return program; }
+        var s2 = e2;
+        while ((s2 > 0) && (load8(program + s2 - 1) != 47)) { s2 = s2 - 1; }
+        return app_substr(program, s2, e2 - s2);
+    }
+    # ".." -> file_name() is None -> fall back to the raw program
+    if ((clen == 2) && (load8(program + start) == 46) && (load8(program + start + 1) == 46)) {
+        return program;
+    }
+    return app_substr(program, start, clen);
+}
+# app_term_is_allowed(program): basename-strip then allowlist membership. -> 0/1.
+fn app_term_is_allowed(program): i64 {
+    var base = app_term_basename(program);
+    var v = app_term_allowlist();
+    var i = 0;
+    while (i < vec_len(v)) {
+        if (streq(vec_get(v, i), base) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+# execute_command (C1 pre-spawn checks only): empty/whitespace -> WindowError;
+# non-allowlisted first token -> PermDenied; allowed -> Ok (spawn is C2).
+fn app_term_execute_command(p, command): i64 {
+    var len = strlen(command);
+    # skip leading whitespace to the first token (split_whitespace semantics)
+    var start = 0;
+    while (start < len) {
+        if (app_is_ws(load8(command + start)) == 1) { start = start + 1; } else { break; }
+    }
+    if (start >= len) { return AppErr.APP_ERR_WINDOW; }   # empty / whitespace-only
+    # token runs to the next whitespace
+    var end = start;
+    while (end < len) {
+        if (app_is_ws(load8(command + end)) == 1) { break; }
+        end = end + 1;
+    }
+    var tlen = end - start;
+    var tok = alloc(tlen + 1);
+    var j = 0;
+    while (j < tlen) { store8(tok + j, load8(command + start + j)); j = j + 1; }
+    store8(tok + tlen, 0);
+    if (app_term_is_allowed(tok) == 0) { return AppErr.APP_ERR_PERM_DENIED; }
+    # PARITY (C2): allowed -> spawn the bare basename + args, capture stdout.
+    return AppErr.APP_OK;
+}
+
+# ---------------------------------------------------------------------------
+# DesktopApplications aggregate.
+# ---------------------------------------------------------------------------
+fn app_desk_new(): i64 {
+    var d = alloc(AD_SZ);
+    if (d == 0) { return 0; }
+    store64(d + AD_TERMINAL, app_term_new());
+    store64(d + AD_FILE_MGR, app_filemgr_new());
+    var browsers = vec_new();
+    vec_push(browsers, app_browser_firefox());
+    vec_push(browsers, app_browser_chromium());
+    vec_push(browsers, app_browser_zen());
+    vec_push(browsers, app_browser_brave());
+    vec_push(browsers, app_browser_librewolf());
+    vec_push(browsers, app_browser_vivaldi());
+    vec_push(browsers, app_browser_falkon());
+    vec_push(browsers, app_browser_midori());
+    store64(d + AD_BROWSERS, browsers);
+    store64(d + AD_AGENT_MGR, app_agentmgr_new());
+    store64(d + AD_AUDIT_VIEW, app_auditview_new());
+    store64(d + AD_MODEL_MGR, app_modelmgr_new());
+    store64(d + AD_SHRUTI, app_shruti_new());
+    store64(d + AD_OPEN_WINDOWS, vec_new());
+    store64(d + AD_NEXT_ID, 1);
+    store64(d + AD_LAST_ERR, AppErr.APP_OK);
+    return d;
+}
+fn app_desk_terminal(d)      { return load64(d + AD_TERMINAL); }
+fn app_desk_file_manager(d)  { return load64(d + AD_FILE_MGR); }
+fn app_desk_last_err(d)      { return load64(d + AD_LAST_ERR); }
+fn app_desk_get_agent_manager(d) { return load64(d + AD_AGENT_MGR); }
+fn app_desk_get_model_manager(d) { return load64(d + AD_MODEL_MGR); }
+fn app_desk_get_shruti(d)        { return load64(d + AD_SHRUTI); }
+fn app_desk_list_browsers(d)     { return load64(d + AD_BROWSERS); }
+fn app_desk_next_id(d): i64 {
+    var id = load64(d + AD_NEXT_ID);
+    store64(d + AD_NEXT_ID, id + 1);
+    return id;
+}
+fn app_desk_register(d, w): i64 {
+    vec_push(load64(d + AD_OPEN_WINDOWS), w);
+    return w;
+}
+fn app_desk_open_terminal(d): i64 {
+    var w = app_window_new(app_desk_next_id(d), AppType.APP_TERMINAL, app_term_name(app_desk_terminal(d)));
+    return app_desk_register(d, w);
+}
+fn app_desk_open_file_manager(d, path): i64 {
+    var w = app_window_new(app_desk_next_id(d), AppType.APP_FILE_MANAGER, app_filemgr_name(app_desk_file_manager(d)));
+    app_window_set_ai(w, app_filemgr_agent_assistance(app_desk_file_manager(d)));
+    return app_desk_register(d, w);
+}
+fn app_desk_open_agent_manager(d): i64 {
+    var nm = app_agentmgr_name(app_desk_get_agent_manager(d));
+    var w = app_window_new(app_desk_next_id(d), AppType.APP_AGENT_MANAGER, nm);
+    app_window_set_ai(w, 1);
+    return app_desk_register(d, w);
+}
+fn app_desk_open_audit_viewer(d): i64 {
+    var nm = app_auditview_name(load64(d + AD_AUDIT_VIEW));
+    var w = app_window_new(app_desk_next_id(d), AppType.APP_AUDIT_VIEWER, nm);
+    app_window_set_ai(w, 1);
+    return app_desk_register(d, w);
+}
+fn app_desk_open_model_manager(d): i64 {
+    var nm = app_modelmgr_name(app_desk_get_model_manager(d));
+    var w = app_window_new(app_desk_next_id(d), AppType.APP_MODEL_MANAGER, nm);
+    app_window_set_ai(w, 1);
+    return app_desk_register(d, w);
+}
+# get_browser: id==0 -> first (firefox); else scan by id; miss/empty -> 0.
+fn app_desk_get_browser(d, id): i64 {
+    var v = load64(d + AD_BROWSERS);
+    if (vec_len(v) == 0) { return 0; }
+    if (id == 0) { return vec_get(v, 0); }
+    var i = 0;
+    while (i < vec_len(v)) {
+        var b = vec_get(v, i);
+        if (streq(app_browser_id(b), id) == 1) { return b; }
+        i = i + 1;
+    }
+    return 0;
+}
+# open_web_browser: resolve browser (0 == default); miss -> NotFound/0. Title is
+# "{name} — {url}" (em-dash) when a url is given, else the browser name. 1280x900.
+fn app_desk_open_web_browser(d, browser_id, url): i64 {
+    var b = app_desk_get_browser(d, browser_id);
+    if (b == 0) { store64(d + AD_LAST_ERR, AppErr.APP_ERR_NOT_FOUND); return 0; }
+    var title = app_browser_name(b);
+    if (url != 0) { title = app_cstr_cat3(app_browser_name(b), " — ", url); }
+    var w = app_window_new(app_desk_next_id(d), AppType.APP_WEB_BROWSER, title);
+    app_window_set_width(w, 1280);
+    app_window_set_height(w, 900);
+    return app_desk_register(d, w);
+}
+# open_shruti: title "Shruti — {path}" (em-dash) with a session path, else "Shruti".
+# Type is APP_CUSTOM (no Shruti AppType). 1400x900, ai=1.
+fn app_desk_open_shruti(d, session_path): i64 {
+    var title = "Shruti";
+    if (session_path != 0) { title = app_cstr_cat3("Shruti", " — ", session_path); }
+    var w = app_window_new(app_desk_next_id(d), AppType.APP_CUSTOM, title);
+    var cfg = app_shruti_cfg(app_desk_get_shruti(d));
+    app_window_set_width(w, app_shrutisurf_width(cfg));
+    app_window_set_height(w, app_shrutisurf_height(cfg));
+    app_window_set_ai(w, 1);
+    return app_desk_register(d, w);
+}
+# close_window: remove the window with that id; Ok(0) unconditionally (even if absent).
+fn app_desk_close_window(d, window_id): i64 {
+    var v = load64(d + AD_OPEN_WINDOWS);
+    var i = 0;
+    while (i < vec_len(v)) {
+        if (app_window_id(vec_get(v, i)) == window_id) {
+            vec_remove(v, i);
+        } else {
+            i = i + 1;
+        }
+    }
+    return AppErr.APP_OK;
+}
+# get_open_windows: a fresh vec of the live *AppWindow pointers. NOTE: Rust returns
+# .values().cloned() (independent AppWindow copies); the port shares the stored
+# pointers. Unobservable in C1 (no path mutates a window post-open); a future C2/C3
+# caller that mutates a returned handle expecting an isolated snapshot must clone first.
+fn app_desk_get_open_windows(d): i64 {
+    var out = vec_new();
+    var v = load64(d + AD_OPEN_WINDOWS);
+    var i = 0;
+    while (i < vec_len(v)) {
+        vec_push(out, vec_get(v, i));
+        i = i + 1;
+    }
+    return out;
+}

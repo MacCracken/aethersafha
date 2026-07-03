@@ -68,7 +68,10 @@ symbols), each compiling + smoke-tested. Driven by the parity workflow.
   — the compositor's own job; incremental, one protocol object at a time.
 
 ### M4 — Apps + capture + plugins (v0.4.0)
-- `apps.cyr` (Terminal allowlist exec, FileManager, AgentManager, ModelManager, AuditViewer).
+- **`apps.cyr` 🚧 C1 done** — app framework (`AppWindow`/`DesktopApplications`) + data-model
+  apps (FileManager, AgentManager, AuditViewer, ModelManager) + WebBrowser/Shruti configs +
+  the Terminal allowlist/basename security logic; 125-assertion test. Process-spawn (C2) +
+  fs/net effect bodies (C3) deferred.
 - **`screen_capture.cyr` ✅** — permission model + rate-limit + secure-mode auth + history
   ring buffer + full/region/window capture + byte-exact RAW/BMP/PNG encoders; 90-assertion
   parity test.
