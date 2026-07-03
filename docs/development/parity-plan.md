@@ -13,7 +13,7 @@
 | Core: geom, window, main | — | ✅ done, runs on bhumi |
 | Leaf: theme_bridge, gestures, accessibility, ai_features, shell, security_ui | ~6900 | **structural** parity + smoke tests; behavioral tests + wiring pending (Bite B) |
 | Leaf: shell_integration, plugin_host | 516 + 848 | ⬜ not ported (Bite B1) |
-| Apps | 2986 | **C1 ✅** framework + data-model apps + aggregate (125 assertions); C2 (exec spawn) + C3 (fs/net) pending |
+| Apps | 2986 | **C1+C2 ✅** framework + data-model apps + aggregate + Terminal spawn (133 assertions); C3 (fs/net) pending |
 | Capture / recording | 1299 + 938 | **✅ Bite D done** — `screen_capture` (D1) + `screen_recording` (D2) ported + tested |
 | HUD widgets | ~1990 | ⬜ not ported (Bite E) |
 | **Wayland protocol** (types/protocol/server/popups) | ~3360 | ⬜ not ported — from scratch in Cyrius (Bite F) |
@@ -72,9 +72,12 @@ Rust: `apps.rs` (2986). Re-sliced by effect-danger during scoping:
   (8 WebBrowser configs, Shruti, Terminal allowlist + **basename-strip** path-traversal
   neutralisation + pre-spawn validation). Effect bodies stubbed to clean-env fallback.
   `tests/apps.tcyr` (125 assertions). Standalone; compositor wiring is follow-on.
-- **C2** ➡️ (security-critical): the process-spawn bodies — Terminal `execute_command`
-  spawn, WebBrowser/Shruti `launch` — routed through the kavach/mehman sandbox seam
-  (`src/foreign.cyr`). Dedicated review pass; the allowlist + basename logic already landed in C1.
+- **C2 ✅** the process-spawn bodies — Terminal `execute_command` (PATH-resolve the allowlisted
+  bare name, direct fork+execve, capture stdout + real `WEXITSTATUS` → `Ok(stdout)` / WindowError),
+  WebBrowser/Shruti `launch` (is_installed guard → AppNotFound; detached env-injecting spawn).
+  **DIRECT** exec — faithful to Rust's unsandboxed `Command`; the allowlist + basename-strip are the
+  control. Routing through the kavach sandbox is an **ADR-gated future enhancement**, not parity.
+  `tests/apps.tcyr` runs real `echo`/`true`/`false`. fs/net effect bodies remain C3.
 - **C3** 🔗: the filesystem/network effect bodies — `list_agents` (agent-socket scan),
   `get_logs` (audit-log parse), model-gateway `list/download/select`.
 - **Accept**: C1 — data model + security logic tested ✅; C2/C3 — real effects sandboxed + tested.

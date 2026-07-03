@@ -186,6 +186,20 @@ fn app_substr(s, start, len): i64 {
     store8(out + len, 0);
     return out;
 }
+# app_cstr_contains(hay, needle): 1 if needle occurs as a substring of hay, else 0.
+fn app_cstr_contains(hay, needle): i64 {
+    var hl = strlen(hay);
+    var nl = strlen(needle);
+    if (nl == 0) { return 1; }
+    var i = 0;
+    while ((i + nl) <= hl) {
+        var j = 0;
+        while ((j < nl) && (load8(hay + i + j) == load8(needle + j))) { j = j + 1; }
+        if (j == nl) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
 # app_is_ws(ch): the ASCII subset of Rust split_whitespace() — space, tab, LF, VT,
 # FF, CR. (Full Unicode whitespace is out of scope for shell input.)
 fn app_is_ws(ch): i64 {
@@ -196,6 +210,115 @@ fn app_is_ws(ch): i64 {
     if (ch == 12) { return 1; }
     if (ch == 13) { return 1; }
     return 0;
+}
+
+# ---------------------------------------------------------------------------
+# C2 process seam — DIRECT fork+execve, faithful to Rust's unsandboxed
+# tokio::process::Command (the allowlist is the security control, in Rust and
+# here; sandboxing would be an ADR-gated enhancement beyond parity). Distinct
+# from lib/process.cyr's exec_capture (discards exit status + child stderr) and
+# exec_env (waits — wrong for a detached GUI launch).
+# ---------------------------------------------------------------------------
+# app_which_path(name): the first of the 4 standard dirs where `name` exists, as a
+# full-path cstr, or 0. execve has no $PATH; Rust runs the bare name via execvp.
+fn app_which_path(name): i64 {
+    var dirs = vec_new();
+    vec_push(dirs, "/usr/local/bin/");
+    vec_push(dirs, "/usr/bin/");
+    vec_push(dirs, "/bin/");
+    vec_push(dirs, "/usr/sbin/");
+    var i = 0;
+    while (i < vec_len(dirs)) {
+        var full = app_cstr_cat3(vec_get(dirs, i), name, "");
+        if (path_exists(full) != 0) { return full; }   # F_OK existence (like Rust Path::exists)
+        i = i + 1;
+    }
+    return 0;
+}
+# app_term_run_capture(argv, buf, buflen, status_out): fork+execve argv[0] with the
+# inherited environ, capture stdout into buf (stderr -> /dev/null), wait, and write
+# the child's real WEXITSTATUS to *status_out. -> bytes captured, or -1 on fork fail.
+fn app_term_run_capture(argv_vec, buf, buflen, status_out): i64 {
+    var argc = vec_len(argv_vec);
+    if (argc < 1) { return 0 - 1; }
+    var cmd = vec_get(argv_vec, 0);
+    var argv = alloc((argc + 1) * 8);
+    var avi = 0;
+    while (avi < argc) { store64(argv + avi * 8, vec_get(argv_vec, avi)); avi = avi + 1; }
+    store64(argv + argc * 8, 0);
+    var envp = _read_environ_envp();
+    if (envp == 0) { envp = alloc(8); store64(envp, 0); }   # empty-env fallback (proc unreadable)
+    var pipefd[16];
+    sys_pipe(&pipefd);
+    var rfd = load32(&pipefd);
+    var wfd = load32(&pipefd + 4);
+    var pid = sys_fork();
+    if (pid < 0) { sys_close(rfd); sys_close(wfd); return 0 - 1; }
+    if (pid == 0) {
+        sys_close(rfd);
+        sys_dup2(wfd, 1);
+        sys_close(wfd);
+        var devnull = sys_open("/dev/null", 1, 0);
+        if (devnull >= 0) { sys_dup2(devnull, 2); sys_close(devnull); }
+        sys_execve(cmd, argv, envp);
+        sys_exit(127);
+    }
+    sys_close(wfd);
+    var total = 0;
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = sys_read(rfd, buf + total, buflen - total);
+        if (n <= 0) { rgo = 0; } else { total = total + n; if (total >= buflen) { rgo = 0; } }
+    }
+    sys_close(rfd);
+    var stbuf[4];
+    sys_waitpid(pid, &stbuf, 0);
+    var st = load32(&stbuf);
+    if (WIFEXITED(st) == 1) { store64(status_out, WEXITSTATUS(st)); } else { store64(status_out, 0 - 1); }
+    return total;
+}
+# app_merge_env(overrides): a fresh NULL-terminated envp = the inherited environ +
+# each "KEY=VALUE" cstr in the `overrides` vec (0 == none). Rust cmd.env augments.
+fn app_merge_env(overrides): i64 {
+    var parent = _read_environ_envp();
+    var count = 0;
+    if (parent != 0) {
+        while (load64(parent + count * 8) != 0) { count = count + 1; }
+    }
+    var nover = 0;
+    if (overrides != 0) { nover = vec_len(overrides); }
+    var out = alloc((count + nover + 1) * 8);
+    var i = 0;
+    while (i < count) { store64(out + i * 8, load64(parent + i * 8)); i = i + 1; }
+    var j = 0;
+    while (j < nover) { store64(out + (count + j) * 8, vec_get(overrides, j)); j = j + 1; }
+    store64(out + (count + nover) * 8, 0);
+    return out;
+}
+# app_spawn_detached(argv, envp): fire-and-forget fork+execve argv[0] with all stdio
+# redirected to /dev/null and NO waitpid. -> child pid (>0), or -1 on fork failure.
+fn app_spawn_detached(argv_vec, envp): i64 {
+    var argc = vec_len(argv_vec);
+    if (argc < 1) { return 0 - 1; }
+    var cmd = vec_get(argv_vec, 0);
+    var argv = alloc((argc + 1) * 8);
+    var avi = 0;
+    while (avi < argc) { store64(argv + avi * 8, vec_get(argv_vec, avi)); avi = avi + 1; }
+    store64(argv + argc * 8, 0);
+    var pid = sys_fork();
+    if (pid < 0) { return 0 - 1; }
+    if (pid == 0) {
+        var devnull = sys_open("/dev/null", 2, 0);
+        if (devnull >= 0) {
+            sys_dup2(devnull, 0);
+            sys_dup2(devnull, 1);
+            sys_dup2(devnull, 2);
+            sys_close(devnull);
+        }
+        sys_execve(cmd, argv, envp);
+        sys_exit(127);
+    }
+    return pid;
 }
 
 # ---------------------------------------------------------------------------
@@ -496,8 +619,26 @@ fn app_browser_midori(): i64 { return app_browser_new("midori", "Midori", "/usr/
 fn app_browser_default(): i64   { return app_browser_firefox(); }
 # is_installed: real fs probe of the binary path (test only asserts no-crash).
 fn app_browser_is_installed(p): i64 {
-    if (file_exists(app_browser_binary(p)) != 0) { return 1; }
+    if (path_exists(app_browser_binary(p)) != 0) { return 1; }   # F_OK, like Rust Path::exists()
     return 0;
+}
+# app_browser_launch(p, url): is_installed guard -> AppNotFound; else a detached spawn
+# with this browser's env override (url arg if given, else the default_url). NOTE: the
+# detached-spawn body is untested (no browser binary in CI) — only the guard is exercised.
+fn app_browser_launch(p, url): i64 {
+    if (app_browser_is_installed(p) == 0) { return AppErr.APP_ERR_NOT_FOUND; }
+    var argv = vec_new();
+    vec_push(argv, app_browser_binary(p));
+    if (url != 0) {
+        vec_push(argv, url);
+    } else {
+        if (app_browser_default_url(p) != 0) { vec_push(argv, app_browser_default_url(p)); }
+    }
+    var ov = vec_new();
+    if (app_browser_env(p) != 0) { vec_push(ov, app_browser_env(p)); }
+    var pid = app_spawn_detached(argv, app_merge_env(ov));
+    if (pid < 0) { return AppErr.APP_ERR_WINDOW; }
+    return AppErr.APP_OK;
 }
 
 # ---------------------------------------------------------------------------
@@ -535,6 +676,39 @@ fn app_shruti_binary(p)    { return load64(p + SHR_BINARY); }
 fn app_shruti_data_dir(p)  { return load64(p + SHR_DATADIR); }
 fn app_shruti_cfg(p)       { return load64(p + SHR_CFG); }
 fn app_shruti_is_running(p){ return load64(p + SHR_RUNNING); }
+fn app_shruti_is_installed(p): i64 {
+    if (path_exists(app_shruti_binary(p)) != 0) { return 1; }   # F_OK, like Rust Path::exists()
+    return 0;
+}
+# app_shruti_launch(p, session_path): is_installed guard -> AppNotFound; else a detached
+# spawn with the Wayland/PipeWire env; is_running=1 only on success. NOTE: the
+# detached-spawn body is untested (no shruti binary in CI) — only the guard runs.
+fn app_shruti_launch(p, session_path): i64 {
+    if (app_shruti_is_installed(p) == 0) { return AppErr.APP_ERR_NOT_FOUND; }
+    var argv = vec_new();
+    vec_push(argv, app_shruti_binary(p));
+    if (session_path != 0) {
+        vec_push(argv, "--open");
+        vec_push(argv, session_path);
+    }
+    var cfg = app_shruti_cfg(p);
+    var ov = vec_new();
+    vec_push(ov, "GDK_BACKEND=wayland");
+    vec_push(ov, "QT_QPA_PLATFORM=wayland");
+    vec_push(ov, app_cstr_cat3("SHRUTI_DATA_DIR=", app_shruti_data_dir(p), ""));
+    vec_push(ov, app_cstr_cat3("PIPEWIRE_NODE=", app_shrutisurf_pw_node(cfg), ""));
+    var wbuf = alloc(24);
+    fmt_int_buf(app_shrutisurf_width(cfg), wbuf);
+    vec_push(ov, app_cstr_cat3("SHRUTI_WINDOW_WIDTH=", wbuf, ""));
+    var hbuf = alloc(24);
+    fmt_int_buf(app_shrutisurf_height(cfg), hbuf);
+    vec_push(ov, app_cstr_cat3("SHRUTI_WINDOW_HEIGHT=", hbuf, ""));
+    if (app_shrutisurf_exclusive(cfg) != 0) { vec_push(ov, "SHRUTI_EXCLUSIVE_AUDIO=1"); }
+    var pid = app_spawn_detached(argv, app_merge_env(ov));
+    if (pid < 0) { return AppErr.APP_ERR_WINDOW; }
+    store64(p + SHR_RUNNING, 1);
+    return AppErr.APP_OK;
+}
 
 # ---------------------------------------------------------------------------
 # TerminalApp — pure part: allowlist + basename-strip + pre-spawn checks.
@@ -603,27 +777,50 @@ fn app_term_is_allowed(program): i64 {
 }
 # execute_command (C1 pre-spawn checks only): empty/whitespace -> WindowError;
 # non-allowlisted first token -> PermDenied; allowed -> Ok (spawn is C2).
-fn app_term_execute_command(p, command): i64 {
+# app_term_execute_command(p, command, out): run the command (C2). Pre-spawn checks:
+# empty/whitespace -> APP_ERR_WINDOW; non-allowlisted first token -> APP_ERR_PERM_DENIED.
+# Then resolve the allowlisted bare name to a full path and fork+execve it, capturing
+# stdout. exit 0 -> APP_OK with *out = the stdout cstr; non-zero exit / spawn failure ->
+# APP_ERR_WINDOW. On any error *out = 0. (Rust returns Result<String, AppError>.)
+fn app_term_execute_command(p, command, out): i64 {
     var len = strlen(command);
     # skip leading whitespace to the first token (split_whitespace semantics)
     var start = 0;
     while (start < len) {
         if (app_is_ws(load8(command + start)) == 1) { start = start + 1; } else { break; }
     }
-    if (start >= len) { return AppErr.APP_ERR_WINDOW; }   # empty / whitespace-only
-    # token runs to the next whitespace
+    if (start >= len) { store64(out, 0); return AppErr.APP_ERR_WINDOW; }   # empty / whitespace-only
+    # first token runs to the next whitespace
     var end = start;
     while (end < len) {
         if (app_is_ws(load8(command + end)) == 1) { break; }
         end = end + 1;
     }
-    var tlen = end - start;
-    var tok = alloc(tlen + 1);
-    var j = 0;
-    while (j < tlen) { store8(tok + j, load8(command + start + j)); j = j + 1; }
-    store8(tok + tlen, 0);
-    if (app_term_is_allowed(tok) == 0) { return AppErr.APP_ERR_PERM_DENIED; }
-    # PARITY (C2): allowed -> spawn the bare basename + args, capture stdout.
+    var tok = app_substr(command, start, end - start);
+    if (app_term_is_allowed(tok) == 0) { store64(out, 0); return AppErr.APP_ERR_PERM_DENIED; }
+    # --- C2 spawn: resolve the bare basename to a full path (execve has no $PATH) ---
+    var full = app_which_path(app_term_basename(tok));
+    if (full == 0) { store64(out, 0); return AppErr.APP_ERR_WINDOW; }   # not found == spawn error
+    # argv = [full, <remaining whitespace-split tokens>]
+    var argv = vec_new();
+    vec_push(argv, full);
+    var i = end;
+    while (i < len) {
+        while ((i < len) && (app_is_ws(load8(command + i)) == 1)) { i = i + 1; }
+        if (i >= len) { break; }
+        var ts = i;
+        while ((i < len) && (app_is_ws(load8(command + i)) == 0)) { i = i + 1; }
+        vec_push(argv, app_substr(command, ts, i - ts));
+    }
+    var buf = alloc(65536);
+    var status = 0;
+    # cap the read at 65535 so there is always room for the NUL terminator below —
+    # else a command whose stdout fills the buffer would make store8(buf+n,0) overrun.
+    var n = app_term_run_capture(argv, buf, 65535, &status);
+    if (n < 0) { store64(out, 0); return AppErr.APP_ERR_WINDOW; }   # fork failure
+    if (status != 0) { store64(out, 0); return AppErr.APP_ERR_WINDOW; }   # non-zero exit -> WindowError
+    store8(buf + n, 0);   # NUL-terminate the captured stdout (n <= 65535, in-bounds)
+    store64(out, buf);
     return AppErr.APP_OK;
 }
 

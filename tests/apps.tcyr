@@ -160,22 +160,36 @@ fn main() {
     assert_eq(app_term_is_allowed("echo/./"), 1, "echo/./ -> echo allowed");
     assert_eq(app_term_is_allowed("cat/."), 1, "cat/. -> cat allowed");
     assert_eq(app_term_is_allowed("sudo/"), 0, "sudo/ still denied");
-    assert_eq(app_term_execute_command(tm, ""), AppErr.APP_ERR_WINDOW, "empty command -> WindowError");
-    assert_eq(app_term_execute_command(tm, "   "), AppErr.APP_ERR_WINDOW, "whitespace command -> WindowError");
-    assert_eq(app_term_execute_command(tm, "badcmd"), AppErr.APP_ERR_PERM_DENIED, "non-allowlisted denied");
-    assert_eq(app_term_execute_command(tm, "echo hi"), AppErr.APP_OK, "allowlisted echo passes pre-checks");
+    var tout = alloc(8);
+    assert_eq(app_term_execute_command(tm, "", tout), AppErr.APP_ERR_WINDOW, "empty command -> WindowError");
+    assert_eq(app_term_execute_command(tm, "   ", tout), AppErr.APP_ERR_WINDOW, "whitespace command -> WindowError");
+    assert_eq(app_term_execute_command(tm, "badcmd", tout), AppErr.APP_ERR_PERM_DENIED, "non-allowlisted denied");
+    # C2: the allowlisted command really runs; exit 0 -> Ok with captured stdout
+    assert_eq(app_term_execute_command(tm, "echo hi", tout), AppErr.APP_OK, "echo runs -> Ok");
+    assert_eq(app_cstr_contains(load64(tout), "hi"), 1, "echo stdout contains 'hi'");
+    assert_eq(app_term_execute_command(tm, "true", tout), AppErr.APP_OK, "true (exit 0) -> Ok");
+    assert_eq(app_term_execute_command(tm, "false", tout), AppErr.APP_ERR_WINDOW, "false (exit 1) -> WindowError");
     # split_whitespace() parity: newline is a delimiter, not part of the token
     var nlcmd = alloc(4);
     store8(nlcmd + 0, 10);
     store8(nlcmd + 1, 108);
     store8(nlcmd + 2, 115);
     store8(nlcmd + 3, 0);
-    assert_eq(app_term_execute_command(tm, nlcmd), AppErr.APP_OK, "newline-led 'ls' allowed");
+    assert_eq(app_term_execute_command(tm, nlcmd, tout), AppErr.APP_OK, "newline-led 'ls' runs -> Ok");
     var wsonly = alloc(4);
     store8(wsonly + 0, 10);
     store8(wsonly + 1, 10);
     store8(wsonly + 2, 0);
-    assert_eq(app_term_execute_command(tm, wsonly), AppErr.APP_ERR_WINDOW, "newlines-only -> WindowError");
+    assert_eq(app_term_execute_command(tm, wsonly, tout), AppErr.APP_ERR_WINDOW, "newlines-only -> WindowError");
+    # C2 launch guards: an absent binary -> AppNotFound (the detached spawn body is
+    # untested — firefox happens to be a present stub here, shruti/DAW is absent).
+    var bogus = app_browser_new("bogus", "Bogus", "/nonexistent/bin/no-such-browser", 0, 0);
+    assert_eq(app_browser_is_installed(bogus), 0, "absent browser binary -> 0");
+    assert_eq(app_browser_launch(bogus, 0), AppErr.APP_ERR_NOT_FOUND, "absent browser -> AppNotFound");
+    var shl = app_shruti_new();
+    assert_eq(app_shruti_is_installed(shl), 0, "shruti binary absent -> 0");
+    assert_eq(app_shruti_launch(shl, 0), AppErr.APP_ERR_NOT_FOUND, "shruti absent -> AppNotFound");
+    assert_eq(app_shruti_is_running(shl), 0, "shruti stays not-running after failed launch");
 
     # -----------------------------------------------------------------------
     test_group("apps — DesktopApplications aggregate");

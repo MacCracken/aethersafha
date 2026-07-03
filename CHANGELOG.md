@@ -4,22 +4,32 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.5.0] - 2026-07-03 — built-in apps (Bite C1 + C2)
 
 ### Added
 
-- **Built-in apps — first slice (`src/apps.cyr`, Bite C1)** — port of the app framework
-  + pure data-model apps from Rust `apps.rs` (2986 lines): `AppError` / `AppType` /
-  `AppWindow`, the **`DesktopApplications`** aggregate (open / close / list windows,
-  live sub-app getters), and the data-model apps **FileManager**, **AgentManager**,
-  **AuditViewer**, **ModelManager**, plus the 8 **WebBrowser** factory configs,
-  **Shruti**, and the **Terminal** security surface — the 30-program allowlist +
-  path-traversal-neutralising **basename-strip** + pre-spawn command validation. The
-  process-spawning bodies (Terminal exec, browser / Shruti launch) and the
-  filesystem / network effect bodies (`list_agents`, `get_logs`, the model gateway) are
-  stubbed to their clean-env fallback and deferred to **C2** (a dedicated
-  security-reviewed spawn sub-bite) / **C3** (fs+net). `tests/apps.tcyr`
-  (**125 assertions**, all green). Standalone; compositor wiring is follow-on.
+- **Built-in apps (`src/apps.cyr`, Bite C1 + C2)** — port of the app framework, data-model
+  apps, and the process-spawn bodies from Rust `apps.rs` (2986 lines).
+  - **C1** — `AppError` / `AppType` / `AppWindow`, the **`DesktopApplications`** aggregate
+    (open / close / list windows, live sub-app getters), the data-model apps
+    **FileManager** / **AgentManager** / **AuditViewer** / **ModelManager**, the 8
+    **WebBrowser** factory configs, **Shruti**, and the **Terminal** security surface — the
+    30-program allowlist + `Path::file_name()`-faithful **basename-strip** (path-traversal
+    neutralisation) + `split_whitespace` tokenizer.
+  - **C2** — the real **process spawn**: `Terminal.execute_command` resolves the allowlisted
+    bare name via a PATH search, fork+execve's it (direct + unsandboxed like Rust — the
+    allowlist is the security control), captures stdout, and maps the real `WEXITSTATUS` to
+    `Ok(stdout)` / `WindowError`; `WebBrowser` / `Shruti` `launch` guard on `is_installed`
+    then detached-spawn with a merged (inherited + override) environment.
+  The filesystem / network effect bodies (`list_agents`, `get_logs`, the model gateway) remain
+  stubbed to their clean-env fallback, deferred to **C3**. `tests/apps.tcyr`
+  (**133 assertions** — incl. real `echo` / `true` / `false` execution + launch guards; all
+  green). Standalone; compositor wiring is follow-on.
+
+### Changed
+
+- **Toolchain `6.3.42` → `6.3.43`** — matches the installed `cycc`; refreshes the vendored
+  `lib/` snapshot.
 
 ## [0.4.2] - 2026-07-03 — screen capture + recording (Bite D)
 

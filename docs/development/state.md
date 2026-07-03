@@ -5,20 +5,21 @@
 
 ## Version
 
-**0.4.2** (2026-07-03) — **Bite D (screen capture + recording) complete**: `screen_capture`
-(D1 — per-agent permission model + sliding-window rate limiting + full-screen/region/window
-framebuffer capture + byte-exact RAW/BMP/PNG encoders; 90 assertions) and `screen_recording`
-(D2 — recording sessions + start/capture/pause/resume/stop state machine + frame ring buffer,
-built on D1; 72 assertions). Also: mehman `0.3.1` → `1.0.0`; toolchain `6.3.40` → `6.3.42`.
+**0.5.0** (2026-07-03) — **Bite C (built-in apps) — C1 + C2**: the app framework
+(`AppError`/`AppType`/`AppWindow` + the `DesktopApplications` aggregate), the data-model apps
+(FileManager, AgentManager, AuditViewer, ModelManager), and the **Terminal** security surface +
+**real process spawn** (30-program allowlist + `Path::file_name` basename-strip; direct
+fork+execve capturing stdout + real exit status → `Ok(stdout)`/`WindowError`; browser/Shruti
+detached launch); 133 assertions. Toolchain `6.3.42` → `6.3.43`.
 
-Built on **0.4.1** (foreign guest surface presentation), **0.4.0** (mehman foreign-app
-hosting + kavach-sandboxed guest execution — the XWayland-successor path), 0.3.0 (kashi fonts,
-B3 desktop wiring), and the 0.2.0 parity milestone. Ported from Rust via `cyrius port`; 27,207
-lines preserved at `rust-old/` as the parity oracle.
+Built on **0.4.2** (screen capture + recording, Bite D), **0.4.1** (foreign guest surface
+presentation), **0.4.0** (mehman foreign-app hosting + kavach-sandboxed guest execution), 0.3.0
+(kashi fonts, B3 desktop wiring), and the 0.2.0 parity milestone. Ported from Rust via
+`cyrius port`; 27,207 lines preserved at `rust-old/` as the parity oracle.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.3.42` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.3.43` (in `cyrius.cyml [package].cyrius`)
 - Build: `cyrius lib sync --full && cyrius deps && cyrius build src/main.cyr build/aethersafha`
   (the `lib sync --full` is required — the declared stdlib set exceeds the incremental pin).
 
@@ -58,11 +59,11 @@ lines preserved at `rust-old/` as the parity oracle.
     machine, a per-session frame ring buffer (cap 100; `frame_count`/`total_bytes` count
     all frames ever), one-recording-per-agent, and `capture_frame` → `scap_mgr_capture` →
     `RecordedFrame`. Caps use `-1 == None` (so `Some(0)` is distinct). Not yet wired.
-  - **Apps (M4/Bite C1, standalone)** — `apps` framework (`AppError`/`AppType`/`AppWindow`
-    + the `DesktopApplications` aggregate: open/close/list windows, live sub-app getters)
-    + data-model apps (FileManager, AgentManager, AuditViewer, ModelManager) + 8 WebBrowser
-    factory configs + Shruti + the **Terminal** allowlist + path-traversal basename-strip.
-    Process-spawn (C2) and fs/net effect bodies (C3) stubbed to clean-env fallback. Not wired.
+  - **Apps (M4/Bite C1+C2, standalone)** — `apps` framework (`AppError`/`AppType`/`AppWindow`
+    + the `DesktopApplications` aggregate) + data-model apps (FileManager, AgentManager,
+    AuditViewer, ModelManager) + 8 WebBrowser configs + Shruti + the **Terminal** (allowlist +
+    `Path::file_name` basename-strip + **real fork+execve spawn** capturing stdout + exit status;
+    browser/Shruti detached launch). fs/net effect bodies (C3) stubbed to clean-env fallback. Not wired.
 
 ## Tests
 
@@ -73,8 +74,8 @@ lines preserved at `rust-old/` as the parity oracle.
   (90 — permissions / rate-limit / secure-mode / region-clamp / window / history +
   RAW/BMP/PNG encoder checksums), `screen_recording` (72 — session lifecycle / state
   machine / frame + duration limits / ring buffer / one-per-agent / queries). apps:
-  `apps` (125 — framework / data-model apps / aggregate open-close-list / Terminal
-  allowlist + basename security). Behavioral per-module: `theme_bridge`, `gestures`,
+  `apps` (133 — framework / data-model apps / aggregate / Terminal allowlist + basename +
+  real echo/true/false spawn / launch guards). Behavioral per-module: `theme_bridge`, `gestures`,
   `accessibility`, `ai_features`, `shell`, `security_ui`, `shell_integration`, `plugin_host`.
 - Run: `cyrius tests tests/` (or a single `cyrius test tests/<file>.tcyr`).
 
@@ -111,10 +112,9 @@ _None yet (top-level application, `publish = false`)._
 
 ## Next
 
-**Bite C started** — **C1** (app framework + data-model apps + aggregate + the Terminal
-security logic) is ported + tested (125 assertions). Next on the apps track: **C2** (the
-process-spawn bodies — Terminal exec, browser/Shruti launch — through the kavach/mehman
-sandbox seam, a security-reviewed sub-bite) and **C3** (the fs/net effect bodies —
+**Bite C — C1+C2 done** — the app framework + data model + aggregate + the **Terminal spawn**
+(real fork+execve, allowlist-gated, capturing stdout + exit status) + browser/Shruti detached
+launch (133 assertions). Next on the apps track: **C3** (the fs/net effect bodies —
 agent-socket scan, audit-log parse, model gateway). Also complete + awaiting wiring: Bite D
 (capture + recording). Other large unported layers: HUD widgets (Bite E), the native
 Wayland protocol surface (Bite F, highest-risk). **mehman track (Bite G)**: consume 1.0.0's
