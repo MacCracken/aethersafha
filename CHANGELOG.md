@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.4.2] - 2026-07-03 — screen capture + recording (Bite D)
 
 ### Added
 
@@ -18,19 +18,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (hand-rolled Adler-32 + CRC-32 + zlib STORED deflate). `tests/screen_capture.tcyr`
   mirrors the Rust unit tests (**90 assertions**, all green). Not yet wired into the
   compositor surface (follow-on, like the M2 leaf modules).
+- **Screen recording (`src/screen_recording.cyr`, Bite D2)** — port of Rust
+  `screen_recording.rs`, built on D1: a `ScreenRecordingManager` with recording
+  **sessions** (config: target / format / frame-interval / `max_frames` / `max_duration`),
+  a start → capture-frame → pause/resume → stop **state machine**, a per-session frame
+  **ring buffer** (cap 100; `frame_count`/`total_bytes` count all frames ever), and
+  one-recording-per-agent enforcement. `capture_frame` delegates to D1's
+  `scap_mgr_capture` and wraps the result as a `RecordedFrame`; `max_frames` /
+  `max_duration` are hard pre-capture limits and caps use `-1 == None` (so `Some(0)` is
+  distinct). `tests/screen_recording.tcyr` mirrors the 22 Rust unit tests
+  (**72 assertions**, all green). Standalone; **Bite D (capture + recording) complete**.
 
 ### Changed
 
 - **mehman `0.3.1` → `1.0.0`** — API-compatible for the consumed
   `types`/`surface`/`sandbox` modules (the 1.0.0 delta only *adds* mehman's per-ABI
   `guest`/`shim` modules). Foreign capture + presentation unchanged and still green.
-- **Toolchain `6.3.40` → `6.3.41`** — matches the installed `cycc`; refreshes the
+- **Toolchain `6.3.40` → `6.3.42`** — matches the installed `cycc`; refreshes the
   vendored `lib/` snapshot (sankoch 2.4.9).
-- **`scripts/version-bump.sh`** rewritten for the Cyrius layout — bumps `VERSION` +
-  `cyrius.cyml [package].version` (was stale Rust-era: it targeted a nonexistent root
-  `Cargo.toml`, ran `cargo check`, and never touched `cyrius.cyml` — so it would crash
-  mid-run and leave the manifest un-bumped, failing the release CI) with a post-write
-  consistency self-check.
 
 ## [0.4.1] - 2026-07-03 — foreign guest surface presentation
 
@@ -57,6 +62,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   hosted window's surface buffer** (the M2 handoff).
 - **mehman `0.2.1` → `0.3.1`** (0.4.0 shipped 0.2.1; `0.3.0` added the capture API,
   `0.3.1` is the current pin); **toolchain `6.3.39` → `6.3.40`.**
+- **`scripts/version-bump.sh`** rewritten for the Cyrius layout — bumps `VERSION` +
+  `cyrius.cyml [package].version` with a post-write self-check (the stale Rust-era script
+  targeted a nonexistent root `Cargo.toml`, ran `cargo check`, and never touched
+  `cyrius.cyml`, so it would crash mid-run and leave the manifest un-bumped).
 
 ## [0.4.0] - 2026-07-03 — mehman foreign-app hosting
 

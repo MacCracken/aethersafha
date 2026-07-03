@@ -71,7 +71,10 @@ symbols), each compiling + smoke-tested. Driven by the parity workflow.
 - `apps.cyr` (Terminal allowlist exec, FileManager, AgentManager, ModelManager, AuditViewer).
 - **`screen_capture.cyr` ✅** — permission model + rate-limit + secure-mode auth + history
   ring buffer + full/region/window capture + byte-exact RAW/BMP/PNG encoders; 90-assertion
-  parity test (standalone, wiring follow-on). `screen_recording.cyr` (ring buffer) next.
+  parity test.
+- **`screen_recording.cyr` ✅** — recording sessions + start/capture/pause/resume/stop state
+  machine + per-session frame ring buffer (on D1); 72-assertion parity test. Both standalone
+  (compositor wiring is follow-on).
 - `plugin_host.cyr` (Unix-socket IPC, sandbox profiles, capability grants).
 - HUD widgets (`hud/{gpu,domain,crew}_status.cyr`) — HTTP polling of daimon MCP.
 

@@ -1,0 +1,380 @@
+# aethersafha — screen recording model (Bite D2)
+# Parity: rust-old/src/screen_recording.rs
+#   (ScreenRecordingManager, RecordingSession(+Inner), RecordedFrame,
+#    RecordingConfig, RecordingState, RecordingError)
+#
+# Builds on Bite D1 (src/screen_capture.cyr): capture_frame delegates to
+# scap_mgr_capture and wraps the returned *ScapResult in a RecordedFrame.
+#
+# Substitutions (same convention as screen_capture.cyr): Uuid RecordingId ->
+# monotonic i64 (0==nil), minted by THIS manager; DateTime -> i64 epoch secs
+# (caller passes `now`); String -> cstr char*; Vec/VecDeque -> stdlib vec;
+# HashMap -> cstr-keyed map (agent -> id); Result<_,Error> -> i64 code (0==Ok);
+# Option<u32/u64> caps -> i64 with -1 == None (Some(0) is DISTINCT). tracing dropped.
+#
+# Design choices reconciled from the port spec:
+#  - RecordingSession + RecordingSessionInner MERGE into one SrecSess (frames slot).
+#  - sessions live in a *vec (linear scan by id) — the compositor/history idiom;
+#    avoids an integer-keyed hashmap (only cstr keys are proven in this codebase).
+#  - target is FLATTENED into the config (kind,a,b,c,d) and handed to scap_mgr_capture.
+#  - `fb` is threaded into capture_frame (the ported compositor has no front buffer;
+#    same caller-owns-fb seam as D1 — see screen_capture.cyr's structural note).
+#
+# LIBRARY MODULE: definitions only, no main / no top-level statements.
+
+# ---------------------------------------------------------------------------
+# Value enums.
+# ---------------------------------------------------------------------------
+enum SrecState {        # RecordingState
+    SREC_STATE_IDLE      = 0;   # created-not-started (defined for parity; never assigned)
+    SREC_STATE_RECORDING = 1;   # initial state after start_recording
+    SREC_STATE_PAUSED    = 2;
+    SREC_STATE_STOPPED   = 3;   # terminal
+}
+enum SrecErr {          # RecordingError -> i64 (0 == Ok)
+    SREC_OK                    = 0;
+    SREC_ERR_SECURE_MODE       = 1;   # SecureModeActive
+    SREC_ERR_PERM_DENIED       = 2;   # PermissionDenied(agent)
+    SREC_ERR_SESSION_NOT_FOUND = 3;   # SessionNotFound — also capture/pause/resume/stop on a wrong state
+    SREC_ERR_ALREADY_RECORDING = 4;   # AlreadyRecording(agent's existing id)
+    SREC_ERR_MAX_FRAMES        = 5;   # MaxFramesReached
+    SREC_ERR_MAX_DURATION      = 6;   # MaxDurationReached
+    SREC_ERR_CAPTURE           = 7;   # CaptureError — the D1 ScapErr stays in scap_mgr_last_err
+    SREC_ERR_NO_FRAMES         = 8;   # NoFramesAvailable
+}
+enum SrecCap {
+    SREC_MAX_RING_BUFFER_FRAMES = 100;   # VecDeque ring cap (const MAX_RING_BUFFER_FRAMES)
+}
+
+# ---------------------------------------------------------------------------
+# Offset enums (heap layouts; 8-byte slots).
+# ---------------------------------------------------------------------------
+enum SrecCfgOff {       # RecordingConfig (target flattened inline)
+    SREC_C_TKIND       = 0;    # ScapKind (default FULLSCREEN=0)
+    SREC_C_TA          = 8;    # target a: Window surface_id / Region x
+    SREC_C_TB          = 16;   # target b: Region y
+    SREC_C_TC          = 24;   # target c: Region w
+    SREC_C_TD          = 32;   # target d: Region h
+    SREC_C_INTERVAL_MS = 40;   # frame_interval_ms (STORED, never read; default 100)
+    SREC_C_MAX_FRAMES  = 48;   # i64, -1 == None (unlimited); default 600
+    SREC_C_MAX_DUR     = 56;   # i64 secs, -1 == None; default 60; Some(0) stored as 0
+    SREC_C_FORMAT      = 64;   # ScapFmt (default SCAP_FMT_PNG=1)
+    SREC_C_AGENT_ID    = 72;   # cstr, 0 == None
+    SREC_C_SZ          = 80;
+}
+enum SrecFrameOff {     # RecordedFrame
+    SREC_F_SEQUENCE    = 0;    # zero-based; == frame_count at capture time
+    SREC_F_CAPTURED_AT = 8;    # i64 epoch secs (from CaptureResult)
+    SREC_F_WIDTH       = 16;
+    SREC_F_HEIGHT      = 24;
+    SREC_F_DATA        = 32;   # byte ptr (scap_result_data); may be 0
+    SREC_F_DATA_SIZE   = 40;   # byte count
+    SREC_F_SZ          = 48;
+}
+enum SrecSessOff {      # RecordingSession (+ Inner merged: frames inline)
+    SREC_S_ID          = 0;    # i64 RecordingId
+    SREC_S_CONFIG      = 8;    # *SrecCfg
+    SREC_S_STATE       = 16;   # SrecState (init RECORDING)
+    SREC_S_STARTED_AT  = 24;   # i64 epoch secs
+    SREC_S_FRAME_COUNT = 32;   # ALL frames ever (incl. ring-evicted)
+    SREC_S_TOTAL_BYTES = 40;   # sum of data_size over ALL frames
+    SREC_S_AGENT_ID    = 48;   # cstr, 0 == None
+    SREC_S_FRAMES      = 56;   # *vec of *SrecFrame (index 0 == oldest); ring cap 100
+    SREC_S_SZ          = 64;
+}
+enum SrecMgrOff {       # ScreenRecordingManager
+    SREC_M_SESSIONS = 0;    # *vec of *SrecSess (linear-scanned by id)
+    SREC_M_ACTIVE   = 8;    # map (cstr-keyed): agent_id -> i64 RecordingId
+    SREC_M_NEXT_ID  = 16;   # i64 monotonic RecordingId, starts 1
+    SREC_M_SZ       = 24;
+}
+
+# ---------------------------------------------------------------------------
+# RecordingConfig.
+# ---------------------------------------------------------------------------
+fn srec_cfg_new(tkind, ta, tb, tc, td, interval_ms, max_frames, max_dur, fmt, agent): i64 {
+    var c = alloc(SREC_C_SZ);
+    if (c == 0) { return 0; }
+    store64(c + SREC_C_TKIND, tkind);
+    store64(c + SREC_C_TA, ta);
+    store64(c + SREC_C_TB, tb);
+    store64(c + SREC_C_TC, tc);
+    store64(c + SREC_C_TD, td);
+    store64(c + SREC_C_INTERVAL_MS, interval_ms);
+    store64(c + SREC_C_MAX_FRAMES, max_frames);
+    store64(c + SREC_C_MAX_DUR, max_dur);
+    store64(c + SREC_C_FORMAT, fmt);
+    store64(c + SREC_C_AGENT_ID, agent);
+    return c;
+}
+# srec_cfg_default(): RecordingConfig::default() — FullScreen, 100ms, 600 frames,
+# 60s, PNG, no agent.
+fn srec_cfg_default(): i64 {
+    return srec_cfg_new(ScapKind.SCAP_KIND_FULLSCREEN, 0, 0, 0, 0, 100, 600, 60,
+    ScapFmt.SCAP_FMT_PNG, 0);
+}
+# srec_cfg_agent(agent): default config owned by an agent.
+fn srec_cfg_agent(agent): i64 {
+    var c = srec_cfg_default();
+    store64(c + SREC_C_AGENT_ID, agent);
+    return c;
+}
+fn srec_cfg_tkind(c)      { return load64(c + SREC_C_TKIND); }
+fn srec_cfg_ta(c)         { return load64(c + SREC_C_TA); }
+fn srec_cfg_tb(c)         { return load64(c + SREC_C_TB); }
+fn srec_cfg_tc(c)         { return load64(c + SREC_C_TC); }
+fn srec_cfg_td(c)         { return load64(c + SREC_C_TD); }
+fn srec_cfg_interval(c)   { return load64(c + SREC_C_INTERVAL_MS); }
+fn srec_cfg_max_frames(c) { return load64(c + SREC_C_MAX_FRAMES); }
+fn srec_cfg_max_dur(c)    { return load64(c + SREC_C_MAX_DUR); }
+fn srec_cfg_format(c)     { return load64(c + SREC_C_FORMAT); }
+fn srec_cfg_agent_id(c)   { return load64(c + SREC_C_AGENT_ID); }
+
+# ---------------------------------------------------------------------------
+# RecordedFrame.
+# ---------------------------------------------------------------------------
+fn srec_frame_new(seq, captured_at, width, height, data, data_size): i64 {
+    var f = alloc(SREC_F_SZ);
+    if (f == 0) { return 0; }
+    store64(f + SREC_F_SEQUENCE, seq);
+    store64(f + SREC_F_CAPTURED_AT, captured_at);
+    store64(f + SREC_F_WIDTH, width);
+    store64(f + SREC_F_HEIGHT, height);
+    store64(f + SREC_F_DATA, data);
+    store64(f + SREC_F_DATA_SIZE, data_size);
+    return f;
+}
+fn srec_frame_sequence(f)    { return load64(f + SREC_F_SEQUENCE); }
+fn srec_frame_captured_at(f) { return load64(f + SREC_F_CAPTURED_AT); }
+fn srec_frame_width(f)       { return load64(f + SREC_F_WIDTH); }
+fn srec_frame_height(f)      { return load64(f + SREC_F_HEIGHT); }
+fn srec_frame_data(f)        { return load64(f + SREC_F_DATA); }
+fn srec_frame_data_size(f)   { return load64(f + SREC_F_DATA_SIZE); }
+
+# ---------------------------------------------------------------------------
+# RecordingSession (frames inline).
+# ---------------------------------------------------------------------------
+fn srec_sess_new(id, cfg, state, started_at, frame_count, total_bytes, agent): i64 {
+    var s = alloc(SREC_S_SZ);
+    if (s == 0) { return 0; }
+    store64(s + SREC_S_ID, id);
+    store64(s + SREC_S_CONFIG, cfg);
+    store64(s + SREC_S_STATE, state);
+    store64(s + SREC_S_STARTED_AT, started_at);
+    store64(s + SREC_S_FRAME_COUNT, frame_count);
+    store64(s + SREC_S_TOTAL_BYTES, total_bytes);
+    store64(s + SREC_S_AGENT_ID, agent);
+    store64(s + SREC_S_FRAMES, vec_new());
+    return s;
+}
+fn srec_sess_id(s)          { return load64(s + SREC_S_ID); }
+fn srec_sess_config(s)      { return load64(s + SREC_S_CONFIG); }
+fn srec_sess_state(s)       { return load64(s + SREC_S_STATE); }
+fn srec_sess_started_at(s)  { return load64(s + SREC_S_STARTED_AT); }
+fn srec_sess_frame_count(s) { return load64(s + SREC_S_FRAME_COUNT); }
+fn srec_sess_total_bytes(s) { return load64(s + SREC_S_TOTAL_BYTES); }
+fn srec_sess_agent_id(s)    { return load64(s + SREC_S_AGENT_ID); }
+fn srec_sess_frames(s)      { return load64(s + SREC_S_FRAMES); }
+
+# ---------------------------------------------------------------------------
+# ScreenRecordingManager.
+# ---------------------------------------------------------------------------
+fn srec_mgr_new(): i64 {
+    var m = alloc(SREC_M_SZ);
+    if (m == 0) { return 0; }
+    store64(m + SREC_M_SESSIONS, vec_new());
+    store64(m + SREC_M_ACTIVE, map_new());
+    store64(m + SREC_M_NEXT_ID, 1);
+    return m;
+}
+fn srec_mgr_sessions(m) { return load64(m + SREC_M_SESSIONS); }
+fn srec_mgr_active(m)   { return load64(m + SREC_M_ACTIVE); }
+fn srec_mgr_next_id(m): i64 {
+    var id = load64(m + SREC_M_NEXT_ID);
+    store64(m + SREC_M_NEXT_ID, id + 1);
+    return id;
+}
+# srec_mgr_find(m, id): the session with that id, or 0 (linear scan).
+fn srec_mgr_find(m, id): i64 {
+    var ss = srec_mgr_sessions(m);
+    var i = 0;
+    while (i < vec_len(ss)) {
+        var s = vec_get(ss, i);
+        if (srec_sess_id(s) == id) { return s; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# srec_mgr_start_recording(m, comp, scap, cfg, now, err_out): begin a recording.
+# Guards in order: secure-mode, then (agent only) permission, then one-per-agent.
+# -> the new RecordingId (>0), or 0 with *err_out set to a SrecErr.
+fn srec_mgr_start_recording(m, comp, scap, cfg, now, err_out): i64 {
+    if (comp_secure_mode(comp) != 0) {
+        store64(err_out, SrecErr.SREC_ERR_SECURE_MODE);
+        return 0;
+    }
+    var agent = srec_cfg_agent_id(cfg);
+    if (agent != 0) {
+        if (scap_mgr_get_permission(scap, agent) == 0) {
+            store64(err_out, SrecErr.SREC_ERR_PERM_DENIED);
+            return 0;
+        }
+        if (map_get(srec_mgr_active(m), agent) != 0) {
+            store64(err_out, SrecErr.SREC_ERR_ALREADY_RECORDING);
+            return 0;
+        }
+    }
+    var id = srec_mgr_next_id(m);
+    var sess = srec_sess_new(id, cfg, SrecState.SREC_STATE_RECORDING, now, 0, 0, agent);
+    vec_push(srec_mgr_sessions(m), sess);
+    if (agent != 0) { map_set(srec_mgr_active(m), agent, id); }
+    store64(err_out, SrecErr.SREC_OK);
+    return id;
+}
+
+# srec_mgr_capture_frame(m, comp, scap, fb, id, now, err_out): capture one frame
+# into the session (state machine hot spot). Guards: session exists + Recording,
+# then max_frames (hard error), then max_duration (hard error), then the D1
+# capture. Appends a RecordedFrame (ring-evicting the oldest at cap 100) and bumps
+# frame_count/total_bytes (which count ALL frames ever). -> *SrecFrame or 0/err.
+fn srec_mgr_capture_frame(m, comp, scap, fb, id, now, err_out): i64 {
+    var sess = srec_mgr_find(m, id);
+    if (sess == 0) {
+        store64(err_out, SrecErr.SREC_ERR_SESSION_NOT_FOUND);
+        return 0;
+    }
+    if (srec_sess_state(sess) != SrecState.SREC_STATE_RECORDING) {
+        store64(err_out, SrecErr.SREC_ERR_SESSION_NOT_FOUND);
+        return 0;
+    }
+    var cfg = srec_sess_config(sess);
+    var maxf = srec_cfg_max_frames(cfg);
+    if ((maxf >= 0) && (srec_sess_frame_count(sess) >= maxf)) {
+        store64(err_out, SrecErr.SREC_ERR_MAX_FRAMES);
+        return 0;
+    }
+    var maxd = srec_cfg_max_dur(cfg);
+    if (maxd >= 0) {
+        # Rust tests `elapsed as u64 >= max_secs`, so a backward clock (now <
+        # started_at) wraps the signed elapsed to a huge value and FIRES the guard.
+        # Match that: treat negative elapsed as over-limit (not zero-elapsed).
+        var elapsed = now - srec_sess_started_at(sess);
+        if ((elapsed < 0) || (elapsed >= maxd)) {
+            store64(err_out, SrecErr.SREC_ERR_MAX_DURATION);
+            return 0;
+        }
+    }
+    var tk = srec_cfg_tkind(cfg);
+    var a = srec_cfg_ta(cfg);
+    var b = srec_cfg_tb(cfg);
+    var c = srec_cfg_tc(cfg);
+    var dd = srec_cfg_td(cfg);
+    var fmt = srec_cfg_format(cfg);
+    var ag = srec_cfg_agent_id(cfg);
+    var result = scap_mgr_capture(scap, comp, fb, tk, a, b, c, dd, fmt, ag, now);
+    if (result == 0) {
+        store64(err_out, SrecErr.SREC_ERR_CAPTURE);
+        return 0;
+    }
+    var seq = srec_sess_frame_count(sess);
+    var frame = srec_frame_new(seq, scap_result_captured_at(result), scap_result_width(result),
+    scap_result_height(result), scap_result_data(result), scap_result_data_size(result));
+    store64(sess + SREC_S_FRAME_COUNT, seq + 1);
+    store64(sess + SREC_S_TOTAL_BYTES, srec_sess_total_bytes(sess) + srec_frame_data_size(frame));
+    var frames = srec_sess_frames(sess);
+    if (vec_len(frames) >= SrecCap.SREC_MAX_RING_BUFFER_FRAMES) { vec_remove(frames, 0); }
+    vec_push(frames, frame);
+    store64(err_out, SrecErr.SREC_OK);
+    return frame;
+}
+
+# srec_mgr_pause_recording(m, id): Recording -> Paused. -> SrecErr code.
+fn srec_mgr_pause_recording(m, id): i64 {
+    var sess = srec_mgr_find(m, id);
+    if (sess == 0) { return SrecErr.SREC_ERR_SESSION_NOT_FOUND; }
+    if (srec_sess_state(sess) != SrecState.SREC_STATE_RECORDING) { return SrecErr.SREC_ERR_SESSION_NOT_FOUND; }
+    store64(sess + SREC_S_STATE, SrecState.SREC_STATE_PAUSED);
+    return SrecErr.SREC_OK;
+}
+
+# srec_mgr_resume_recording(m, id): Paused -> Recording. -> SrecErr code.
+fn srec_mgr_resume_recording(m, id): i64 {
+    var sess = srec_mgr_find(m, id);
+    if (sess == 0) { return SrecErr.SREC_ERR_SESSION_NOT_FOUND; }
+    if (srec_sess_state(sess) != SrecState.SREC_STATE_PAUSED) { return SrecErr.SREC_ERR_SESSION_NOT_FOUND; }
+    store64(sess + SREC_S_STATE, SrecState.SREC_STATE_RECORDING);
+    return SrecErr.SREC_OK;
+}
+
+# srec_mgr_stop_recording(m, id, err_out): -> Stopped (legal from Recording or
+# Paused; only re-stopping a Stopped session errors). Removes the agent from
+# active. -> the session (*SrecSess) or 0/err.
+fn srec_mgr_stop_recording(m, id, err_out): i64 {
+    var sess = srec_mgr_find(m, id);
+    if (sess == 0) {
+        store64(err_out, SrecErr.SREC_ERR_SESSION_NOT_FOUND);
+        return 0;
+    }
+    if (srec_sess_state(sess) == SrecState.SREC_STATE_STOPPED) {
+        store64(err_out, SrecErr.SREC_ERR_SESSION_NOT_FOUND);
+        return 0;
+    }
+    store64(sess + SREC_S_STATE, SrecState.SREC_STATE_STOPPED);
+    var agent = srec_sess_agent_id(sess);
+    if (agent != 0) { map_delete(srec_mgr_active(m), agent); }
+    store64(err_out, SrecErr.SREC_OK);
+    return sess;
+}
+
+# srec_mgr_get_session(m, id): -> *SrecSess or 0 (None).
+fn srec_mgr_get_session(m, id): i64 { return srec_mgr_find(m, id); }
+
+# srec_mgr_list_sessions(m): fresh vec of every session (active, paused, stopped).
+fn srec_mgr_list_sessions(m): i64 {
+    var out = vec_new();
+    var ss = srec_mgr_sessions(m);
+    var i = 0;
+    while (i < vec_len(ss)) {
+        vec_push(out, vec_get(ss, i));
+        i = i + 1;
+    }
+    return out;
+}
+
+# srec_mgr_get_frames(m, id, since_seq, err_out): frames with sequence strictly >
+# since_seq (since_seq < 0 means all). Oldest->newest order. -> *vec or 0/err.
+fn srec_mgr_get_frames(m, id, since_seq, err_out): i64 {
+    var sess = srec_mgr_find(m, id);
+    if (sess == 0) {
+        store64(err_out, SrecErr.SREC_ERR_SESSION_NOT_FOUND);
+        return 0;
+    }
+    var frames = srec_sess_frames(sess);
+    var out = vec_new();
+    var i = 0;
+    while (i < vec_len(frames)) {
+        var f = vec_get(frames, i);
+        if ((since_seq < 0) || (srec_frame_sequence(f) > since_seq)) { vec_push(out, f); }
+        i = i + 1;
+    }
+    store64(err_out, SrecErr.SREC_OK);
+    return out;
+}
+
+# srec_mgr_get_latest_frame(m, id, err_out): the most recent frame (back of the
+# ring). -> *SrecFrame, or 0 with NO_FRAMES if none / SESSION_NOT_FOUND if absent.
+fn srec_mgr_get_latest_frame(m, id, err_out): i64 {
+    var sess = srec_mgr_find(m, id);
+    if (sess == 0) {
+        store64(err_out, SrecErr.SREC_ERR_SESSION_NOT_FOUND);
+        return 0;
+    }
+    var frames = srec_sess_frames(sess);
+    if (vec_len(frames) == 0) {
+        store64(err_out, SrecErr.SREC_ERR_NO_FRAMES);
+        return 0;
+    }
+    store64(err_out, SrecErr.SREC_OK);
+    return vec_get(frames, vec_len(frames) - 1);
+}

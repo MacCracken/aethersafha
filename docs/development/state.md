@@ -5,31 +5,27 @@
 
 ## Version
 
-**0.4.1** (2026-07-03) — the mehman "swallow" loop is now visible end to end: a hosted
-guest is run + captured **and its stdout is presented as the window's content**
-(`render_desktop_foreign` / `render_foreign_content` + line-aware `draw_text_lines`; the
-desktop tracks hosted foreign apps). mehman `0.2.1` → `0.3.1`; toolchain → `6.3.40`.
+**0.4.2** (2026-07-03) — **Bite D (screen capture + recording) complete**: `screen_capture`
+(D1 — per-agent permission model + sliding-window rate limiting + full-screen/region/window
+framebuffer capture + byte-exact RAW/BMP/PNG encoders; 90 assertions) and `screen_recording`
+(D2 — recording sessions + start/capture/pause/resume/stop state machine + frame ring buffer,
+built on D1; 72 assertions). Also: mehman `0.3.1` → `1.0.0`; toolchain `6.3.40` → `6.3.42`.
 
-Built on **0.4.0** (mehman wired in: foreign-app hosting + kavach-sandboxed guest
-execution — the XWayland-successor path), 0.3.0 (kashi fonts, B3 desktop wiring), and the
-0.2.0 parity milestone. Ported from Rust via `cyrius port`; 27,207 lines preserved at
-`rust-old/` as the parity oracle.
-
-**Unreleased (HEAD)** — **screen_capture** ported (Bite D1: per-agent permission model +
-sliding-window rate limiting + full-screen/region/window framebuffer capture + byte-exact
-RAW/BMP/PNG encoders; 90-assertion parity test). mehman `0.3.1` → `1.0.0`; toolchain
-`6.3.40` → `6.3.41`; `scripts/version-bump.sh` fixed for the Cyrius layout.
+Built on **0.4.1** (foreign guest surface presentation), **0.4.0** (mehman foreign-app
+hosting + kavach-sandboxed guest execution — the XWayland-successor path), 0.3.0 (kashi fonts,
+B3 desktop wiring), and the 0.2.0 parity milestone. Ported from Rust via `cyrius port`; 27,207
+lines preserved at `rust-old/` as the parity oracle.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.3.41` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.3.42` (in `cyrius.cyml [package].cyrius`)
 - Build: `cyrius lib sync --full && cyrius deps && cyrius build src/main.cyr build/aethersafha`
   (the `lib sync --full` is required — the declared stdlib set exceeds the incremental pin).
 
 ## Source
 
 - Rust reference: 27,207 lines at `rust-old/` (frozen, do not edit).
-- Cyrius port: **17 modules**; compiles clean + runs on the bhumi seam.
+- Cyrius port: **18 modules**; compiles clean + runs on the bhumi seam.
   - **Core (M1/Bite A)** — `geom`, `window`, `compositor`, `render`, `input`, `main`.
     compositor: workspaces + context types + move/switch + secure/agent-aware modes
     + window-at-point hit-test; renderer: alpha blend + damage tracking + window
@@ -56,15 +52,23 @@ RAW/BMP/PNG encoders; 90-assertion parity test). mehman `0.3.1` → `1.0.0`; too
     secure-mode authorization + capture-history ring buffer + full-screen/region/window
     capture off a bhumi framebuffer + byte-exact RAW/BMP/PNG encoders (hand-rolled
     Adler-32/CRC-32/zlib-STORED). Not yet wired into the compositor surface.
+  - **Screen recording (M4/Bite D2, standalone)** — `screen_recording`
+    (`ScreenRecordingManager`), built on D1: recording sessions (target/format/interval/
+    `max_frames`/`max_duration`), a start → capture-frame → pause/resume → stop state
+    machine, a per-session frame ring buffer (cap 100; `frame_count`/`total_bytes` count
+    all frames ever), one-recording-per-agent, and `capture_frame` → `scap_mgr_capture` →
+    `RecordedFrame`. Caps use `-1 == None` (so `Some(0)` is distinct). Not yet wired.
 
 ## Tests
 
-- **15 `.tcyr` files, all green.** Core: `aethersafha` (38), `render` (34 — decoration
+- **16 `.tcyr` files, all green.** Core: `aethersafha` (38), `render` (34 — decoration
   hit-test + shell-panel bars + bitmap text pixel test), `input` (13), `leaf_modules`
   (11), `desktop` (15). mehman: `foreign` (23 — guest spec/surface + host-as-window +
   sandboxed run + capture + **presentation pixel test**). capture: `screen_capture`
   (90 — permissions / rate-limit / secure-mode / region-clamp / window / history +
-  RAW/BMP/PNG encoder checksums). Behavioral per-module: `theme_bridge`, `gestures`,
+  RAW/BMP/PNG encoder checksums), `screen_recording` (72 — session lifecycle / state
+  machine / frame + duration limits / ring buffer / one-per-agent / queries).
+  Behavioral per-module: `theme_bridge`, `gestures`,
   `accessibility`, `ai_features`, `shell`, `security_ui`, `shell_integration`, `plugin_host`.
 - Run: `cyrius tests tests/` (or a single `cyrius test tests/<file>.tcyr`).
 
@@ -101,10 +105,10 @@ _None yet (top-level application, `publish = false`)._
 
 ## Next
 
-**Capture track (Bite D)**: D1 `screen_capture` is ported + tested; next is **D2
-`screen_recording`** (938 Rust lines — ring buffer + poll-based streaming state machine,
-depends on D1), then **wiring** capture into the compositor/desktop surface. Other large
-unported layers: built-in apps (Bite C, 2986 lines), the native Wayland protocol surface
-(Bite F). **mehman track**: 1.0.0 now ships the per-ABI `guest`/`shim` modules — consuming
-them (+ real XRGB pixel fidelity beyond the stdout MVP, mehman ADR 0004) is the remaining
-Bite G / M5 work. See [`roadmap.md`](roadmap.md) / [`parity-plan.md`](parity-plan.md).
+**Bite D (capture + recording) complete** — both `screen_capture` (D1) and
+`screen_recording` (D2) are ported + tested; **wiring** them into the compositor/desktop
+surface is the follow-on. Remaining large unported layers: built-in apps (Bite C, 2986
+lines), HUD widgets (Bite E), the native Wayland protocol surface (Bite F, highest-risk).
+**mehman track**: 1.0.0 ships the per-ABI `guest`/`shim` modules — consuming them (+ real
+XRGB pixel fidelity beyond the stdout MVP, mehman ADR 0004) is the remaining Bite G / M5
+work. See [`roadmap.md`](roadmap.md) / [`parity-plan.md`](parity-plan.md).

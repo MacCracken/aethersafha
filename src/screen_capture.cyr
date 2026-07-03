@@ -577,8 +577,8 @@ fn scap_mgr_capture_history(m): i64 { return scap_mgr_history(m); }
 fn scap_mgr_record_history(m, result): i64 {
     var h = scap_mgr_history(m);
     var e = scap_hist_new(scap_result_id(result), scap_result_target(result),
-        scap_result_format(result), scap_result_width(result), scap_result_height(result),
-        scap_result_data_size(result), scap_result_captured_at(result), scap_result_req_agent(result));
+    scap_result_format(result), scap_result_width(result), scap_result_height(result),
+    scap_result_data_size(result), scap_result_captured_at(result), scap_result_req_agent(result));
     if (vec_len(h) >= ScapCap.SCAP_MAX_HISTORY) { vec_remove(h, 0); }
     vec_push(h, e);
     return 0;

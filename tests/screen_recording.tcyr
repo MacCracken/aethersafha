@@ -1,0 +1,264 @@
+# aethersafha — screen_recording BEHAVIORAL parity test (Bite D2).
+# Mirrors rust-old/src/screen_recording.rs #[cfg(test)] mod tests (22 tests).
+# Builds on D1 (screen_capture): each recording captures frames via scap_mgr_capture.
+# Determinism: fns take `now` explicitly; a fixed NOW drives the duration guard.
+include "lib/bhumi.cyr"
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/screen_capture.cyr"
+include "src/screen_recording.cyr"
+
+fn t_ok(x): i64 {
+    if (x != 0) { return 1; }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    var NOW = 1000000000;
+    var err = alloc(8);
+    var fbs = bhumi_fb_new(4, 4);   # small fb — frame counts/state are what we assert
+    bhumi_fb_clear(fbs, 0);
+    var FS = ScapKind.SCAP_KIND_FULLSCREEN;
+    var RAW = ScapFmt.SCAP_FMT_RAW_ARGB;
+    var PNG = ScapFmt.SCAP_FMT_PNG;
+    var REC = SrecState.SREC_STATE_RECORDING;
+    var PAUSED = SrecState.SREC_STATE_PAUSED;
+    var STOPPED = SrecState.SREC_STATE_STOPPED;
+
+    # -----------------------------------------------------------------------
+    test_group("screen_recording — start recording");
+    # test_start_recording (system, default config)
+    var m1 = srec_mgr_new();
+    var c1 = comp_new();
+    var s1 = scap_mgr_new();
+    var id1 = srec_mgr_start_recording(m1, c1, s1, srec_cfg_default(), NOW, err);
+    assert(t_ok(id1), "start returns a recording id");
+    assert_eq(load64(err), SrecErr.SREC_OK, "start ok");
+    var sess1 = srec_mgr_get_session(m1, id1);
+    assert_eq(srec_sess_state(sess1), REC, "initial state Recording");
+    assert_eq(srec_sess_frame_count(sess1), 0, "zero frames at start");
+    # test_start_recording_secure_mode
+    var m2 = srec_mgr_new();
+    var c2 = comp_new();
+    comp_set_secure_mode(c2, 1);
+    var id2 = srec_mgr_start_recording(m2, c2, scap_mgr_new(), srec_cfg_default(), NOW, err);
+    assert_eq(id2, 0, "secure mode blocks start");
+    assert_eq(load64(err), SrecErr.SREC_ERR_SECURE_MODE, "err SECURE_MODE");
+    # test_start_recording_agent_no_permission
+    var m3 = srec_mgr_new();
+    var id3 = srec_mgr_start_recording(m3, comp_new(), scap_mgr_new(), srec_cfg_agent("rogue"), NOW, err);
+    assert_eq(id3, 0, "unpermitted agent blocked");
+    assert_eq(load64(err), SrecErr.SREC_ERR_PERM_DENIED, "err PERM_DENIED");
+    # test_start_recording_agent_with_permission (+ agent_id storage + agent capture path)
+    var good = "good";
+    var m4 = srec_mgr_new();
+    var c4 = comp_new();
+    var s4 = scap_mgr_new();
+    scap_mgr_grant_full_access(s4, good, NOW);
+    var id4 = srec_mgr_start_recording(m4, c4, s4, srec_cfg_agent(good), NOW, err);
+    assert(t_ok(id4), "permitted agent starts");
+    var sess4 = srec_mgr_get_session(m4, id4);
+    assert_eq(srec_sess_state(sess4), REC, "agent session state Recording");
+    assert_eq(srec_sess_agent_id(sess4), good, "agent session stores agent_id");
+    var af = srec_mgr_capture_frame(m4, c4, s4, fbs, id4, NOW, err);
+    assert(t_ok(af), "agent-owned recording captures a frame (D1 re-auth)");
+
+    # -----------------------------------------------------------------------
+    test_group("screen_recording — frame capture");
+    var mc = srec_mgr_new();
+    var cc = comp_new();
+    var sc = scap_mgr_new();
+    var idc = srec_mgr_start_recording(mc, cc, sc, srec_cfg_default(), NOW, err);
+    # test_capture_frame
+    var f0 = srec_mgr_capture_frame(mc, cc, sc, fbs, idc, NOW, err);
+    assert(t_ok(f0), "capture_frame succeeds");
+    assert_eq(load64(err), SrecErr.SREC_OK, "capture ok");
+    assert_eq(srec_frame_sequence(f0), 0, "first frame seq 0");
+    assert_eq(srec_sess_frame_count(srec_mgr_get_session(mc, idc)), 1, "frame_count 1");
+    # frame carries the D1 capture result (fb is 4x4)
+    assert_eq(srec_frame_width(f0), 4, "frame width == fb width");
+    assert_eq(srec_frame_height(f0), 4, "frame height == fb height");
+    assert_eq(srec_frame_captured_at(f0), NOW, "frame captured_at == now");
+    assert(t_ok(srec_frame_data_size(f0)), "frame has encoded data");
+    # test_capture_multiple_frames (4 more -> 5 total, same NOW so elapsed 0 < 60)
+    var i = 0;
+    while (i < 4) {
+        srec_mgr_capture_frame(mc, cc, sc, fbs, idc, NOW, err);
+        i = i + 1;
+    }
+    var mcsess = srec_mgr_get_session(mc, idc);
+    assert_eq(srec_sess_frame_count(mcsess), 5, "5 frames total");
+    assert_eq(srec_sess_total_bytes(mcsess), srec_frame_data_size(f0) * 5, "total_bytes sums frames");
+    # test_capture_frame_session_not_found
+    var fnf = srec_mgr_capture_frame(mc, cc, sc, fbs, 999999, NOW, err);
+    assert_eq(fnf, 0, "capture on missing session -> 0");
+    assert_eq(load64(err), SrecErr.SREC_ERR_SESSION_NOT_FOUND, "err SESSION_NOT_FOUND");
+
+    # -----------------------------------------------------------------------
+    test_group("screen_recording — pause / resume");
+    var mp = srec_mgr_new();
+    var cp = comp_new();
+    var sp = scap_mgr_new();
+    var idp = srec_mgr_start_recording(mp, cp, sp, srec_cfg_default(), NOW, err);
+    srec_mgr_capture_frame(mp, cp, sp, fbs, idp, NOW, err);   # seq 0
+    assert_eq(srec_mgr_pause_recording(mp, idp), SrecErr.SREC_OK, "pause ok");
+    assert_eq(srec_sess_state(srec_mgr_get_session(mp, idp)), PAUSED, "state Paused");
+    var fp = srec_mgr_capture_frame(mp, cp, sp, fbs, idp, NOW, err);
+    assert_eq(fp, 0, "no capture while paused");
+    assert_eq(load64(err), SrecErr.SREC_ERR_SESSION_NOT_FOUND, "paused capture -> SESSION_NOT_FOUND");
+    assert_eq(srec_mgr_resume_recording(mp, idp), SrecErr.SREC_OK, "resume ok");
+    assert_eq(srec_sess_state(srec_mgr_get_session(mp, idp)), REC, "state Recording after resume");
+    var fpr = srec_mgr_capture_frame(mp, cp, sp, fbs, idp, NOW, err);
+    assert(t_ok(fpr), "capture after resume");
+    assert_eq(srec_frame_sequence(fpr), 1, "resumed frame seq 1");
+
+    # -----------------------------------------------------------------------
+    test_group("screen_recording — stop");
+    var mst = srec_mgr_new();
+    var cst = comp_new();
+    var sst = scap_mgr_new();
+    var idst = srec_mgr_start_recording(mst, cst, sst, srec_cfg_default(), NOW, err);
+    srec_mgr_capture_frame(mst, cst, sst, fbs, idst, NOW, err);
+    srec_mgr_capture_frame(mst, cst, sst, fbs, idst, NOW, err);
+    var stopped = srec_mgr_stop_recording(mst, idst, err);
+    assert(t_ok(stopped), "stop returns the session");
+    assert_eq(srec_sess_state(stopped), STOPPED, "state Stopped");
+    assert_eq(srec_sess_frame_count(stopped), 2, "frame_count preserved after stop");
+    # test_stop_already_stopped
+    var restop = srec_mgr_stop_recording(mst, idst, err);
+    assert_eq(restop, 0, "re-stop returns 0");
+    assert_eq(load64(err), SrecErr.SREC_ERR_SESSION_NOT_FOUND, "re-stop -> SESSION_NOT_FOUND");
+
+    # -----------------------------------------------------------------------
+    test_group("screen_recording — frame / duration limits");
+    # test_max_frames_limit (max_frames = 3)
+    var mf = srec_mgr_new();
+    var cf = comp_new();
+    var sf = scap_mgr_new();
+    var idf = srec_mgr_start_recording(mf, cf, sf, srec_cfg_new(FS, 0, 0, 0, 0, 100, 3, 60, RAW, 0), NOW, err);
+    var kk = 0;
+    var okc = 0;
+    while (kk < 3) {
+        if (t_ok(srec_mgr_capture_frame(mf, cf, sf, fbs, idf, NOW, err)) == 1) { okc = okc + 1; }
+        kk = kk + 1;
+    }
+    assert_eq(okc, 3, "3 frames within max_frames");
+    var f4 = srec_mgr_capture_frame(mf, cf, sf, fbs, idf, NOW, err);
+    assert_eq(f4, 0, "4th frame blocked");
+    assert_eq(load64(err), SrecErr.SREC_ERR_MAX_FRAMES, "err MAX_FRAMES");
+    # test_max_duration_limit (max_duration_secs = 0 == Some(0), fires immediately)
+    var md = srec_mgr_new();
+    var cd = comp_new();
+    var sd = scap_mgr_new();
+    var idd = srec_mgr_start_recording(md, cd, sd, srec_cfg_new(FS, 0, 0, 0, 0, 100, 600, 0, RAW, 0), NOW, err);
+    var fdd = srec_mgr_capture_frame(md, cd, sd, fbs, idd, NOW, err);
+    assert_eq(fdd, 0, "max_duration 0 blocks first frame");
+    assert_eq(load64(err), SrecErr.SREC_ERR_MAX_DURATION, "err MAX_DURATION");
+    # clock skew: now < started_at fires MaxDurationReached (Rust u64-cast parity)
+    var msk = srec_mgr_new();
+    var csk = comp_new();
+    var ssk = scap_mgr_new();
+    var idsk = srec_mgr_start_recording(msk, csk, ssk, srec_cfg_default(), NOW, err);
+    var fsk = srec_mgr_capture_frame(msk, csk, ssk, fbs, idsk, NOW - 5, err);
+    assert_eq(fsk, 0, "backward clock (now < started_at) blocks capture");
+    assert_eq(load64(err), SrecErr.SREC_ERR_MAX_DURATION, "clock skew -> MAX_DURATION");
+
+    # -----------------------------------------------------------------------
+    test_group("screen_recording — one recording per agent");
+    var moa = srec_mgr_new();
+    var coa = comp_new();
+    var soa = scap_mgr_new();
+    scap_mgr_grant_full_access(soa, "agent-x", NOW);
+    var ida = srec_mgr_start_recording(moa, coa, soa, srec_cfg_agent("agent-x"), NOW, err);
+    assert(t_ok(ida), "agent-x first recording ok");
+    var idb = srec_mgr_start_recording(moa, coa, soa, srec_cfg_agent("agent-x"), NOW, err);
+    assert_eq(idb, 0, "agent-x second recording blocked");
+    assert_eq(load64(err), SrecErr.SREC_ERR_ALREADY_RECORDING, "err ALREADY_RECORDING");
+    assert_eq(vec_len(srec_mgr_list_sessions(moa)), 1, "still one session");
+
+    # -----------------------------------------------------------------------
+    test_group("screen_recording — session + frame queries");
+    # test_get_session
+    var mq = srec_mgr_new();
+    var idq = srec_mgr_start_recording(mq, comp_new(), scap_mgr_new(), srec_cfg_default(), NOW, err);
+    assert(t_ok(srec_mgr_get_session(mq, idq)), "get_session finds it");
+    assert_eq(srec_sess_id(srec_mgr_get_session(mq, idq)), idq, "get_session returns the right id");
+    assert_eq(srec_mgr_get_session(mq, 999999), 0, "get_session missing -> 0");
+    # test_list_sessions (system + agent-a + agent-b = 3)
+    var ml = srec_mgr_new();
+    var cl = comp_new();
+    var sl = scap_mgr_new();
+    scap_mgr_grant_full_access(sl, "agent-a", NOW);
+    scap_mgr_grant_full_access(sl, "agent-b", NOW);
+    srec_mgr_start_recording(ml, cl, sl, srec_cfg_default(), NOW, err);
+    srec_mgr_start_recording(ml, cl, sl, srec_cfg_agent("agent-a"), NOW, err);
+    srec_mgr_start_recording(ml, cl, sl, srec_cfg_agent("agent-b"), NOW, err);
+    assert_eq(vec_len(srec_mgr_list_sessions(ml)), 3, "three sessions listed");
+    # test_get_frames_since + test_get_frames_all (capture 5 -> seq 0..4)
+    var mg2 = srec_mgr_new();
+    var cg2 = comp_new();
+    var sg2 = scap_mgr_new();
+    var idg = srec_mgr_start_recording(mg2, cg2, sg2, srec_cfg_default(), NOW, err);
+    var j = 0;
+    while (j < 5) {
+        srec_mgr_capture_frame(mg2, cg2, sg2, fbs, idg, NOW, err);
+        j = j + 1;
+    }
+    var since2 = srec_mgr_get_frames(mg2, idg, 2, err);
+    assert_eq(vec_len(since2), 2, "frames since seq 2 -> [3,4]");
+    assert_eq(srec_frame_sequence(vec_get(since2, 0)), 3, "first is seq 3");
+    var allf = srec_mgr_get_frames(mg2, idg, 0 - 1, err);
+    assert_eq(vec_len(allf), 5, "all frames -> 5");
+    # test_get_latest_frame + test_get_latest_frame_empty
+    var latest = srec_mgr_get_latest_frame(mg2, idg, err);
+    assert_eq(srec_frame_sequence(latest), 4, "latest frame seq 4");
+    var me = srec_mgr_new();
+    var ide = srec_mgr_start_recording(me, comp_new(), scap_mgr_new(), srec_cfg_default(), NOW, err);
+    var lf = srec_mgr_get_latest_frame(me, ide, err);
+    assert_eq(lf, 0, "latest of empty -> 0");
+    assert_eq(load64(err), SrecErr.SREC_ERR_NO_FRAMES, "empty -> NO_FRAMES");
+
+    # -----------------------------------------------------------------------
+    test_group("screen_recording — ring buffer + config defaults");
+    # test_frame_ring_buffer (max_frames 150, capture 110 -> ring keeps 100, count 110)
+    var mrb = srec_mgr_new();
+    var crb = comp_new();
+    var srb = scap_mgr_new();
+    var idrb = srec_mgr_start_recording(mrb, crb, srb, srec_cfg_new(FS, 0, 0, 0, 0, 100, 150, 60, RAW, 0), NOW, err);
+    var r = 0;
+    while (r < 110) {
+        srec_mgr_capture_frame(mrb, crb, srb, fbs, idrb, NOW, err);
+        r = r + 1;
+    }
+    var rbsess = srec_mgr_get_session(mrb, idrb);
+    assert_eq(srec_sess_frame_count(rbsess), 110, "frame_count counts all 110");
+    assert_eq(vec_len(srec_sess_frames(rbsess)), SrecCap.SREC_MAX_RING_BUFFER_FRAMES, "ring retains 100");
+    var oldest = srec_mgr_get_frames(mrb, idrb, 0 - 1, err);
+    assert_eq(srec_frame_sequence(vec_get(oldest, 0)), 10, "oldest retained seq 10");
+    assert_eq(srec_frame_sequence(vec_get(oldest, vec_len(oldest) - 1)), 109, "newest retained seq 109");
+    var fsz = srec_frame_data_size(vec_get(oldest, 0));
+    assert_eq(srec_sess_total_bytes(rbsess), fsz * 110, "total_bytes counts all 110 frames");
+    # test_recording_default_config
+    var dc = srec_cfg_default();
+    assert_eq(srec_cfg_tkind(dc), FS, "default target FullScreen");
+    assert_eq(srec_cfg_interval(dc), 100, "default interval 100ms");
+    assert_eq(srec_cfg_max_frames(dc), 600, "default max_frames 600");
+    assert_eq(srec_cfg_max_dur(dc), 60, "default max_duration 60");
+    assert_eq(srec_cfg_format(dc), PNG, "default format PNG");
+    assert_eq(srec_cfg_agent_id(dc), 0, "default agent_id None (0)");
+    # test_system_recording_no_agent
+    var msys = srec_mgr_new();
+    var csys = comp_new();
+    var ssys = scap_mgr_new();
+    var idsys = srec_mgr_start_recording(msys, csys, ssys, srec_cfg_default(), NOW, err);
+    assert(t_ok(idsys), "system recording starts (no agent)");
+    assert_eq(srec_sess_agent_id(srec_mgr_get_session(msys, idsys)), 0, "system session agent_id 0");
+    assert(t_ok(srec_mgr_capture_frame(msys, csys, ssys, fbs, idsys, NOW, err)), "system frame captured");
+
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);

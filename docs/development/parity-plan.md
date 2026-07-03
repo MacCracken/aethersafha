@@ -14,7 +14,7 @@
 | Leaf: theme_bridge, gestures, accessibility, ai_features, shell, security_ui | ~6900 | **structural** parity + smoke tests; behavioral tests + wiring pending (Bite B) |
 | Leaf: shell_integration, plugin_host | 516 + 848 | ⬜ not ported (Bite B1) |
 | Apps | 2986 | ⬜ not ported (Bite C) |
-| Capture / recording | 1299 + 938 | **D1 ✅** `screen_capture` ported + tested; D2 `screen_recording` pending |
+| Capture / recording | 1299 + 938 | **✅ Bite D done** — `screen_capture` (D1) + `screen_recording` (D2) ported + tested |
 | HUD widgets | ~1990 | ⬜ not ported (Bite E) |
 | **Wayland protocol** (types/protocol/server/popups) | ~3360 | ⬜ not ported — from scratch in Cyrius (Bite F) |
 | xwayland → mehman | 823 | ⬜ blocked on mehman (Bite G) |
@@ -78,8 +78,13 @@ Rust: `apps.rs` (2986) — Terminal, FileManager, AgentManager, AuditViewer, Mod
   framebuffer, with byte-exact **raw/BMP/PNG** encoders (real PNG — hand-rolled Adler-32 +
   CRC-32 + zlib STORED — not a stub). `tests/screen_capture.tcyr` (90 assertions). Standalone;
   compositor wiring is follow-on.
-- **D2** `screen_recording` (938): depends on D1 — ring buffer + state machine. Next.
-- **Accept**: permission + rate-limit tested; capture reads the bhumi framebuffer. ✅ (D1)
+- **D2 ✅** `screen_recording` (938) → `src/screen_recording.cyr`: recording sessions
+  (config target/format/interval/`max_frames`/`max_duration`), a start → capture-frame →
+  pause/resume → stop state machine, a per-session frame ring buffer (cap 100), one-
+  recording-per-agent, and `capture_frame` → D1 `scap_mgr_capture` → `RecordedFrame`.
+  `tests/screen_recording.tcyr` (72 assertions). Standalone; wiring follow-on.
+- **Accept**: capture — permission + rate-limit tested, reads the bhumi fb ✅ (D1); recording
+  — lifecycle + limits + ring buffer tested ✅ (D2). **Bite D complete.**
 
 ### Bite E — HUD widgets · ➡️ substrate + 🔁 trio · M
 - **E1** ➡️: HTTP+JSON polling substrate (`lib/http`/sandhi + `lib/bayan`) replacing
