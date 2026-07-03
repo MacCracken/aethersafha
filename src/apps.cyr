@@ -725,7 +725,7 @@ fn app_term_new(): i64 {
 fn app_term_id(p)   { return load64(p + TERM_ID); }
 fn app_term_name(p) { return load64(p + TERM_NAME); }
 fn app_term_ai_integration(p) { return load64(p + TERM_AI); }
-# The 32-entry allowlist (Rust ALLOWED_PROGRAMS).
+# The 30-entry allowlist (Rust ALLOWED_PROGRAMS).
 fn app_term_allowlist(): i64 {
     var v = vec_new();
     vec_push(v, "ls"); vec_push(v, "cat"); vec_push(v, "echo"); vec_push(v, "pwd");
