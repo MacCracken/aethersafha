@@ -4,7 +4,10 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — Cyrius port
+## [0.1.0] - 2026-07-02 — Cyrius port
+
+First release of the Cyrius incarnation of aethersafha. The prior Rust crate is
+frozen at `rust-old/` as the parity oracle (see the pre-port baseline below).
 
 ### Changed
 
@@ -33,9 +36,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Cyrius target, backend binding, and milestone (M1–M5).
 - Toolchain pin advanced to 6.3.36.
 
-## [0.1.0] - 2026-04-01
+### Notes
 
-### Added
+- Structural parity for the M2 leaf batch (compiles + smoke-tested); deeper
+  behavioral parity tests against `rust-old/` are the next increment.
+- Known: agnostik + agnodrm both bundle the shared `ERR_*` module → benign
+  duplicate-symbol warnings ("last wins"). See roadmap "Known cleanup".
+
+## Pre-port Rust baseline - 2026-04-01
+
+_Not a Cyrius release — the extracted Rust crate that the 0.1.0 Cyrius port
+targets for parity. Source frozen at `rust-old/`._
 
 - Initial extraction from `agnosticos/userland/desktop-environment/`
 - Wayland compositor with backend abstraction (`WaylandBackend`)
