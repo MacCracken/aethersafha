@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Screen capture (`src/screen_capture.cyr`, Bite D1)** — port of Rust
+  `screen_capture.rs`: a `ScreenCaptureManager` with a per-agent **permission model**
+  (grant/revoke/list/get, allowed-target kinds, expiry), **sliding-window rate
+  limiting** (per-permission `max_captures_per_minute`), **secure-mode** +
+  system-vs-agent authorization, a **capture-history ring buffer** (cap 100), and
+  full-screen / **region** (clamped, saturating) / **window** capture off a
+  caller-supplied bhumi framebuffer. Includes byte-exact **RAW / BMP / PNG encoders**
+  (hand-rolled Adler-32 + CRC-32 + zlib STORED deflate). `tests/screen_capture.tcyr`
+  mirrors the Rust unit tests (**69 assertions**, all green). Not yet wired into the
+  compositor surface (follow-on, like the M2 leaf modules).
+
+### Changed
+
+- **mehman `0.3.1` → `1.0.0`** — API-compatible for the consumed
+  `types`/`surface`/`sandbox` modules (the 1.0.0 delta only *adds* mehman's per-ABI
+  `guest`/`shim` modules). Foreign capture + presentation unchanged and still green.
+- **Toolchain `6.3.40` → `6.3.41`** — matches the installed `cycc`; refreshes the
+  vendored `lib/` snapshot (sankoch 2.4.9).
+- **`scripts/version-bump.sh`** rewritten for the Cyrius layout — bumps `VERSION` +
+  `cyrius.cyml [package].version` (was stale Rust-era: it targeted a nonexistent root
+  `Cargo.toml`, ran `cargo check`, and never touched `cyrius.cyml` — so it would crash
+  mid-run and leave the manifest un-bumped, failing the release CI) with a post-write
+  consistency self-check.
+
 ## [0.4.1] - 2026-07-03 — foreign guest surface presentation
 
 ### Added

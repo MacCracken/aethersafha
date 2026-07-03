@@ -14,7 +14,7 @@
 | Leaf: theme_bridge, gestures, accessibility, ai_features, shell, security_ui | ~6900 | **structural** parity + smoke tests; behavioral tests + wiring pending (Bite B) |
 | Leaf: shell_integration, plugin_host | 516 + 848 | ⬜ not ported (Bite B1) |
 | Apps | 2986 | ⬜ not ported (Bite C) |
-| Capture / recording | 1299 + 938 | ⬜ not ported (Bite D) |
+| Capture / recording | 1299 + 938 | **D1 ✅** `screen_capture` ported + tested; D2 `screen_recording` pending |
 | HUD widgets | ~1990 | ⬜ not ported (Bite E) |
 | **Wayland protocol** (types/protocol/server/popups) | ~3360 | ⬜ not ported — from scratch in Cyrius (Bite F) |
 | xwayland → mehman | 823 | ⬜ blocked on mehman (Bite G) |
@@ -72,10 +72,14 @@ Rust: `apps.rs` (2986) — Terminal, FileManager, AgentManager, AuditViewer, Mod
 - **Accept**: each app opens as a compositor window; Terminal allowlist enforced + tested.
 
 ### Bite D — Screen capture + recording · 🔗 · M
-- **D1** `screen_capture` (1299): permission model, rate limiting, encode
-  (raw/BMP native; PNG via a ported/stdlib encoder or documented stub).
-- **D2** `screen_recording` (938): depends on D1 — ring buffer + state machine.
-- **Accept**: permission + rate-limit tested; capture reads the bhumi framebuffer.
+- **D1 ✅** `screen_capture` (1299) → `src/screen_capture.cyr`: per-agent permission model,
+  sliding-window rate limiting, secure-mode + system/agent authorization, capture-history
+  ring buffer, and full-screen/region(clamped)/window capture off a caller-supplied bhumi
+  framebuffer, with byte-exact **raw/BMP/PNG** encoders (real PNG — hand-rolled Adler-32 +
+  CRC-32 + zlib STORED — not a stub). `tests/screen_capture.tcyr` (69 assertions). Standalone;
+  compositor wiring is follow-on.
+- **D2** `screen_recording` (938): depends on D1 — ring buffer + state machine. Next.
+- **Accept**: permission + rate-limit tested; capture reads the bhumi framebuffer. ✅ (D1)
 
 ### Bite E — HUD widgets · ➡️ substrate + 🔁 trio · M
 - **E1** ➡️: HTTP+JSON polling substrate (`lib/http`/sandhi + `lib/bayan`) replacing

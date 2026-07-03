@@ -1,0 +1,652 @@
+# aethersafha — screen capture model (Bite D1)
+# Parity: rust-old/src/screen_capture.rs
+#   (ScreenCaptureManager, CapturePermission, CaptureResult, CaptureHistoryEntry,
+#    CaptureTarget/Kind, CaptureFormat, CaptureError + encoders)
+#
+# Convention (same as src/security_ui.cyr): every Rust struct behind
+# Arc<RwLock<..>> becomes a heap object — a named offset enum + alloc(SZ) +
+# load64/store64 accessors. Concurrency wrapper dropped (single-threaded port).
+# Substitutions: Uuid -> monotonic i64 id (0 == nil); DateTime<Utc> -> i64 epoch
+# seconds (caller passes `now`; expires_at Option -> i64, 0 == None); String ->
+# cstr char*; Vec/HashMap -> stdlib vec / cstr-keyed hashmap; Result<_,Error> ->
+# i64 code (0 == Ok). tracing macros dropped (silent).
+#
+# STRUCTURAL DIVERGENCE (parity note): Rust reads pixels from
+# compositor.renderer.front_buffer() sized by compositor.current_output. The
+# ported compositor has no renderer/output, so capture takes a caller-supplied
+# bhumi framebuffer as BOTH the front buffer and the output surface —
+# bhumi_fb_width/height == output dims, bhumi_fb_get == one XRGB pixel. This is
+# the same caller-owns-fb seam already used by src/render.cyr / src/desktop.cyr.
+# Observable behavior (dims, clamping, OOB-black, encoder byte output) matches.
+#
+# LIBRARY MODULE: definitions only, no main / no top-level statements.
+
+# ---------------------------------------------------------------------------
+# Value enums (CaptureFormat / CaptureTargetKind / CaptureError) + caps.
+# ---------------------------------------------------------------------------
+enum ScapFmt {          # CaptureFormat (Rust #[default] == Png)
+    SCAP_FMT_RAW_ARGB = 0;
+    SCAP_FMT_PNG      = 1;   # default
+    SCAP_FMT_BMP      = 2;
+}
+enum ScapKind {         # CaptureTargetKind
+    SCAP_KIND_FULLSCREEN = 0;
+    SCAP_KIND_WINDOW     = 1;
+    SCAP_KIND_REGION     = 2;
+}
+enum ScapErr {          # CaptureError -> i64 (payload strings/ids dropped)
+    SCAP_OK                     = 0;
+    SCAP_ERR_SECURE_MODE        = 1;   # SecureModeActive
+    SCAP_ERR_PERM_DENIED        = 2;   # PermissionDenied(agent)
+    SCAP_ERR_TARGET_NOT_ALLOWED = 3;   # TargetNotAllowed(agent, kind)
+    SCAP_ERR_RATE_LIMIT         = 4;   # RateLimitExceeded(agent, max)
+    SCAP_ERR_PERM_EXPIRED       = 5;   # PermissionExpired(agent)
+    SCAP_ERR_WINDOW_NOT_FOUND   = 6;   # WindowNotFound(surface_id)
+    SCAP_ERR_REGION_OOB         = 7;   # RegionOutOfBounds
+    SCAP_ERR_ENCODING           = 8;   # EncodingError (encode is infallible here)
+}
+enum ScapCap {
+    SCAP_MAX_HISTORY = 100;   # history ring-buffer cap (Rust const MAX_HISTORY)
+}
+
+# ---------------------------------------------------------------------------
+# Offset enums (heap layouts; 8-byte slots).
+# ---------------------------------------------------------------------------
+enum ScapTargetOff {    # flattened CaptureTarget (tag + up to 4 payload scalars)
+    SCAP_T_KIND = 0;    # ScapKind
+    SCAP_T_A    = 8;    # Window: surface_id. Region: x. FullScreen: 0
+    SCAP_T_B    = 16;   # Region: y
+    SCAP_T_C    = 24;   # Region: width
+    SCAP_T_D    = 32;   # Region: height
+    SCAP_T_SZ   = 40;
+}
+enum ScapPermOff {      # CapturePermission
+    SCAP_P_AGENT_ID    = 0;    # cstr
+    SCAP_P_ALLOWED     = 8;    # *vec of ScapKind ints
+    SCAP_P_GRANTED_AT  = 16;   # i64 epoch secs
+    SCAP_P_EXPIRES_AT  = 24;   # i64 epoch secs, 0 == None
+    SCAP_P_MAX_PER_MIN = 32;   # i64 (u32 max_captures_per_minute)
+    SCAP_P_SZ          = 40;
+}
+enum ScapResultOff {    # CaptureResult
+    SCAP_R_ID          = 0;
+    SCAP_R_TARGET      = 8;    # *ScapTarget
+    SCAP_R_FORMAT      = 16;
+    SCAP_R_WIDTH       = 24;
+    SCAP_R_HEIGHT      = 32;
+    SCAP_R_CAPTURED_AT = 40;
+    SCAP_R_DATA        = 48;   # raw byte-buffer ptr (encoded image), 0 == none
+    SCAP_R_DATA_SIZE   = 56;   # byte count
+    SCAP_R_REQ_AGENT   = 64;   # cstr, 0 == None (system capture)
+    SCAP_R_SZ          = 72;
+}
+enum ScapHistOff {      # CaptureHistoryEntry (metadata only, no pixel data)
+    SCAP_H_ID          = 0;
+    SCAP_H_TARGET      = 8;    # *ScapTarget
+    SCAP_H_FORMAT      = 16;
+    SCAP_H_WIDTH       = 24;
+    SCAP_H_HEIGHT      = 32;
+    SCAP_H_DATA_SIZE   = 40;
+    SCAP_H_CAPTURED_AT = 48;
+    SCAP_H_REQ_AGENT   = 56;
+    SCAP_H_SZ          = 64;
+}
+enum ScapMgrOff {       # ScreenCaptureManager
+    SCAP_M_PERMS    = 0;    # map (cstr-keyed): agent_id -> *ScapPerm
+    SCAP_M_RATES    = 8;    # map (cstr-keyed): agent_id -> *vec of i64 epoch-secs
+    SCAP_M_HISTORY  = 16;   # *vec of *ScapHist (index 0 == oldest)
+    SCAP_M_NEXT_ID  = 24;   # i64 monotonic id (Uuid substitute), starts 1
+    SCAP_M_LAST_ERR = 32;   # i64 ScapErr of the last scap_mgr_capture (query after a 0 return)
+    SCAP_M_SZ       = 40;
+}
+enum ScapBufOff {       # encoder output: byte pointer + length
+    SCAP_BUF_PTR = 0;
+    SCAP_BUF_LEN = 8;
+    SCAP_BUF_SZ  = 16;
+}
+enum ScapPixOff {       # framebuffer read result: flat i64 pixel array + dims
+    SCAP_PX_PTR = 0;    # alloc(w*h*8); pixels[y*w+x] = 0x00RRGGBB
+    SCAP_PX_W   = 8;
+    SCAP_PX_H   = 16;
+    SCAP_PX_SZ  = 24;
+}
+
+# ---------------------------------------------------------------------------
+# Small integer helpers (prefixed to avoid stdlib collisions).
+# ---------------------------------------------------------------------------
+fn scap_min(a, b): i64 { if (a < b) { return a; } return b; }
+fn scap_max(a, b): i64 { if (a > b) { return a; } return b; }
+fn scap_sat_sub(a, b): i64 { if (b >= a) { return 0; } return a - b; }
+
+# ---------------------------------------------------------------------------
+# CaptureTarget value object.
+# ---------------------------------------------------------------------------
+fn scap_target_new(kind, a, b, c, d): i64 {
+    var t = alloc(SCAP_T_SZ);
+    if (t == 0) { return 0; }
+    store64(t + SCAP_T_KIND, kind);
+    store64(t + SCAP_T_A, a);
+    store64(t + SCAP_T_B, b);
+    store64(t + SCAP_T_C, c);
+    store64(t + SCAP_T_D, d);
+    return t;
+}
+fn scap_target_fullscreen(): i64 { return scap_target_new(ScapKind.SCAP_KIND_FULLSCREEN, 0, 0, 0, 0); }
+fn scap_target_window(surface_id): i64 { return scap_target_new(ScapKind.SCAP_KIND_WINDOW, surface_id, 0, 0, 0); }
+fn scap_target_region(x, y, w, h): i64 { return scap_target_new(ScapKind.SCAP_KIND_REGION, x, y, w, h); }
+fn scap_target_kind(t)       { return load64(t + SCAP_T_KIND); }
+fn scap_target_surface_id(t) { return load64(t + SCAP_T_A); }
+fn scap_target_x(t)          { return load64(t + SCAP_T_A); }
+fn scap_target_y(t)          { return load64(t + SCAP_T_B); }
+fn scap_target_width(t)      { return load64(t + SCAP_T_C); }
+fn scap_target_height(t)     { return load64(t + SCAP_T_D); }
+
+# scap_kind_matches(kind, target_kind): CaptureTargetKind::matches — int equality.
+fn scap_kind_matches(kind, target_kind): i64 {
+    if (kind == target_kind) { return 1; }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# CapturePermission.
+# ---------------------------------------------------------------------------
+fn scap_perm_new(agent_id, allowed, granted_at, expires_at, max_per_min): i64 {
+    var p = alloc(SCAP_P_SZ);
+    if (p == 0) { return 0; }
+    if (allowed == 0) { allowed = vec_new(); }
+    store64(p + SCAP_P_AGENT_ID, agent_id);
+    store64(p + SCAP_P_ALLOWED, allowed);
+    store64(p + SCAP_P_GRANTED_AT, granted_at);
+    store64(p + SCAP_P_EXPIRES_AT, expires_at);
+    store64(p + SCAP_P_MAX_PER_MIN, max_per_min);
+    return p;
+}
+fn scap_perm_agent_id(p)        { return load64(p + SCAP_P_AGENT_ID); }
+fn scap_perm_allowed_targets(p) { return load64(p + SCAP_P_ALLOWED); }
+fn scap_perm_granted_at(p)      { return load64(p + SCAP_P_GRANTED_AT); }
+fn scap_perm_expires_at(p)      { return load64(p + SCAP_P_EXPIRES_AT); }
+fn scap_perm_max_per_min(p)     { return load64(p + SCAP_P_MAX_PER_MIN); }
+
+# scap_perm_is_expired(p, now): Rust `expires_at.is_some() && now > expires` —
+# strict >, so now == expires_at is still valid.
+fn scap_perm_is_expired(p, now): i64 {
+    var exp = scap_perm_expires_at(p);
+    if ((exp != 0) && (now > exp)) { return 1; }
+    return 0;
+}
+# scap_perm_allowed_has(p, kind): membership scan over allowed_targets.
+fn scap_perm_allowed_has(p, kind): i64 {
+    var allowed = scap_perm_allowed_targets(p);
+    var i = 0;
+    while (i < vec_len(allowed)) {
+        if (vec_get(allowed, i) == kind) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+# scap_allowed_all(): a fresh vec of all three target kinds (grant_full_access).
+fn scap_allowed_all(): i64 {
+    var v = vec_new();
+    vec_push(v, ScapKind.SCAP_KIND_FULLSCREEN);
+    vec_push(v, ScapKind.SCAP_KIND_WINDOW);
+    vec_push(v, ScapKind.SCAP_KIND_REGION);
+    return v;
+}
+
+# ---------------------------------------------------------------------------
+# CaptureResult + CaptureHistoryEntry + encoder buffer + pixel source.
+# ---------------------------------------------------------------------------
+fn scap_result_new(id, target, fmt, width, height, data, data_size, captured_at, agent): i64 {
+    var r = alloc(SCAP_R_SZ);
+    if (r == 0) { return 0; }
+    store64(r + SCAP_R_ID, id);
+    store64(r + SCAP_R_TARGET, target);
+    store64(r + SCAP_R_FORMAT, fmt);
+    store64(r + SCAP_R_WIDTH, width);
+    store64(r + SCAP_R_HEIGHT, height);
+    store64(r + SCAP_R_CAPTURED_AT, captured_at);
+    store64(r + SCAP_R_DATA, data);
+    store64(r + SCAP_R_DATA_SIZE, data_size);
+    store64(r + SCAP_R_REQ_AGENT, agent);
+    return r;
+}
+fn scap_result_id(r)          { return load64(r + SCAP_R_ID); }
+fn scap_result_target(r)      { return load64(r + SCAP_R_TARGET); }
+fn scap_result_format(r)      { return load64(r + SCAP_R_FORMAT); }
+fn scap_result_width(r)       { return load64(r + SCAP_R_WIDTH); }
+fn scap_result_height(r)      { return load64(r + SCAP_R_HEIGHT); }
+fn scap_result_captured_at(r) { return load64(r + SCAP_R_CAPTURED_AT); }
+fn scap_result_data(r)        { return load64(r + SCAP_R_DATA); }
+fn scap_result_data_size(r)   { return load64(r + SCAP_R_DATA_SIZE); }
+fn scap_result_req_agent(r)   { return load64(r + SCAP_R_REQ_AGENT); }
+
+fn scap_hist_new(id, target, fmt, width, height, data_size, captured_at, agent): i64 {
+    var h = alloc(SCAP_H_SZ);
+    if (h == 0) { return 0; }
+    store64(h + SCAP_H_ID, id);
+    store64(h + SCAP_H_TARGET, target);
+    store64(h + SCAP_H_FORMAT, fmt);
+    store64(h + SCAP_H_WIDTH, width);
+    store64(h + SCAP_H_HEIGHT, height);
+    store64(h + SCAP_H_DATA_SIZE, data_size);
+    store64(h + SCAP_H_CAPTURED_AT, captured_at);
+    store64(h + SCAP_H_REQ_AGENT, agent);
+    return h;
+}
+fn scap_hist_id(h)          { return load64(h + SCAP_H_ID); }
+fn scap_hist_target(h)      { return load64(h + SCAP_H_TARGET); }
+fn scap_hist_format(h)      { return load64(h + SCAP_H_FORMAT); }
+fn scap_hist_width(h)       { return load64(h + SCAP_H_WIDTH); }
+fn scap_hist_height(h)      { return load64(h + SCAP_H_HEIGHT); }
+fn scap_hist_data_size(h)   { return load64(h + SCAP_H_DATA_SIZE); }
+fn scap_hist_captured_at(h) { return load64(h + SCAP_H_CAPTURED_AT); }
+fn scap_hist_req_agent(h)   { return load64(h + SCAP_H_REQ_AGENT); }
+
+fn scap_buf_new(ptr, len): i64 {
+    var b = alloc(SCAP_BUF_SZ);
+    if (b == 0) { return 0; }
+    store64(b + SCAP_BUF_PTR, ptr);
+    store64(b + SCAP_BUF_LEN, len);
+    return b;
+}
+fn scap_buf_ptr(b)   { return load64(b + SCAP_BUF_PTR); }
+fn scap_buf_len(b)   { return load64(b + SCAP_BUF_LEN); }
+fn scap_buf_at(b, i) { return load8(load64(b + SCAP_BUF_PTR) + i); }
+
+# ---------------------------------------------------------------------------
+# Encoders — pure byte arithmetic on alloc'd buffers. Pixel logical value is
+# 0x00RRGGBB (bhumi XRGB; alpha byte always 0), matching Rust's u32 ARGB with a=0.
+# ---------------------------------------------------------------------------
+
+# Adler-32 (RFC 1950). scap_adler32("") == 1, scap_adler32("Wikipedia") == 0x11E60398.
+fn scap_adler32(ptr, len): i64 {
+    var a = 1;
+    var b = 0;
+    var i = 0;
+    while (i < len) {
+        a = (a + load8(ptr + i)) % 65521;
+        b = (b + a) % 65521;
+        i = i + 1;
+    }
+    return ((b << 16) | a) & 0xFFFFFFFF;
+}
+
+# CRC-32 (PNG/zlib polynomial 0xEDB88320) update over a byte range.
+fn scap_crc_update(crc, ptr, len): i64 {
+    var i = 0;
+    while (i < len) {
+        crc = (crc ^ load8(ptr + i)) & 0xFFFFFFFF;
+        var k = 0;
+        while (k < 8) {
+            if ((crc & 1) != 0) { crc = ((crc >> 1) ^ 0xEDB88320) & 0xFFFFFFFF; }
+            else { crc = (crc >> 1) & 0xFFFFFFFF; }
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    return crc;
+}
+# scap_png_crc32(type,type_len,data,data_len): CRC over type bytes then data.
+# scap_png_crc32("IEND", 4, 0, 0) == 0xAE426082.
+fn scap_png_crc32(type_ptr, type_len, data_ptr, data_len): i64 {
+    var crc = 0xFFFFFFFF;
+    crc = scap_crc_update(crc, type_ptr, type_len);
+    crc = scap_crc_update(crc, data_ptr, data_len);
+    return (crc ^ 0xFFFFFFFF) & 0xFFFFFFFF;
+}
+# scap_put_be32(dst, v): write a big-endian u32 (PNG length/CRC/IHDR dims).
+fn scap_put_be32(dst, v): i64 {
+    store8(dst + 0, (v >> 24) & 0xFF);
+    store8(dst + 1, (v >> 16) & 0xFF);
+    store8(dst + 2, (v >> 8) & 0xFF);
+    store8(dst + 3, v & 0xFF);
+    return 4;
+}
+
+# scap_encode_raw(pix, npix): RawArgb — 4 bytes/pixel, [B,G,R,X] (px LE bytes).
+fn scap_encode_raw(pix, npix): i64 {
+    var out = alloc(npix * 4);
+    if (out == 0) { return scap_buf_new(0, 0); }
+    var i = 0;
+    while (i < npix) {
+        var v = load64(pix + i * 8);
+        var o = out + i * 4;
+        store8(o + 0, v & 0xFF);
+        store8(o + 1, (v >> 8) & 0xFF);
+        store8(o + 2, (v >> 16) & 0xFF);
+        store8(o + 3, (v >> 24) & 0xFF);
+        i = i + 1;
+    }
+    return scap_buf_new(out, npix * 4);
+}
+
+# scap_encode_bmp(pix, width, height): 32-bit BITMAPINFOHEADER BMP, top-down
+# (negative height), BGRA, uncompressed. file_size = 54 + width*4*height.
+fn scap_encode_bmp(pix, width, height): i64 {
+    var row_size = width * 4;
+    var pixel_data_size = row_size * height;
+    var file_size = 54 + pixel_data_size;
+    var out = alloc(file_size);
+    if (out == 0) { return scap_buf_new(0, 0); }
+    # --- file header (14 bytes) ---
+    store8(out + 0, 0x42);            # 'B'
+    store8(out + 1, 0x4D);            # 'M'
+    store32(out + 2, file_size);      # file size (LE)
+    store32(out + 6, 0);              # reserved
+    store32(out + 10, 54);            # pixel-data offset
+    # --- BITMAPINFOHEADER (40 bytes) ---
+    store32(out + 14, 40);            # header size
+    store32(out + 18, width);         # width
+    store32(out + 22, 0 - height);    # -height (top-down): low 32 bits of two's-complement
+    store16(out + 26, 1);             # planes
+    store16(out + 28, 32);            # bpp
+    store32(out + 30, 0);             # compression BI_RGB
+    store32(out + 34, pixel_data_size);
+    store32(out + 38, 2835);          # x px/meter (~72 dpi)
+    store32(out + 42, 2835);          # y px/meter
+    store32(out + 46, 0);             # colors used
+    store32(out + 50, 0);             # important colors
+    # --- pixel data @ 54, BGRA, top-down, row-major ---
+    var i = 0;
+    var n = width * height;
+    while (i < n) {
+        var v = load64(pix + i * 8);
+        var o = out + 54 + i * 4;
+        store8(o + 0, v & 0xFF);          # B
+        store8(o + 1, (v >> 8) & 0xFF);   # G
+        store8(o + 2, (v >> 16) & 0xFF);  # R
+        store8(o + 3, (v >> 24) & 0xFF);  # A (0)
+        i = i + 1;
+    }
+    return scap_buf_new(out, file_size);
+}
+
+# scap_zlib_store(raw, raw_len, out): zlib stream, deflate STORED blocks (no
+# compression). Returns bytes written into `out`.
+fn scap_zlib_store(raw, raw_len, out): i64 {
+    store8(out + 0, 0x78);   # CMF (CM=8, CINFO=7)
+    store8(out + 1, 0x01);   # FLG (0x7801 % 31 == 0)
+    var cur = 2;
+    var pos = 0;
+    var maxb = 65535;
+    if (raw_len == 0) {
+        store8(out + cur, 0x01); cur = cur + 1;           # BFINAL, BTYPE=00
+        store16(out + cur, 0); cur = cur + 2;             # len 0
+        store16(out + cur, 0xFFFF); cur = cur + 2;        # nlen
+    }
+    while (pos < raw_len) {
+        var remain = raw_len - pos;
+        var blk = remain;
+        if (blk > maxb) { blk = maxb; }
+        var last = 0;
+        if ((pos + blk) >= raw_len) { last = 1; }
+        store8(out + cur, last); cur = cur + 1;
+        store16(out + cur, blk); cur = cur + 2;                   # LEN (LE)
+        store16(out + cur, (blk ^ 0xFFFF) & 0xFFFF); cur = cur + 2; # NLEN (~LEN, LE)
+        var i = 0;
+        while (i < blk) { store8(out + cur + i, load8(raw + pos + i)); i = i + 1; }
+        cur = cur + blk;
+        pos = pos + blk;
+    }
+    scap_put_be32(out + cur, scap_adler32(raw, raw_len)); cur = cur + 4;
+    return cur;
+}
+
+# scap_png_chunk(dst, type, data, data_len): write one PNG chunk (length BE,
+# type, data, CRC32 BE over type+data). Returns 12 + data_len.
+fn scap_png_chunk(dst, type_ptr, data_ptr, data_len): i64 {
+    scap_put_be32(dst, data_len);
+    store8(dst + 4, load8(type_ptr + 0));
+    store8(dst + 5, load8(type_ptr + 1));
+    store8(dst + 6, load8(type_ptr + 2));
+    store8(dst + 7, load8(type_ptr + 3));
+    var i = 0;
+    while (i < data_len) { store8(dst + 8 + i, load8(data_ptr + i)); i = i + 1; }
+    var crc = scap_png_crc32(type_ptr, 4, data_ptr, data_len);
+    scap_put_be32(dst + 8 + data_len, crc);
+    return 12 + data_len;
+}
+
+# scap_encode_png(pix, width, height): PNG (8-bit RGBA, filter None, zlib STORED).
+# Signature + IHDR + IDAT + IEND, hand-rolled CRC-32/Adler-32.
+fn scap_encode_png(pix, width, height): i64 {
+    # IHDR data (13 bytes)
+    var ihdr = alloc(13);
+    scap_put_be32(ihdr + 0, width);
+    scap_put_be32(ihdr + 4, height);
+    store8(ihdr + 8, 8);    # bit depth
+    store8(ihdr + 9, 6);    # color type RGBA
+    store8(ihdr + 10, 0);   # compression
+    store8(ihdr + 11, 0);   # filter
+    store8(ihdr + 12, 0);   # interlace
+    # raw image bytes (filter byte per row + RGBA pixels)
+    var row_bytes = 1 + width * 4;
+    var raw_len = row_bytes * height;
+    var raw = alloc(raw_len);
+    var y = 0;
+    while (y < height) {
+        var rowstart = y * row_bytes;
+        store8(raw + rowstart, 0);   # filter type None
+        var x = 0;
+        while (x < width) {
+            var v = load64(pix + (y * width + x) * 8);
+            var o = raw + rowstart + 1 + x * 4;
+            store8(o + 0, (v >> 16) & 0xFF);  # R
+            store8(o + 1, (v >> 8) & 0xFF);   # G
+            store8(o + 2, v & 0xFF);          # B
+            store8(o + 3, (v >> 24) & 0xFF);  # A (0)
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    # zlib stored stream
+    var num_blocks = raw_len / 65535 + 1;
+    var zmax = 2 + num_blocks * 5 + raw_len + 4;
+    var zbuf = alloc(zmax);
+    var zlen = scap_zlib_store(raw, raw_len, zbuf);
+    # assemble PNG
+    var total_max = 8 + 25 + (12 + zlen) + 12;
+    var out = alloc(total_max);
+    store8(out + 0, 137); store8(out + 1, 80); store8(out + 2, 78); store8(out + 3, 71);
+    store8(out + 4, 13); store8(out + 5, 10); store8(out + 6, 26); store8(out + 7, 10);
+    var cur = 8;
+    cur = cur + scap_png_chunk(out + cur, "IHDR", ihdr, 13);
+    cur = cur + scap_png_chunk(out + cur, "IDAT", zbuf, zlen);
+    cur = cur + scap_png_chunk(out + cur, "IEND", 0, 0);
+    return scap_buf_new(out, cur);
+}
+
+# scap_encode_pixels(pix, npix, width, height, fmt): dispatch. -> *ScapBuf.
+fn scap_encode_pixels(pix, npix, width, height, fmt): i64 {
+    if (fmt == ScapFmt.SCAP_FMT_RAW_ARGB) { return scap_encode_raw(pix, npix); }
+    if (fmt == ScapFmt.SCAP_FMT_BMP) { return scap_encode_bmp(pix, width, height); }
+    return scap_encode_png(pix, width, height);
+}
+
+fn scap_default_format(): i64 { return ScapFmt.SCAP_FMT_PNG; }
+
+# ---------------------------------------------------------------------------
+# Framebuffer read — the pixel-capture path (caller-supplied bhumi fb).
+# ---------------------------------------------------------------------------
+fn scap_pix_new(ptr, w, h): i64 {
+    var r = alloc(SCAP_PX_SZ);
+    store64(r + SCAP_PX_PTR, ptr);
+    store64(r + SCAP_PX_W, w);
+    store64(r + SCAP_PX_H, h);
+    return r;
+}
+fn scap_pix_ptr(r) { return load64(r + SCAP_PX_PTR); }
+fn scap_pix_w(r)   { return load64(r + SCAP_PX_W); }
+fn scap_pix_h(r)   { return load64(r + SCAP_PX_H); }
+
+# scap_capture_full_screen(fb): whole framebuffer -> *ScapPix (never fails).
+fn scap_capture_full_screen(fb): i64 {
+    var w = bhumi_fb_width(fb);
+    var h = bhumi_fb_height(fb);
+    var pix = alloc(w * h * 8);
+    var y = 0;
+    while (y < h) {
+        var x = 0;
+        while (x < w) {
+            store64(pix + (y * w + x) * 8, bhumi_fb_get(fb, x, y));
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return scap_pix_new(pix, w, h);
+}
+
+# scap_capture_region(fb, x, y, width, height, err_out): clamped sub-rectangle.
+# -> *ScapPix, or 0 with *err_out = SCAP_ERR_REGION_OOB.
+fn scap_capture_region(fb, x, y, width, height, err_out): i64 {
+    if ((width == 0) || (height == 0)) { store64(err_out, ScapErr.SCAP_ERR_REGION_OOB); return 0; }
+    var out_w = bhumi_fb_width(fb);
+    var out_h = bhumi_fb_height(fb);
+    var src_x = scap_max(x, 0);
+    var src_y = scap_max(y, 0);
+    var cw = scap_min(width, scap_sat_sub(out_w, src_x));
+    var ch = scap_min(height, scap_sat_sub(out_h, src_y));
+    if ((cw == 0) || (ch == 0)) { store64(err_out, ScapErr.SCAP_ERR_REGION_OOB); return 0; }
+    var pix = alloc(cw * ch * 8);
+    var row = 0;
+    while (row < ch) {
+        var col = 0;
+        while (col < cw) {
+            var sx = src_x + col;
+            var sy = src_y + row;
+            var v = 0xFF000000;   # OOB fallback (Rust black-with-alpha); unreachable after clamp
+            if ((sx < out_w) && (sy < out_h)) { v = bhumi_fb_get(fb, sx, sy); }
+            store64(pix + (row * cw + col) * 8, v);
+            col = col + 1;
+        }
+        row = row + 1;
+    }
+    return scap_pix_new(pix, cw, ch);
+}
+
+# scap_capture_window(comp, fb, surface_id, err_out): window geometry -> region.
+# -> *ScapPix, or 0 with *err_out = SCAP_ERR_WINDOW_NOT_FOUND / REGION_OOB.
+fn scap_capture_window(comp, fb, surface_id, err_out): i64 {
+    var idx = comp_find_by_id(comp, surface_id);
+    if (idx < 0) { store64(err_out, ScapErr.SCAP_ERR_WINDOW_NOT_FOUND); return 0; }
+    var win = comp_get(comp, idx);
+    return scap_capture_region(fb, win_x(win), win_y(win), win_w(win), win_h(win), err_out);
+}
+
+# ---------------------------------------------------------------------------
+# ScreenCaptureManager.
+# ---------------------------------------------------------------------------
+fn scap_mgr_new(): i64 {
+    var m = alloc(SCAP_M_SZ);
+    if (m == 0) { return 0; }
+    store64(m + SCAP_M_PERMS, map_new());
+    store64(m + SCAP_M_RATES, map_new());
+    store64(m + SCAP_M_HISTORY, vec_new());
+    store64(m + SCAP_M_NEXT_ID, 1);
+    store64(m + SCAP_M_LAST_ERR, ScapErr.SCAP_OK);
+    return m;
+}
+fn scap_mgr_perms(m)    { return load64(m + SCAP_M_PERMS); }
+fn scap_mgr_rates(m)    { return load64(m + SCAP_M_RATES); }
+fn scap_mgr_history(m)  { return load64(m + SCAP_M_HISTORY); }
+fn scap_mgr_last_err(m) { return load64(m + SCAP_M_LAST_ERR); }
+fn scap_mgr_next_id(m): i64 {
+    var id = load64(m + SCAP_M_NEXT_ID);
+    store64(m + SCAP_M_NEXT_ID, id + 1);
+    return id;
+}
+
+# grant_permission(perm): insert/overwrite by agent_id (HashMap::insert).
+fn scap_mgr_grant(m, perm): i64 {
+    map_set(scap_mgr_perms(m), scap_perm_agent_id(perm), perm);
+    return 0;
+}
+# grant_full_access(agent, now): all three targets, max 60/min, no expiry.
+fn scap_mgr_grant_full_access(m, agent, now): i64 {
+    return scap_mgr_grant(m, scap_perm_new(agent, scap_allowed_all(), now, 0, 60));
+}
+# revoke_permission(agent) -> bool (1 if present, 0 if not). Leaves rates/history.
+fn scap_mgr_revoke(m, agent): i64 {
+    return map_delete(scap_mgr_perms(m), agent);
+}
+fn scap_mgr_list_permissions(m): i64 { return map_values(scap_mgr_perms(m)); }
+fn scap_mgr_get_permission(m, agent): i64 { return map_get(scap_mgr_perms(m), agent); }
+fn scap_mgr_capture_history(m): i64 { return scap_mgr_history(m); }
+
+# record_history(result): append metadata entry, evict oldest at cap (ring).
+fn scap_mgr_record_history(m, result): i64 {
+    var h = scap_mgr_history(m);
+    var e = scap_hist_new(scap_result_id(result), scap_result_target(result),
+        scap_result_format(result), scap_result_width(result), scap_result_height(result),
+        scap_result_data_size(result), scap_result_captured_at(result), scap_result_req_agent(result));
+    if (vec_len(h) >= ScapCap.SCAP_MAX_HISTORY) { vec_remove(h, 0); }
+    vec_push(h, e);
+    return 0;
+}
+
+# check_rate_limit(agent, max_per_min, now): sliding 60s window; strict > cutoff
+# prune; over cap when len >= max_per_min; records `now` only when allowed.
+fn scap_mgr_check_rate_limit(m, agent, max_per_min, now): i64 {
+    var cutoff = now - 60;
+    var ts = map_get(scap_mgr_rates(m), agent);
+    if (ts == 0) { ts = vec_new(); map_set(scap_mgr_rates(m), agent, ts); }
+    var i = 0;
+    while (i < vec_len(ts)) {
+        if (vec_get(ts, i) > cutoff) { i = i + 1; }
+        else { vec_remove(ts, i); }
+    }
+    if (vec_len(ts) >= max_per_min) { return ScapErr.SCAP_ERR_RATE_LIMIT; }
+    vec_push(ts, now);
+    return ScapErr.SCAP_OK;
+}
+
+# check_authorization(agent, target_kind, comp, now): 5 checks in order; first
+# failure returns its error, else SCAP_OK.
+fn scap_mgr_check_authorization(m, agent, target_kind, comp, now): i64 {
+    if (comp_secure_mode(comp) != 0) { return ScapErr.SCAP_ERR_SECURE_MODE; }
+    var perm = map_get(scap_mgr_perms(m), agent);
+    if (perm == 0) { return ScapErr.SCAP_ERR_PERM_DENIED; }
+    var exp = scap_perm_expires_at(perm);
+    if ((exp != 0) && (now > exp)) { return ScapErr.SCAP_ERR_PERM_EXPIRED; }
+    if (scap_perm_allowed_has(perm, target_kind) == 0) { return ScapErr.SCAP_ERR_TARGET_NOT_ALLOWED; }
+    return scap_mgr_check_rate_limit(m, agent, scap_perm_max_per_min(perm), now);
+}
+
+# scap_mgr_capture(m, comp, fb, kind, a, b, c, d, fmt, agent, now):
+# the top-level capture. agent == 0 == system (None) path: only secure-mode
+# gates it. Returns *ScapResult (0 on any failure; query scap_mgr_last_err(m)).
+# Target payload: Window a=surface_id; Region a=x,b=y,c=width,d=height.
+fn scap_mgr_capture(m, comp, fb, kind, a, b, c, d, fmt, agent, now): i64 {
+    # --- authorization ---
+    if (agent != 0) {
+        var rc = scap_mgr_check_authorization(m, agent, kind, comp, now);
+        if (rc != ScapErr.SCAP_OK) { store64(m + SCAP_M_LAST_ERR, rc); return 0; }
+    } else {
+        if (comp_secure_mode(comp) != 0) { store64(m + SCAP_M_LAST_ERR, ScapErr.SCAP_ERR_SECURE_MODE); return 0; }
+    }
+    # --- pixel extraction ---
+    var perr = ScapErr.SCAP_OK;
+    var src = 0;
+    if (kind == ScapKind.SCAP_KIND_FULLSCREEN) {
+        src = scap_capture_full_screen(fb);
+    } else {
+        if (kind == ScapKind.SCAP_KIND_WINDOW) {
+            src = scap_capture_window(comp, fb, a, &perr);
+        } else {
+            src = scap_capture_region(fb, a, b, c, d, &perr);
+        }
+    }
+    if (src == 0) { store64(m + SCAP_M_LAST_ERR, perr); return 0; }
+    var w = scap_pix_w(src);
+    var h = scap_pix_h(src);
+    var pix = scap_pix_ptr(src);
+    # --- encode ---
+    var buf = scap_encode_pixels(pix, w * h, w, h, fmt);
+    # --- build result + record history ---
+    var tgt = scap_target_new(kind, a, b, c, d);
+    var id = scap_mgr_next_id(m);
+    var result = scap_result_new(id, tgt, fmt, w, h, scap_buf_ptr(buf), scap_buf_len(buf), now, agent);
+    scap_mgr_record_history(m, result);
+    store64(m + SCAP_M_LAST_ERR, ScapErr.SCAP_OK);
+    return result;
+}

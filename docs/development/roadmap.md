@@ -69,12 +69,14 @@ symbols), each compiling + smoke-tested. Driven by the parity workflow.
 
 ### M4 — Apps + capture + plugins (v0.4.0)
 - `apps.cyr` (Terminal allowlist exec, FileManager, AgentManager, ModelManager, AuditViewer).
-- `screen_capture.cyr` / `screen_recording.cyr` (permission + rate-limit + ring buffer).
+- **`screen_capture.cyr` ✅** — permission model + rate-limit + secure-mode auth + history
+  ring buffer + full/region/window capture + byte-exact RAW/BMP/PNG encoders; 69-assertion
+  parity test (standalone, wiring follow-on). `screen_recording.cyr` (ring buffer) next.
 - `plugin_host.cyr` (Unix-socket IPC, sandbox profiles, capability grants).
 - HUD widgets (`hud/{gpu,domain,crew}_status.cyr`) — HTTP polling of daimon MCP.
 
 ### M5 — mehman (XWayland successor) — 🚧 started (v0.5.0+)
-- mehman 0.3.1 + kavach 3.6.0 **wired** via `src/foreign.cyr`: guest-spec +
+- mehman 1.0.0 + kavach 3.6.0 **wired** via `src/foreign.cyr`: guest-spec +
   foreign-surface descriptor + `desktop_host_foreign` → a compositor window;
   `main` hosts a demo guest.
 - Guest **execution + capture** via `foreign_run` → `mehman_sandbox_capture_guest`
@@ -83,8 +85,8 @@ symbols), each compiling + smoke-tested. Driven by the parity workflow.
 - **Presentation** — `render_desktop_foreign` / `render_foreign_content` draw the
   captured surface as the hosted window's content (line-aware `draw_text_lines`); the
   desktop tracks hosted foreign apps (`desk_foreign`); pixel-tested. ✅
-- Remaining: per-ABI shim; real XRGB pixel fidelity beyond the stdout-as-framebuffer
-  MVP (mehman ADR 0004).
+- Remaining: consume mehman 1.0.0's per-ABI `guest`/`shim` modules; real XRGB pixel
+  fidelity beyond the stdout-as-framebuffer MVP (mehman ADR 0004).
 
 ## Known cleanup
 - **Deferred deps** (mehman / agnostik / agnodrm): `cyrius build` auto-prepends

@@ -1,0 +1,249 @@
+# aethersafha — screen_capture BEHAVIORAL parity test (Bite D1).
+# Mirrors rust-old/src/screen_capture.rs #[cfg(test)] mod tests.
+# Determinism: enforcement fns take `now` explicitly, so a fixed NOW drives
+# expiry/rate windows without real time.
+include "lib/bhumi.cyr"
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/screen_capture.cyr"
+
+# assert(cond) passes only when cond == 1; normalize a non-zero pointer to 1.
+fn t_ok(x): i64 {
+    if (x != 0) { return 1; }
+    return 0;
+}
+
+# a fresh 2-pixel array holding value v twice (encoder unit tests).
+fn two_px(v): i64 {
+    var p = alloc(2 * 8);
+    store64(p + 0, v);
+    store64(p + 8, v);
+    return p;
+}
+# a 4-pixel (2x2) array all == v.
+fn four_px(v): i64 {
+    var p = alloc(4 * 8);
+    store64(p + 0, v);
+    store64(p + 8, v);
+    store64(p + 16, v);
+    store64(p + 24, v);
+    return p;
+}
+
+fn main() {
+    alloc_init();
+    var NOW = 1000000000;
+    # short aliases for fully-qualified enum values (keep capture call lines <= 120).
+    var FS = ScapKind.SCAP_KIND_FULLSCREEN;
+    var RG = ScapKind.SCAP_KIND_REGION;
+    var WN = ScapKind.SCAP_KIND_WINDOW;
+    var RAW = ScapFmt.SCAP_FMT_RAW_ARGB;
+    var PNG = ScapFmt.SCAP_FMT_PNG;
+    var BMP = ScapFmt.SCAP_FMT_BMP;
+    var fb = bhumi_fb_new(800, 600);
+    bhumi_fb_clear(fb, 0);
+    var fbs = bhumi_fb_new(4, 4);
+    bhumi_fb_clear(fbs, 0);
+
+    # -----------------------------------------------------------------------
+    test_group("screen_capture — encoders (adler32 / crc32 / raw / bmp / png)");
+    # test_adler32_empty / test_adler32_known
+    assert_eq(scap_adler32("", 0), 1, "adler32(empty) == 1");
+    assert_eq(scap_adler32("Wikipedia", 9), 0x11E60398, "adler32(Wikipedia) == 0x11E60398");
+    # test_crc32_known (PNG IEND chunk CRC)
+    assert_eq(scap_png_crc32("IEND", 4, 0, 0), 0xAE426082, "crc32(IEND) == 0xAE426082");
+    # test_default_capture_format_is_png
+    assert_eq(scap_default_format(), PNG, "default format == PNG");
+    # test_raw_encoding: 2px 0xAABBCCDD -> 8 bytes, [B,G,R,X] per pixel
+    var rbuf = scap_encode_pixels(two_px(0xAABBCCDD), 2, 2, 1, RAW);
+    assert_eq(scap_buf_len(rbuf), 8, "raw 2px -> 8 bytes");
+    assert_eq(scap_buf_at(rbuf, 0), 0xDD, "raw byte0 == B (0xDD)");
+    assert_eq(scap_buf_at(rbuf, 1), 0xCC, "raw byte1 == G (0xCC)");
+    assert_eq(scap_buf_at(rbuf, 2), 0xBB, "raw byte2 == R (0xBB)");
+    assert_eq(scap_buf_at(rbuf, 3), 0xAA, "raw byte3 == X (0xAA)");
+    # test_bmp_encoding_structure: 2x2 -> file_size 70, "BM" magic, size field == len
+    var bbuf = scap_encode_bmp(four_px(0xFFFF0000), 2, 2);
+    assert_eq(scap_buf_len(bbuf), 70, "bmp 2x2 len == 14+40+16");
+    assert_eq(scap_buf_at(bbuf, 0), 0x42, "bmp byte0 == 'B'");
+    assert_eq(scap_buf_at(bbuf, 1), 0x4D, "bmp byte1 == 'M'");
+    assert_eq(scap_buf_at(bbuf, 2), 70, "bmp file_size field (LE byte0) == 70");
+    # test_png_encoding_signature: first 8 bytes are the PNG signature
+    var pbuf = scap_encode_png(four_px(0xFF00FF00), 2, 2);
+    assert_eq(scap_buf_at(pbuf, 0), 137, "png sig byte0 == 137");
+    assert_eq(scap_buf_at(pbuf, 1), 80, "png sig byte1 == 'P'");
+    assert_eq(scap_buf_at(pbuf, 2), 78, "png sig byte2 == 'N'");
+    assert_eq(scap_buf_at(pbuf, 3), 71, "png sig byte3 == 'G'");
+    assert_eq(scap_buf_at(pbuf, 7), 10, "png sig byte7 == 10");
+
+    # -----------------------------------------------------------------------
+    test_group("screen_capture — target kind matching");
+    # test_target_kind_matches
+    assert_eq(scap_kind_matches(FS, FS), 1, "fullscreen matches fullscreen");
+    assert_eq(scap_kind_matches(FS, WN), 0, "fullscreen !matches window");
+    assert_eq(scap_target_kind(scap_target_region(1, 2, 3, 4)), RG, "region target kind");
+    assert_eq(scap_target_surface_id(scap_target_window(42)), 42, "window target surface_id");
+
+    # -----------------------------------------------------------------------
+    test_group("screen_capture — full-screen capture (system agent)");
+    # test_full_screen_capture_raw
+    var mm = scap_mgr_new();
+    var comp = comp_new();
+    var fr = scap_mgr_capture(mm, comp, fb, FS, 0, 0, 0, 0, RAW, 0, NOW);
+    assert(t_ok(fr), "full-screen raw capture succeeds");
+    assert_eq(scap_result_width(fr), 800, "raw width == 800");
+    assert_eq(scap_result_height(fr), 600, "raw height == 600");
+    assert_eq(scap_result_data_size(fr), 800 * 600 * 4, "raw data_size == w*h*4");
+    # test_full_screen_capture_bmp
+    var fbmp = scap_mgr_capture(mm, comp, fb, FS, 0, 0, 0, 0, BMP, 0, NOW);
+    assert_eq(scap_result_data_size(fbmp), 54 + 800 * 600 * 4, "bmp data_size == 54 + w*h*4");
+    # test_full_screen_capture_png
+    var fpng = scap_mgr_capture(mm, comp, fbs, FS, 0, 0, 0, 0, PNG, 0, NOW);
+    assert(t_ok(fpng), "full-screen png capture succeeds");
+    assert_eq(load8(scap_result_data(fpng)), 137, "png data starts with signature byte 137");
+
+    # -----------------------------------------------------------------------
+    test_group("screen_capture — region capture + clamping");
+    var mr = scap_mgr_new();
+    # test_region_capture: 200x150 fully in-bounds
+    var rc = scap_mgr_capture(mr, comp, fb, RG, 100, 100, 200, 150, RAW, 0, NOW);
+    assert(t_ok(rc), "in-bounds region captures");
+    assert_eq(scap_result_width(rc), 200, "region width 200");
+    assert_eq(scap_result_height(rc), 150, "region height 150");
+    # test_region_clamped_to_screen: 700,500,200,200 -> 100x100
+    var rcl = scap_mgr_capture(mr, comp, fb, RG, 700, 500, 200, 200, RAW, 0, NOW);
+    assert_eq(scap_result_width(rcl), 100, "clamped width 100");
+    assert_eq(scap_result_height(rcl), 100, "clamped height 100");
+    # test_region_negative_coords_clamped: -50,-50,200,200 -> 200x200
+    var rneg = scap_mgr_capture(mr, comp, fb, RG, 0 - 50, 0 - 50, 200, 200, RAW, 0, NOW);
+    assert_eq(scap_result_width(rneg), 200, "neg-origin clamped width 200");
+    assert_eq(scap_result_height(rneg), 200, "neg-origin clamped height 200");
+    # test_region_fully_out_of_bounds: 900,700 -> OOB
+    var roob = scap_mgr_capture(mr, comp, fb, RG, 900, 700, 100, 100, RAW, 0, NOW);
+    assert_eq(roob, 0, "fully-OOB region returns 0");
+    assert_eq(scap_mgr_last_err(mr), ScapErr.SCAP_ERR_REGION_OOB, "last_err == REGION_OOB");
+    # test_region_zero_dimensions: width 0 -> OOB
+    var rz = scap_mgr_capture(mr, comp, fb, RG, 0, 0, 0, 100, RAW, 0, NOW);
+    assert_eq(rz, 0, "zero-dim region returns 0");
+    assert_eq(scap_mgr_last_err(mr), ScapErr.SCAP_ERR_REGION_OOB, "zero-dim last_err == REGION_OOB");
+
+    # -----------------------------------------------------------------------
+    test_group("screen_capture — window capture");
+    var mw = scap_mgr_new();
+    var compw = comp_new();
+    var win = comp_create_window(compw, 10, 10, 300, 200, "Test");
+    var wid = win_id(win);
+    # test_window_capture
+    var wc = scap_mgr_capture(mw, compw, fb, WN, wid, 0, 0, 0, RAW, 0, NOW);
+    assert(t_ok(wc), "window capture succeeds");
+    assert_eq(scap_result_width(wc), 300, "window region width 300");
+    assert_eq(scap_result_height(wc), 200, "window region height 200");
+    # test_window_capture_not_found
+    var wnf = scap_mgr_capture(mw, compw, fb, WN, 999999, 0, 0, 0, RAW, 0, NOW);
+    assert_eq(wnf, 0, "absent window returns 0");
+    assert_eq(scap_mgr_last_err(mw), ScapErr.SCAP_ERR_WINDOW_NOT_FOUND, "last_err == WINDOW_NOT_FOUND");
+
+    # -----------------------------------------------------------------------
+    test_group("screen_capture — secure mode");
+    var ms = scap_mgr_new();
+    var comps = comp_new();
+    comp_set_secure_mode(comps, 1);
+    # test_system_capture_respects_secure_mode (system agent)
+    var sc = scap_mgr_capture(ms, comps, fbs, FS, 0, 0, 0, 0, RAW, 0, NOW);
+    assert_eq(sc, 0, "system capture blocked by secure mode");
+    assert_eq(scap_mgr_last_err(ms), ScapErr.SCAP_ERR_SECURE_MODE, "last_err == SECURE_MODE");
+    # test_secure_mode_blocks_agent_capture (permitted agent still blocked)
+    scap_mgr_grant_full_access(ms, "agent-1", NOW);
+    var sca = scap_mgr_capture(ms, comps, fbs, FS, 0, 0, 0, 0, PNG, "agent-1", NOW);
+    assert_eq(sca, 0, "permitted agent blocked by secure mode");
+    assert_eq(scap_mgr_last_err(ms), ScapErr.SCAP_ERR_SECURE_MODE, "agent last_err == SECURE_MODE");
+
+    # -----------------------------------------------------------------------
+    test_group("screen_capture — agent permissions");
+    var mp = scap_mgr_new();
+    var compp = comp_new();
+    # test_agent_without_permission_denied
+    var pd = scap_mgr_capture(mp, compp, fbs, FS, 0, 0, 0, 0, PNG, "rogue", NOW);
+    assert_eq(pd, 0, "unpermitted agent denied");
+    assert_eq(scap_mgr_last_err(mp), ScapErr.SCAP_ERR_PERM_DENIED, "last_err == PERM_DENIED");
+    # test_agent_with_permission_succeeds
+    scap_mgr_grant_full_access(mp, "good", NOW);
+    var ps = scap_mgr_capture(mp, compp, fbs, FS, 0, 0, 0, 0, PNG, "good", NOW);
+    assert(t_ok(ps), "permitted agent succeeds");
+    # test_agent_target_not_allowed: allowed=[REGION], request FULLSCREEN
+    var reg_only = vec_new();
+    vec_push(reg_only, RG);
+    scap_mgr_grant(mp, scap_perm_new("limited", reg_only, NOW, 0, 60));
+    var tna = scap_mgr_capture(mp, compp, fbs, FS, 0, 0, 0, 0, PNG, "limited", NOW);
+    assert_eq(tna, 0, "disallowed target denied");
+    assert_eq(scap_mgr_last_err(mp), ScapErr.SCAP_ERR_TARGET_NOT_ALLOWED, "last_err == TARGET_NOT_ALLOWED");
+    # test_permission_expired
+    var fs_only = vec_new();
+    vec_push(fs_only, FS);
+    scap_mgr_grant(mp, scap_perm_new("expired", fs_only, NOW - 7200, NOW - 3600, 60));
+    var pe = scap_mgr_capture(mp, compp, fbs, FS, 0, 0, 0, 0, PNG, "expired", NOW);
+    assert_eq(pe, 0, "expired permission denied");
+    assert_eq(scap_mgr_last_err(mp), ScapErr.SCAP_ERR_PERM_EXPIRED, "last_err == PERM_EXPIRED");
+    # test_multiple_agent_permissions
+    var mm2 = scap_mgr_new();
+    var a_only = vec_new();
+    vec_push(a_only, FS);
+    scap_mgr_grant(mm2, scap_perm_new("agent-a", a_only, NOW, 0, 10));
+    var b_only = vec_new();
+    vec_push(b_only, RG);
+    scap_mgr_grant(mm2, scap_perm_new("agent-b", b_only, NOW, 0, 10));
+    assert_eq(vec_len(scap_mgr_list_permissions(mm2)), 2, "two permissions listed");
+    assert(t_ok(scap_mgr_get_permission(mm2, "agent-a")), "get agent-a permission");
+
+    # -----------------------------------------------------------------------
+    test_group("screen_capture — rate limiting");
+    var mrl = scap_mgr_new();
+    var compr = comp_new();
+    scap_mgr_grant(mrl, scap_perm_new("fast", scap_allowed_all(), NOW, 0, 3));
+    # test_rate_limit_exceeded: max 3 -> 3 succeed, 4th blocked (frozen now)
+    var k = 0;
+    var ok3 = 0;
+    while (k < 3) {
+        if (t_ok(scap_mgr_capture(mrl, compr, fbs, FS, 0, 0, 0, 0, RAW, "fast", NOW)) == 1) { ok3 = ok3 + 1; }
+        k = k + 1;
+    }
+    assert_eq(ok3, 3, "first 3 captures within limit succeed");
+    var rl4 = scap_mgr_capture(mrl, compr, fbs, FS, 0, 0, 0, 0, RAW, "fast", NOW);
+    assert_eq(rl4, 0, "4th capture rate-limited");
+    assert_eq(scap_mgr_last_err(mrl), ScapErr.SCAP_ERR_RATE_LIMIT, "last_err == RATE_LIMIT");
+
+    # -----------------------------------------------------------------------
+    test_group("screen_capture — grant / revoke");
+    var mg = scap_mgr_new();
+    # test_grant_and_revoke_permission
+    scap_mgr_grant_full_access(mg, "agent-x", NOW);
+    assert(t_ok(scap_mgr_get_permission(mg, "agent-x")), "granted agent-x present");
+    assert_eq(scap_mgr_revoke(mg, "agent-x"), 1, "revoke returns true");
+    assert_eq(scap_mgr_get_permission(mg, "agent-x"), 0, "agent-x gone after revoke");
+    # test_revoke_nonexistent_returns_false
+    assert_eq(scap_mgr_revoke(mg, "ghost"), 0, "revoke nonexistent returns false");
+
+    # -----------------------------------------------------------------------
+    test_group("screen_capture — capture history");
+    var mh = scap_mgr_new();
+    var comph = comp_new();
+    # test_capture_history_recorded
+    assert_eq(vec_len(scap_mgr_capture_history(mh)), 0, "history starts empty");
+    scap_mgr_capture(mh, comph, fbs, FS, 0, 0, 0, 0, RAW, 0, NOW);
+    assert_eq(vec_len(scap_mgr_capture_history(mh)), 1, "one history entry after capture");
+    assert_eq(scap_hist_width(vec_get(scap_mgr_capture_history(mh), 0)), 4, "history[0] width == fb width");
+    # test_capture_history_max_entries: 110 captures, cap at 100
+    var mh2 = scap_mgr_new();
+    var comph2 = comp_new();
+    var c = 0;
+    while (c < 110) {
+        scap_mgr_capture(mh2, comph2, fbs, FS, 0, 0, 0, 0, RAW, 0, NOW);
+        c = c + 1;
+    }
+    assert_eq(vec_len(scap_mgr_capture_history(mh2)), ScapCap.SCAP_MAX_HISTORY, "history capped at MAX_HISTORY (100)");
+
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);
