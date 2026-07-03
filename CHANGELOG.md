@@ -6,14 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Foreign windows now show their guest's output** — the mehman "swallow" loop is
+  visible end to end. A hosted guest's captured stdout is presented as the window's
+  content: new `render_foreign_content` / `render_desktop_foreign` (`src/foreign.cyr`)
+  paint the captured surface buffer into the window body via a new line-aware
+  `draw_text_lines` (`src/render.cyr`, honors `\n`). The `desktop` aggregate now
+  tracks its hosted foreign apps (`DSK_FOREIGN` vec + `desk_foreign` /
+  `desk_foreign_count`), and the `main` frame loop presents them each frame
+  (`render_desktop_foreign` after `render_desktop`). `main` hosts + runs a live
+  `/bin/echo` guest so its window shows real output. Stdout-as-framebuffer MVP
+  (mehman ADR 0004); real XRGB pixel fidelity is the next step. `tests/foreign.tcyr`
+  gains a presentation group with a pixel-level assertion that the captured text
+  paints the window body (**23 assertions**, all green).
+
 ### Changed
 
-- **Foreign windows now show guest content.** `foreign_run` switched from
-  `mehman_sandbox_run_guest` to mehman 0.3.0's `mehman_sandbox_capture_guest(guest,
-  surface, &exit)`, so it runs the guest **and captures its output into the hosted
-  window's surface buffer** (the M2 handoff). Bumped `[deps.mehman]` → **0.3.0**.
-  `tests/foreign.tcyr` gains a capture group — a live `/bin/echo` guest's output
-  lands in the surface buffer (16 assertions, all green).
+- **Foreign guests are captured, not just run.** `foreign_run` uses
+  `mehman_sandbox_capture_guest(guest, surface, &exit)` — it runs the guest in a
+  kavach PROCESS sandbox (real fork+exec+reap) **and captures its stdout into the
+  hosted window's surface buffer** (the M2 handoff).
+- **mehman `0.3.0` → `0.3.1`; toolchain `6.3.39` → `6.3.40`.**
 
 ## [0.4.0] - 2026-07-03 — mehman foreign-app hosting
 

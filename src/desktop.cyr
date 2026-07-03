@@ -18,7 +18,8 @@ enum DeskOff {
     DSK_THEME = 48;   # HighContrastTheme
     DSK_PLUG  = 56;   # PluginHost
     DSK_TRAY  = 64;   # vec of *TrayItem (shell_integration)
-    DSK_SZ    = 72;
+    DSK_FOREIGN = 72; # vec of *Foreign (mehman "swallow" seam)
+    DSK_SZ    = 80;
 }
 
 # Default gesture-recognizer config: tap 300ms, double-tap 400ms, long-press
@@ -41,6 +42,7 @@ fn desktop_new(): i64 {
     store64(d + DSK_THEME, theme_hc_new(0x121218, 0xFFFFFF, 0x3366FF, 0xFF0000, 0xFFAA00, 0x00FF00, 1250));
     store64(d + DSK_PLUG, plug_host_new(16));
     store64(d + DSK_TRAY, vec_new());
+    store64(d + DSK_FOREIGN, vec_new());
     return d;
 }
 
@@ -53,6 +55,8 @@ fn desk_gest(d)  { return load64(d + DSK_GEST); }
 fn desk_theme(d) { return load64(d + DSK_THEME); }
 fn desk_plug(d)  { return load64(d + DSK_PLUG); }
 fn desk_tray(d)  { return load64(d + DSK_TRAY); }
+fn desk_foreign(d) { return load64(d + DSK_FOREIGN); }
+fn desk_foreign_count(d): i64 { return vec_len(desk_foreign(d)); }
 
 # desktop_sync_accessibility(d): rebuild the a11y tree from the compositor's
 # window stack — one AX_ROLE_WINDOW node per window (name = window title).

@@ -4,7 +4,7 @@ version = "0.4.0"
 description = "aethersafha — AI-augmented AGNOS compositor (Cyrius port, from 27207 lines of Rust)"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.3.39"
+cyrius = "6.3.40"
 
 [build]
 entry = "src/main.cyr"
@@ -71,7 +71,7 @@ modules = ["src/font_data.cyr"]
 [deps.mehman]
 git = "https://github.com/MacCracken/mehman.git"
 path = "../mehman"
-tag = "0.3.0"
+tag = "0.3.1"
 modules = ["src/types.cyr", "src/surface.cyr", "src/sandbox.cyr"]
 
 # --- Sandbox execution surface (mehman's guest backend). Declared explicitly so

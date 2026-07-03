@@ -74,15 +74,17 @@ symbols), each compiling + smoke-tested. Driven by the parity workflow.
 - HUD widgets (`hud/{gpu,domain,crew}_status.cyr`) — HTTP polling of daimon MCP.
 
 ### M5 — mehman (XWayland successor) — 🚧 started (v0.5.0+)
-- mehman 0.2.1 + kavach 3.6.0 **wired** via `src/foreign.cyr`: guest-spec +
+- mehman 0.3.1 + kavach 3.6.0 **wired** via `src/foreign.cyr`: guest-spec +
   foreign-surface descriptor + `desktop_host_foreign` → a compositor window;
   `main` hosts a demo guest.
 - Guest **execution + capture** via `foreign_run` → `mehman_sandbox_capture_guest`
-  (mehman 0.3.0: kavach PROCESS fork+exec+reap + surface capture) — done + tested
-  against a live `/bin/true` and `/bin/echo` (captured output lands in the surface
-  buffer).
-- Remaining: present the captured surface as the window's content; per-ABI shim;
-  real pixel fidelity beyond the stdout-as-framebuffer MVP (mehman ADR 0004).
+  (kavach PROCESS fork+exec+reap + surface capture) — done + tested against a live
+  `/bin/true` and `/bin/echo` (captured output lands in the surface buffer).
+- **Presentation** — `render_desktop_foreign` / `render_foreign_content` draw the
+  captured surface as the hosted window's content (line-aware `draw_text_lines`); the
+  desktop tracks hosted foreign apps (`desk_foreign`); pixel-tested. ✅
+- Remaining: per-ABI shim; real XRGB pixel fidelity beyond the stdout-as-framebuffer
+  MVP (mehman ADR 0004).
 
 ## Known cleanup
 - **Deferred deps** (mehman / agnostik / agnodrm): `cyrius build` auto-prepends

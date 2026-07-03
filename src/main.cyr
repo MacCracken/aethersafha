@@ -59,13 +59,12 @@ fn main(): i64 {
     comp_create_window(comp, 80, 60, 420, 320, "Terminal");
     comp_create_window(comp, 240, 180, 520, 360, "Files");
     desktop_add_tray_item(desk, 1, "network", "Network");
-    # Host a foreign-ABI app as a kavach-sandboxed guest (mehman "swallow" seam).
-    desktop_host_foreign(desk, "xterm", 320, 200, 480, 300, "xterm (foreign)");
-    # Exercise the guest-execution path: run a benign foreign guest sandboxed.
-    var demo = foreign_new("/bin/true", 64, 64);
-    if (demo != 0) {
+    # Host a foreign-ABI app as a kavach-sandboxed guest (mehman "swallow" seam),
+    # run it, and present its captured stdout as the window's content (M2 handoff).
+    var greeter = desktop_host_foreign(desk, "/bin/echo aethersafha guest", 320, 200, 480, 300, "echo (foreign)");
+    if (greeter != 0) {
         println("aethersafha: foreign guest ran (0=OK):");
-        println_int(foreign_run(demo));
+        println_int(foreign_run(greeter));
     }
     var axn = desktop_sync_accessibility(desk);
     println("aethersafha: desktop up — windows:");
@@ -90,6 +89,7 @@ fn main(): i64 {
             }
         }
         render_desktop(desk, fb);
+        render_desktop_foreign(desk, fb);
         bhumi_backend_present(be, now);
         frame = frame + 1;
     }

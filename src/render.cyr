@@ -280,6 +280,28 @@ fn draw_text(fb, s, x, y, color): i64 {
     return cx - x;
 }
 
+# draw_text_lines(fb, s, x, y, color): like draw_text, but honors '\n' (0x0A) as a
+# line break — a foreign guest's captured stdout is multi-line. NUL ends. Returns
+# the total pixel height drawn (from y to the last line's baseline).
+fn draw_text_lines(fb, s, x, y, color): i64 {
+    var cx = x;
+    var cy = y;
+    var i = 0;
+    while (1) {
+        var ch = load8(s + i);
+        if (ch == 0) { break; }
+        if (ch == 10) {
+            cx = x;
+            cy = cy + FONT_H + 2;
+        } else {
+            draw_char(fb, ch, cx, cy, color);
+            cx = cx + FONT_ADV;
+        }
+        i = i + 1;
+    }
+    return cy - y;
+}
+
 # text_width(s): pixel width of a cstring in this font (chars*6 - 1; 0 if empty).
 fn text_width(s): i64 {
     var n = 0;

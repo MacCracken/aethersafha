@@ -2,6 +2,7 @@
 # mehman/kavach/TLS surface is auto-prepended via cyrius.cyml [deps.*].
 include "src/geom.cyr"
 include "src/window.cyr"
+include "src/render.cyr"   # render_foreign_content presents captured surfaces
 include "src/compositor.cyr"
 include "src/theme_bridge.cyr"
 include "src/gestures.cyr"
@@ -53,6 +54,33 @@ fn main() {
     assert_eq(load8(sbuf + 0), 104, "surface byte 0 = 'h' (captured guest output)");
     assert_eq(load8(sbuf + 1), 105, "surface byte 1 = 'i'");
     assert_eq(load8(sbuf + 2), 10, "surface byte 2 = newline");
+
+    test_group("mehman — present the captured surface as window content");
+    kashi_font_init();   # the glyph tables must be live before draw_text_lines
+    var pd = desktop_new();
+    assert_eq(desk_foreign_count(pd), 0, "no foreign apps hosted yet");
+    var pf = desktop_host_foreign(pd, "/bin/echo hi", 0, 0, 200, 100, "echo");
+    assert(t_ok(pf), "hosted the echo guest");
+    assert_eq(desk_foreign_count(pd), 1, "desktop tracks the hosted foreign app");
+    var pfb = bhumi_fb_new(200, 100);
+    bhumi_fb_clear(pfb, 0);
+    # before the guest runs there is nothing to present (no-op).
+    assert_eq(render_foreign_content(pfb, pf), 0, "no content before the guest runs");
+    assert_eq(foreign_run(pf), 0, "guest ran (capture OK)");
+    # present every hosted foreign app; the captured "hi" paints the window body.
+    assert_eq(render_desktop_foreign(pd, pfb), 1, "render_desktop_foreign drew 1 app");
+    var green = bhumi_xrgb(190, 230, 190);
+    var lit = 0;
+    var yy = 30;
+    while (yy < 60) {
+        var xx = 0;
+        while (xx < 120) {
+            if (bhumi_fb_get(pfb, xx, yy) == green) { lit = lit + 1; }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    assert(t_ok(lit), "captured guest text painted pixels in the window body");
 
     return assert_summary();
 }

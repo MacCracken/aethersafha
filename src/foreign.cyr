@@ -72,5 +72,37 @@ fn desktop_host_foreign(desk, command, x, y, w, h, title): i64 {
     var win = comp_create_window(desk_comp(desk), x, y, w, h, title);
     win_set_agent(win, 0);
     store64(f + FGN_WIN, win);
+    vec_push(desk_foreign(desk), f);
     return f;
+}
+
+# render_foreign_content(fb, f): present a hosted foreign app's captured surface as
+# its window's content — the mehman "swallow" made visible. The guest's captured
+# stdout lives in the surface buffer (NUL-terminated by surface_blit_bytes'
+# zero-fill) and is drawn as text in the window body, below the titlebar. This is
+# the stdout-as-framebuffer MVP (mehman ADR 0004); real XRGB pixel fidelity is the
+# next step. A no-op until the guest has actually run. -> pixel height drawn.
+fn render_foreign_content(fb, f): i64 {
+    if (foreign_has_run(f) == 0) { return 0; }
+    var win = foreign_window(f);
+    if (win == 0) { return 0; }
+    var buf = MehmanSurface_buffer(foreign_surface(f));
+    if (buf == 0) { return 0; }
+    var tx = win_x(win) + 6;
+    var ty = win_y(win) + TITLEBAR_H + 4;
+    return draw_text_lines(fb, buf, tx, ty, bhumi_xrgb(190, 230, 190));
+}
+
+# render_desktop_foreign(desk, fb): present every hosted foreign app's captured
+# content on top of the composited window bodies. Called right after render_desktop
+# in the frame loop. -> the number of foreign apps drawn.
+fn render_desktop_foreign(desk, fb): i64 {
+    var v = desk_foreign(desk);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        render_foreign_content(fb, vec_get(v, i));
+        i = i + 1;
+    }
+    return n;
 }

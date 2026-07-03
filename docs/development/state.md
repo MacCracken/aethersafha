@@ -10,16 +10,21 @@ guest execution (the XWayland-successor path). Built on 0.3.0 (kashi fonts, B3 d
 wiring) and the 0.2.0 parity milestone. Ported from Rust via `cyrius port`; 27,207
 lines preserved at `rust-old/` as the parity oracle.
 
+**Unreleased (HEAD)** — the mehman "swallow" loop is now visible end to end: a hosted
+guest's **captured stdout is presented as the window's content** (`render_desktop_foreign`
+/ `render_foreign_content` + line-aware `draw_text_lines`; the desktop tracks hosted
+foreign apps). mehman `0.3.0` → `0.3.1`, toolchain `6.3.39` → `6.3.40`.
+
 ## Toolchain
 
-- **Cyrius pin**: `6.3.39` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.3.40` (in `cyrius.cyml [package].cyrius`)
 - Build: `cyrius lib sync --full && cyrius deps && cyrius build src/main.cyr build/aethersafha`
   (the `lib sync --full` is required — the declared stdlib set exceeds the incremental pin).
 
 ## Source
 
 - Rust reference: 27,207 lines at `rust-old/` (frozen, do not edit).
-- Cyrius port: **15 modules**; compiles clean + runs on the bhumi seam.
+- Cyrius port: **16 modules**; compiles clean + runs on the bhumi seam.
   - **Core (M1/Bite A)** — `geom`, `window`, `compositor`, `render`, `input`, `main`.
     compositor: workspaces + context types + move/switch + secure/agent-aware modes
     + window-at-point hit-test; renderer: alpha blend + damage tracking + window
@@ -37,14 +42,19 @@ lines preserved at `rust-old/` as the parity oracle.
     Live cross-subsystem links: compositor→accessibility (`desktop_sync_accessibility`),
     theme→renderer, shell→renderer, shell_integration tray. (ai/security/gestures/
     plugin instantiated; deeper feature wiring is follow-on.)
+  - **Foreign (M5, mehman)** — `foreign` hosts a foreign-ABI app as a kavach-sandboxed
+    guest, runs + **captures** its stdout (`mehman_sandbox_capture_guest`), and
+    **presents** the captured surface as the hosted window's content
+    (`render_desktop_foreign` / `render_foreign_content`, painted after `render_desktop`).
 
 ## Tests
 
-- **13 `.tcyr` files, all green.** Core: `aethersafha` (38), `render` (34 — decoration
+- **14 `.tcyr` files, all green.** Core: `aethersafha` (38), `render` (34 — decoration
   hit-test + shell-panel bars + bitmap text pixel test), `input` (13), `leaf_modules`
-  (11), `desktop` (15). Behavioral per-module: `theme_bridge`, `gestures`,
-  `accessibility`, `ai_features`, `shell`, `security_ui`, `shell_integration`,
-  `plugin_host`.
+  (11), `desktop` (15). mehman: `foreign` (23 — guest spec/surface + host-as-window +
+  sandboxed run + capture + **presentation pixel test**). Behavioral per-module:
+  `theme_bridge`, `gestures`, `accessibility`, `ai_features`, `shell`, `security_ui`,
+  `shell_integration`, `plugin_host`.
 - Run: `cyrius tests tests/` (or a single `cyrius test tests/<file>.tcyr`).
 
 ## Dependencies
@@ -57,8 +67,9 @@ Active (auto-prepended; stdlib declared per each dep's reviewed needs):
 - **agnostik** 1.3.3 — shared domain primitives (errors namespaced `STIK_ERR_*`).
 - **agnodrm** 1.4.5 — udev/DRM device model (errors namespaced `DRM_ERR_*`).
 - **kashi** 1.0.2 — bitmap console fonts (freestanding `font_data.cyr`, VGA 8×16).
-- **mehman** 0.2.1 + **kavach** 3.6.0 — foreign-app "swallow" backend (the XWayland
-  successor). Consumed via `src/foreign.cyr`; pulls the full TLS/crypto stdlib
+- **mehman** 0.3.1 + **kavach** 3.6.0 — foreign-app "swallow" backend (the XWayland
+  successor). Consumed via `src/foreign.cyr` (host → sandboxed run → capture → present);
+  pulls the full TLS/crypto stdlib
   cascade (net, sandhi, thread_local, random, freelist, sync, async, fdlopen,
   dynlib, mmap, tls, tls_native*, sha1, keccak, sigil, sakshi — all declared in
   `[deps].stdlib`). `[deps.kavach]` is declared explicitly (its `Backend`/`config`/
@@ -78,7 +89,9 @@ _None yet (top-level application, `publish = false`)._
 
 ## Next
 
-B3 first increment landed (desktop aggregate + a11y sync). Deepen the wiring
-(shell panel render, notifications surface, input→gestures, theme→renderer) and
-continue Bite A (renderer decorations + bitmap text; input routing to focused
-surface). See [`roadmap.md`](roadmap.md) / [`parity-plan.md`](parity-plan.md).
+mehman "swallow" loop is visible end to end (host → sandboxed run → capture →
+present). Remaining on the mehman track (Bite G / M5): per-ABI shim; real XRGB pixel
+fidelity beyond the stdout-as-framebuffer MVP (mehman ADR 0004). Broader parity: the
+built-in apps (Bite C), capture/recording (Bite D), and the native Wayland protocol
+surface (Bite F) remain the large unported layers. See [`roadmap.md`](roadmap.md) /
+[`parity-plan.md`](parity-plan.md).
