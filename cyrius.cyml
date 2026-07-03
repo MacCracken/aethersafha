@@ -65,12 +65,13 @@ modules = ["src/font_data.cyr"]
 # --- Compat / "swallow" backend: the XWayland successor — hosts foreign-ABI app
 # surfaces in a kavach sandbox. We consume its library modules (error/caps/guest
 # vocabulary, the foreign-surface descriptor, and the kavach-sandboxed guest
-# runner). Transitively pulls [deps.kavach] → sandhi → the tls_native TLS stack,
-# declared in [deps].stdlib above.
+# runner + the M2 surface-capture handoff, mehman_sandbox_capture_guest).
+# Transitively pulls [deps.kavach] → sandhi → the tls_native TLS stack, declared
+# in [deps].stdlib above.
 [deps.mehman]
 git = "https://github.com/MacCracken/mehman.git"
 path = "../mehman"
-tag = "0.2.1"
+tag = "0.3.0"
 modules = ["src/types.cyr", "src/surface.cyr", "src/sandbox.cyr"]
 
 # --- Sandbox execution surface (mehman's guest backend). Declared explicitly so

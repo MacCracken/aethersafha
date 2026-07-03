@@ -25,24 +25,51 @@ fn _mehman_kavach_ensure_init() {
     return 0;
 }
 
-# Run one foreign guest under a kavach PROCESS-backend sandbox and reap it.
-#
-# Validates the spec against the swallow-stage capability contract FIRST — that
-# branch needs no kavach runtime, so a bad spec is rejected before the engine is
-# even initialized. Then: create the sandbox → transition to RUNNING → exec the
-# guest command → read kavach's exec status → destroy (reap).
+# Run one foreign guest under a kavach PROCESS-backend sandbox and reap it —
+# WITHOUT capturing its surface (use mehman_sandbox_capture_guest for the swallow
+# handoff). Validates the spec against the swallow-stage capability contract, then
+# drives the kavach lifecycle.
 #
 # Writes kavach's ExecResult exit_code through `out_exit_code` (an i64*, or 0 to
-# ignore) once the run reaches exec. NOTE the PROCESS-backend semantics: that
-# value is 0 when the guest ran and its output was captured, 1 when exec itself
-# failed — it is NOT the guest's own exit status (WEXITSTATUS). kavach's PROCESS
-# backend captures output via exec_capture and does not propagate the child's
-# exit code; surfacing the true guest exit is a future concern (a kavach change,
-# or M2+ once the surface, not the exit, is what matters).
+# ignore). NOTE the PROCESS-backend semantics: that value is 0 when the guest ran
+# and its output was captured, 1 when exec itself failed — it is NOT the guest's
+# own exit status (WEXITSTATUS). kavach's PROCESS backend captures output via
+# exec_capture and does not propagate the child's exit code.
 #
 # Returns MehmanError.OK on a clean run+reap, or a MehmanError code identifying
 # the stage that failed.
 fn mehman_sandbox_run_guest(spec, out_exit_code): i64 {
+    return _mehman_run_guest(spec, 0, out_exit_code);
+}
+
+# THE M2 swallow handoff: run one foreign guest under a kavach PROCESS-backend
+# sandbox AND capture its rendered surface into `surface`'s pixel buffer, then
+# reap. This is the swallow stage's whole act — run a foreign binary sandboxed,
+# capture its surface, hand the populated buffer to the compositor (aethersafha
+# hosts a window backed by that buffer). Validates the guest spec and the surface
+# first, then runs the guest and blits its captured output into the surface.
+#
+# CAPTURE MODEL / CAVEAT: kavach's PROCESS backend captures the guest's stdout as
+# a NUL-terminated cstr, so the swallow-stage MVP treats stdout AS the guest's
+# framebuffer and copies it into the surface buffer (bounded by the buffer size;
+# `surface_blit_bytes` zero-fills the uncovered tail). The captured length is
+# strlen(stdout), so binary XRGB8888 with embedded NUL bytes truncates at the
+# first NUL. True framebuffer capture (a shared-memory handoff, or kavach exposing
+# the raw byte count) is a future refinement; this establishes the seam.
+#
+# Returns MehmanError.OK on a clean run+capture+reap, or a MehmanError code.
+fn mehman_sandbox_capture_guest(spec, surface, out_exit_code): i64 {
+    if (surface_is_valid(surface) == 0) {
+        mehman_err_print(MehmanError.INVALID_SPEC, "surface");
+        return MehmanError.INVALID_SPEC;
+    }
+    return _mehman_run_guest(spec, surface, out_exit_code);
+}
+
+# Shared driver for run/capture. Validates the spec, inits kavach once, runs the
+# guest under a PROCESS-backend sandbox, optionally captures its stdout into
+# `surface` (0 = no capture), and reaps. Private. Returns a MehmanError.
+fn _mehman_run_guest(spec, surface, out_exit_code): i64 {
     if (guest_spec_is_valid(spec) == 0) {
         mehman_err_print(MehmanError.INVALID_SPEC, 0);
         return MehmanError.INVALID_SPEC;
@@ -74,8 +101,16 @@ fn mehman_sandbox_run_guest(spec, out_exit_code): i64 {
 
     if (out_exit_code != 0) {
         # kavach's exec status (0 = ran + output captured; 1 = exec failed) —
-        # NOT the guest's WEXITSTATUS; see the fn doc.
+        # NOT the guest's WEXITSTATUS; see mehman_sandbox_run_guest's doc.
         store64(out_exit_code, ExecResult_exit_code(res));
+    }
+
+    # M2 capture: blit the guest's stdout into the surface's pixel buffer.
+    if (surface != 0) {
+        var out = ExecResult_stdout(res);
+        var n = 0;
+        if (out != 0) { n = strlen(out); }
+        surface_blit_bytes(surface, out, n);
     }
 
     var derr = sandbox_destroy(sb);

@@ -44,6 +44,16 @@ fn main() {
     assert_eq(foreign_run(rf), 0, "run returns MehmanError.OK (clean fork+exec+reap)");
     assert_eq(foreign_has_run(rf), 1, "marked as run after foreign_run");
 
+    test_group("mehman — capture the guest surface into its buffer (M2 handoff)");
+    var cf = foreign_new("/bin/echo hi", 64, 8);
+    assert(t_ok(cf), "foreign_new for /bin/echo");
+    assert_eq(foreign_run(cf), 0, "capture run returns MehmanError.OK");
+    # the guest's stdout ("hi\n") is captured into the foreign surface's pixel buffer
+    var sbuf = MehmanSurface_buffer(foreign_surface(cf));
+    assert_eq(load8(sbuf + 0), 104, "surface byte 0 = 'h' (captured guest output)");
+    assert_eq(load8(sbuf + 1), 105, "surface byte 1 = 'i'");
+    assert_eq(load8(sbuf + 2), 10, "surface byte 2 = newline");
+
     return assert_summary();
 }
 

@@ -95,10 +95,11 @@ Rust: `wayland/{types,protocol,server,popups}` + client socket. From scratch.
   attach an shm buffer, and see it composited.
 
 ### Bite G — mehman (XWayland successor) · 🚧 started
-mehman 0.2.1 + kavach 3.6.0 **wired** (`src/foreign.cyr`): guest-spec + foreign-surface
-descriptor + `desktop_host_foreign` → a compositor window; `main` hosts a demo guest.
-Remaining: run guests via `mehman_sandbox_run_guest`; capture the guest framebuffer
-into the surface buffer (M2 handoff); per-ABI shim.
+mehman 0.3.0 + kavach 3.6.0 **wired** (`src/foreign.cyr`): guest-spec + foreign-surface
+descriptor + `desktop_host_foreign` → a compositor window; `main` hosts a demo guest;
+`foreign_run` → `mehman_sandbox_capture_guest` runs the guest AND captures its output
+into the surface buffer (M2 handoff — tested). Remaining: per-ABI shim; present the
+captured surface as window content; real pixel fidelity (mehman ADR 0004).
 
 ### Bite H — GPU acceleration (mabda) · optional · —
 Wire mabda 4.0.2 (`[deps.mabda]`) when hardware accel is wanted. Off the v1.0 path.

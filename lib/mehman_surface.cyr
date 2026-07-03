@@ -86,3 +86,22 @@ fn surface_is_valid(surface): i64 {
 fn surface_size_bytes(surface): i64 {
     return MehmanSurface_stride(surface) * MehmanSurface_height(surface);
 }
+
+# Copy up to `len` raw bytes from `src` into the surface's pixel buffer, then
+# zero-fill the remainder (so any uncovered area is black rather than stale).
+# Bounded by the buffer size (stride * height). Returns the number of source
+# bytes written. This is the dependency-free byte sink the capture path fills;
+# `src`/`len` come from the guest's captured output. A null `src` writes nothing
+# and zeroes the whole buffer.
+fn surface_blit_bytes(surface, src, len): i64 {
+    var buf = MehmanSurface_buffer(surface);
+    var cap = surface_size_bytes(surface);
+    var n = len;
+    if (src == 0) { n = 0; }
+    if (n < 0) { n = 0; }
+    if (n > cap) { n = cap; }
+    var i = 0;
+    while (i < n) { store8(buf + i, load8(src + i)); i = i + 1; }
+    while (i < cap) { store8(buf + i, 0); i = i + 1; }
+    return n;
+}

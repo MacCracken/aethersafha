@@ -50,12 +50,14 @@ fn foreign_has_run(f): i64 {
 }
 
 # foreign_run(f): run the foreign guest in a kavach PROCESS sandbox (real
-# fork+exec+reap), recording the MehmanError result + kavach exec status.
-# -> the MehmanError code (MehmanError.OK on a clean run+reap). This is the
-# actual "swallow" execution path — the compositor launching a foreign app.
+# fork+exec+reap) AND capture its rendered surface into the hosted window's pixel
+# buffer — the mehman M2 handoff. Records the MehmanError result + kavach exec
+# status. -> the MehmanError code (MehmanError.OK on a clean run+capture+reap).
+# This is the actual "swallow" path: the compositor launching a foreign app and
+# taking its surface. (mehman 0.3.0: mehman_sandbox_capture_guest.)
 fn foreign_run(f): i64 {
     var exit = 0;
-    var r = mehman_sandbox_run_guest(foreign_guest(f), &exit);
+    var r = mehman_sandbox_capture_guest(foreign_guest(f), foreign_surface(f), &exit);
     store64(f + FGN_RESULT, r);
     store64(f + FGN_EXIT, exit);
     return r;

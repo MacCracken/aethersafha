@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Foreign windows now show guest content.** `foreign_run` switched from
+  `mehman_sandbox_run_guest` to mehman 0.3.0's `mehman_sandbox_capture_guest(guest,
+  surface, &exit)`, so it runs the guest **and captures its output into the hosted
+  window's surface buffer** (the M2 handoff). Bumped `[deps.mehman]` → **0.3.0**.
+  `tests/foreign.tcyr` gains a capture group — a live `/bin/echo` guest's output
+  lands in the surface buffer (16 assertions, all green).
+
 ## [0.4.0] - 2026-07-03 — mehman foreign-app hosting
 
 Wires in **mehman** (the XWayland-successor "swallow" backend) as a real dependency —
