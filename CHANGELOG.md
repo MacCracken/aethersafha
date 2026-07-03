@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.4.1] - 2026-07-03 — foreign guest surface presentation
 
 ### Added
 
@@ -27,7 +27,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `mehman_sandbox_capture_guest(guest, surface, &exit)` — it runs the guest in a
   kavach PROCESS sandbox (real fork+exec+reap) **and captures its stdout into the
   hosted window's surface buffer** (the M2 handoff).
-- **mehman `0.3.0` → `0.3.1`; toolchain `6.3.39` → `6.3.40`.**
+- **mehman `0.2.1` → `0.3.1`** (0.4.0 shipped 0.2.1; `0.3.0` added the capture API,
+  `0.3.1` is the current pin); **toolchain `6.3.39` → `6.3.40`.**
 
 ## [0.4.0] - 2026-07-03 — mehman foreign-app hosting
 

@@ -5,15 +5,15 @@
 
 ## Version
 
-**0.4.0** (2026-07-03) — **mehman** wired in: foreign-app hosting + kavach-sandboxed
-guest execution (the XWayland-successor path). Built on 0.3.0 (kashi fonts, B3 desktop
-wiring) and the 0.2.0 parity milestone. Ported from Rust via `cyrius port`; 27,207
-lines preserved at `rust-old/` as the parity oracle.
+**0.4.1** (2026-07-03) — the mehman "swallow" loop is now visible end to end: a hosted
+guest is run + captured **and its stdout is presented as the window's content**
+(`render_desktop_foreign` / `render_foreign_content` + line-aware `draw_text_lines`; the
+desktop tracks hosted foreign apps). mehman `0.2.1` → `0.3.1`; toolchain → `6.3.40`.
 
-**Unreleased (HEAD)** — the mehman "swallow" loop is now visible end to end: a hosted
-guest's **captured stdout is presented as the window's content** (`render_desktop_foreign`
-/ `render_foreign_content` + line-aware `draw_text_lines`; the desktop tracks hosted
-foreign apps). mehman `0.3.0` → `0.3.1`, toolchain `6.3.39` → `6.3.40`.
+Built on **0.4.0** (mehman wired in: foreign-app hosting + kavach-sandboxed guest
+execution — the XWayland-successor path), 0.3.0 (kashi fonts, B3 desktop wiring), and the
+0.2.0 parity milestone. Ported from Rust via `cyrius port`; 27,207 lines preserved at
+`rust-old/` as the parity oracle.
 
 ## Toolchain
 
