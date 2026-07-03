@@ -2,34 +2,77 @@
 # Parity: rust-old/src/compositor.rs (route_input_event) + gestures.rs
 #
 # Translates bhumi HID key events (physical press/release + USB HID usage) into
-# compositor actions. Keyboard layout / keysym / compose belong here (the
-# compositor's job, above bhumi's raw evdev-equivalent) — mirrors libxkbcommon.
+# compositor actions, then applies them to the focused window. Keyboard layout /
+# keysym / compose belong here (the compositor's job, above bhumi's raw
+# evdev-equivalent) — mirrors libxkbcommon.
 
 enum InputAction {
-    IA_NONE       = 0;
-    IA_QUIT       = 1;
-    IA_FOCUS_NEXT = 2;
+    IA_NONE             = 0;
+    IA_QUIT             = 1;
+    IA_FOCUS_NEXT       = 2;
+    IA_CLOSE_FOCUSED    = 3;
+    IA_MAXIMIZE_FOCUSED = 4;
+    IA_MINIMIZE_FOCUSED = 5;
 }
 
 # USB HID usage IDs (Keyboard/Keypad page 0x07) — see lib/bhumi.cyr
 enum HidUsage {
     HID_ESC = 0x29;
     HID_TAB = 0x2B;
+    HID_F4  = 0x3D;   # close focused window
+    HID_F5  = 0x3E;   # toggle maximize
+    HID_F6  = 0x3F;   # minimize
 }
 
-# input_handle: consume one bhumi key event, mutate compositor focus, return action.
-fn input_handle(comp, ev): i64 {
+# input_map(ev): pure key→action mapping for a pressed key (IA_NONE otherwise).
+fn input_map(ev): i64 {
     if (bhumi_key_pressed(ev) == 0) { return InputAction.IA_NONE; }
     var u = bhumi_key_usage(ev);
     if (u == HidUsage.HID_ESC) { return InputAction.IA_QUIT; }
-    if (u == HidUsage.HID_TAB) {
+    if (u == HidUsage.HID_TAB) { return InputAction.IA_FOCUS_NEXT; }
+    if (u == HidUsage.HID_F4)  { return InputAction.IA_CLOSE_FOCUSED; }
+    if (u == HidUsage.HID_F5)  { return InputAction.IA_MAXIMIZE_FOCUSED; }
+    if (u == HidUsage.HID_F6)  { return InputAction.IA_MINIMIZE_FOCUSED; }
+    return InputAction.IA_NONE;
+}
+
+# input_apply(comp, action): apply a window-management action to the compositor.
+# Focus-next cycles the z-order; the rest act on the focused window.
+fn input_apply(comp, action): i64 {
+    if (action == InputAction.IA_FOCUS_NEXT) {
         var n = comp_count(comp);
         if (n > 0) {
             var f = comp_focused(comp) + 1;
             if (f >= n) { f = 0; }
             comp_focus(comp, f);
         }
-        return InputAction.IA_FOCUS_NEXT;
+        return 0;
     }
-    return InputAction.IA_NONE;
+    var win = comp_focused_window(comp);
+    if (win == 0) { return 0; }
+    if (action == InputAction.IA_CLOSE_FOCUSED) {
+        comp_close_window(comp, win_id(win));
+        return 0;
+    }
+    if (action == InputAction.IA_MAXIMIZE_FOCUSED) {
+        if (win_state(win) == WinState.WS_MAXIMIZED) {
+            win_set_state(win, WinState.WS_NORMAL);
+        } else {
+            win_set_state(win, WinState.WS_MAXIMIZED);
+        }
+        return 0;
+    }
+    if (action == InputAction.IA_MINIMIZE_FOCUSED) {
+        win_set_state(win, WinState.WS_MINIMIZED);
+        return 0;
+    }
+    return 0;
+}
+
+# input_handle(comp, ev): map + apply one event; returns the action so the main
+# loop can observe IA_QUIT.
+fn input_handle(comp, ev): i64 {
+    var action = input_map(ev);
+    input_apply(comp, action);
+    return action;
 }

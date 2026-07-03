@@ -30,6 +30,18 @@ fn main() {
     rend_dmg_clear(d);
     assert_eq(rend_dmg_valid(d), 0, "clear resets validity");
 
+    test_group("render — decoration hit-test");
+    var win = win_new(1, 100, 100, 400, 300, "T");
+    assert_eq(deco_hit(win, 50, 50), Deco.DECO_NONE, "outside window");
+    assert_eq(deco_hit(win, 300, 250), Deco.DECO_BODY, "body");
+    assert_eq(deco_hit(win, 200, 110), Deco.DECO_TITLEBAR, "titlebar drag strip");
+    assert_eq(deco_hit(win, 485, 112), Deco.DECO_CLOSE, "close button");
+    assert_eq(deco_hit(win, 463, 112), Deco.DECO_MAX, "maximize button");
+    assert_eq(deco_hit(win, 440, 112), Deco.DECO_MIN, "minimize button");
+    assert_eq(deco_hit(win, 497, 250), Deco.DECO_RESIZE_R, "right resize edge");
+    assert_eq(deco_hit(win, 300, 397), Deco.DECO_RESIZE_B, "bottom resize edge");
+    assert_eq(deco_hit(win, 497, 397), Deco.DECO_RESIZE_BR, "bottom-right resize corner");
+
     return assert_summary();
 }
 

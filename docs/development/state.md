@@ -10,7 +10,7 @@ preserved at `rust-old/` as the frozen parity oracle.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.3.37` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.3.38` (in `cyrius.cyml [package].cyrius`)
 - Build: `cyrius lib sync --full && cyrius deps && cyrius build src/main.cyr build/aethersafha`
   (the `lib sync --full` is required — the declared stdlib set exceeds the incremental pin).
 
@@ -18,9 +18,12 @@ preserved at `rust-old/` as the frozen parity oracle.
 
 - Rust reference: 27,207 lines at `rust-old/` (frozen, do not edit).
 - Cyrius port: **15 modules**; compiles clean + runs on the bhumi seam.
-  - **Core (M1)** — `geom`, `window`, `compositor`, `render`, `input`, `main`.
-    compositor has workspaces + context types + move/switch + secure/agent-aware
-    modes + window-at-point hit-test; renderer has alpha blend + damage tracking.
+  - **Core (M1/Bite A)** — `geom`, `window`, `compositor`, `render`, `input`, `main`.
+    compositor: workspaces + context types + move/switch + secure/agent-aware modes
+    + window-at-point hit-test; renderer: alpha blend + damage tracking + window
+    **decorations** (close/max/min buttons + `deco_hit` decoration hit-test);
+    input: **window-management shortcuts** (Tab focus-cycle, F4 close, F5 maximize-
+    toggle, F6 minimize) via `input_map`/`input_apply`, wired into the frame loop.
   - **Leaf (M2)** — `theme_bridge`, `gestures`, `accessibility`, `ai_features`,
     `shell`, `security_ui`, `shell_integration`, `plugin_host` (all 8). Parity vs
     `rust-old/` (heap offset-accessor structs, prefixed symbols); behaviorally tested.
@@ -32,10 +35,11 @@ preserved at `rust-old/` as the frozen parity oracle.
 
 ## Tests
 
-- **12 `.tcyr` files, all green.** Core: `aethersafha` (38), `render` (13),
-  `leaf_modules` (11), `desktop` (14 — B3 wiring). Behavioral per-module:
-  `theme_bridge`, `gestures`, `accessibility`, `ai_features`, `shell`,
-  `security_ui`, `shell_integration`, `plugin_host`.
+- **13 `.tcyr` files, all green.** Core: `aethersafha` (38), `render` (22 — incl.
+  decoration hit-test), `input` (13 — key→action→window mgmt), `leaf_modules` (11),
+  `desktop` (14 — B3 wiring). Behavioral per-module: `theme_bridge`, `gestures`,
+  `accessibility`, `ai_features`, `shell`, `security_ui`, `shell_integration`,
+  `plugin_host`.
 - Run: `cyrius tests tests/` (or a single `cyrius test tests/<file>.tcyr`).
 
 ## Dependencies

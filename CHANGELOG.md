@@ -19,10 +19,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   cross-subsystem connection — compositor → accessibility
   (`desktop_sync_accessibility` mirrors the window stack into the a11y tree).
   `tests/desktop.tcyr` (14 assertions).
+- **Bite A**: window **decorations** — close/maximize/minimize titlebar buttons +
+  `deco_hit` decoration hit-test (body/titlebar/buttons/resize edges). **Input
+  routing** — window-management keyboard shortcuts (Tab focus-cycle, F4 close, F5
+  maximize-toggle, F6 minimize) via a pure `input_map` + `input_apply`, wired into
+  the frame loop. `tests/render.tcyr` (22) + `tests/input.tcyr` (13).
 
 ### Changed
 
-- **Toolchain 6.3.36 → 6.3.37; bhumi 0.7.0 → 1.0.0** (API-compatible bump).
+- **Toolchain 6.3.36 → 6.3.38; bhumi 0.7.0 → 1.0.0** (API-compatible bump).
 - **Dependency de-collision + re-enable.** agnostik + agnodrm namespaced their error
   families (`STIK_ERR_*` / `DRM_ERR_*`) to end the `ERR_*` symbol collision — cut as
   **agnostik 1.3.3** + **agnodrm 1.4.5** — and are now active deps (reviewed stdlib:

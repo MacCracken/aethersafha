@@ -1,0 +1,42 @@
+# aethersafha input-routing test (Bite A3).
+# bhumi key events → actions → compositor window management.
+include "lib/bhumi.cyr"
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/input.cyr"
+
+fn main() {
+    alloc_init();
+
+    test_group("input — key → action mapping");
+    assert_eq(input_map(bhumi_key_event(1, 0x29)), InputAction.IA_QUIT, "ESC pressed → quit");
+    assert_eq(input_map(bhumi_key_event(1, 0x2B)), InputAction.IA_FOCUS_NEXT, "TAB → focus next");
+    assert_eq(input_map(bhumi_key_event(1, 0x3D)), InputAction.IA_CLOSE_FOCUSED, "F4 → close focused");
+    assert_eq(input_map(bhumi_key_event(1, 0x3E)), InputAction.IA_MAXIMIZE_FOCUSED, "F5 → toggle maximize");
+    assert_eq(input_map(bhumi_key_event(1, 0x3F)), InputAction.IA_MINIMIZE_FOCUSED, "F6 → minimize");
+    assert_eq(input_map(bhumi_key_event(0, 0x3D)), InputAction.IA_NONE, "key release → none");
+    assert_eq(input_map(bhumi_key_event(1, 0x04)), InputAction.IA_NONE, "unmapped key → none");
+
+    test_group("input — apply to compositor focus + window state");
+    var c = comp_new();
+    comp_create_window(c, 0, 0, 100, 100, "A");
+    comp_create_window(c, 0, 0, 100, 100, "B");
+    comp_create_window(c, 0, 0, 100, 100, "C");
+    assert_eq(comp_focused(c), 2, "focus follows newest window");
+    input_apply(c, InputAction.IA_FOCUS_NEXT);
+    assert_eq(comp_focused(c), 0, "focus-next wraps to first");
+    input_apply(c, InputAction.IA_MAXIMIZE_FOCUSED);
+    assert_eq(win_state(comp_focused_window(c)), WinState.WS_MAXIMIZED, "maximize focused");
+    input_apply(c, InputAction.IA_MAXIMIZE_FOCUSED);
+    assert_eq(win_state(comp_focused_window(c)), WinState.WS_NORMAL, "maximize toggles back");
+    input_apply(c, InputAction.IA_MINIMIZE_FOCUSED);
+    assert_eq(win_state(comp_focused_window(c)), WinState.WS_MINIMIZED, "minimize focused");
+    input_apply(c, InputAction.IA_CLOSE_FOCUSED);
+    assert_eq(comp_count(c), 2, "close focused removes a window");
+
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);

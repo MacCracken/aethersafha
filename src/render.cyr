@@ -7,6 +7,24 @@
 
 enum RenderK {
     TITLEBAR_H = 30;
+    BTN_W      = 18;   # titlebar button width
+    BTN_H      = 18;
+    BTN_GAP    = 4;    # gap between buttons
+    BTN_MARGIN = 6;    # gap from the window's right edge to the close button
+    RESIZE_M   = 6;    # resize-edge grab margin
+}
+
+# Which part of a window's decoration a point hits (parity: renderer.rs DecorationHit).
+enum Deco {
+    DECO_NONE      = 0;
+    DECO_BODY      = 1;
+    DECO_TITLEBAR  = 2;   # draggable region
+    DECO_CLOSE     = 3;
+    DECO_MAX       = 4;
+    DECO_MIN       = 5;
+    DECO_RESIZE_R  = 6;
+    DECO_RESIZE_B  = 7;
+    DECO_RESIZE_BR = 8;
 }
 
 # fill_rect: fill [x,x+w) x [y,y+h) with color, clamped to framebuffer bounds.
@@ -86,6 +104,51 @@ fn rend_dmg_w(d) { return load64(d + D_X1) - load64(d + D_X0); }
 fn rend_dmg_h(d) { return load64(d + D_Y1) - load64(d + D_Y0); }
 fn rend_dmg_clear(d) { store64(d + D_VALID, 0); return 0; }
 
+# Titlebar button x-positions (right-aligned: close, then maximize, then minimize).
+fn deco_close_x(win) { return win_x(win) + win_w(win) - BTN_MARGIN - BTN_W; }
+fn deco_max_x(win)   { return deco_close_x(win) - BTN_GAP - BTN_W; }
+fn deco_min_x(win)   { return deco_max_x(win) - BTN_GAP - BTN_W; }
+fn deco_btn_y(win)   { return win_y(win) + (TITLEBAR_H - BTN_H) / 2; }
+
+# Is (px,py) inside the BTN_W x BTN_H button at (bx,by)?
+fn deco_in_btn(px, py, bx, by): i64 {
+    if (px < bx) { return 0; }
+    if (px >= bx + BTN_W) { return 0; }
+    if (py < by) { return 0; }
+    if (py >= by + BTN_H) { return 0; }
+    return 1;
+}
+
+# deco_hit(win, px, py): which decoration part of the window is under the point.
+# Used by input routing to dispatch clicks (close/min/max/drag/resize).
+fn deco_hit(win, px, py): i64 {
+    var x = win_x(win);
+    var y = win_y(win);
+    var w = win_w(win);
+    var h = win_h(win);
+    if (px < x) { return Deco.DECO_NONE; }
+    if (py < y) { return Deco.DECO_NONE; }
+    if (px >= x + w) { return Deco.DECO_NONE; }
+    if (py >= y + h) { return Deco.DECO_NONE; }
+    # resize edges — bottom-right corner takes priority
+    var nr = 0;
+    var nb = 0;
+    if (px >= x + w - RESIZE_M) { nr = 1; }
+    if (py >= y + h - RESIZE_M) { nb = 1; }
+    if ((nr == 1) && (nb == 1)) { return Deco.DECO_RESIZE_BR; }
+    if (nr == 1) { return Deco.DECO_RESIZE_R; }
+    if (nb == 1) { return Deco.DECO_RESIZE_B; }
+    # titlebar: buttons first, else the draggable strip
+    if (py < y + TITLEBAR_H) {
+        var by = deco_btn_y(win);
+        if (deco_in_btn(px, py, deco_close_x(win), by) == 1) { return Deco.DECO_CLOSE; }
+        if (deco_in_btn(px, py, deco_max_x(win), by) == 1) { return Deco.DECO_MAX; }
+        if (deco_in_btn(px, py, deco_min_x(win), by) == 1) { return Deco.DECO_MIN; }
+        return Deco.DECO_TITLEBAR;
+    }
+    return Deco.DECO_BODY;
+}
+
 fn render_window(fb, win, focused): i64 {
     var x = win_x(win);
     var y = win_y(win);
@@ -97,6 +160,11 @@ fn render_window(fb, win, focused): i64 {
     var tb = bhumi_xrgb(50, 54, 62);
     if (focused == 1) { tb = bhumi_xrgb(70, 90, 140); }
     fill_rect(fb, x, y, w, TITLEBAR_H, tb);
+    # decoration buttons: close (red), maximize (green), minimize (amber)
+    var by = deco_btn_y(win);
+    fill_rect(fb, deco_close_x(win), by, BTN_W, BTN_H, bhumi_xrgb(220, 80, 80));
+    fill_rect(fb, deco_max_x(win), by, BTN_W, BTN_H, bhumi_xrgb(90, 180, 90));
+    fill_rect(fb, deco_min_x(win), by, BTN_W, BTN_H, bhumi_xrgb(210, 190, 90));
     return 0;
 }
 
