@@ -37,6 +37,13 @@ fn main() {
     assert_eq(comp_count(desk_comp(d)), before + 1, "compositor gained the foreign window");
     assert_eq(win_is_agent(foreign_window(fw)), 0, "foreign window is not agent-owned");
 
+    test_group("mehman — run a sandboxed guest (kavach PROCESS backend)");
+    var rf = foreign_new("/bin/true", 100, 100);
+    assert(t_ok(rf), "foreign_new for /bin/true");
+    assert_eq(foreign_has_run(rf), 0, "not run yet");
+    assert_eq(foreign_run(rf), 0, "run returns MehmanError.OK (clean fork+exec+reap)");
+    assert_eq(foreign_has_run(rf), 1, "marked as run after foreign_run");
+
     return assert_summary();
 }
 

@@ -77,8 +77,10 @@ symbols), each compiling + smoke-tested. Driven by the parity workflow.
 - mehman 0.2.1 + kavach 3.6.0 **wired** via `src/foreign.cyr`: guest-spec +
   foreign-surface descriptor + `desktop_host_foreign` → a compositor window;
   `main` hosts a demo guest.
-- Remaining: run guests via `mehman_sandbox_run_guest` (kavach exec); capture the
-  guest framebuffer into the surface buffer (mehman M2 handoff); per-ABI shim.
+- Guest **execution** via `foreign_run` → `mehman_sandbox_run_guest` (kavach PROCESS
+  fork+exec+reap) — done + tested against a live `/bin/true`.
+- Remaining: capture the guest framebuffer into the surface buffer (mehman M2
+  handoff); per-ABI shim; present the captured surface as the window's content.
 
 ## Known cleanup
 - **Deferred deps** (mehman / agnostik / agnodrm): `cyrius build` auto-prepends

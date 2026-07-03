@@ -61,6 +61,12 @@ fn main(): i64 {
     desktop_add_tray_item(desk, 1, "network", "Network");
     # Host a foreign-ABI app as a kavach-sandboxed guest (mehman "swallow" seam).
     desktop_host_foreign(desk, "xterm", 320, 200, 480, 300, "xterm (foreign)");
+    # Exercise the guest-execution path: run a benign foreign guest sandboxed.
+    var demo = foreign_new("/bin/true", 64, 64);
+    if (demo != 0) {
+        println("aethersafha: foreign guest ran (0=OK):");
+        println_int(foreign_run(demo));
+    }
     var axn = desktop_sync_accessibility(desk);
     println("aethersafha: desktop up — windows:");
     println_int(comp_count(comp));

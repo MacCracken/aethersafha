@@ -5,10 +5,10 @@
 
 ## Version
 
-**0.3.0** (2026-07-03) — kashi font dependency + real bitmap text; B3 desktop wiring
-complete (shell status panel, themed background). Built on the 0.2.0 parity milestone
-(compositor/renderer depth, all 8 M2 leaf modules, Bite A window interaction). Ported
-from Rust via `cyrius port`; 27,207 lines preserved at `rust-old/` as the parity oracle.
+**0.4.0** (2026-07-03) — **mehman** wired in: foreign-app hosting + kavach-sandboxed
+guest execution (the XWayland-successor path). Built on 0.3.0 (kashi fonts, B3 desktop
+wiring) and the 0.2.0 parity milestone. Ported from Rust via `cyrius port`; 27,207
+lines preserved at `rust-old/` as the parity oracle.
 
 ## Toolchain
 

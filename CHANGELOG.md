@@ -6,15 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-03 — mehman foreign-app hosting
+
+Wires in **mehman** (the XWayland-successor "swallow" backend) as a real dependency —
+foreign-app hosting *and* execution, end to end.
+
 ### Added
 
-- **mehman wired in (foreign-app hosting).** `src/foreign.cyr` — the "swallow" seam
-  onto **mehman** 0.2.1 + **kavach** 3.6.0 (the XWayland successor): builds a
-  sandboxed-guest spec (swallow caps) + an XRGB8888 foreign-surface descriptor, and
-  `desktop_host_foreign` registers a compositor window backed by it. `main` hosts a
-  demo foreign `xterm`. Required declaring the full TLS/crypto stdlib cascade for
-  kavach→sandhi (net/sandhi/thread_local/tls*/sha1/keccak/sigil/sakshi/…) and
-  `[deps.kavach]` explicitly. `tests/foreign.tcyr` (7 assertions). Pin → 6.3.39.
+- **mehman foreign-app hosting + execution.** `src/foreign.cyr` — the "swallow" seam
+  onto **mehman** 0.2.1 + **kavach** 3.6.0: builds a sandboxed-guest spec (swallow
+  caps) + an XRGB8888 foreign-surface descriptor; `desktop_host_foreign` registers a
+  compositor window backed by it; and **`foreign_run` executes the guest in a kavach
+  PROCESS sandbox** (real fork+exec+reap, returns `MehmanError.OK`). `main` hosts a
+  demo foreign `xterm` and runs a benign guest. Required declaring the full TLS/crypto
+  stdlib cascade for kavach→sandhi (net/sandhi/thread_local/tls*/sha1/keccak/sigil/
+  sakshi/…) + `[deps.kavach]` explicitly. `tests/foreign.tcyr` (11 assertions, incl.
+  live guest execution). Toolchain pin → 6.3.39.
 
 ## [0.3.0] - 2026-07-03 — kashi fonts + desktop wiring
 

@@ -10,10 +10,12 @@
 
 # A hosted foreign app: its mehman guest spec + surface descriptor + window.
 enum ForeignOff {
-    FGN_GUEST = 0;    # *MehmanGuestSpec
-    FGN_SURF  = 8;    # *MehmanSurface
-    FGN_WIN   = 16;   # *Window (in the compositor), or 0
-    FGN_SZ    = 24;
+    FGN_GUEST  = 0;    # *MehmanGuestSpec
+    FGN_SURF   = 8;    # *MehmanSurface
+    FGN_WIN    = 16;   # *Window (in the compositor), or 0
+    FGN_RESULT = 24;   # last foreign_run MehmanError, or -1 (never run)
+    FGN_EXIT   = 32;   # last kavach exec status
+    FGN_SZ     = 40;
 }
 
 # foreign_new(command, w, h): build the mehman guest + XRGB8888 surface descriptor
@@ -32,12 +34,32 @@ fn foreign_new(command, w, h): i64 {
     store64(f + FGN_GUEST, guest);
     store64(f + FGN_SURF, surf);
     store64(f + FGN_WIN, 0);
+    store64(f + FGN_RESULT, 0 - 1);   # never run
+    store64(f + FGN_EXIT, 0);
     return f;
 }
 
-fn foreign_guest(f)   { return load64(f + FGN_GUEST); }
-fn foreign_surface(f) { return load64(f + FGN_SURF); }
-fn foreign_window(f)  { return load64(f + FGN_WIN); }
+fn foreign_guest(f)       { return load64(f + FGN_GUEST); }
+fn foreign_surface(f)     { return load64(f + FGN_SURF); }
+fn foreign_window(f)      { return load64(f + FGN_WIN); }
+fn foreign_result(f)      { return load64(f + FGN_RESULT); }
+fn foreign_exit_status(f) { return load64(f + FGN_EXIT); }
+fn foreign_has_run(f): i64 {
+    if (load64(f + FGN_RESULT) >= 0) { return 1; }
+    return 0;
+}
+
+# foreign_run(f): run the foreign guest in a kavach PROCESS sandbox (real
+# fork+exec+reap), recording the MehmanError result + kavach exec status.
+# -> the MehmanError code (MehmanError.OK on a clean run+reap). This is the
+# actual "swallow" execution path — the compositor launching a foreign app.
+fn foreign_run(f): i64 {
+    var exit = 0;
+    var r = mehman_sandbox_run_guest(foreign_guest(f), &exit);
+    store64(f + FGN_RESULT, r);
+    store64(f + FGN_EXIT, exit);
+    return r;
+}
 
 # desktop_host_foreign(desk, command, x, y, w, h, title): host a foreign app —
 # create its mehman guest + surface and register a compositor window (flagged
