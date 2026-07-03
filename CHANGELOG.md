@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-03 — kashi fonts + desktop wiring
+
+Adds the `kashi` font dependency (real bitmap text) and completes the B3 desktop
+wiring (shell status panel, theme-driven background).
+
 ### Added
 
 - **Bitmap text** — `draw_char`/`draw_text`/`text_width` in the renderer, backed by
