@@ -54,9 +54,10 @@ symbols), each compiling + smoke-tested. Driven by the parity workflow.
 - `plugin_host.cyr` (lifecycle, sandbox profiles, capabilities; IPC stubbed)  ✅ ported
 - Behavioral parity tests for all 8 leaf modules  ✅ (~670 assertions green)
 - **B3 wiring** — `desktop` aggregate owns compositor + all 8 leaf managers, created
-  by `main`; live compositor→accessibility sync.  ✅ first increment (14-assert test)
-- Remaining (B3 depth): shell panel render, notifications surface, input→gestures,
-  theme→renderer.
+  by `main`. `render_desktop` = themed bg + windows + shell status panel. Live links:
+  compositor→accessibility, theme→renderer, shell→renderer, tray.  ✅ complete
+- Remaining (feature depth): notifications surface, input→gestures, quick-settings,
+  and the big renderer piece — **bitmap text** (window titles + status labels).
 
 ### M3 — Renderer + compositor depth (v0.3.0)
 - Damage tracking, scene graph, decorations, bitmap text (`renderer.rs` full).

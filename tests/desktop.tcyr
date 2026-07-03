@@ -48,6 +48,9 @@ fn main() {
     desktop_add_tray_item(d, 2, "vol", "Volume");
     assert_eq(desk_tray_count(d), 2, "two tray items registered");
 
+    test_group("desktop — theme → renderer background");
+    assert_eq(desk_bg_color(d), 0x121218, "desktop bg comes from the theme (alpha masked)");
+
     return assert_summary();
 }
 

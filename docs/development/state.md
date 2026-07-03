@@ -28,17 +28,19 @@ modules, B3 desktop wiring, Bite A window interaction. Ported from Rust via
   - **Leaf (M2)** — `theme_bridge`, `gestures`, `accessibility`, `ai_features`,
     `shell`, `security_ui`, `shell_integration`, `plugin_host` (all 8). Parity vs
     `rust-old/` (heap offset-accessor structs, prefixed symbols); behaviorally tested.
-  - **Wiring (B3)** — `desktop` aggregate owns the compositor + all 8 leaf managers
-    and is created by `main`, so they're reachable + running. First live cross-subsystem
-    connection: **compositor → accessibility** (`desktop_sync_accessibility` mirrors the
-    window stack into the a11y tree). Deeper wiring (shell panel, notifications,
-    input→gestures) is next.
+  - **Wiring (B3, complete)** — `desktop` aggregate owns the compositor + all 8 leaf
+    managers, created by `main`. `render_desktop` is the unified frame: clear to the
+    **theme** background (`desk_bg_color`), paint windows, draw the **shell** status
+    panel (`render_shell_panel` — cpu/mem/battery bars, net dot, notification badge).
+    Live cross-subsystem links: compositor→accessibility (`desktop_sync_accessibility`),
+    theme→renderer, shell→renderer, shell_integration tray. (ai/security/gestures/
+    plugin instantiated; deeper feature wiring is follow-on.)
 
 ## Tests
 
-- **13 `.tcyr` files, all green.** Core: `aethersafha` (38), `render` (22 — incl.
-  decoration hit-test), `input` (13 — key→action→window mgmt), `leaf_modules` (11),
-  `desktop` (14 — B3 wiring). Behavioral per-module: `theme_bridge`, `gestures`,
+- **13 `.tcyr` files, all green.** Core: `aethersafha` (38), `render` (27 — decoration
+  hit-test + shell-panel bars), `input` (13 — key→action→window mgmt), `leaf_modules`
+  (11), `desktop` (15 — B3 wiring + theme bg). Behavioral per-module: `theme_bridge`, `gestures`,
   `accessibility`, `ai_features`, `shell`, `security_ui`, `shell_integration`,
   `plugin_host`.
 - Run: `cyrius tests tests/` (or a single `cyrius test tests/<file>.tcyr`).

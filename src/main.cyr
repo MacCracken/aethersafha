@@ -79,7 +79,7 @@ fn main(): i64 {
                 i = i + 1;
             }
         }
-        render_frame(comp, fb);
+        render_desktop(desk, fb);
         bhumi_backend_present(be, now);
         frame = frame + 1;
     }

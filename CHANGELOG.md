@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **B3 wiring completed** — a **shell status panel** rendered from the desktop shell
+  (cpu/mem/battery bar-graphs, net-status dot, notification badge; `render_shell_panel`
+  + pure `panel_bar_w`), and **theme → renderer** (`render_desktop` clears to the
+  theme's high-contrast background via `desk_bg_color`, then paints windows + panel).
+  All 8 leaf subsystems are now wired into the running frame.
+
 ## [0.2.0] - 2026-07-03 — parity milestone
 
 Compositor + renderer depth, the full M2 leaf-module set, B3 wiring (desktop

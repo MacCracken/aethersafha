@@ -38,7 +38,7 @@ fn desktop_new(): i64 {
     store64(d + DSK_SEC, sec_ui_new());   # sec_ui_new seeds the permission definitions
     store64(d + DSK_A11Y, a11y_tree_new());
     store64(d + DSK_GEST, desk_default_gestures());
-    store64(d + DSK_THEME, theme_hc_new(0, 0xFFFFFF, 0x3366FF, 0xFF0000, 0xFFAA00, 0x00FF00, 1250));
+    store64(d + DSK_THEME, theme_hc_new(0x121218, 0xFFFFFF, 0x3366FF, 0xFF0000, 0xFFAA00, 0x00FF00, 1250));
     store64(d + DSK_PLUG, plug_host_new(16));
     store64(d + DSK_TRAY, vec_new());
     return d;
@@ -77,3 +77,27 @@ fn desktop_add_tray_item(d, id, app, tooltip): i64 {
     return item;
 }
 fn desk_tray_count(d) { return vec_len(desk_tray(d)); }
+
+# desk_bg_color(d): the desktop background as a bhumi XRGB pixel — the theme's
+# high-contrast background with its alpha byte masked off. (theme → renderer)
+fn desk_bg_color(d): i64 {
+    return theme_hc_background(desk_theme(d)) & 0xFFFFFF;
+}
+
+# render_desktop(d, fb): the full desktop frame — clear to the themed background,
+# paint the window stack (focus-tinted), then the shell status panel on top.
+fn render_desktop(d, fb): i64 {
+    var comp = desk_comp(d);
+    bhumi_fb_clear(fb, desk_bg_color(d));
+    var v = comp_windows(comp);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var focused = 0;
+        if (i == comp_focused(comp)) { focused = 1; }
+        render_window(fb, vec_get(v, i), focused);
+        i = i + 1;
+    }
+    render_shell_panel(fb, desk_shell(d));
+    return 0;
+}
