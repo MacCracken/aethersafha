@@ -321,6 +321,22 @@ fn app_spawn_detached(argv_vec, envp): i64 {
     return pid;
 }
 
+# app_launch_terminal(puka_path): launch puka — the sovereign VT terminal — as a
+# DETACHED setu-client process. puka is NOT a built-in app (the Command Palette
+# took over the old built-in "terminal" slot); it is an external binary that
+# connects to the compositor's setu socket on its own and presents its window.
+# This is the desktop's "open a terminal" action. Inherits the compositor env
+# (so puka sees SETU_SOCKET + PATH for its hosted shell). -> child pid (> 0), or
+# -1 on fork failure / empty path. The compositor's running setu listener accepts
+# the connection the spawned puka makes.
+fn app_launch_terminal(puka_path): i64 {
+    if (puka_path == 0) { return 0 - 1; }
+    if (load8(puka_path) == 0) { return 0 - 1; }
+    var argv = vec_new();
+    vec_push(argv, puka_path);
+    return app_spawn_detached(argv, app_merge_env(0));
+}
+
 # ---------------------------------------------------------------------------
 # Enum display helpers.
 # ---------------------------------------------------------------------------
