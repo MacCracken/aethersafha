@@ -246,3 +246,30 @@ fn setu_srv_serve_accepted(cfd, comp, fb): i64 {
     }
     return win_id(win);
 }
+
+# Like setu_srv_serve_accepted, but PLACE this surface's window at (dstx,dsty)
+# instead of the default (0,0) origin — so a compositor (or harness) can host
+# MULTIPLE setu clients as distinct, non-overlapping windows (the multi-window
+# desktop). Moves the minted Window and blits the committed buffer there. The
+# CALLER owns cfd + the listen socket. Returns the surface id (>0) or a negative
+# recv code.
+fn setu_srv_serve_accepted_at(cfd, comp, fb, dstx, dsty): i64 {
+    var out4 = alloc(32);
+    var nbytes = setu_srv_recv_committed(cfd, comp, out4);
+    if (nbytes < 0) { return nbytes; }
+    var win = load64(out4 + 0);
+    var pix = load64(out4 + 8);
+    var w   = load64(out4 + 16);
+    var h   = load64(out4 + 24);
+    win_move(win, dstx, dsty);
+    var py = 0;
+    while (py < h) {
+        var px = 0;
+        while (px < w) {
+            bhumi_fb_set(fb, dstx + px, dsty + py, load32(pix + (py * w + px) * 4));
+            px = px + 1;
+        }
+        py = py + 1;
+    }
+    return win_id(win);
+}

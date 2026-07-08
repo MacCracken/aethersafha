@@ -1,0 +1,108 @@
+# puka_desktop_probe.cyr — prove MULTI-WINDOW compositing: two independent setu
+# clients hosted as distinct windows on one desktop.
+#
+# aethersafha listens, then launches TWO clients in turn — puka (the sovereign
+# terminal) and dhancha's setu_demo_client (a widget app) — accepting + placing
+# each as its own window (setu_srv_serve_accepted_at) on a shared framebuffer
+# with a desktop backdrop, then dumps the whole desktop to a PPM. This is the
+# compositor doing what a compositor is for: many apps, one screen.
+#
+# Run: PUKA_BIN=/abs/puka_setu_probe DHANCHA_BIN=/abs/setu_demo_client ./build/puka_desktop_probe
+
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/setu_server.cyr"
+include "src/setu_dispatch.cyr"
+
+fn pdp_spawn(path): i64 {
+    var argv = alloc(16);
+    store64(argv + 0, path);
+    store64(argv + 8, 0);
+    var pid = sys_fork();
+    if (pid < 0) { return 0 - 1; }
+    if (pid == 0) { sys_execve(path, argv, 0); sys_exit(127); }
+    return pid;
+}
+
+fn pdp_dump_ppm(fb, w, h, path): i64 {
+    var hdr = alloc(64);
+    var p = 0;
+    store8(hdr + 0, 80); store8(hdr + 1, 54); store8(hdr + 2, 10);
+    p = 3;
+    var wb = alloc(24); var wl = fmt_int_buf(w, wb); memcpy(hdr + p, wb, wl); p = p + wl;
+    store8(hdr + p, 32); p = p + 1;
+    var hb = alloc(24); var hl = fmt_int_buf(h, hb); memcpy(hdr + p, hb, hl); p = p + hl;
+    store8(hdr + p, 10); p = p + 1;
+    store8(hdr + p, 50); store8(hdr + p + 1, 53); store8(hdr + p + 2, 53); store8(hdr + p + 3, 10);
+    p = p + 4;
+    var body = alloc(w * h * 3);
+    var bi = 0;
+    var py = 0;
+    while (py < h) {
+        var px = 0;
+        while (px < w) {
+            var pixel = bhumi_fb_get(fb, px, py);
+            store8(body + bi, (pixel >> 16) & 255); bi = bi + 1;
+            store8(body + bi, (pixel >> 8) & 255);  bi = bi + 1;
+            store8(body + bi, pixel & 255);         bi = bi + 1;
+            px = px + 1;
+        }
+        py = py + 1;
+    }
+    var fd = syscall(SYS_OPEN, path, 577, 420);
+    if (fd < 0) { return 0 - 1; }
+    syscall(SYS_WRITE, fd, hdr, p);
+    syscall(SYS_WRITE, fd, body, w * h * 3);
+    syscall(SYS_CLOSE, fd);
+    return 0;
+}
+
+fn pdp_say(s): i64 { return syscall(SYS_WRITE, 1, s, strlen(s)); }
+
+# Launch one client, accept its connection, place its window at (x,y). -> sid/neg.
+fn pdp_host(sfd, comp, fb, bin, x, y): i64 {
+    var pid = pdp_spawn(bin);
+    if (pid < 0) { return 0 - 1; }
+    var cfd = syscall(SYS_ACCEPT, sfd, 0, 0);
+    if (cfd < 0) { return 0 - 5; }
+    var sid = setu_srv_serve_accepted_at(cfd, comp, fb, x, y);
+    syscall(SYS_CLOSE, cfd);
+    return sid;
+}
+
+fn main(): i64 {
+    alloc_init();
+    var path = "/tmp/aethersafha-setu.sock";
+    var ppm = "/tmp/aethersafha-desktop.ppm";
+    syscall(SYS_UNLINK, path);
+
+    var fb = bhumi_fb_new(720, 280);
+    if (fb == 0) { return 1; }
+    bhumi_fb_clear(fb, bhumi_xrgb(24, 24, 37));   # desktop backdrop
+    var comp = comp_new();
+
+    var sfd = setu_srv_listen(path);
+    if (sfd < 0) { pdp_say("puka_desktop_probe: listen failed\n"); return 1; }
+
+    var puka = getenv("PUKA_BIN");
+    if (puka == 0) { puka = "/home/macro/Repos/puka/build/puka_setu_probe"; }
+    var dhancha = getenv("DHANCHA_BIN");
+    if (dhancha == 0) { dhancha = "/home/macro/Repos/dhancha/build/setu_demo_client"; }
+
+    pdp_say("puka_desktop_probe: hosting puka + dhancha widget app...\n");
+    var s1 = pdp_host(sfd, comp, fb, puka, 20, 20);
+    if (s1 < 0) { pdp_say("puka_desktop_probe: puka host failed\n"); syscall(SYS_CLOSE, sfd); return 1; }
+    var s2 = pdp_host(sfd, comp, fb, dhancha, 380, 40);
+    if (s2 < 0) { pdp_say("puka_desktop_probe: dhancha host failed\n"); syscall(SYS_CLOSE, sfd); return 1; }
+
+    pdp_dump_ppm(fb, 720, 280, ppm);
+    syscall(SYS_CLOSE, sfd);
+    syscall(SYS_UNLINK, path);
+    pdp_say("puka_desktop_probe: PASS — 2 clients composited as windows (");
+    pdp_say("puka + dhancha) -> PPM\n");
+    return 0;
+}
+
+fn _entry(): i64 { var r = main(); syscall(SYS_EXIT, r); return 0; }
+_entry();
