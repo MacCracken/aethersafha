@@ -1,0 +1,49 @@
+# programs/setu_input_server_probe.cyr — bite-10 proof (compositor side): accept
+# a client and push a scripted input sequence down the setu return-path
+# (KEY 'A' → POINTER_MOVE → POINTER_BTN press). Pair with dhancha's
+# build/setu_input_client_probe, which decodes them into DhEvents. On the real
+# compositor these frames originate from bhumi_backend_poll; here they're
+# scripted so the return-path proves standalone. Throwaway harness.
+
+include "src/setu_server.cyr"
+
+fn main(): i64 {
+    alloc_init();
+    var path = "/tmp/aethersafha-setu.sock";
+
+    var sfd = setu_srv_listen(path);
+    if (sfd < 0) {
+        var e = "setu_input_server_probe: listen failed\n";
+        syscall(SYS_WRITE, 2, e, strlen(e));
+        return 1;
+    }
+    var banner = "setu_input_server_probe: listening; will send KEY/MOVE/BTN\n";
+    syscall(SYS_WRITE, 1, banner, strlen(banner));
+
+    var cfd = syscall(SYS_ACCEPT, sfd, 0, 0);
+    if (cfd < 0) {
+        syscall(SYS_CLOSE, sfd);
+        syscall(SYS_UNLINK, path);
+        return 1;
+    }
+
+    # Scripted input to the focused client (surface id 1).
+    setu_srv_write_frame(cfd, setu_input_key(1, 65, 0));        # 'A' (keysym 65), no mods
+    setu_srv_write_frame(cfd, setu_input_ptr_move(1, 100, 50)); # pointer → (100,50)
+    setu_srv_write_frame(cfd, setu_input_ptr_btn(1, 272, 1));   # button 272 press
+
+    syscall(SYS_CLOSE, cfd);
+    syscall(SYS_CLOSE, sfd);
+    syscall(SYS_UNLINK, path);
+
+    var done = "setu_input_server_probe: sent 3 input events; closed\n";
+    syscall(SYS_WRITE, 1, done, strlen(done));
+    return 0;
+}
+
+fn _entry(): i64 {
+    var r = main();
+    syscall(SYS_EXIT, r);
+    return 0;
+}
+_entry();
