@@ -1,0 +1,52 @@
+# aethersafha — setu display-protocol DISPATCH (message → compositor state).
+#
+# Bite 4 of the native display protocol (agnosticos native-display-protocol.md
+# §2.2): turns decoded setu messages into real compositor `Window`s. Depends on
+# the transport (setu_server.cyr) AND the compositor (compositor.cyr /
+# window.cyr) — kept separate from setu_server.cyr so the pure transport carries
+# no compositor refs. All fns `setu_srv_*` (the dispatch half).
+
+# Close the client + listening fds and remove the socket file.
+fn setu_srv_dispatch_close(cfd, sfd, path): i64 {
+    syscall(SYS_CLOSE, cfd);
+    syscall(SYS_CLOSE, sfd);
+    syscall(SYS_UNLINK, path);
+    return 0;
+}
+
+# Accept ONE client, read a CREATE_SURFACE, create a real Window on `comp`, and
+# reply SURFACE_CREATED(id). The COMPOSITOR is the source of truth for the id
+# (its C_NEXTID counter). Returns the new surface id (> 0) or a negative code:
+#   setu_srv_listen codes · -5 accept · setu_srv_read_frame codes · -8 not a
+#   CREATE_SURFACE · -9 window alloc · setu_srv_write_frame codes (reply).
+fn setu_srv_create_surface(path, comp): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var sfd = setu_srv_listen(path);
+    if (sfd < 0) { return sfd; }
+    var cfd = syscall(SYS_ACCEPT, sfd, 0, 0);
+    if (cfd < 0) { syscall(SYS_CLOSE, sfd); syscall(SYS_UNLINK, path); return 0 - 5; }
+
+    var msg = setu_msg_new();
+    var rc = setu_srv_read_frame(cfd, msg);
+    if (rc < 0) { setu_srv_dispatch_close(cfd, sfd, path); return rc; }
+    if (setu_msg_kind(msg) != SETU_CREATE_SURFACE) {
+        setu_srv_dispatch_close(cfd, sfd, path);
+        return 0 - 8;
+    }
+
+    var w = setu_msg_arg(msg, 0);
+    var h = setu_msg_arg(msg, 1);
+    # arg2 (flags) is unused at this step.
+    var win = comp_create_window(comp, 0, 0, w, h, "setu-surface");
+    if (win == 0) { setu_srv_dispatch_close(cfd, sfd, path); return 0 - 9; }
+    var id = win_id(win);
+
+    var wr = setu_srv_write_frame(cfd, setu_surface_created(id));
+    setu_srv_dispatch_close(cfd, sfd, path);
+    if (wr < 0) { return wr; }
+    return id;
+    #endif
+}

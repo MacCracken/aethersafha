@@ -1,17 +1,13 @@
-# aethersafha — setu display-protocol listener (server side).
+# aethersafha — setu display-protocol listener (server-side TRANSPORT).
 #
-# Bite 2 of the native display protocol (agnosticos native-display-protocol.md
-# §2): the compositor's `setu` seam. This is the MINIMAL, terminating listener —
-# bind a Unix socket, accept ONE client, read ONE setu frame, and decode it. It
-# is deliberately NOT wired into the compositor frame loop yet (a later bite);
-# a probe program drives it standalone so the display wire proves out without
-# touching main.
-#
-# Sovereign AF_UNIX server pattern (prior-art: bote transport_unix.cyr, majra
-# ipc) — own syscalls, no bote dep. The frame is validated by `setu_decode`
-# (from [deps.setu]). AF_UNIX fail-closes on agnos (a TCP transport lands when
-# the compositor runs on-agnos); on the Linux proving ground the Unix socket is
-# the seam. All fns are `setu_srv_*` to stay clear of the setu `setu_*` surface.
+# Native display protocol (agnosticos native-display-protocol.md §2): the
+# compositor's `setu` socket transport — bind/listen/accept a Unix socket and
+# read/write setu frames. PURE TRANSPORT: no compositor refs (the
+# message→Window dispatch lives in setu_dispatch.cyr, kept separate so this
+# stays a clean transport). Sovereign AF_UNIX pattern (prior-art: bote
+# transport_unix). All fns `setu_srv_*`. AF_UNIX fail-closes on agnos (a TCP
+# transport lands when the compositor runs on-agnos); the frame is validated by
+# `setu_decode` / built by `setu_encode` (from [deps.setu]).
 
 var SETU_SRV_AF_UNIX     = 1;   # AF_UNIX
 var SETU_SRV_SOCK_STREAM = 1;   # SOCK_STREAM
@@ -28,15 +24,10 @@ fn setu_srv_sockaddr(addr_buf, path): i64 {
     return 2 + plen + 1;
 }
 
-# Bind a Unix socket at `path`, accept ONE connection, read ONE setu frame, and
-# decode it into `msg_out` (a setu_msg_new()). Terminating (no loop) so a probe
-# drives it once. Returns the decoded frame length (> 0) on success, else a
-# negative step code so a failure is localizable:
-#   -1 agnos (AF_UNIX fail-closed)  -2 socket  -3 bind  -4 listen
-#   -5 accept                        -6 empty read
-# A setu_decode failure is returned as its own negated SetuErr (also < 0); the
-# caller distinguishes decode-vs-transport by the step codes above.
-fn setu_srv_accept_one(path, msg_out): i64 {
+# Open + bind + chmod(0600) + listen a Unix socket at `path`. Returns the
+# listening fd (>= 0) or a negative step code (-1 agnos, -2 socket, -3 bind,
+# -4 listen). Removes any prior socket file at `path` first.
+fn setu_srv_listen(path): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     return 0 - 1;
     #endif
@@ -49,17 +40,49 @@ fn setu_srv_accept_one(path, msg_out): i64 {
     if (syscall(SYS_BIND, sfd, addr, alen) < 0) { syscall(SYS_CLOSE, sfd); return 0 - 3; }
     syscall(SYS_CHMOD, path, 0x180);   # 0o600 — only the owning UID may dial
     if (syscall(SYS_LISTEN, sfd, 4) < 0) { syscall(SYS_CLOSE, sfd); return 0 - 4; }
-    var cfd = syscall(SYS_ACCEPT, sfd, 0, 0);
-    if (cfd < 0) { syscall(SYS_CLOSE, sfd); syscall(SYS_UNLINK, path); return 0 - 5; }
-    # One setu frame is small (widest is ATTACH, (2+5)*8 = 56 bytes); read up to
-    # 256 bytes and let setu_decode bound/validate against the byte count.
-    var cap = 256;
+    return sfd;
+    #endif
+}
+
+# Read ONE setu frame from a connected fd into `msg_out`. Returns the decoded
+# length (> 0), -6 on empty read / EOF, or a negated SetuErr from setu_decode.
+fn setu_srv_read_frame(cfd, msg_out): i64 {
+    var cap = 256;   # widest setu frame is 56 bytes
     var buf = alloc(cap);
     var n = syscall(SYS_READ, cfd, buf, cap);
+    if (n <= 0) { return 0 - 6; }
+    return setu_decode(buf, n, msg_out);
+}
+
+# Encode `msg` and write the whole frame to `cfd`. Returns bytes written (> 0),
+# a negated SetuErr on encode failure, or -7 on a short write.
+fn setu_srv_write_frame(cfd, msg): i64 {
+    var cap = 128;
+    var buf = alloc(cap);
+    var enc = setu_encode(msg, buf, cap);
+    if (enc < 0) { return enc; }
+    var w = syscall(SYS_WRITE, cfd, buf, enc);
+    if (w != enc) { return 0 - 7; }
+    return w;
+}
+
+# Bite 2: bind, accept ONE client, read ONE frame into `msg_out`, close all.
+# Returns the decoded length (> 0) or a negative step code (setu_srv_listen
+# codes, -5 accept, setu_srv_read_frame codes). No compositor involvement — a
+# pure "receive one message" primitive.
+fn setu_srv_accept_one(path, msg_out): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var sfd = setu_srv_listen(path);
+    if (sfd < 0) { return sfd; }
+    var cfd = syscall(SYS_ACCEPT, sfd, 0, 0);
+    if (cfd < 0) { syscall(SYS_CLOSE, sfd); syscall(SYS_UNLINK, path); return 0 - 5; }
+    var rc = setu_srv_read_frame(cfd, msg_out);
     syscall(SYS_CLOSE, cfd);
     syscall(SYS_CLOSE, sfd);
     syscall(SYS_UNLINK, path);
-    if (n <= 0) { return 0 - 6; }
-    return setu_decode(buf, n, msg_out);
+    return rc;
     #endif
 }

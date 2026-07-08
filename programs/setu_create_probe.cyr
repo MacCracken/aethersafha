@@ -1,0 +1,53 @@
+# programs/setu_create_probe.cyr — bite-4 runtime proof of the compositor
+# minting a real Window from a setu CREATE_SURFACE. Builds a bare compositor
+# (comp_new), serves ONE create request, and prints the surface id + window
+# count. Drive it: run this, then connect, send a CREATE_SURFACE frame, and read
+# the SURFACE_CREATED reply. Throwaway proof harness — not wired into main.
+
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/setu_server.cyr"
+include "src/setu_dispatch.cyr"
+
+# Print a signed decimal via fmt_int_buf (24-byte scratch).
+fn setu_create_probe_emit_int(n): i64 {
+    var nb = alloc(24);
+    var nl = fmt_int_buf(n, nb);
+    syscall(SYS_WRITE, 1, nb, nl);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    var path = "/tmp/aethersafha-setu.sock";
+    var comp = comp_new();
+
+    var banner = "setu_create_probe: listening; windows before=";
+    syscall(SYS_WRITE, 1, banner, strlen(banner));
+    setu_create_probe_emit_int(comp_count(comp));
+    syscall(SYS_WRITE, 1, "\n", 1);
+
+    var id = setu_srv_create_surface(path, comp);
+    if (id <= 0) {
+        var e = "setu_create_probe: create failed\n";
+        syscall(SYS_WRITE, 2, e, strlen(e));
+        return 1;
+    }
+
+    var pre = "setu_create_probe: minted surface id=";
+    syscall(SYS_WRITE, 1, pre, strlen(pre));
+    setu_create_probe_emit_int(id);
+    var mid = " windows after=";
+    syscall(SYS_WRITE, 1, mid, strlen(mid));
+    setu_create_probe_emit_int(comp_count(comp));
+    syscall(SYS_WRITE, 1, "\n", 1);
+    return 0;
+}
+
+fn _entry(): i64 {
+    var r = main();
+    syscall(SYS_EXIT, r);
+    return 0;
+}
+_entry();
