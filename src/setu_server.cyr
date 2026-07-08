@@ -2,12 +2,12 @@
 #
 # Native display protocol (agnosticos native-display-protocol.md §2): the
 # compositor's `setu` socket transport — bind/listen/accept a Unix socket and
-# read/write setu frames. PURE TRANSPORT: no compositor refs (the
-# message→Window dispatch lives in setu_dispatch.cyr, kept separate so this
-# stays a clean transport). Sovereign AF_UNIX pattern (prior-art: bote
-# transport_unix). All fns `setu_srv_*`. AF_UNIX fail-closes on agnos (a TCP
-# transport lands when the compositor runs on-agnos); the frame is validated by
-# `setu_decode` / built by `setu_encode` (from [deps.setu]).
+# read/write setu frames (with exact-length framing so a following raw pixel
+# payload on the same stream is not consumed by a frame read). PURE TRANSPORT:
+# no compositor refs (the message→Window dispatch lives in setu_dispatch.cyr).
+# Sovereign AF_UNIX pattern (prior-art: bote transport_unix). All fns
+# `setu_srv_*`. AF_UNIX fail-closes on agnos (a TCP transport lands when the
+# compositor runs on-agnos); frames are (de)coded by [deps.setu].
 
 var SETU_SRV_AF_UNIX     = 1;   # AF_UNIX
 var SETU_SRV_SOCK_STREAM = 1;   # SOCK_STREAM
@@ -44,14 +44,35 @@ fn setu_srv_listen(path): i64 {
     #endif
 }
 
-# Read ONE setu frame from a connected fd into `msg_out`. Returns the decoded
-# length (> 0), -6 on empty read / EOF, or a negated SetuErr from setu_decode.
-fn setu_srv_read_frame(cfd, msg_out): i64 {
-    var cap = 256;   # widest setu frame is 56 bytes
-    var buf = alloc(cap);
-    var n = syscall(SYS_READ, cfd, buf, cap);
-    if (n <= 0) { return 0 - 6; }
-    return setu_decode(buf, n, msg_out);
+# Read EXACTLY `n` bytes from `fd` into `buf`, looping over short reads. Returns
+# `n` (>= 0) or -6 on EOF/error before `n` bytes arrive. This is what lets a
+# raw pixel payload follow a framed message on the same stream.
+fn setu_srv_read_exact(fd, buf, n): i64 {
+    var got = 0;
+    while (got < n) {
+        var r = syscall(SYS_READ, fd, buf + got, n - got);
+        if (r <= 0) { return 0 - 6; }
+        got = got + r;
+    }
+    return got;
+}
+
+# Read ONE full setu frame from `fd` into `msg_out` using length-from-header
+# framing: read the 16-byte header (kind + argc), size the frame as (2+argc)*8,
+# read the remainder, then decode. Returns the frame byte length (> 0), -6 on a
+# short read / bad argc, or a negated SetuErr. Does NOT over-read into a trailing
+# payload (unlike a bulk read).
+fn setu_srv_read_msg(fd, msg_out): i64 {
+    var buf = alloc(128);
+    if (setu_srv_read_exact(fd, buf, 16) < 0) { return 0 - 6; }   # kind + argc
+    var argc = setu_get_i64(buf, 8);
+    if (argc < 0) { return 0 - 6; }
+    if (argc > 8) { return 0 - 6; }                                # setu max argc is 5
+    var total = (2 + argc) * 8;
+    if (total > 16) {
+        if (setu_srv_read_exact(fd, buf + 16, total - 16) < 0) { return 0 - 6; }
+    }
+    return setu_decode(buf, total, msg_out);
 }
 
 # Encode `msg` and write the whole frame to `cfd`. Returns bytes written (> 0),
@@ -66,10 +87,10 @@ fn setu_srv_write_frame(cfd, msg): i64 {
     return w;
 }
 
-# Bite 2: bind, accept ONE client, read ONE frame into `msg_out`, close all.
-# Returns the decoded length (> 0) or a negative step code (setu_srv_listen
-# codes, -5 accept, setu_srv_read_frame codes). No compositor involvement — a
-# pure "receive one message" primitive.
+# Bite 2: bind, accept ONE client, read ONE frame into `msg_out` (bulk read),
+# close all. Returns the decoded length (> 0) or a negative step code
+# (setu_srv_listen codes, -5 accept, -6 read / negated SetuErr). No compositor
+# involvement — a pure "receive one message" primitive.
 fn setu_srv_accept_one(path, msg_out): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     return 0 - 1;
@@ -79,7 +100,11 @@ fn setu_srv_accept_one(path, msg_out): i64 {
     if (sfd < 0) { return sfd; }
     var cfd = syscall(SYS_ACCEPT, sfd, 0, 0);
     if (cfd < 0) { syscall(SYS_CLOSE, sfd); syscall(SYS_UNLINK, path); return 0 - 5; }
-    var rc = setu_srv_read_frame(cfd, msg_out);
+    var cap = 256;
+    var buf = alloc(cap);
+    var n = syscall(SYS_READ, cfd, buf, cap);
+    var rc = 0 - 6;
+    if (n > 0) { rc = setu_decode(buf, n, msg_out); }
     syscall(SYS_CLOSE, cfd);
     syscall(SYS_CLOSE, sfd);
     syscall(SYS_UNLINK, path);
