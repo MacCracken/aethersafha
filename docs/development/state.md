@@ -5,7 +5,16 @@
 
 ## Version
 
-**0.5.0** (2026-07-03) — **Bite C (built-in apps) — C1 + C2**: the app framework
+**0.6.0** (2026-07-08) — **native display protocol (setu server + frame-loop integration)**:
+the compositor side of the sovereign dhancha ↔ aethersafha wire — `src/setu_server.cyr`
+(AF_UNIX transport, length-from-header framing), `src/setu_dispatch.cyr`
+(`CREATE_SURFACE` → real `Window`, buffer receive + bhumi-framebuffer blit, verified),
+and `src/main.cyr` standing up a non-blocking setu listener that composites real client
+presents in the actual frame loop. Proven on Linux against a real dhancha `DhClient`;
+`AF_UNIX` fail-closes on agnos so the agnos loop is untouched. Adds the new `setu` 0.1.0
+contract-lib dependency. The final kernel-scanout hop is agnos-only.
+
+Built on **0.5.0** (2026-07-03) — **Bite C (built-in apps) — C1 + C2**: the app framework
 (`AppError`/`AppType`/`AppWindow` + the `DesktopApplications` aggregate), the data-model apps
 (FileManager, AgentManager, AuditViewer, ModelManager), and the **Terminal** security surface +
 **real process spawn** (30-program allowlist + `Path::file_name` basename-strip; direct

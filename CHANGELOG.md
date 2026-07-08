@@ -4,7 +4,32 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.6.0] - 2026-07-08 — native display protocol (setu server + frame-loop integration)
+
+### Added
+
+- **The setu server — aethersafha serves the native display protocol, wired into
+  the real frame loop.** The full compositor side of the sovereign
+  dhancha ↔ aethersafha wire (`setu`), built incrementally and proven end-to-end
+  on Linux:
+  - **`src/setu_server.cyr`** — the setu socket transport (AF_UNIX; fail-closes
+    on agnos): `setu_srv_listen` / `accept` / `setu_srv_read_msg`
+    (length-from-header framing) / `setu_srv_read_exact` / `setu_srv_write_frame`.
+  - **`src/setu_dispatch.cyr`** — message → compositor state: `CREATE_SURFACE` →
+    a real `comp_create_window` `Window` + `SURFACE_CREATED` reply; `ATTACH` +
+    inline BGRA payload + `COMMIT` received byte-exact and blitted into the bhumi
+    framebuffer, the framebuffer region verified against the source
+    (`setu_srv_serve_present` / `serve_session` / `serve_accepted`).
+  - **`src/main.cyr`** — the real compositor frame loop now stands up a
+    **non-blocking** setu listener and, each frame, accepts + composites client
+    presents on top of its desktop. `AF_UNIX` fail-closes on agnos, so the setu
+    block is skipped there and the loop keeps its bounded agnos form untouched.
+  - Adds a dependency on the new **`setu` 0.1.0** contract lib, and blits client
+    surfaces into the bhumi framebuffer.
+  - Proven on Linux: `build/aethersafha` accepting a real dhancha `DhClient`,
+    minting its `Window`, and compositing its rendered widget tree — the display
+    slice end-to-end (the final kernel-scanout hop, `bhumi_backend_present` →
+    `fbinfo#38`/`blit#39`, is agnos-only).
 
 ### Changed
 
