@@ -25,6 +25,8 @@ include "src/shell_integration.cyr"
 include "src/plugin_host.cyr"
 include "src/desktop.cyr"
 include "src/foreign.cyr"
+include "src/setu_server.cyr"    # native display-protocol transport (setu)
+include "src/setu_dispatch.cyr"  # setu → compositor dispatch (surface → Window + blit)
 
 enum AeConfig {
     AE_W     = 1280;
@@ -72,13 +74,29 @@ fn main(): i64 {
     println("aethersafha: a11y nodes synced:");
     println_int(axn);
 
-    # Frame loop: poll bhumi input, dispatch, render, scan out. Bounded so the
-    # host build terminates; on agnos this becomes `while (running == 1)`.
+    # Native display protocol: stand up the setu listener so real dhancha clients
+    # can connect + present (native-display-protocol.md). Non-blocking accept, so
+    # the frame loop never stalls. AF_UNIX fail-closes on agnos → setu_sfd < 0
+    # there: the setu block is skipped and the loop keeps its bounded frame<3
+    # form (the agnos transport lands later); on Linux the cap is extended so a
+    # client has time to connect.
+    var setu_path = "/tmp/aethersafha-setu.sock";
+    var setu_sfd = setu_srv_listen(setu_path);
+    var setu_cap = 3;
+    if (setu_sfd >= 0) {
+        syscall(SYS_FCNTL, setu_sfd, 4, 2048);   # F_SETFL O_NONBLOCK
+        setu_cap = 400;                          # spin (render-paced) long enough to catch a client
+        println("aethersafha: setu listener up");
+    }
+
+    # Frame loop: poll bhumi input, dispatch, render, composite setu clients,
+    # scan out. Bounded so the host build terminates; on agnos this becomes
+    # `while (running == 1)`.
     var events[512];   # AE_MAXEV (64) * 8 bytes
     var now = 1;
     var frame = 0;
     var running = 1;
-    while ((running == 1) && (frame < 3)) {
+    while ((running == 1) && (frame < setu_cap)) {
         var n = bhumi_backend_poll(be, &events, AE_MAXEV, now);
         if (n != BHUMI_SEAT_DENIED) {
             var i = 0;
@@ -90,9 +108,23 @@ fn main(): i64 {
         }
         render_desktop(desk, fb);
         render_desktop_foreign(desk, fb);
+        # setu: accept + composite one client present per frame (over the desktop).
+        if (setu_sfd >= 0) {
+            var cfd = syscall(SYS_ACCEPT, setu_sfd, 0, 0);
+            if (cfd >= 0) {
+                var sid = setu_srv_serve_accepted(cfd, comp, fb);
+                syscall(SYS_CLOSE, cfd);
+                if (sid > 0) {
+                    println("aethersafha: setu client presented surface");
+                    println_int(sid);
+                    running = 0;
+                }
+            }
+        }
         bhumi_backend_present(be, now);
         frame = frame + 1;
     }
+    if (setu_sfd >= 0) { syscall(SYS_CLOSE, setu_sfd); syscall(SYS_UNLINK, setu_path); }
 
     println("aethersafha: frame loop ok");
     return 0;

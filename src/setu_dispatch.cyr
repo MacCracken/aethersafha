@@ -217,3 +217,32 @@ fn setu_srv_serve_session(path, comp, fb): i64 {
     return fb_sum;
     #endif
 }
+
+# Bite 12: serve a present on an ALREADY-ACCEPTED connection `cfd` — the seam
+# main's frame loop calls per accepted client. Receive CREATE→ATTACH+payload→
+# COMMIT, mint the Window on `comp`, and blit the buffer into `fb` (composited on
+# top of whatever the desktop drew this frame; proper z-order via the Window
+# model is later polish). The CALLER owns cfd (accepts + closes it) and the
+# listen socket, so this does no listen/accept/close and needs no agnos guard.
+# Returns the surface id (> 0) or a negative recv code.
+fn setu_srv_serve_accepted(cfd, comp, fb): i64 {
+    var out4 = alloc(32);
+    var nbytes = setu_srv_recv_committed(cfd, comp, out4);
+    if (nbytes < 0) { return nbytes; }
+    var win = load64(out4 + 0);
+    var pix = load64(out4 + 8);
+    var w   = load64(out4 + 16);
+    var h   = load64(out4 + 24);
+    var wx = win_x(win);
+    var wy = win_y(win);
+    var py = 0;
+    while (py < h) {
+        var px = 0;
+        while (px < w) {
+            bhumi_fb_set(fb, wx + px, wy + py, load32(pix + (py * w + px) * 4));
+            px = px + 1;
+        }
+        py = py + 1;
+    }
+    return win_id(win);
+}
