@@ -63,11 +63,15 @@ fn main(): i64 {
     desktop_add_tray_item(desk, 1, "network", "Network");
     # Host a foreign-ABI app as a kavach-sandboxed guest (mehman "swallow" seam),
     # run it, and present its captured stdout as the window's content (M2 handoff).
+    # Linux-only: the kavach sandbox forks (sys_fork), which agnos lacks by design
+    # — the swallow lane is a compat feature, not the sovereign compositor's job.
+    #ifndef CYRIUS_TARGET_AGNOS
     var greeter = desktop_host_foreign(desk, "/bin/echo aethersafha guest", 320, 200, 480, 300, "echo (foreign)");
     if (greeter != 0) {
         println("aethersafha: foreign guest ran (0=OK):");
         println_int(foreign_run(greeter));
     }
+    #endif
     var axn = desktop_sync_accessibility(desk);
     println("aethersafha: desktop up — windows:");
     println_int(comp_count(comp));
@@ -80,14 +84,16 @@ fn main(): i64 {
     # there: the setu block is skipped and the loop keeps its bounded frame<3
     # form (the agnos transport lands later); on Linux the cap is extended so a
     # client has time to connect.
+    var setu_cap = 3;                            # agnos: bounded loop, no setu (AF_UNIX fail-closes; 3b adds a TCP transport)
+    #ifndef CYRIUS_TARGET_AGNOS
     var setu_path = "/tmp/aethersafha-setu.sock";
     var setu_sfd = setu_srv_listen(setu_path);
-    var setu_cap = 3;
     if (setu_sfd >= 0) {
         syscall(SYS_FCNTL, setu_sfd, 4, 2048);   # F_SETFL O_NONBLOCK
         setu_cap = 400;                          # spin (render-paced) long enough to catch a client
         println("aethersafha: setu listener up");
     }
+    #endif
 
     # Frame loop: poll bhumi input, dispatch, render, composite setu clients,
     # scan out. Bounded so the host build terminates; on agnos this becomes
@@ -96,7 +102,12 @@ fn main(): i64 {
     var now = 1;
     var frame = 0;
     var running = 1;
-    while ((running == 1) && (frame < setu_cap)) {
+    #ifdef CYRIUS_TARGET_AGNOS
+    while (running == 1) {                            # agnos: the real compositor loop — renders until quit
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    while ((running == 1) && (frame < setu_cap)) {    # host: bounded so the dev build terminates
+    #endif
         var n = bhumi_backend_poll(be, &events, AE_MAXEV, now);
         if (n != BHUMI_SEAT_DENIED) {
             var i = 0;
@@ -109,6 +120,7 @@ fn main(): i64 {
         render_desktop(desk, fb);
         render_desktop_foreign(desk, fb);
         # setu: accept + composite one client present per frame (over the desktop).
+        #ifndef CYRIUS_TARGET_AGNOS
         if (setu_sfd >= 0) {
             var cfd = syscall(SYS_ACCEPT, setu_sfd, 0, 0);
             if (cfd >= 0) {
@@ -121,10 +133,13 @@ fn main(): i64 {
                 }
             }
         }
+        #endif
         bhumi_backend_present(be, now);
         frame = frame + 1;
     }
+    #ifndef CYRIUS_TARGET_AGNOS
     if (setu_sfd >= 0) { syscall(SYS_CLOSE, setu_sfd); syscall(SYS_UNLINK, setu_path); }
+    #endif
 
     println("aethersafha: frame loop ok");
     return 0;

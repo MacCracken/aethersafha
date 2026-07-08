@@ -4,7 +4,7 @@ version = "0.6.0"
 description = "aethersafha — AI-augmented AGNOS compositor (Cyrius port, from 27207 lines of Rust)"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.3.43"
+cyrius = "6.4.25"
 
 [build]
 entry = "src/main.cyr"
@@ -50,7 +50,7 @@ modules = ["dist/agnostik.cyr"]
 [deps.agnodrm]
 git = "https://github.com/MacCracken/agnodrm.git"
 path = "../agnodrm"
-tag = "1.4.5"
+tag = "1.4.6"
 modules = ["dist/agnodrm.cyr"]
 
 # --- Bitmap console fonts (the AGNOS font subsystem). We consume only the
@@ -80,7 +80,7 @@ modules = ["src/types.cyr", "src/surface.cyr", "src/sandbox.cyr"]
 [deps.kavach]
 git = "https://github.com/MacCracken/kavach.git"
 path = "../kavach"
-tag = "3.6.0"
+tag = "3.7.0"
 modules = ["dist/kavach.cyr"]
 
 # --- DISPLAY plane contract: setu (सेतु — bridge). The dhancha client ↔ this
