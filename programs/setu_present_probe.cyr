@@ -1,0 +1,61 @@
+# programs/setu_present_probe.cyr — bite-7 runtime proof: the compositor blits a
+# committed setu buffer into the bhumi framebuffer and verifies the framebuffer
+# region equals the source pixels. Drive it with dhancha's existing
+# build/setu_buffer_client_probe (bite 6) — it sends CREATE→ATTACH+payload→COMMIT.
+#
+# On Linux the bhumi framebuffer is an in-memory buffer (scanout is agnos-only:
+# fbinfo#38/blit#39), so this proves the full path client→wire→compositor→
+# framebuffer; the final on-screen scanout hop is validated on agnos. Throwaway
+# harness — not wired into main.
+
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/setu_server.cyr"
+include "src/setu_dispatch.cyr"
+
+fn setu_pp_emit_int(n): i64 {
+    var nb = alloc(24);
+    var nl = fmt_int_buf(n, nb);
+    syscall(SYS_WRITE, 1, nb, nl);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    var path = "/tmp/aethersafha-setu.sock";
+    var fb = bhumi_fb_new(1280, 720);
+    if (fb == 0) {
+        var fe = "setu_present_probe: fb alloc failed\n";
+        syscall(SYS_WRITE, 2, fe, strlen(fe));
+        return 1;
+    }
+    var comp = comp_new();
+    var banner = "setu_present_probe: listening (fb 1280x720, in-memory on Linux)\n";
+    syscall(SYS_WRITE, 1, banner, strlen(banner));
+
+    var rc = setu_srv_serve_present(path, comp, fb);
+    if (rc < 0) {
+        var e = "setu_present_probe: present failed rc=";
+        syscall(SYS_WRITE, 2, e, strlen(e));
+        setu_pp_emit_int(rc);
+        syscall(SYS_WRITE, 2, "\n", 1);
+        return 1;
+    }
+
+    var pre = "setu_present_probe: BLIT VERIFIED (fb region == source); windows=";
+    syscall(SYS_WRITE, 1, pre, strlen(pre));
+    setu_pp_emit_int(comp_count(comp));
+    var mid = " fb_region_checksum=";
+    syscall(SYS_WRITE, 1, mid, strlen(mid));
+    setu_pp_emit_int(rc);
+    syscall(SYS_WRITE, 1, "\n", 1);
+    return 0;
+}
+
+fn _entry(): i64 {
+    var r = main();
+    syscall(SYS_EXIT, r);
+    return 0;
+}
+_entry();

@@ -1,10 +1,11 @@
 # aethersafha — setu display-protocol DISPATCH (message → compositor state).
 #
 # Native display protocol (agnosticos native-display-protocol.md §2.2): turns
-# decoded setu messages into real compositor `Window`s + received pixel buffers.
-# Depends on the transport (setu_server.cyr) AND the compositor (compositor.cyr /
-# window.cyr) — kept separate from setu_server.cyr so the pure transport carries
-# no compositor refs. All fns `setu_srv_*` (the dispatch half).
+# decoded setu messages into real compositor `Window`s, received pixel buffers,
+# and framebuffer blits. Depends on the transport (setu_server.cyr) AND the
+# compositor (compositor.cyr / window.cyr) + the bhumi framebuffer — kept
+# separate from setu_server.cyr so the pure transport carries no compositor refs.
+# All fns `setu_srv_*` (the dispatch half).
 
 # Close the client + listening fds and remove the socket file.
 fn setu_srv_dispatch_close(cfd, sfd, path): i64 {
@@ -14,11 +15,47 @@ fn setu_srv_dispatch_close(cfd, sfd, path): i64 {
     return 0;
 }
 
+# Receive a CREATE_SURFACE → ATTACH(+inline payload) → COMMIT session on an
+# already-accepted `cfd`, minting a Window on `comp`. Fills `out4` (a 32-byte
+# scratch = 4 i64 slots): [+0]=*Window, [+8]=*pixels, [+16]=w, [+24]=h. Returns
+# nbytes (> 0) or a negative code (-6 read · -7 reply · -8 not CREATE · -9 window
+# alloc · -11 not ATTACH · -12 bad payload size · -13 not COMMIT). Byte-exact
+# framing throughout (setu_srv_read_msg for frames, setu_srv_read_exact for the
+# raw payload).
+fn setu_srv_recv_committed(cfd, comp, out4): i64 {
+    var m = setu_msg_new();
+    if (setu_srv_read_msg(cfd, m) < 0) { return 0 - 6; }
+    if (setu_msg_kind(m) != SETU_CREATE_SURFACE) { return 0 - 8; }
+    var win = comp_create_window(comp, 0, 0, setu_msg_arg(m, 0), setu_msg_arg(m, 1), "setu-surface");
+    if (win == 0) { return 0 - 9; }
+    if (setu_srv_write_frame(cfd, setu_surface_created(win_id(win))) < 0) { return 0 - 7; }
+
+    var am = setu_msg_new();
+    if (setu_srv_read_msg(cfd, am) < 0) { return 0 - 6; }
+    if (setu_msg_kind(am) != SETU_ATTACH) { return 0 - 11; }
+    var w  = setu_msg_arg(am, 1);
+    var ah = setu_msg_arg(am, 2);
+    var stride = setu_msg_arg(am, 3);
+    var nbytes = ah * stride;
+    if (nbytes <= 0) { return 0 - 12; }
+    if (nbytes > 16777216) { return 0 - 12; }   # 16 MB cap
+    var pix = alloc(nbytes);
+    if (setu_srv_read_exact(cfd, pix, nbytes) < 0) { return 0 - 6; }
+
+    var cm = setu_msg_new();
+    if (setu_srv_read_msg(cfd, cm) < 0) { return 0 - 6; }
+    if (setu_msg_kind(cm) != SETU_COMMIT) { return 0 - 13; }
+
+    store64(out4 + 0,  win);
+    store64(out4 + 8,  pix);
+    store64(out4 + 16, w);
+    store64(out4 + 24, ah);
+    return nbytes;
+}
+
 # Bite 4: accept ONE client, read a CREATE_SURFACE, create a real Window on
-# `comp`, and reply SURFACE_CREATED(id). The COMPOSITOR is the source of truth
-# for the id (its C_NEXTID counter). Returns the new surface id (> 0) or a
-# negative code (setu_srv_listen codes · -5 accept · -6 read · -8 not a
-# CREATE_SURFACE · -9 window alloc · setu_srv_write_frame codes for the reply).
+# `comp`, and reply SURFACE_CREATED(id). Returns the new surface id (> 0) or a
+# negative code (listen/-5 accept/-6 read/-8 not CREATE/-9 alloc/-7 reply).
 fn setu_srv_create_surface(path, comp): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     return 0 - 1;
@@ -32,18 +69,10 @@ fn setu_srv_create_surface(path, comp): i64 {
     var msg = setu_msg_new();
     var rc = setu_srv_read_msg(cfd, msg);
     if (rc < 0) { setu_srv_dispatch_close(cfd, sfd, path); return rc; }
-    if (setu_msg_kind(msg) != SETU_CREATE_SURFACE) {
-        setu_srv_dispatch_close(cfd, sfd, path);
-        return 0 - 8;
-    }
-
-    var w = setu_msg_arg(msg, 0);
-    var h = setu_msg_arg(msg, 1);
-    # arg2 (flags) is unused at this step.
-    var win = comp_create_window(comp, 0, 0, w, h, "setu-surface");
+    if (setu_msg_kind(msg) != SETU_CREATE_SURFACE) { setu_srv_dispatch_close(cfd, sfd, path); return 0 - 8; }
+    var win = comp_create_window(comp, 0, 0, setu_msg_arg(msg, 0), setu_msg_arg(msg, 1), "setu-surface");
     if (win == 0) { setu_srv_dispatch_close(cfd, sfd, path); return 0 - 9; }
     var id = win_id(win);
-
     var wr = setu_srv_write_frame(cfd, setu_surface_created(id));
     setu_srv_dispatch_close(cfd, sfd, path);
     if (wr < 0) { return wr; }
@@ -51,15 +80,9 @@ fn setu_srv_create_surface(path, comp): i64 {
     #endif
 }
 
-# Bite 6: serve a CREATE_SURFACE → ATTACH(+inline BGRA payload) → COMMIT session
-# for ONE client. Creates the surface, receives the inline pixel buffer, and
-# returns a checksum (sum of the committed pixel bytes) — the proof the payload
-# crossed the wire intact. Byte-for-byte framing (setu_srv_read_msg for the
-# frames, setu_srv_read_exact for the raw payload). Negative on error:
-#   listen/accept codes · -6 read · -8 not CREATE · -7 reply write · -11 not
-#   ATTACH · -12 bad payload size · -13 not COMMIT.
-# Does NOT persist the buffer or blit yet — that (into the Window + bhumi
-# framebuffer) is the next bite.
+# Bite 6: serve a CREATE→ATTACH(+payload)→COMMIT session and return a byte
+# checksum (sum of committed pixel bytes) — proof the payload crossed the wire
+# intact. Does not blit.
 fn setu_srv_serve_buffer(path, comp): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     return 0 - 1;
@@ -69,39 +92,73 @@ fn setu_srv_serve_buffer(path, comp): i64 {
     if (sfd < 0) { return sfd; }
     var cfd = syscall(SYS_ACCEPT, sfd, 0, 0);
     if (cfd < 0) { syscall(SYS_CLOSE, sfd); syscall(SYS_UNLINK, path); return 0 - 5; }
-
-    # 1) CREATE_SURFACE -> mint a Window, reply SURFACE_CREATED(id)
-    var m = setu_msg_new();
-    if (setu_srv_read_msg(cfd, m) < 0) { setu_srv_dispatch_close(cfd, sfd, path); return 0 - 6; }
-    if (setu_msg_kind(m) != SETU_CREATE_SURFACE) { setu_srv_dispatch_close(cfd, sfd, path); return 0 - 8; }
-    var win = comp_create_window(comp, 0, 0, setu_msg_arg(m, 0), setu_msg_arg(m, 1), "setu-surface");
-    if (win == 0) { setu_srv_dispatch_close(cfd, sfd, path); return 0 - 9; }
-    var id = win_id(win);
-    if (setu_srv_write_frame(cfd, setu_surface_created(id)) < 0) { setu_srv_dispatch_close(cfd, sfd, path); return 0 - 7; }
-
-    # 2) ATTACH(id, w, h, stride, fmt) then the inline pixel payload (h*stride bytes)
-    var am = setu_msg_new();
-    if (setu_srv_read_msg(cfd, am) < 0) { setu_srv_dispatch_close(cfd, sfd, path); return 0 - 6; }
-    if (setu_msg_kind(am) != SETU_ATTACH) { setu_srv_dispatch_close(cfd, sfd, path); return 0 - 11; }
-    var ah = setu_msg_arg(am, 2);
-    var stride = setu_msg_arg(am, 3);
-    var nbytes = ah * stride;
-    if (nbytes <= 0) { setu_srv_dispatch_close(cfd, sfd, path); return 0 - 12; }
-    if (nbytes > 16777216) { setu_srv_dispatch_close(cfd, sfd, path); return 0 - 12; }  # 16 MB cap
-    var pix = alloc(nbytes);
-    if (setu_srv_read_exact(cfd, pix, nbytes) < 0) { setu_srv_dispatch_close(cfd, sfd, path); return 0 - 6; }
-
-    # 3) COMMIT(id)
-    var cm = setu_msg_new();
-    if (setu_srv_read_msg(cfd, cm) < 0) { setu_srv_dispatch_close(cfd, sfd, path); return 0 - 6; }
-    if (setu_msg_kind(cm) != SETU_COMMIT) { setu_srv_dispatch_close(cfd, sfd, path); return 0 - 13; }
-
+    var out4 = alloc(32);
+    var nbytes = setu_srv_recv_committed(cfd, comp, out4);
     setu_srv_dispatch_close(cfd, sfd, path);
-
-    # Checksum the committed pixels (sum of bytes) — proof they arrived intact.
+    if (nbytes < 0) { return nbytes; }
+    var pix = load64(out4 + 8);
     var sum = 0;
     var i = 0;
     while (i < nbytes) { sum = sum + load8(pix + i); i = i + 1; }
     return sum;
+    #endif
+}
+
+# Bite 7: serve a full session AND blit the committed buffer into the bhumi
+# framebuffer `fb` at the window's (x,y), then read the framebuffer region back
+# and verify it equals the source pixels. Returns the framebuffer-region pixel
+# checksum (> 0) when the blit landed correctly, -30 on a source/framebuffer
+# mismatch, or a negative recv code. This proves the whole path
+# client→wire→compositor→framebuffer; the final kernel-scanout hop
+# (bhumi_backend_present) is agnos-only.
+fn setu_srv_serve_present(path, comp, fb): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var sfd = setu_srv_listen(path);
+    if (sfd < 0) { return sfd; }
+    var cfd = syscall(SYS_ACCEPT, sfd, 0, 0);
+    if (cfd < 0) { syscall(SYS_CLOSE, sfd); syscall(SYS_UNLINK, path); return 0 - 5; }
+    var out4 = alloc(32);
+    var nbytes = setu_srv_recv_committed(cfd, comp, out4);
+    setu_srv_dispatch_close(cfd, sfd, path);
+    if (nbytes < 0) { return nbytes; }
+
+    var win = load64(out4 + 0);
+    var pix = load64(out4 + 8);
+    var w   = load64(out4 + 16);
+    var h   = load64(out4 + 24);
+    var wx = win_x(win);
+    var wy = win_y(win);
+
+    # Blit the w×h BGRA buffer into the framebuffer, summing source pixels.
+    var src_sum = 0;
+    var py = 0;
+    while (py < h) {
+        var px = 0;
+        while (px < w) {
+            var pixel = load32(pix + (py * w + px) * 4);
+            bhumi_fb_set(fb, wx + px, wy + py, pixel);
+            src_sum = src_sum + pixel;
+            px = px + 1;
+        }
+        py = py + 1;
+    }
+
+    # Read the framebuffer region back and sum it — must equal the source.
+    var fb_sum = 0;
+    py = 0;
+    while (py < h) {
+        var px = 0;
+        while (px < w) {
+            fb_sum = fb_sum + bhumi_fb_get(fb, wx + px, wy + py);
+            px = px + 1;
+        }
+        py = py + 1;
+    }
+
+    if (src_sum != fb_sum) { return 0 - 30; }
+    return fb_sum;
     #endif
 }
