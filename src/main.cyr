@@ -58,7 +58,9 @@ fn main(): i64 {
     # a11y, gestures, theme, tray, plugins) wired together.
     var desk = desktop_new();
     var comp = desk_comp(desk);
-    comp_create_window(comp, 80, 60, 420, 320, "Terminal");
+    # The terminal is now puka — a setu CLIENT that connects at runtime (its own
+    # window arrives over setu), not a compositor-seeded placeholder. Files stays
+    # as a demo window until it too is a real client.
     comp_create_window(comp, 240, 180, 520, 360, "Files");
     desktop_add_tray_item(desk, 1, "network", "Network");
     # Host a foreign-ABI app as a kavach-sandboxed guest (mehman "swallow" seam),

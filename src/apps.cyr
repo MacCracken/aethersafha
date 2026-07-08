@@ -28,7 +28,7 @@ enum AppErr {           # AppError -> i64 (payload strings dropped)
     APP_ERR_PERM_DENIED = 3;   # PermissionDenied(String) — program not in allowlist
 }
 enum AppType {          # AppType (9 variants; Shruti uses APP_CUSTOM)
-    APP_TERMINAL      = 0;
+    APP_CMDPALETTE      = 0;
     APP_FILE_MANAGER  = 1;
     APP_TEXT_EDITOR   = 2;
     APP_WEB_BROWSER   = 3;
@@ -138,14 +138,14 @@ enum ShrOff {           # ShrutiApp
     SHR_RUNNING = 40;  # 0/1
     SHR_SZ      = 48;
 }
-enum TermOff {          # TerminalApp
-    TERM_ID   = 0;   # cstr "terminal"
-    TERM_NAME = 8;   # cstr "AGNOS Terminal"
-    TERM_AI   = 16;  # 0/1 (1)
-    TERM_SZ   = 24;
+enum TermOff {          # CmdPaletteApp
+    CMDP_ID   = 0;   # cstr "cmdpalette"
+    CMDP_NAME = 8;   # cstr "Command Palette"
+    CMDP_AI   = 16;  # 0/1 (1)
+    CMDP_SZ   = 24;
 }
 enum AppDeskOff {       # DesktopApplications
-    AD_TERMINAL     = 0;   # *TerminalApp
+    AD_CMDPALETTE     = 0;   # *CmdPaletteApp
     AD_FILE_MGR     = 8;   # *FileManagerApp
     AD_BROWSERS     = 16;  # *vec of *WebBrowserApp (8)
     AD_AGENT_MGR    = 24;  # *AgentManagerApp
@@ -235,10 +235,10 @@ fn app_which_path(name): i64 {
     }
     return 0;
 }
-# app_term_run_capture(argv, buf, buflen, status_out): fork+execve argv[0] with the
+# app_cmdp_run_capture(argv, buf, buflen, status_out): fork+execve argv[0] with the
 # inherited environ, capture stdout into buf (stderr -> /dev/null), wait, and write
 # the child's real WEXITSTATUS to *status_out. -> bytes captured, or -1 on fork fail.
-fn app_term_run_capture(argv_vec, buf, buflen, status_out): i64 {
+fn app_cmdp_run_capture(argv_vec, buf, buflen, status_out): i64 {
     var argc = vec_len(argv_vec);
     if (argc < 1) { return 0 - 1; }
     var cmd = vec_get(argv_vec, 0);
@@ -325,7 +325,7 @@ fn app_spawn_detached(argv_vec, envp): i64 {
 # Enum display helpers.
 # ---------------------------------------------------------------------------
 fn app_type_debug_name(t): i64 {
-    if (t == AppType.APP_TERMINAL)      { return "Terminal"; }
+    if (t == AppType.APP_CMDPALETTE)      { return "CommandPalette"; }
     if (t == AppType.APP_FILE_MANAGER)  { return "FileManager"; }
     if (t == AppType.APP_TEXT_EDITOR)   { return "TextEditor"; }
     if (t == AppType.APP_WEB_BROWSER)   { return "WebBrowser"; }
@@ -711,22 +711,22 @@ fn app_shruti_launch(p, session_path): i64 {
 }
 
 # ---------------------------------------------------------------------------
-# TerminalApp — pure part: allowlist + basename-strip + pre-spawn checks.
+# CmdPaletteApp — pure part: allowlist + basename-strip + pre-spawn checks.
 # The security-critical logic ports NOW; the actual spawn is deferred to C2.
 # ---------------------------------------------------------------------------
-fn app_term_new(): i64 {
-    var p = alloc(TERM_SZ);
+fn app_cmdp_new(): i64 {
+    var p = alloc(CMDP_SZ);
     if (p == 0) { return 0; }
-    store64(p + TERM_ID, "terminal");
-    store64(p + TERM_NAME, "AGNOS Terminal");
-    store64(p + TERM_AI, 1);
+    store64(p + CMDP_ID, "cmdpalette");
+    store64(p + CMDP_NAME, "Command Palette");
+    store64(p + CMDP_AI, 1);
     return p;
 }
-fn app_term_id(p)   { return load64(p + TERM_ID); }
-fn app_term_name(p) { return load64(p + TERM_NAME); }
-fn app_term_ai_integration(p) { return load64(p + TERM_AI); }
+fn app_cmdp_id(p)   { return load64(p + CMDP_ID); }
+fn app_cmdp_name(p) { return load64(p + CMDP_NAME); }
+fn app_cmdp_ai_integration(p) { return load64(p + CMDP_AI); }
 # The 30-entry allowlist (Rust ALLOWED_PROGRAMS).
-fn app_term_allowlist(): i64 {
+fn app_cmdp_allowlist(): i64 {
     var v = vec_new();
     vec_push(v, "ls"); vec_push(v, "cat"); vec_push(v, "echo"); vec_push(v, "pwd");
     vec_push(v, "whoami"); vec_push(v, "date"); vec_push(v, "uname"); vec_push(v, "env");
@@ -738,11 +738,11 @@ fn app_term_allowlist(): i64 {
     vec_push(v, "false"); vec_push(v, "expr");
     return v;
 }
-# app_term_basename(program): the final path component, replicating Rust
+# app_cmdp_basename(program): the final path component, replicating Rust
 # std::path::Path::file_name() — strips trailing '/' and a trailing "." component;
 # an empty / all-slashes / ".." path yields None (-> the raw program). This is the
 # path-traversal neutralisation feeding the allowlist check.
-fn app_term_basename(program): i64 {
+fn app_cmdp_basename(program): i64 {
     var end = strlen(program);
     while ((end > 0) && (load8(program + end - 1) == 47)) { end = end - 1; }   # trim trailing '/'
     if (end == 0) { return program; }
@@ -764,10 +764,10 @@ fn app_term_basename(program): i64 {
     }
     return app_substr(program, start, clen);
 }
-# app_term_is_allowed(program): basename-strip then allowlist membership. -> 0/1.
-fn app_term_is_allowed(program): i64 {
-    var base = app_term_basename(program);
-    var v = app_term_allowlist();
+# app_cmdp_is_allowed(program): basename-strip then allowlist membership. -> 0/1.
+fn app_cmdp_is_allowed(program): i64 {
+    var base = app_cmdp_basename(program);
+    var v = app_cmdp_allowlist();
     var i = 0;
     while (i < vec_len(v)) {
         if (streq(vec_get(v, i), base) == 1) { return 1; }
@@ -777,12 +777,12 @@ fn app_term_is_allowed(program): i64 {
 }
 # execute_command (C1 pre-spawn checks only): empty/whitespace -> WindowError;
 # non-allowlisted first token -> PermDenied; allowed -> Ok (spawn is C2).
-# app_term_execute_command(p, command, out): run the command (C2). Pre-spawn checks:
+# app_cmdp_execute_command(p, command, out): run the command (C2). Pre-spawn checks:
 # empty/whitespace -> APP_ERR_WINDOW; non-allowlisted first token -> APP_ERR_PERM_DENIED.
 # Then resolve the allowlisted bare name to a full path and fork+execve it, capturing
 # stdout. exit 0 -> APP_OK with *out = the stdout cstr; non-zero exit / spawn failure ->
 # APP_ERR_WINDOW. On any error *out = 0. (Rust returns Result<String, AppError>.)
-fn app_term_execute_command(p, command, out): i64 {
+fn app_cmdp_execute_command(p, command, out): i64 {
     var len = strlen(command);
     # skip leading whitespace to the first token (split_whitespace semantics)
     var start = 0;
@@ -797,9 +797,9 @@ fn app_term_execute_command(p, command, out): i64 {
         end = end + 1;
     }
     var tok = app_substr(command, start, end - start);
-    if (app_term_is_allowed(tok) == 0) { store64(out, 0); return AppErr.APP_ERR_PERM_DENIED; }
+    if (app_cmdp_is_allowed(tok) == 0) { store64(out, 0); return AppErr.APP_ERR_PERM_DENIED; }
     # --- C2 spawn: resolve the bare basename to a full path (execve has no $PATH) ---
-    var full = app_which_path(app_term_basename(tok));
+    var full = app_which_path(app_cmdp_basename(tok));
     if (full == 0) { store64(out, 0); return AppErr.APP_ERR_WINDOW; }   # not found == spawn error
     # argv = [full, <remaining whitespace-split tokens>]
     var argv = vec_new();
@@ -816,7 +816,7 @@ fn app_term_execute_command(p, command, out): i64 {
     var status = 0;
     # cap the read at 65535 so there is always room for the NUL terminator below —
     # else a command whose stdout fills the buffer would make store8(buf+n,0) overrun.
-    var n = app_term_run_capture(argv, buf, 65535, &status);
+    var n = app_cmdp_run_capture(argv, buf, 65535, &status);
     if (n < 0) { store64(out, 0); return AppErr.APP_ERR_WINDOW; }   # fork failure
     if (status != 0) { store64(out, 0); return AppErr.APP_ERR_WINDOW; }   # non-zero exit -> WindowError
     store8(buf + n, 0);   # NUL-terminate the captured stdout (n <= 65535, in-bounds)
@@ -830,7 +830,7 @@ fn app_term_execute_command(p, command, out): i64 {
 fn app_desk_new(): i64 {
     var d = alloc(AD_SZ);
     if (d == 0) { return 0; }
-    store64(d + AD_TERMINAL, app_term_new());
+    store64(d + AD_CMDPALETTE, app_cmdp_new());
     store64(d + AD_FILE_MGR, app_filemgr_new());
     var browsers = vec_new();
     vec_push(browsers, app_browser_firefox());
@@ -851,7 +851,7 @@ fn app_desk_new(): i64 {
     store64(d + AD_LAST_ERR, AppErr.APP_OK);
     return d;
 }
-fn app_desk_terminal(d)      { return load64(d + AD_TERMINAL); }
+fn app_desk_cmdpalette(d)      { return load64(d + AD_CMDPALETTE); }
 fn app_desk_file_manager(d)  { return load64(d + AD_FILE_MGR); }
 fn app_desk_last_err(d)      { return load64(d + AD_LAST_ERR); }
 fn app_desk_get_agent_manager(d) { return load64(d + AD_AGENT_MGR); }
@@ -867,8 +867,8 @@ fn app_desk_register(d, w): i64 {
     vec_push(load64(d + AD_OPEN_WINDOWS), w);
     return w;
 }
-fn app_desk_open_terminal(d): i64 {
-    var w = app_window_new(app_desk_next_id(d), AppType.APP_TERMINAL, app_term_name(app_desk_terminal(d)));
+fn app_desk_open_cmdpalette(d): i64 {
+    var w = app_window_new(app_desk_next_id(d), AppType.APP_CMDPALETTE, app_cmdp_name(app_desk_cmdpalette(d)));
     return app_desk_register(d, w);
 }
 fn app_desk_open_file_manager(d, path): i64 {

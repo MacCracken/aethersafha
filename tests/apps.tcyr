@@ -15,7 +15,7 @@ fn main() {
 
     # -----------------------------------------------------------------------
     test_group("apps — enums + display + module constants");
-    assert_eq(streq(app_type_debug_name(AppType.APP_TERMINAL), "Terminal"), 1, "AppType Terminal debug");
+    assert_eq(streq(app_type_debug_name(AppType.APP_CMDPALETTE), "CommandPalette"), 1, "AppType CommandPalette debug");
     assert_eq(streq(app_type_debug_name(AppType.APP_FILE_MANAGER), "FileManager"), 1, "FileManager debug");
     assert_eq(streq(app_type_debug_name(AppType.APP_TEXT_EDITOR), "TextEditor"), 1, "TextEditor debug");
     assert_eq(streq(app_type_debug_name(AppType.APP_WEB_BROWSER), "WebBrowser"), 1, "WebBrowser debug");
@@ -34,9 +34,9 @@ fn main() {
 
     # -----------------------------------------------------------------------
     test_group("apps — AppWindow");
-    var w = app_window_new(1, AppType.APP_TERMINAL, "Test Terminal");
+    var w = app_window_new(1, AppType.APP_CMDPALETTE, "Test Terminal");
     assert_eq(app_window_id(w), 1, "window id");
-    assert_eq(app_window_type(w), AppType.APP_TERMINAL, "window type");
+    assert_eq(app_window_type(w), AppType.APP_CMDPALETTE, "window type");
     assert_eq(streq(app_window_title(w), "Test Terminal"), 1, "window title");
     assert_eq(app_window_width(w), 800, "default width 800");
     assert_eq(app_window_height(w), 600, "default height 600");
@@ -146,41 +146,41 @@ fn main() {
     var sc = app_shrutisurf_default();
     assert_eq(app_shrutisurf_width(sc), 1400, "shruti surface width 1400");
     assert_eq(app_shrutisurf_height(sc), 900, "shruti surface height 900");
-    var tm = app_term_new();
-    assert_eq(streq(app_term_name(tm), "AGNOS Terminal"), 1, "terminal name");
-    assert_eq(app_term_ai_integration(tm), 1, "terminal ai on");
+    var tm = app_cmdp_new();
+    assert_eq(streq(app_cmdp_name(tm), "Command Palette"), 1, "terminal name");
+    assert_eq(app_cmdp_ai_integration(tm), 1, "terminal ai on");
     # allowlist + path-traversal neutralisation (security-critical)
-    assert_eq(app_term_is_allowed("ls"), 1, "ls allowed");
-    assert_eq(app_term_is_allowed("/evil/bin/ls"), 1, "basename-strip: /evil/bin/ls allowed as ls");
-    assert_eq(app_term_is_allowed("sudo"), 0, "sudo not allowed");
-    assert_eq(app_term_is_allowed("/x/sudo"), 0, "basename-strip: /x/sudo still not allowed");
+    assert_eq(app_cmdp_is_allowed("ls"), 1, "ls allowed");
+    assert_eq(app_cmdp_is_allowed("/evil/bin/ls"), 1, "basename-strip: /evil/bin/ls allowed as ls");
+    assert_eq(app_cmdp_is_allowed("sudo"), 0, "sudo not allowed");
+    assert_eq(app_cmdp_is_allowed("/x/sudo"), 0, "basename-strip: /x/sudo still not allowed");
     # Path::file_name() parity: trailing slash / dot components resolve to the basename
-    assert_eq(app_term_is_allowed("ls/"), 1, "ls/ -> ls allowed");
-    assert_eq(app_term_is_allowed("/bin/ls/"), 1, "/bin/ls/ -> ls allowed");
-    assert_eq(app_term_is_allowed("echo/./"), 1, "echo/./ -> echo allowed");
-    assert_eq(app_term_is_allowed("cat/."), 1, "cat/. -> cat allowed");
-    assert_eq(app_term_is_allowed("sudo/"), 0, "sudo/ still denied");
+    assert_eq(app_cmdp_is_allowed("ls/"), 1, "ls/ -> ls allowed");
+    assert_eq(app_cmdp_is_allowed("/bin/ls/"), 1, "/bin/ls/ -> ls allowed");
+    assert_eq(app_cmdp_is_allowed("echo/./"), 1, "echo/./ -> echo allowed");
+    assert_eq(app_cmdp_is_allowed("cat/."), 1, "cat/. -> cat allowed");
+    assert_eq(app_cmdp_is_allowed("sudo/"), 0, "sudo/ still denied");
     var tout = alloc(8);
-    assert_eq(app_term_execute_command(tm, "", tout), AppErr.APP_ERR_WINDOW, "empty command -> WindowError");
-    assert_eq(app_term_execute_command(tm, "   ", tout), AppErr.APP_ERR_WINDOW, "whitespace command -> WindowError");
-    assert_eq(app_term_execute_command(tm, "badcmd", tout), AppErr.APP_ERR_PERM_DENIED, "non-allowlisted denied");
+    assert_eq(app_cmdp_execute_command(tm, "", tout), AppErr.APP_ERR_WINDOW, "empty command -> WindowError");
+    assert_eq(app_cmdp_execute_command(tm, "   ", tout), AppErr.APP_ERR_WINDOW, "whitespace command -> WindowError");
+    assert_eq(app_cmdp_execute_command(tm, "badcmd", tout), AppErr.APP_ERR_PERM_DENIED, "non-allowlisted denied");
     # C2: the allowlisted command really runs; exit 0 -> Ok with captured stdout
-    assert_eq(app_term_execute_command(tm, "echo hi", tout), AppErr.APP_OK, "echo runs -> Ok");
+    assert_eq(app_cmdp_execute_command(tm, "echo hi", tout), AppErr.APP_OK, "echo runs -> Ok");
     assert_eq(app_cstr_contains(load64(tout), "hi"), 1, "echo stdout contains 'hi'");
-    assert_eq(app_term_execute_command(tm, "true", tout), AppErr.APP_OK, "true (exit 0) -> Ok");
-    assert_eq(app_term_execute_command(tm, "false", tout), AppErr.APP_ERR_WINDOW, "false (exit 1) -> WindowError");
+    assert_eq(app_cmdp_execute_command(tm, "true", tout), AppErr.APP_OK, "true (exit 0) -> Ok");
+    assert_eq(app_cmdp_execute_command(tm, "false", tout), AppErr.APP_ERR_WINDOW, "false (exit 1) -> WindowError");
     # split_whitespace() parity: newline is a delimiter, not part of the token
     var nlcmd = alloc(4);
     store8(nlcmd + 0, 10);
     store8(nlcmd + 1, 108);
     store8(nlcmd + 2, 115);
     store8(nlcmd + 3, 0);
-    assert_eq(app_term_execute_command(tm, nlcmd, tout), AppErr.APP_OK, "newline-led 'ls' runs -> Ok");
+    assert_eq(app_cmdp_execute_command(tm, nlcmd, tout), AppErr.APP_OK, "newline-led 'ls' runs -> Ok");
     var wsonly = alloc(4);
     store8(wsonly + 0, 10);
     store8(wsonly + 1, 10);
     store8(wsonly + 2, 0);
-    assert_eq(app_term_execute_command(tm, wsonly, tout), AppErr.APP_ERR_WINDOW, "newlines-only -> WindowError");
+    assert_eq(app_cmdp_execute_command(tm, wsonly, tout), AppErr.APP_ERR_WINDOW, "newlines-only -> WindowError");
     # C2 launch guards: an absent binary -> AppNotFound (the detached spawn body is
     # untested — firefox happens to be a present stub here, shruti/DAW is absent).
     var bogus = app_browser_new("bogus", "Bogus", "/nonexistent/bin/no-such-browser", 0, 0);
@@ -195,9 +195,9 @@ fn main() {
     test_group("apps — DesktopApplications aggregate");
     var d = app_desk_new();
     assert_eq(vec_len(app_desk_get_open_windows(d)), 0, "no windows initially");
-    var wt = app_desk_open_terminal(d);
-    assert_eq(app_window_type(wt), AppType.APP_TERMINAL, "terminal window type");
-    assert_eq(streq(app_window_title(wt), "AGNOS Terminal"), 1, "terminal window title");
+    var wt = app_desk_open_cmdpalette(d);
+    assert_eq(app_window_type(wt), AppType.APP_CMDPALETTE, "terminal window type");
+    assert_eq(streq(app_window_title(wt), "Command Palette"), 1, "terminal window title");
     assert_eq(vec_len(app_desk_get_open_windows(d)), 1, "one window open");
     var wfm = app_desk_open_file_manager(d, 0);
     assert_eq(app_window_ai_enabled(wfm), 1, "file manager window ai on");

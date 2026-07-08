@@ -408,7 +408,7 @@ fn ai_detect_context_type(f): i64 {
 
     var has_dev = 0;
     if (ai_apps_any_contains(apps, "code") == 1) { has_dev = 1; }
-    if (ai_apps_any_contains(apps, "terminal") == 1) { has_dev = 1; }
+    if (ai_apps_any_contains(apps, "cmdpalette") == 1) { has_dev = 1; }
     if (ai_apps_any_contains(apps, "editor") == 1) { has_dev = 1; }
 
     var has_design = 0;

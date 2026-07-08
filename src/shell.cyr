@@ -368,7 +368,7 @@ fn shell_registry_put(sh, id, name, icon, category, is_ai): i64 {
 
 # rust: initialize_app_registry — 14 entries (order matches rust array).
 fn shell_init_app_registry(sh): i64 {
-    shell_registry_put(sh, "terminal",      "Terminal",      "terminal",     SH_AppCategory.SH_CAT_SYSTEM,   1);
+    shell_registry_put(sh, "cmdpalette",    "Command Palette", "cmdpalette",  SH_AppCategory.SH_CAT_SYSTEM,   1);
     shell_registry_put(sh, "filemanager",   "File Manager",  "folder",       SH_AppCategory.SH_CAT_SYSTEM,   0);
     shell_registry_put(sh, "settings",      "Settings",      "settings",     SH_AppCategory.SH_CAT_SYSTEM,   0);
     shell_registry_put(sh, "agent-manager", "Agent Manager", "bot",          SH_AppCategory.SH_CAT_AI,       1);

@@ -64,11 +64,11 @@ fn main() {
     # (rust: test_desktop_shell_launch_app, test_desktop_shell_launch_all_registered_apps)
     # ============================================================
     test_group("shell — launch app");
-    assert_eq(shell_launch_app(sh, "terminal"), SH_Err.SH_OK, "launch terminal OK");
+    assert_eq(shell_launch_app(sh, "cmdpalette"), SH_Err.SH_OK, "launch cmdpalette OK");
     assert_eq(shell_launch_app(sh, "midori"), SH_Err.SH_OK, "launch midori OK");
     assert_eq(shell_launch_app(sh, "agent-manager"), SH_Err.SH_OK, "launch agent-manager OK");
     assert_eq(shell_launch_app(sh, "nonexistent-app-xyz"), SH_Err.SH_ERR_APP_NOT_FOUND, "launch unknown app errors");
-    var term_entry = shell_registry_get(sh, "terminal");
+    var term_entry = shell_registry_get(sh, "cmdpalette");
     assert(t_ok(term_entry), "terminal registry entry present");
     assert_eq(shell_app_category(term_entry), SH_AppCategory.SH_CAT_SYSTEM, "terminal is System category");
     assert_eq(shell_app_is_ai(term_entry), 1, "terminal flagged is_ai");
@@ -133,10 +133,10 @@ fn main() {
     #  _case_insensitive], boost logic in search_launcher)
     # ============================================================
     test_group("shell — launcher search");
-    var r_term = shell_search_launcher(sh, "terminal");
+    var r_term = shell_search_launcher(sh, "command");
     var n_term = vec_len(r_term);
     var term_found = (n_term > 0);
-    assert_eq(term_found, 1, "search 'terminal' yields results");
+    assert_eq(term_found, 1, "search 'command' yields results");
 
     var r_empty = shell_search_launcher(sh, "");
     var n_empty = vec_len(r_empty);
@@ -146,11 +146,11 @@ fn main() {
     var r_none = shell_search_launcher(sh, "zzz_nonexistent_12345");
     assert_eq(vec_len(r_none), 0, "gibberish query yields no results");
 
-    var r_lower = shell_search_launcher(sh, "terminal");
-    var r_upper = shell_search_launcher(sh, "TERMINAL");
+    var r_lower = shell_search_launcher(sh, "command");
+    var r_upper = shell_search_launcher(sh, "COMMAND");
     assert_eq(vec_len(r_lower), vec_len(r_upper), "search is case-insensitive (equal counts)");
 
-    # prefix boost: top result for "terminal" has boosted relevance 1000*3/2 == 1500,
+    # prefix boost: top result for "command" has boosted relevance 1000*3/2 == 1500,
     # and results are relevance-sorted descending so index 0 is the boosted match.
     var top = vec_get(r_term, 0);
     assert(t_ok(top), "top search result non-null");
