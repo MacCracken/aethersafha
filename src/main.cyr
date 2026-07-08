@@ -20,6 +20,7 @@ include "src/gestures.cyr"
 include "src/accessibility.cyr"
 include "src/ai_features.cyr"
 include "src/shell.cyr"
+include "src/shell_render.cyr"   # shell status-panel renderer (shell → render bridge)
 include "src/security_ui.cyr"
 include "src/shell_integration.cyr"
 include "src/plugin_host.cyr"

@@ -1,0 +1,66 @@
+# aethersafha — shell status-panel renderer (shell → renderer bridge)
+#
+# The one place where the desktop shell's data model meets the framebuffer.
+# Split out of src/render.cyr so that render.cyr (fill_rect, draw_char,
+# draw_text, render_window, render_frame, deco_*) stays free of shell.cyr
+# symbols and is reusable on its own — a standalone probe can include render.cyr
+# for native window chrome without pulling in the whole compositor.
+#
+# Depends on: render.cyr (fill_rect) + shell.cyr (SystemStatus getters,
+# SH_NetStatus, shell_notification_count).
+
+# --- shell panel (top status bar) --------------------------------------------
+enum PanelK {
+    PANEL_H   = 26;
+    PANEL_PAD = 6;
+    IND_W     = 40;   # status-indicator bar width
+    IND_H     = 12;
+    IND_GAP   = 8;
+}
+
+# panel_bar_w(pct, max_w): filled width of a 0..100% bar-graph (clamped).
+fn panel_bar_w(pct, max_w): i64 {
+    if (pct < 0) { return 0; }
+    if (pct > 100) { return max_w; }
+    return (pct * max_w) / 100;
+}
+
+# net-status indicator color (parity: shell SH_NetStatus).
+fn panel_net_color(net): i64 {
+    if (net == SH_NetStatus.SH_NET_CONNECTED) { return bhumi_xrgb(90, 200, 90); }
+    if (net == SH_NetStatus.SH_NET_CONNECTING) { return bhumi_xrgb(210, 190, 90); }
+    return bhumi_xrgb(210, 80, 80);
+}
+
+# render_shell_panel: draw the top status bar from the desktop shell's
+# SystemStatus — cpu/mem/battery as bar-graphs, net as a colored dot, and a
+# badge when notifications are pending. (shell → renderer)
+fn render_shell_panel(fb, shell): i64 {
+    var fw = bhumi_fb_width(fb);
+    fill_rect(fb, 0, 0, fw, PANEL_H, bhumi_xrgb(28, 30, 38));
+    var st = shell_status(shell);
+    var y = (PANEL_H - IND_H) / 2;
+    var x = fw - PANEL_PAD - IND_W;
+    # cpu
+    fill_rect(fb, x, y, IND_W, IND_H, bhumi_xrgb(50, 54, 62));
+    fill_rect(fb, x, y, panel_bar_w(shell_status_cpu(st), IND_W), IND_H, bhumi_xrgb(90, 140, 210));
+    x = x - IND_GAP - IND_W;
+    # mem
+    fill_rect(fb, x, y, IND_W, IND_H, bhumi_xrgb(50, 54, 62));
+    fill_rect(fb, x, y, panel_bar_w(shell_status_mem(st), IND_W), IND_H, bhumi_xrgb(140, 110, 200));
+    x = x - IND_GAP - IND_W;
+    # battery (only when present)
+    if (shell_status_battery_is_none(st) == 0) {
+        fill_rect(fb, x, y, IND_W, IND_H, bhumi_xrgb(50, 54, 62));
+        fill_rect(fb, x, y, panel_bar_w(shell_status_battery(st), IND_W), IND_H, bhumi_xrgb(90, 200, 120));
+        x = x - IND_GAP - IND_W;
+    }
+    # net-status dot to the left of the bars
+    fill_rect(fb, x + IND_W - IND_H, y, IND_H, IND_H, panel_net_color(shell_status_net(st)));
+    # notification badge on the far left
+    var nc = shell_notification_count(shell);
+    if (nc > 0) {
+        fill_rect(fb, PANEL_PAD, y, IND_H, IND_H, bhumi_xrgb(220, 80, 80));
+    }
+    return 0;
+}

@@ -52,3 +52,4 @@ fn win_set_state(p, s) { store64(p + W_STATE, s); return 0; }
 fn win_set_agent(p, a) { store64(p + W_AGENT, a); return 0; }
 fn win_move(p, x, y)   { store64(p + W_X, x); store64(p + W_Y, y); return 0; }
 fn win_resize(p, w, h) { store64(p + W_W, w); store64(p + W_H, h); return 0; }
+fn win_set_title(p, t) { store64(p + W_TITLE, t); return 0; }

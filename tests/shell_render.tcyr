@@ -1,0 +1,44 @@
+# aethersafha shell status-panel renderer test — the shell → render bridge.
+# shell_render.cyr couples render.cyr (fill_rect) to shell.cyr (SystemStatus +
+# SH_NetStatus), so this suite pulls in both. Stdlib + [deps.*] via cyrius.cyml.
+include "lib/bhumi.cyr"
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/shell.cyr"
+include "src/render.cyr"
+include "src/shell_render.cyr"
+
+fn main() {
+    alloc_init();
+
+    test_group("shell_render — panel bar-graph fill");
+    assert_eq(panel_bar_w(0, 40), 0, "0% → empty");
+    assert_eq(panel_bar_w(100, 40), 40, "100% → full");
+    assert_eq(panel_bar_w(50, 40), 20, "50% → half");
+    assert_eq(panel_bar_w(150, 40), 40, "clamp above 100%");
+    assert_eq(panel_bar_w(0 - 10, 40), 0, "clamp below 0%");
+
+    test_group("shell_render — net-status color");
+    assert_eq(panel_net_color(SH_NetStatus.SH_NET_CONNECTED), bhumi_xrgb(90, 200, 90), "connected → green");
+    assert_eq(panel_net_color(SH_NetStatus.SH_NET_CONNECTING), bhumi_xrgb(210, 190, 90), "connecting → amber");
+    assert_eq(panel_net_color(SH_NetStatus.SH_NET_DISCONNECTED), bhumi_xrgb(210, 80, 80), "disconnected → red");
+    assert_eq(panel_net_color(SH_NetStatus.SH_NET_ERROR), bhumi_xrgb(210, 80, 80), "error → red");
+
+    test_group("shell_render — render_shell_panel smoke (shell → framebuffer)");
+    var shell = shell_new();
+    assert(shell != 0, "shell allocated");
+    var fb = bhumi_fb_new(200, 40);
+    assert(fb != 0, "framebuffer allocated");
+    bhumi_fb_clear(fb, 0);
+    render_shell_panel(fb, shell);
+    var bg = bhumi_xrgb(28, 30, 38);
+    assert_eq(bhumi_fb_get(fb, 0, 0), bg, "top-left is the panel background");
+    assert_eq(bhumi_fb_get(fb, 0, 25), bg, "panel bottom row filled (y < PANEL_H)");
+    assert_eq(bhumi_fb_get(fb, 5, 30), 0, "below the panel is untouched (y >= PANEL_H)");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

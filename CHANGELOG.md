@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.0] - 2026-07-08 — renderer decoupled from the shell (reusable window chrome)
+
+### Changed
+
+- **`src/render.cyr` is now free of `shell.cyr` symbols — the core window
+  renderer is reusable on its own.** The shell status-panel renderer
+  (`render_shell_panel` + `panel_bar_w` / `panel_net_color` + the `PanelK`
+  metrics), which coupled to `shell.cyr`'s `SystemStatus` + `SH_NetStatus`,
+  moved out of `render.cyr` into a new **`src/shell_render.cyr`** — the one place
+  the desktop shell's data model meets the framebuffer (the shell → render
+  bridge). `render.cyr` now holds only shell-agnostic primitives: `fill_rect`,
+  `rend_blend`, the damage tracker, `deco_*` decoration hit-testing, `render_window`
+  / `render_frame`, and the kashi bitmap-text `draw_char` / `draw_text` /
+  `draw_text_lines`. `main.cyr` gains the `shell_render.cyr` include;
+  `desktop.cyr`'s `render_desktop` is unchanged. Pure module split — behavior is
+  identical.
+- **`tests/render.tcyr` no longer includes `shell.cyr`** — proving `render.cyr`
+  stands alone. The panel bar-graph assertions moved to the new
+  **`tests/shell_render.tcyr`**, which adds `panel_net_color` mapping checks and a
+  `render_shell_panel` shell → framebuffer smoke test. **18 `.tcyr` suites green.**
+- **`programs/puka_desktop_probe.cyr` now reuses `render_window` + `draw_text`**
+  for native window chrome. Because `render.cyr` is decoupled, the probe includes
+  it directly and frames each hosted setu client (puka, dhancha) with the real
+  compositor titlebar — focus tint, traffic-light buttons, **and bitmap title
+  TEXT** ("puka - terminal", "dhancha - files"). The previous inlined, fill-only
+  `pdp_titlebar` (managed windows without title text) is gone. Verified end-to-end
+  on Linux: two managed, **titled** windows composited to a PPM.
+
 ## [0.6.0] - 2026-07-08 — native display protocol (setu server + frame-loop integration)
 
 ### Added

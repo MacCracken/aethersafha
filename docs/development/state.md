@@ -5,13 +5,23 @@
 
 ## Version
 
-**0.6.0** (2026-07-08) — **native display protocol (setu server + frame-loop integration)**:
-the compositor side of the sovereign dhancha ↔ aethersafha wire — `src/setu_server.cyr`
-(AF_UNIX transport, length-from-header framing), `src/setu_dispatch.cyr`
+**0.7.0** (2026-07-08) — **renderer decoupled from the shell (reusable window chrome)**:
+the shell status-panel renderer (`render_shell_panel` + `panel_bar_w`/`panel_net_color`/
+`PanelK`), which coupled to `shell.cyr`'s `SystemStatus` + `SH_NetStatus`, moved out of
+`render.cyr` into a new **`src/shell_render.cyr`** (the shell → render bridge). `render.cyr`
+now holds only shell-agnostic primitives (`fill_rect`, `rend_blend`, damage tracker,
+`deco_*`, `render_window`/`render_frame`, kashi `draw_char`/`draw_text`) and is reusable
+on its own — `programs/puka_desktop_probe.cyr` now includes it directly and frames each
+hosted setu client (puka, dhancha) with real compositor chrome including **bitmap title
+TEXT**, replacing its inlined fill-only titlebar. Pure module split; behavior identical.
+
+Built on **0.6.0** (2026-07-08) — **native display protocol (setu server + frame-loop
+integration)**: the compositor side of the sovereign dhancha ↔ aethersafha wire —
+`src/setu_server.cyr` (AF_UNIX transport, length-from-header framing), `src/setu_dispatch.cyr`
 (`CREATE_SURFACE` → real `Window`, buffer receive + bhumi-framebuffer blit, verified),
 and `src/main.cyr` standing up a non-blocking setu listener that composites real client
 presents in the actual frame loop. Proven on Linux against a real dhancha `DhClient`;
-`AF_UNIX` fail-closes on agnos so the agnos loop is untouched. Adds the new `setu` 0.1.0
+`AF_UNIX` fail-closes on agnos so the agnos loop is untouched. Adds the `setu` 0.1.0
 contract-lib dependency. The final kernel-scanout hop is agnos-only.
 
 Built on **0.5.0** (2026-07-03) — **Bite C (built-in apps) — C1 + C2**: the app framework
@@ -35,7 +45,7 @@ presentation), **0.4.0** (mehman foreign-app hosting + kavach-sandboxed guest ex
 ## Source
 
 - Rust reference: 27,207 lines at `rust-old/` (frozen, do not edit).
-- Cyrius port: **19 modules**; compiles clean + runs on the bhumi seam.
+- Cyrius port: **20 modules**; compiles clean + runs on the bhumi seam.
   - **Core (M1/Bite A)** — `geom`, `window`, `compositor`, `render`, `input`, `main`.
     compositor: workspaces + context types + move/switch + secure/agent-aware modes
     + window-at-point hit-test; renderer: alpha blend + damage tracking + window
@@ -49,7 +59,9 @@ presentation), **0.4.0** (mehman foreign-app hosting + kavach-sandboxed guest ex
   - **Wiring (B3, complete)** — `desktop` aggregate owns the compositor + all 8 leaf
     managers, created by `main`. `render_desktop` is the unified frame: clear to the
     **theme** background (`desk_bg_color`), paint windows, draw the **shell** status
-    panel (`render_shell_panel` — cpu/mem/battery bars, net dot, notification badge).
+    panel (`render_shell_panel` — cpu/mem/battery bars, net dot, notification badge —
+    which lives in `shell_render.cyr`, the shell → render bridge, so `render.cyr`
+    itself carries no shell symbols and is reusable standalone).
     Live cross-subsystem links: compositor→accessibility (`desktop_sync_accessibility`),
     theme→renderer, shell→renderer, shell_integration tray. (ai/security/gestures/
     plugin instantiated; deeper feature wiring is follow-on.)
@@ -76,9 +88,10 @@ presentation), **0.4.0** (mehman foreign-app hosting + kavach-sandboxed guest ex
 
 ## Tests
 
-- **17 `.tcyr` files, all green.** Core: `aethersafha` (38), `render` (34 — decoration
-  hit-test + shell-panel bars + bitmap text pixel test), `input` (13), `leaf_modules`
-  (11), `desktop` (15). mehman: `foreign` (23 — guest spec/surface + host-as-window +
+- **18 `.tcyr` files, all green.** Core: `aethersafha` (38), `render` (29 — decoration
+  hit-test + bitmap text pixel test; now shell-free), `shell_render` (14 — panel bars +
+  net-status color + `render_shell_panel` shell→framebuffer smoke), `input` (13),
+  `leaf_modules` (11), `desktop` (15). mehman: `foreign` (23 — guest spec/surface + host-as-window +
   sandboxed run + capture + **presentation pixel test**). capture: `screen_capture`
   (90 — permissions / rate-limit / secure-mode / region-clamp / window / history +
   RAW/BMP/PNG encoder checksums), `screen_recording` (72 — session lifecycle / state

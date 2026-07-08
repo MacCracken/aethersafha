@@ -1,17 +1,26 @@
-# puka_desktop_probe.cyr — prove MULTI-WINDOW compositing: two independent setu
-# clients hosted as distinct windows on one desktop.
+# puka_desktop_probe.cyr — prove MULTI-WINDOW compositing with server-side
+# window decorations: two independent setu clients hosted as DECORATED windows
+# (compositor-drawn titlebar + title TEXT + traffic-light buttons, exactly like a
+# native window) on one desktop.
 #
-# aethersafha listens, then launches TWO clients in turn — puka (the sovereign
-# terminal) and dhancha's setu_demo_client (a widget app) — accepting + placing
-# each as its own window (setu_srv_serve_accepted_at) on a shared framebuffer
-# with a desktop backdrop, then dumps the whole desktop to a PPM. This is the
-# compositor doing what a compositor is for: many apps, one screen.
+# aethersafha listens, launches puka (the sovereign terminal) + dhancha's
+# widget app in turn, and for each: receives its committed surface, frames it as
+# a managed Window (move/resize to content+titlebar, set title), draws the
+# compositor chrome via render.cyr's render_window (native titlebar + bitmap
+# title label + buttons), and blits the client's content into the body. Then
+# dumps the whole desktop. The compositor doing window management: many apps, one
+# screen, each a first-class managed window.
+#
+# render.cyr is shell-free (the shell status-panel renderer lives in
+# src/shell_render.cyr), so this probe reuses render_window / draw_text directly
+# without pulling in the whole compositor's shell.
 #
 # Run: PUKA_BIN=/abs/puka_setu_probe DHANCHA_BIN=/abs/setu_demo_client ./build/puka_desktop_probe
 
 include "src/geom.cyr"
 include "src/window.cyr"
 include "src/compositor.cyr"
+include "src/render.cyr"
 include "src/setu_server.cyr"
 include "src/setu_dispatch.cyr"
 
@@ -60,26 +69,50 @@ fn pdp_dump_ppm(fb, w, h, path): i64 {
 
 fn pdp_say(s): i64 { return syscall(SYS_WRITE, 1, s, strlen(s)); }
 
-# Launch one client, accept its connection, place its window at (x,y). -> sid/neg.
-fn pdp_host(sfd, comp, fb, bin, x, y): i64 {
+# Launch a client, accept it, frame its surface as a managed window at (x,y) with
+# native compositor chrome (render.cyr's render_window: titlebar + bitmap title
+# TEXT + traffic-light buttons) + its content in the body. -> sid / negative.
+fn pdp_host_framed(sfd, comp, fb, bin, x, y, title, focused): i64 {
     var pid = pdp_spawn(bin);
     if (pid < 0) { return 0 - 1; }
     var cfd = syscall(SYS_ACCEPT, sfd, 0, 0);
     if (cfd < 0) { return 0 - 5; }
-    var sid = setu_srv_serve_accepted_at(cfd, comp, fb, x, y);
+    var out4 = alloc(32);
+    var nbytes = setu_srv_recv_committed(cfd, comp, out4);
     syscall(SYS_CLOSE, cfd);
-    return sid;
+    if (nbytes < 0) { return nbytes; }
+    var win = load64(out4 + 0);
+    var pix = load64(out4 + 8);
+    var w   = load64(out4 + 16);
+    var h   = load64(out4 + 24);
+    # frame the client surface as a managed window (content + titlebar)
+    win_move(win, x, y);
+    win_resize(win, w, h + TITLEBAR_H);
+    win_set_title(win, title);
+    render_window(fb, win, focused);               # native chrome: titlebar + title TEXT + buttons
+    # blit the client's content into the body, below the titlebar (over the body fill)
+    var py = 0;
+    while (py < h) {
+        var px = 0;
+        while (px < w) {
+            bhumi_fb_set(fb, x + px, y + TITLEBAR_H + py, load32(pix + (py * w + px) * 4));
+            px = px + 1;
+        }
+        py = py + 1;
+    }
+    return win_id(win);
 }
 
 fn main(): i64 {
     alloc_init();
+    kashi_font_init();   # populate the VGA 8x16 glyph tables so render_window can draw title TEXT
     var path = "/tmp/aethersafha-setu.sock";
     var ppm = "/tmp/aethersafha-desktop.ppm";
     syscall(SYS_UNLINK, path);
 
-    var fb = bhumi_fb_new(720, 280);
+    var fb = bhumi_fb_new(720, 300);
     if (fb == 0) { return 1; }
-    bhumi_fb_clear(fb, bhumi_xrgb(24, 24, 37));   # desktop backdrop
+    bhumi_fb_clear(fb, bhumi_xrgb(24, 24, 37));    # desktop backdrop
     var comp = comp_new();
 
     var sfd = setu_srv_listen(path);
@@ -90,17 +123,16 @@ fn main(): i64 {
     var dhancha = getenv("DHANCHA_BIN");
     if (dhancha == 0) { dhancha = "/home/macro/Repos/dhancha/build/setu_demo_client"; }
 
-    pdp_say("puka_desktop_probe: hosting puka + dhancha widget app...\n");
-    var s1 = pdp_host(sfd, comp, fb, puka, 20, 20);
+    pdp_say("puka_desktop_probe: hosting puka + dhancha as managed windows...\n");
+    var s1 = pdp_host_framed(sfd, comp, fb, puka, 20, 20, "puka - terminal", 1);
     if (s1 < 0) { pdp_say("puka_desktop_probe: puka host failed\n"); syscall(SYS_CLOSE, sfd); return 1; }
-    var s2 = pdp_host(sfd, comp, fb, dhancha, 380, 40);
+    var s2 = pdp_host_framed(sfd, comp, fb, dhancha, 380, 46, "dhancha - files", 0);
     if (s2 < 0) { pdp_say("puka_desktop_probe: dhancha host failed\n"); syscall(SYS_CLOSE, sfd); return 1; }
 
-    pdp_dump_ppm(fb, 720, 280, ppm);
+    pdp_dump_ppm(fb, 720, 300, ppm);
     syscall(SYS_CLOSE, sfd);
     syscall(SYS_UNLINK, path);
-    pdp_say("puka_desktop_probe: PASS — 2 clients composited as windows (");
-    pdp_say("puka + dhancha) -> PPM\n");
+    pdp_say("puka_desktop_probe: PASS — 2 managed windows composited (puka + dhancha) -> PPM\n");
     return 0;
 }
 

@@ -1,10 +1,11 @@
 # aethersafha renderer test — alpha blend + damage tracking (pure logic).
+# render.cyr is shell-free: this suite includes it WITHOUT shell.cyr (the shell
+# status-panel renderer + its test live in tests/shell_render.tcyr).
 # Stdlib + [deps.*] auto-included via cyrius.cyml.
 include "lib/bhumi.cyr"
 include "src/geom.cyr"
 include "src/window.cyr"
 include "src/compositor.cyr"
-include "src/shell.cyr"   # render_shell_panel reads SH_NetStatus + shell status
 include "src/render.cyr"
 
 fn main() {
@@ -42,13 +43,6 @@ fn main() {
     assert_eq(deco_hit(win, 497, 250), Deco.DECO_RESIZE_R, "right resize edge");
     assert_eq(deco_hit(win, 300, 397), Deco.DECO_RESIZE_B, "bottom resize edge");
     assert_eq(deco_hit(win, 497, 397), Deco.DECO_RESIZE_BR, "bottom-right resize corner");
-
-    test_group("render — shell panel bar-graph fill");
-    assert_eq(panel_bar_w(0, 40), 0, "0% → empty");
-    assert_eq(panel_bar_w(100, 40), 40, "100% → full");
-    assert_eq(panel_bar_w(50, 40), 20, "50% → half");
-    assert_eq(panel_bar_w(150, 40), 40, "clamp above 100%");
-    assert_eq(panel_bar_w(0 - 10, 40), 0, "clamp below 0%");
 
     test_group("render — bitmap text (kashi VGA 8x16)");
     kashi_font_init();
