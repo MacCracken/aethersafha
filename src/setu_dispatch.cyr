@@ -162,3 +162,58 @@ fn setu_srv_serve_present(path, comp, fb): i64 {
     return fb_sum;
     #endif
 }
+
+# Bite 11: serve a full PERSISTENT session for one client on one connection —
+# receive a present (CREATE→ATTACH+payload→COMMIT), blit + verify it into `fb`,
+# THEN push input events back down the same connection (the realistic duplex the
+# one-shot probes didn't exercise). Returns the framebuffer-region checksum
+# (> 0) on a verified blit, -30 on mismatch, or a negative recv code. On the real
+# compositor the input originates from bhumi_backend_poll; scripted here.
+fn setu_srv_serve_session(path, comp, fb): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var sfd = setu_srv_listen(path);
+    if (sfd < 0) { return sfd; }
+    var cfd = syscall(SYS_ACCEPT, sfd, 0, 0);
+    if (cfd < 0) { syscall(SYS_CLOSE, sfd); syscall(SYS_UNLINK, path); return 0 - 5; }
+
+    var out4 = alloc(32);
+    var nbytes = setu_srv_recv_committed(cfd, comp, out4);
+    if (nbytes < 0) { setu_srv_dispatch_close(cfd, sfd, path); return nbytes; }
+
+    var win = load64(out4 + 0);
+    var pix = load64(out4 + 8);
+    var w   = load64(out4 + 16);
+    var h   = load64(out4 + 24);
+    var wx = win_x(win);
+    var wy = win_y(win);
+    var id = win_id(win);
+
+    # Blit + verify (source == framebuffer region).
+    var src_sum = 0;
+    var fb_sum = 0;
+    var py = 0;
+    while (py < h) {
+        var px = 0;
+        while (px < w) {
+            var pixel = load32(pix + (py * w + px) * 4);
+            bhumi_fb_set(fb, wx + px, wy + py, pixel);
+            src_sum = src_sum + pixel;
+            fb_sum = fb_sum + bhumi_fb_get(fb, wx + px, wy + py);
+            px = px + 1;
+        }
+        py = py + 1;
+    }
+    if (src_sum != fb_sum) { setu_srv_dispatch_close(cfd, sfd, path); return 0 - 30; }
+
+    # Push scripted input back to the client on the SAME connection.
+    setu_srv_write_frame(cfd, setu_input_key(id, 65, 0));        # 'A'
+    setu_srv_write_frame(cfd, setu_input_ptr_move(id, 100, 50));
+    setu_srv_write_frame(cfd, setu_input_ptr_btn(id, 272, 1));   # press
+
+    setu_srv_dispatch_close(cfd, sfd, path);
+    return fb_sum;
+    #endif
+}
