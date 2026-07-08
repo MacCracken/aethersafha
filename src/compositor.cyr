@@ -3,7 +3,7 @@
 #
 # The compositor owns the window registry (a vec of *Window, z-order), the
 # focused index, an id counter, a set of workspaces + the active one, and the
-# secure / agent-aware mode flags. Native Wayland protocol dispatch is the
+# secure / agent-aware mode flags. Native (sovereign) protocol dispatch is the
 # compositor's own job (does NOT move to bhumi/mehman) — this is where the
 # surface tree + window management live.
 

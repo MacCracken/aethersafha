@@ -15,15 +15,15 @@
 - [ ] CHANGELOG complete from v0.1.0 onward
 - [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`)
 
-## Backend seam (the wayland → bhumi/mehman split)
+## Backend seam (the platform-I/O → bhumi/mehman split)
 
 | Rust concern | Cyrius home | Notes |
 |---|---|---|
-| DRM/KMS + libinput + logind (platform I/O) | **bhumi** 0.7.0 | `bhumi_backend_open/fb/poll/present`, seat/cap gating. MVP. |
-| Wayland protocol dispatch, surface tree, window mgmt | **aethersafha** | The compositor's *native* language — stays here. |
-| XWayland (foreign-app surface hosting) | **mehman** 0.1.0 | kavach-sandboxed guests. Post-MVP (types-only today). |
-| Shared domain primitives / errors / wire format | **agnostik** 1.3.2 | was Rust `agnostik`. |
-| udev + DRM/KMS device model | **agnodrm** 1.4.4 | was Rust `agnosys` (decomposed 2026-06-19). |
+| DRM/KMS + libinput + logind (platform I/O) | **bhumi** 1.0.0 | `bhumi_backend_open/fb/poll/present`, seat/cap gating. MVP. |
+| Native protocol dispatch, surface tree, window mgmt | **aethersafha** | The compositor's own sovereign protocol — stays here (ADR 0001). |
+| Foreign-app surface hosting (was XWayland) | **mehman** 1.0.0 | kavach-sandboxed guests (swallow backend). Wired (Bite G). |
+| Shared domain primitives / errors / wire format | **agnostik** 1.3.3 | was Rust `agnostik`. |
+| udev + DRM/KMS device model | **agnodrm** 1.4.5 | was Rust `agnosys` (decomposed 2026-06-19). |
 
 ## Milestones
 
@@ -64,8 +64,8 @@ symbols), each compiling + smoke-tested. Driven by the parity workflow.
 ### M3 — Renderer + compositor depth (v0.3.0)
 - Damage tracking, scene graph, decorations, bitmap text (`renderer.rs` full).
 - Input routing to focused surface, drag/resize state machines, workspaces.
-- Native Wayland protocol surface (`wayland/{types,protocol,server,popups}.rs`)
-  — the compositor's own job; incremental, one protocol object at a time.
+- Native display protocol surface — sovereign, greenfield (see ADR 0001 +
+  Bite F); **not** a Wayland port. Incremental, one message at a time.
 
 ### M4 — Apps + capture + plugins (v0.4.0)
 - **`apps.cyr` 🚧 C1+C2 done** — app framework + data-model apps + the Terminal allowlist/basename
@@ -80,7 +80,7 @@ symbols), each compiling + smoke-tested. Driven by the parity workflow.
 - `plugin_host.cyr` (Unix-socket IPC, sandbox profiles, capability grants).
 - HUD widgets (`hud/{gpu,domain,crew}_status.cyr`) — HTTP polling of daimon MCP.
 
-### M5 — mehman (XWayland successor) — 🚧 started (v0.5.0+)
+### M5 — mehman (foreign-app swallow backend) — 🚧 started (v0.5.0+)
 - mehman 1.0.0 + kavach 3.6.0 **wired** via `src/foreign.cyr`: guest-spec +
   foreign-surface descriptor + `desktop_host_foreign` → a compositor window;
   `main` hosts a demo guest.

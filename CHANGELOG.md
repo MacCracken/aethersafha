@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- **Direction: Wayland refused — the native protocol is sovereign, not a port.**
+  aethersafha's client↔compositor protocol is redefined as a native,
+  first-principles display protocol; the Rust `wayland/` surface (~3360 lines) is
+  **retired, not ported**, and "Bite F" is redefined from "reimplement Wayland in
+  Cyrius" to "design + build the native protocol." See
+  [`docs/adr/0001-native-display-protocol.md`](docs/adr/0001-native-display-protocol.md)
+  and the ecosystem pivot in `agnosticos/docs/design-patterns.md`. Docs
+  (`README`, `docs/architecture/overview.md`, `roadmap.md`, `parity-plan.md`,
+  `state.md`) reconciled to the native direction. No code change.
+
 ## [0.5.0] - 2026-07-03 — built-in apps (Bite C1 + C2)
 
 ### Added

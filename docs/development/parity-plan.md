@@ -16,14 +16,17 @@
 | Apps | 2986 | **C1+C2 ✅** framework + data-model apps + aggregate + Terminal spawn (133 assertions); C3 (fs/net) pending |
 | Capture / recording | 1299 + 938 | **✅ Bite D done** — `screen_capture` (D1) + `screen_recording` (D2) ported + tested |
 | HUD widgets | ~1990 | ⬜ not ported (Bite E) |
-| **Wayland protocol** (types/protocol/server/popups) | ~3360 | ⬜ not ported — from scratch in Cyrius (Bite F) |
-| xwayland → mehman | 823 | ⬜ blocked on mehman (Bite G) |
+| **Native display protocol** (transport/surface/present/input) | — | ⬜ greenfield — designed from scratch (Bite F, redefined); Rust `wayland/` (~3360) **retired, not ported** |
+| foreign-app hosting → mehman (was `xwayland.rs`) | 823 | 🚧 mehman wired (Bite G); per-ABI shim + XRGB fidelity remain |
 | system_tests | 1477 | re-expressed as per-module `.tcyr` (cross-cutting) |
 
-**Key decision (ADR needed):** Wayland is the AGNOS-native client protocol;
-aethersafha implements the wire protocol itself in Cyrius on bhumi + `lib/net`
-syscalls (there is no `wayland-server` crate to lean on). This makes Bite F the
-largest and highest-risk piece.
+**Key decision (ADR 0001):** the native client protocol is a **sovereign
+protocol designed from first principles — Wayland refused, not ported**. The
+Rust `wayland/` surface is retired; Bite F is redefined as the greenfield design
++ build of the native display protocol (see
+[`../adr/0001-native-display-protocol.md`](../adr/0001-native-display-protocol.md)
+and the ecosystem pivot in `agnosticos/docs/design-patterns.md`). Still the
+largest and highest-risk piece — now as design, not translation.
 
 ---
 
@@ -34,7 +37,7 @@ Legend — **Mode**: 🔁 workflow (parallel fan-out) · ➡️ serial (tight co
 
 ### Bite 0 — Cross-cutting foundations · ➡️ · S
 Do alongside everything; unblocks the process gates.
-- **ADR-0001**: record "native protocol = Wayland, implemented in Cyrius".
+- **ADR-0001**: record the native sovereign display protocol (Wayland refused, not ported). ✅ [`../adr/0001-native-display-protocol.md`](../adr/0001-native-display-protocol.md).
 - **Benchmark harness**: real `.bcyr` for compositor create/focus + renderer fill
   (the dev loop forbids claiming perf without numbers).
 - **ERR_\* overlap cleanup**: trim agnostik/agnodrm to selective `modules` so the
@@ -103,18 +106,28 @@ Rust: `apps.rs` (2986). Re-sliced by effect-danger during scoping:
 - **E2** 🔁 (3 agents): `gpu_status`, `domain_filter`, `crew_status` on E1.
 - **Accept**: widgets poll a daimon MCP endpoint + parse JSON; band/status logic tested.
 
-### Bite F — Native Wayland protocol surface · ➡️ · XL (highest-risk)
-Rust: `wayland/{types,protocol,server,popups}` + client socket. From scratch.
-- **F1** 🔁: `wayland/types` data structures (ShmFormat, OutputInfo, transforms).
-- **F2** ➡️ (hard): Wayland wire codec — object registry, message marshal/unmarshal
-  over the Unix socket (`lib/net` `sys_socket`/`bind`/`listen`/`accept4`), `wl_display` core.
-- **F3** ➡️: protocol dispatch (surface create/attach/commit, `wl_shm`, `xdg_shell`
-  roles, `wl_seat`, `wl_output`) → compositor actions; xdg popups + constraints.
-- **Mode**: its own mini-roadmap; scope a minimal object subset first, grow.
-- **Accept**: a native Cyrius client can bind `wl_compositor`, create a surface,
-  attach an shm buffer, and see it composited.
+### Bite F — Native display protocol (sovereign, greenfield) · ➡️ · XL (highest-risk)
+**Redefined** (ADR 0001): design + build a first-principles client↔compositor
+protocol — **not** a port of Wayland. The Rust `wayland/` surface (~3360) is
+retired. Prior art (surface/role separation, client-submits-buffer, damage,
+event ordering) is studied, then redesigned clean. Founder-led design gates this
+bite (transport, paradigm, contract-lib name) — see
+`dhancha/docs/development/sovereign-desktop.md`.
+- **F0** (design): the native protocol + the AGNOS desktop paradigm (design doc /
+  ADR beyond 0001's decision) + the shared contract-lib repo (founder-named).
+- **F1** 🔁: protocol types (pixel formats, output info, transforms) in the shared
+  contract lib — pure, headless RUN-testable.
+- **F2** ➡️ (hard): the sovereign wire codec — connection/handshake, message
+  marshal/unmarshal over the chosen transport (Unix socket *or* shm command ring,
+  `lib/net` if socket).
+- **F3** ➡️: protocol dispatch — surface lifecycle (create/configure/commit/close)
+  → the compositor `Window` model; **CPU buffer submit** (memfd/mmap, no GPU
+  first); input events → focused client.
+- **Mode**: its own mini-roadmap; scope a minimal surface first, grow.
+- **Accept**: a `dhancha` client connects, creates a surface, submits a CPU
+  buffer, sees it composited, and receives input — end-to-end on Linux via bhumi.
 
-### Bite G — mehman (XWayland successor) · 🚧 started
+### Bite G — mehman (foreign-app swallow backend) · 🚧 started
 mehman 0.3.1 + kavach 3.6.0 **wired** (`src/foreign.cyr`): guest-spec + foreign-surface
 descriptor + `desktop_host_foreign` → a compositor window; `main` hosts a demo guest;
 `foreign_run` → `mehman_sandbox_capture_guest` runs the guest AND captures its output
@@ -134,7 +147,7 @@ Wire mabda 4.0.2 (`[deps.mabda]`) when hardware accel is wanted. Off the v1.0 pa
   core depth) and B (independent leaf modules) run in parallel tracks.
 - **Phase 2 (feature breadth)** — Bite C, D, E on top of the solid core. Highly
   parallel: three workflows.
-- **Phase 3 (the protocol)** — Bite F. The make-or-break; its own multi-week arc.
+- **Phase 3 (the native protocol)** — Bite F. The make-or-break; its own multi-week arc (founder-led design first — ADR 0001).
 - **Phase 4 (compat + accel)** — Bite G (when mehman ships), Bite H (when wanted).
 
 ## Workflow catalog (fan-out opportunities)
@@ -147,7 +160,7 @@ Wire mabda 4.0.2 (`[deps.mabda]`) when hardware accel is wanted. Off the v1.0 pa
 | WF-4 | D | capture→recording pipeline | 2 stages |
 | WF-5 | E2 | one widget per agent | 3 |
 | WF-6 | A | core-depth translation drafts (serial integration after) | 3 |
-| WF-7 | F1 | wayland/types | 1–2 |
+| WF-7 | F1 | protocol types (shared contract lib) | 1–2 |
 
 Each bite follows the dev loop: port → cleanliness (`fmt`/`lint`) → tests → bench →
 audit → docs (CHANGELOG, ADRs, source citations) → version/state sync.

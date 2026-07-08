@@ -1,52 +1,63 @@
 # Architecture Overview
 
-## Module Map
+> aethersafha is a pure-Cyrius sovereign compositor. It speaks a **native
+> display protocol** (not Wayland — see
+> [`../adr/0001-native-display-protocol.md`](../adr/0001-native-display-protocol.md))
+> and sits on the **bhumi** platform backend. The Rust original is frozen at
+> `rust-old/` as the parity oracle; this map is the Cyrius port (`src/`).
+
+## Module map (`src/`)
 
 ```
 aethersafha
-├── compositor.rs      — Wayland backend abstraction, surface/window management, workspaces
-├── renderer.rs        — Scene graph, damage tracking, decorations, framebuffer, high-contrast
-├── shell.rs           — Desktop shell: app launcher, notifications, quick settings, system status
-├── ai_features.rs     — Context engine, AI suggestions, agent HUD, resource metrics
-├── plugin_host.rs     — Plugin lifecycle, sandbox profiles, capability system
-├── wayland/           — Wayland protocol implementation
-│   ├── server.rs      — Compositor server, client management
-│   ├── protocol.rs    — Protocol handlers (wl_compositor, xdg_shell, wlr_layer_shell)
-│   ├── popups.rs      — Popup/menu management
-│   ├── types.rs       — Protocol type definitions
-│   ├── stub.rs        — Stub backend for testing
-│   └── tests.rs       — Wayland protocol tests
-├── xwayland.rs        — XWayland manager, X11 surface mapping, property translation
-├── accessibility.rs   — AccessibilityTree, focus management, screen reader announcements
-├── screen_capture.rs  — Capture manager, per-agent permissions, rate limiting, encoding
-├── screen_recording.rs — Recording manager, frame buffer, poll-based streaming
-├── security_ui.rs     — Permission dialogs, threat alerts, security dashboard
-├── shell_integration.rs — System tray, window management, notification bridge
-├── theme_bridge.rs    — AGNOS↔Flutter theme translation, platform channel
-├── apps.rs            — Built-in apps (web browser, file manager, terminal, model manager)
-├── gestures.rs        — Touch/trackpad gesture recognition
-├── hud/               — HUD overlay system
-│   ├── crew_status.rs — Agent crew status display
-│   ├── domain_filter.rs — Domain-specific content filtering
-│   └── gpu_status.rs  — GPU monitoring overlay
-├── system_tests.rs    — Cross-module system integration tests
-├── lib.rs             — Library root, public API surface
-└── main.rs            — Binary entrypoint
+├── geom.cyr             — geometry primitives (rectangles, hit-tests)
+├── window.cyr           — window model + window state
+├── compositor.cyr       — window stack, focus, workspaces, CRUD, secure/agent modes
+├── render.cyr           — software renderer over the bhumi framebuffer: alpha blend,
+│                           damage tracking, decorations, bitmap text (kashi)
+├── input.cyr            — bhumi HID → compositor input actions, window-mgmt shortcuts
+├── main.cyr             — entry: open the bhumi backend, seed windows, frame loop
+├── desktop.cyr          — aggregate: owns the compositor + all leaf managers; the
+│                           unified frame (themed bg + windows + shell status panel)
+├── shell.cyr            — desktop shell: launcher, notifications, quick settings, status
+├── theme_bridge.cyr     — theme translation / synchronization
+├── ai_features.cyr      — context engine, AI suggestions, agent HUD, resource metrics
+├── accessibility.cyr    — accessibility tree, focus, announcements, high-contrast
+├── gestures.cyr         — touch / trackpad gesture recognition
+├── security_ui.cyr      — permission dialogs, threat alerts, security dashboard
+├── shell_integration.cyr — system tray, window management, notification bridge
+├── plugin_host.cyr      — plugin lifecycle, sandbox profiles, capability system
+├── apps.cyr             — built-in apps (file manager, agent manager, audit viewer,
+│                           model manager, terminal, browsers)
+├── screen_capture.cyr   — capture manager: per-agent permissions, rate limiting, encoders
+├── screen_recording.cyr — recording manager: sessions, frame ring buffer
+└── foreign.cyr          — mehman swallow path: host a foreign-ABI app as a
+                            kavach-sandboxed guest, capture + present its surface
 ```
 
-## Data Flow
+The **native display protocol** surface (client↔compositor: transport, surface
+lifecycle, buffer submit, input dispatch) is greenfield — the redefined Bite F.
+Its contract will live in a shared sovereign library consumed by both
+aethersafha (server) and dhancha (client). See ADR 0001 and
+`dhancha/docs/development/sovereign-desktop.md`.
+
+## Data flow
 
 ```
-User Input → Wayland Server → Compositor → Renderer → Display
-                  ↕                ↕
-            XWayland         AI Features ↔ daimon (port 8090)
-                                  ↕
-                            Plugin Host → Sandboxed Plugins
+bhumi (HID) → input → compositor → render → bhumi (framebuffer) → display
+                          ↕              ↕
+                    desktop aggregate   ai_features ↔ daimon
+                          ↕
+                    plugin_host → sandboxed plugins
+                          ↕
+                    foreign → mehman (kavach-sandboxed foreign apps)
+
+client apps:  dhancha client  ↔  native display protocol (greenfield)  ↔  compositor
 ```
 
 ## Consumers
 
-- **AGNOS desktop** — primary consumer (the OS desktop)
-- **Plugin authors** — via plugin_host API
-- **daimon** — screen capture/recording via agent permissions
-- **agnoshi** — shell integration for AI shell
+- **AGNOS desktop** — the OS desktop (primary; `publish = false` top-level app).
+- **dhancha** — the client-side toolkit on the other side of the native protocol.
+- **daimon** — screen capture / recording via agent permissions.
+- **Plugin authors** — via the plugin_host capability API.

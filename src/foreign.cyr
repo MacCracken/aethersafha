@@ -1,7 +1,7 @@
 # aethersafha — foreign-app hosting via mehman (the "swallow" backend)
 # Parity: rust-old/src/xwayland.rs — the foreign-app compat path.
 #
-# mehman is the XWayland successor: it hosts foreign-ABI apps as kavach-sandboxed
+# mehman is the foreign-app swallow backend: it hosts foreign-ABI apps as kavach-sandboxed
 # guests and hands their surfaces to the compositor as native windows. This is
 # aethersafha's seam onto mehman — build a guest spec (swallow caps: non-native,
 # mediated I/O) + an XRGB8888 foreign-surface descriptor, and register a

@@ -62,7 +62,7 @@ path = "../kashi"
 tag = "1.0.2"
 modules = ["src/font_data.cyr"]
 
-# --- Compat / "swallow" backend: the XWayland successor — hosts foreign-ABI app
+# --- Compat / "swallow" backend: does XWayland's job the sovereign way — hosts foreign-ABI app
 # surfaces in a kavach sandbox. We consume its library modules (error/caps/guest
 # vocabulary, the foreign-surface descriptor, and the kavach-sandboxed guest
 # runner + the M2 surface-capture handoff, mehman_sandbox_capture_guest).

@@ -89,8 +89,8 @@ Active (auto-prepended; stdlib declared per each dep's reviewed needs):
 - **agnostik** 1.3.3 — shared domain primitives (errors namespaced `STIK_ERR_*`).
 - **agnodrm** 1.4.5 — udev/DRM device model (errors namespaced `DRM_ERR_*`).
 - **kashi** 1.0.2 — bitmap console fonts (freestanding `font_data.cyr`, VGA 8×16).
-- **mehman** 1.0.0 + **kavach** 3.6.0 — foreign-app "swallow" backend (the XWayland
-  successor). Consumed via `src/foreign.cyr` (host → sandboxed run → capture → present);
+- **mehman** 1.0.0 + **kavach** 3.6.0 — foreign-app "swallow" backend (the sovereign compat
+  lane — does XWayland's job). Consumed via `src/foreign.cyr` (host → sandboxed run → capture → present);
   we pull only `types`/`surface`/`sandbox` (1.0.0 also ships per-ABI `guest`/`shim`
   modules, not yet consumed). Pulls the full TLS/crypto stdlib
   cascade (net, sandhi, thread_local, random, freelist, sync, async, fdlopen,
@@ -117,6 +117,6 @@ _None yet (top-level application, `publish = false`)._
 launch (133 assertions). Next on the apps track: **C3** (the fs/net effect bodies —
 agent-socket scan, audit-log parse, model gateway). Also complete + awaiting wiring: Bite D
 (capture + recording). Other large unported layers: HUD widgets (Bite E), the native
-Wayland protocol surface (Bite F, highest-risk). **mehman track (Bite G)**: consume 1.0.0's
+display protocol surface (Bite F — sovereign/greenfield, highest-risk; ADR 0001). **mehman track (Bite G)**: consume 1.0.0's
 per-ABI `guest`/`shim` + real XRGB pixel fidelity (mehman ADR 0004). See
 [`roadmap.md`](roadmap.md) / [`parity-plan.md`](parity-plan.md).

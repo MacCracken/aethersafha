@@ -3,7 +3,7 @@
 #
 # Sits directly on the bhumi platform backend (output/input/seat vs the agnos
 # kernel) — the sovereign replacement for DRM/KMS + libinput + logind. Native
-# Wayland protocol dispatch stays in aethersafha proper; foreign-app surfaces
+# sovereign protocol dispatch stays in aethersafha proper; foreign-app surfaces
 # (was XWayland) move to the mehman swallow backend, post-MVP.
 #
 # Stdlib + [deps.*] (bhumi/mehman/agnostik/agnodrm) auto-prepended via cyrius.cyml.

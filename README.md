@@ -1,53 +1,77 @@
 # Aethersafha
 
-**AI-augmented Wayland compositor for AGNOS.**
+**AI-augmented AGNOS desktop compositor.**
 
-Aethersafha (Arabic: the surface/plane) is the desktop environment and Wayland compositor for the AGNOS operating system. It provides a composited desktop with AI-native features, agent integration, and security-first design.
+Aethersafha (Arabic: *the surface / plane*) is the desktop environment and
+compositor for the AGNOS operating system — a composited desktop with AI-native
+features, agent integration, and security-first design. It is a pure-Cyrius
+sovereign compositor: it speaks a **native display protocol** designed from
+first principles, **not** a port of Wayland (see
+[`docs/adr/0001-native-display-protocol.md`](docs/adr/0001-native-display-protocol.md)).
+
+It sits directly on the **bhumi** platform backend (output / input / seat — the
+sovereign DRM/KMS + libinput + logind replacement), and hosts foreign-ABI apps,
+when wanted, through the **mehman** swallow backend (kavach-sandboxed).
 
 ## Features
 
-- **Wayland compositor** — `wl_compositor`, `xdg_shell`, `wlr_layer_shell` protocol support
-- **AI desktop features** — context-aware suggestions, agent HUD, resource metrics
-- **Plugin host** — sandboxed plugin loading with capability-based security
-- **XWayland** — X11 compatibility via surface mapping and property translation
-- **Screen capture/recording** — per-agent permissions, rate limiting, multi-format encoding
-- **Accessibility** — AccessibilityTree, tab navigation, screen reader announcements
-- **Theme bridge** — AGNOS↔Flutter theme synchronization
-- **Security UI** — permission dialogs, threat alerts, agent audit dashboard
-- **HUD overlays** — crew status, domain filters, GPU monitoring
+- **Native compositor** — sovereign window model, software renderer over the
+  bhumi framebuffer, workspaces, focus + window management, decorations, damage
+  tracking. Composites its own window model directly on bhumi.
+- **Native display protocol** — a first-principles client↔compositor protocol
+  (greenfield; `dhancha` is the client-side counterpart). Not Wayland, not
+  `xdg_shell`, not `wl_shm`. See ADR 0001.
+- **Foreign-app hosting (swallow)** — via mehman: foreign-ABI apps run as
+  kavach-sandboxed guests whose surfaces are hosted as compositor windows (the
+  compat lane that does XWayland's job the sovereign way — firewalled from the
+  native path).
+- **AI desktop features** — context-aware suggestions, agent HUD, resource
+  metrics, agent-owned windows.
+- **Plugin host** — sandboxed plugin loading with capability-based security.
+- **Screen capture / recording** — per-agent permissions, rate limiting,
+  byte-exact RAW/BMP/PNG encoding.
+- **Accessibility** — accessibility tree, tab navigation, screen-reader
+  announcements, high-contrast theme.
+- **Security UI** — permission dialogs, threat alerts, agent audit dashboard.
+- **Built-in apps** — file manager, agent manager, audit viewer, model manager,
+  terminal (allowlisted spawn), browsers.
 
 ## Architecture
 
-```
-aethersafha
-├── compositor    — Wayland backend, surface management, workspaces
-├── renderer      — Scene graph, damage tracking, decorations
-├── shell         — App launcher, notifications, quick settings
-├── ai_features   — Context engine, suggestions, agent HUD
-├── plugin_host   — Plugin lifecycle, sandbox profiles, capabilities
-├── wayland/      — Protocol implementation (server, popups, types)
-├── xwayland      — XWayland manager, surface mapping
-├── accessibility  — AccessibilityTree, focus, announcements
-├── screen_capture — Capture manager, permissions, encoding
-├── screen_recording — Recording manager, frame buffer, streaming
-├── security_ui   — Permission requests, threat dashboard
-├── shell_integration — Tray, window mgmt, notification bridge
-├── theme_bridge  — AGNOS→Flutter theme translation
-├── apps          — Built-in apps (browser, file manager, terminal)
-├── gestures      — Touch/trackpad gesture recognition
-└── hud/          — HUD overlays (crew, domain, GPU)
-```
+See [`docs/architecture/overview.md`](docs/architecture/overview.md) for the
+full module map. In brief, the Cyrius source (`src/`) is:
+
+- **Core** — `geom`, `window`, `compositor`, `render`, `input`, `main`: the
+  window model, software renderer over the bhumi framebuffer, input routing, and
+  the frame loop.
+- **Shell + leaf** — `desktop`, `shell`, `theme_bridge`, `gestures`,
+  `accessibility`, `ai_features`, `security_ui`, `shell_integration`,
+  `plugin_host`.
+- **Apps + capture** — `apps`, `screen_capture`, `screen_recording`.
+- **Foreign** — `foreign`: the mehman swallow path.
+- **Native display protocol** — greenfield (the redefined Bite F); the shared
+  contract lib is TBD.
+
+The Rust original is preserved at `rust-old/` (27,207 lines) as the parity
+oracle; do not edit it.
 
 ## Dependencies
 
-- **agnostik** — AGNOS shared types
-- **agnosys** — Kernel interface (Landlock, seccomp)
-- **wayland-server** — Wayland protocol (feature-gated)
+- **bhumi** — platform backend (output / input / seat).
+- **agnostik** — shared AGNOS domain primitives.
+- **agnodrm** — udev + DRM/KMS device model.
+- **kashi** — bitmap console fonts (VGA 8×16).
+- **mehman** + **kavach** — foreign-app swallow backend + sandbox execution.
+
+Versions are pinned in [`cyrius.cyml`](cyrius.cyml); the toolchain pin lives in
+`[package].cyrius`.
 
 ## Building
 
-```bash
-cargo build --release --all-features
+```sh
+cyrius lib sync --full   # the declared stdlib set exceeds the incremental pin
+cyrius deps              # resolve deps into lib/
+cyrius build src/main.cyr build/aethersafha
 ```
 
 ## License
