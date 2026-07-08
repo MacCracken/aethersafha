@@ -82,3 +82,15 @@ git = "https://github.com/MacCracken/kavach.git"
 path = "../kavach"
 tag = "3.6.0"
 modules = ["dist/kavach.cyr"]
+
+# --- DISPLAY plane contract: setu (सेतु — bridge). The dhancha client ↔ this
+# compositor wire — pure message TYPES + wire CODEC (pixel/input/surface
+# lifecycle). AGENT-FREE; shares no wire with any MCP endpoint. Transport (Unix
+# socket + memfd/SCM_RIGHTS) lives here in the compositor, NOT in setu. All fns
+# are `setu_*` (no collision); its stdlib needs {string,fmt,alloc,vec,str,io,
+# syscalls,assert} are already a subset of [deps].stdlib above.
+[deps.setu]
+git = "https://github.com/MacCracken/setu.git"
+path = "../setu"
+tag = "0.1.0"
+modules = ["dist/setu.cyr"]
