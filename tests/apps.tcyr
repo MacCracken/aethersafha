@@ -1,6 +1,6 @@
 # aethersafha — apps (Bite C, slice C1) BEHAVIORAL parity test.
 # Mirrors the pure/data-model + aggregate tests of rust-old/src/apps.rs.
-# Process-spawning bodies (Terminal spawn, browser/shruti launch) + fs/net effect
+# Process-spawning bodies (Command Palette spawn, browser/shruti launch) + fs/net effect
 # bodies are deferred to C2/C3; C1 covers the framework + data model + security logic.
 include "src/apps.cyr"
 
@@ -130,7 +130,7 @@ fn main() {
     assert_eq(app_modelmgr_download_model(mm, "x"), AppErr.APP_ERR_WINDOW, "download stub -> WindowError");
 
     # -----------------------------------------------------------------------
-    test_group("apps — WebBrowser + Shruti + Terminal (pure)");
+    test_group("apps — WebBrowser + Shruti + Command Palette (pure)");
     var fx = app_browser_firefox();
     assert_eq(streq(app_browser_id(fx), "firefox"), 1, "firefox id");
     assert_eq(streq(app_browser_binary(fx), "/usr/bin/firefox"), 1, "firefox binary");
@@ -147,8 +147,8 @@ fn main() {
     assert_eq(app_shrutisurf_width(sc), 1400, "shruti surface width 1400");
     assert_eq(app_shrutisurf_height(sc), 900, "shruti surface height 900");
     var tm = app_cmdp_new();
-    assert_eq(streq(app_cmdp_name(tm), "Command Palette"), 1, "terminal name");
-    assert_eq(app_cmdp_ai_integration(tm), 1, "terminal ai on");
+    assert_eq(streq(app_cmdp_name(tm), "Command Palette"), 1, "command palette name");
+    assert_eq(app_cmdp_ai_integration(tm), 1, "command palette ai on");
     # allowlist + path-traversal neutralisation (security-critical)
     assert_eq(app_cmdp_is_allowed("ls"), 1, "ls allowed");
     assert_eq(app_cmdp_is_allowed("/evil/bin/ls"), 1, "basename-strip: /evil/bin/ls allowed as ls");
@@ -196,8 +196,8 @@ fn main() {
     var d = app_desk_new();
     assert_eq(vec_len(app_desk_get_open_windows(d)), 0, "no windows initially");
     var wt = app_desk_open_cmdpalette(d);
-    assert_eq(app_window_type(wt), AppType.APP_CMDPALETTE, "terminal window type");
-    assert_eq(streq(app_window_title(wt), "Command Palette"), 1, "terminal window title");
+    assert_eq(app_window_type(wt), AppType.APP_CMDPALETTE, "command palette window type");
+    assert_eq(streq(app_window_title(wt), "Command Palette"), 1, "command palette window title");
     assert_eq(vec_len(app_desk_get_open_windows(d)), 1, "one window open");
     var wfm = app_desk_open_file_manager(d, 0);
     assert_eq(app_window_ai_enabled(wfm), 1, "file manager window ai on");

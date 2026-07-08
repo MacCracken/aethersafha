@@ -2,7 +2,7 @@
 # Parity: rust-old/src/apps.rs
 #   (AppError, AppType, AppWindow, DesktopApplications + the sub-apps:
 #    FileManager, AgentManager, AuditViewer, ModelManager, WebBrowser, Shruti,
-#    Terminal). C1 = the app framework + pure data-model apps + the aggregate.
+#    Command Palette [rust-old: Terminal]). C1 = the app framework + pure data-model apps + the aggregate.
 #
 # Convention (same as src/screen_capture.cyr / src/security_ui.cyr): heap objects
 # = offset enum + alloc + load64/store64 accessors. Substitutions: Uuid -> i64 id
@@ -12,7 +12,7 @@
 # -> -1 sentinel; Result<_,AppError> -> i64 code (0 == Ok); bool -> 0/1; tracing dropped.
 #
 # DEFERRED (C2/C3, marked `# PARITY (C2/C3)`): process spawning
-# (Terminal.execute_command spawn body, WebBrowser/Shruti launch) and the
+# (Command Palette's app_cmdp_execute_command spawn body, WebBrowser/Shruti launch) and the
 # filesystem/network effect bodies (list_agents, get_logs, list/download_model).
 # C1 ships the pure logic incl. the security-critical allowlist + path-strip.
 #
@@ -138,7 +138,7 @@ enum ShrOff {           # ShrutiApp
     SHR_RUNNING = 40;  # 0/1
     SHR_SZ      = 48;
 }
-enum TermOff {          # CmdPaletteApp
+enum CmdPaletteOff {    # CmdPaletteApp (rust-old: TerminalApp)
     CMDP_ID   = 0;   # cstr "cmdpalette"
     CMDP_NAME = 8;   # cstr "Command Palette"
     CMDP_AI   = 16;  # 0/1 (1)

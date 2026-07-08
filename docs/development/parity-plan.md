@@ -13,7 +13,7 @@
 | Core: geom, window, main | — | ✅ done, runs on bhumi |
 | Leaf: theme_bridge, gestures, accessibility, ai_features, shell, security_ui | ~6900 | **structural** parity + smoke tests; behavioral tests + wiring pending (Bite B) |
 | Leaf: shell_integration, plugin_host | 516 + 848 | ⬜ not ported (Bite B1) |
-| Apps | 2986 | **C1+C2 ✅** framework + data-model apps + aggregate + Terminal spawn (133 assertions); C3 (fs/net) pending |
+| Apps | 2986 | **C1+C2 ✅** framework + data-model apps + aggregate + Command Palette spawn (133 assertions); C3 (fs/net) pending |
 | Capture / recording | 1299 + 938 | **✅ Bite D done** — `screen_capture` (D1) + `screen_recording` (D2) ported + tested |
 | HUD widgets | ~1990 | ⬜ not ported (Bite E) |
 | **Native display protocol** (transport/surface/present/input) | — | ⬜ greenfield — designed from scratch (Bite F, redefined); Rust `wayland/` (~3360) **retired, not ported** |
@@ -72,10 +72,10 @@ Rust: `apps.rs` (2986). Re-sliced by effect-danger during scoping:
 - **C1 ✅** app framework (`AppError`/`AppType`/`AppWindow`), the `DesktopApplications`
   aggregate (open/close/list windows + live sub-app getters), the pure data-model apps
   (FileManager, AgentManager, AuditViewer, ModelManager), and the data-only exec-app parts
-  (8 WebBrowser configs, Shruti, Terminal allowlist + **basename-strip** path-traversal
+  (8 WebBrowser configs, Shruti, Command Palette allowlist + **basename-strip** path-traversal
   neutralisation + pre-spawn validation). Effect bodies stubbed to clean-env fallback.
   `tests/apps.tcyr` (125 assertions). Standalone; compositor wiring is follow-on.
-- **C2 ✅** the process-spawn bodies — Terminal `execute_command` (PATH-resolve the allowlisted
+- **C2 ✅** the process-spawn bodies — Command Palette `execute_command` (PATH-resolve the allowlisted
   bare name, direct fork+execve, capture stdout + real `WEXITSTATUS` → `Ok(stdout)` / WindowError),
   WebBrowser/Shruti `launch` (is_installed guard → AppNotFound; detached env-injecting spawn).
   **DIRECT** exec — faithful to Rust's unsandboxed `Command`; the allowlist + basename-strip are the
@@ -156,7 +156,7 @@ Wire mabda 4.0.2 (`[deps.mabda]`) when hardware accel is wanted. Off the v1.0 pa
 |---|---|---|---|
 | WF-1 | B1 | port 2 leaf modules | 2 |
 | WF-2 | B2 | behavioral test suites | ~8 |
-| WF-3 | C1 | one app per agent | 5 (+ Terminal review) |
+| WF-3 | C1 | one app per agent | 5 (+ Command Palette review) |
 | WF-4 | D | capture→recording pipeline | 2 stages |
 | WF-5 | E2 | one widget per agent | 3 |
 | WF-6 | A | core-depth translation drafts (serial integration after) | 3 |

@@ -69,9 +69,9 @@ fn main() {
     assert_eq(shell_launch_app(sh, "agent-manager"), SH_Err.SH_OK, "launch agent-manager OK");
     assert_eq(shell_launch_app(sh, "nonexistent-app-xyz"), SH_Err.SH_ERR_APP_NOT_FOUND, "launch unknown app errors");
     var term_entry = shell_registry_get(sh, "cmdpalette");
-    assert(t_ok(term_entry), "terminal registry entry present");
-    assert_eq(shell_app_category(term_entry), SH_AppCategory.SH_CAT_SYSTEM, "terminal is System category");
-    assert_eq(shell_app_is_ai(term_entry), 1, "terminal flagged is_ai");
+    assert(t_ok(term_entry), "command palette registry entry present");
+    assert_eq(shell_app_category(term_entry), SH_AppCategory.SH_CAT_SYSTEM, "command palette is System category");
+    assert_eq(shell_app_is_ai(term_entry), 1, "command palette flagged is_ai");
 
     # ============================================================
     # Notification lifecycle

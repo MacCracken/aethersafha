@@ -68,8 +68,8 @@ symbols), each compiling + smoke-tested. Driven by the parity workflow.
   Bite F); **not** a Wayland port. Incremental, one message at a time.
 
 ### M4 — Apps + capture + plugins (v0.4.0)
-- **`apps.cyr` 🚧 C1+C2 done** — app framework + data-model apps + the Terminal allowlist/basename
-  security logic + the **real process spawn** (Terminal fork+execve capturing stdout/exit-status;
+- **`apps.cyr` 🚧 C1+C2 done** — app framework + data-model apps + the Command Palette allowlist/basename
+  security logic + the **real process spawn** (Command Palette fork+execve capturing stdout/exit-status;
   browser/Shruti detached launch); 133-assertion test. fs/net effect bodies (C3) deferred.
 - **`screen_capture.cyr` ✅** — permission model + rate-limit + secure-mode auth + history
   ring buffer + full/region/window capture + byte-exact RAW/BMP/PNG encoders; 90-assertion

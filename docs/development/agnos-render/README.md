@@ -67,7 +67,8 @@ rendered — a blank/console screen is near-uniform). A PNG is saved to
   suspects if it faults: bhumi backend open (cap/seat), or a leaf-manager init in
   `desktop_new` hitting an unexpected syscall.
 - **No setu / no clients** — this is the compositor rendering *its own* desktop
-  (the seeded Terminal/Files windows + shell panel). The client↔compositor setu
+  (the seeded Files window + shell panel; the terminal is now puka, a setu
+  client, not a compositor-seeded window). The client↔compositor setu
   path is 3b (needs an agnos transport; AF_UNIX fail-closes there).
 - **kavach dep** carries agnos-readiness warnings (`sys_unlink`/`sys_rmdir`
   arity) in the now-unreachable foreign/sandbox path — cosmetic here; a future

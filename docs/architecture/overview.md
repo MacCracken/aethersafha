@@ -28,7 +28,7 @@ aethersafha
 ├── shell_integration.cyr — system tray, window management, notification bridge
 ├── plugin_host.cyr      — plugin lifecycle, sandbox profiles, capability system
 ├── apps.cyr             — built-in apps (file manager, agent manager, audit viewer,
-│                           model manager, terminal, browsers)
+│                           model manager, command palette, browsers)
 ├── screen_capture.cyr   — capture manager: per-agent permissions, rate limiting, encoders
 ├── screen_recording.cyr — recording manager: sessions, frame ring buffer
 └── foreign.cyr          — mehman swallow path: host a foreign-ABI app as a

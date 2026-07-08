@@ -16,7 +16,7 @@ contract-lib dependency. The final kernel-scanout hop is agnos-only.
 
 Built on **0.5.0** (2026-07-03) — **Bite C (built-in apps) — C1 + C2**: the app framework
 (`AppError`/`AppType`/`AppWindow` + the `DesktopApplications` aggregate), the data-model apps
-(FileManager, AgentManager, AuditViewer, ModelManager), and the **Terminal** security surface +
+(FileManager, AgentManager, AuditViewer, ModelManager), and the **Command Palette** security surface +
 **real process spawn** (30-program allowlist + `Path::file_name` basename-strip; direct
 fork+execve capturing stdout + real exit status → `Ok(stdout)`/`WindowError`; browser/Shruti
 detached launch); 133 assertions. Toolchain `6.3.42` → `6.3.43`.
@@ -70,7 +70,7 @@ presentation), **0.4.0** (mehman foreign-app hosting + kavach-sandboxed guest ex
     `RecordedFrame`. Caps use `-1 == None` (so `Some(0)` is distinct). Not yet wired.
   - **Apps (M4/Bite C1+C2, standalone)** — `apps` framework (`AppError`/`AppType`/`AppWindow`
     + the `DesktopApplications` aggregate) + data-model apps (FileManager, AgentManager,
-    AuditViewer, ModelManager) + 8 WebBrowser configs + Shruti + the **Terminal** (allowlist +
+    AuditViewer, ModelManager) + 8 WebBrowser configs + Shruti + the **Command Palette** (allowlist +
     `Path::file_name` basename-strip + **real fork+execve spawn** capturing stdout + exit status;
     browser/Shruti detached launch). fs/net effect bodies (C3) stubbed to clean-env fallback. Not wired.
 
@@ -83,7 +83,7 @@ presentation), **0.4.0** (mehman foreign-app hosting + kavach-sandboxed guest ex
   (90 — permissions / rate-limit / secure-mode / region-clamp / window / history +
   RAW/BMP/PNG encoder checksums), `screen_recording` (72 — session lifecycle / state
   machine / frame + duration limits / ring buffer / one-per-agent / queries). apps:
-  `apps` (133 — framework / data-model apps / aggregate / Terminal allowlist + basename +
+  `apps` (133 — framework / data-model apps / aggregate / Command Palette allowlist + basename +
   real echo/true/false spawn / launch guards). Behavioral per-module: `theme_bridge`, `gestures`,
   `accessibility`, `ai_features`, `shell`, `security_ui`, `shell_integration`, `plugin_host`.
 - Run: `cyrius tests tests/` (or a single `cyrius test tests/<file>.tcyr`).
@@ -121,7 +121,7 @@ _None yet (top-level application, `publish = false`)._
 
 ## Next
 
-**Bite C — C1+C2 done** — the app framework + data model + aggregate + the **Terminal spawn**
+**Bite C — C1+C2 done** — the app framework + data model + aggregate + the **Command Palette spawn**
 (real fork+execve, allowlist-gated, capturing stdout + exit status) + browser/Shruti detached
 launch (133 assertions). Next on the apps track: **C3** (the fs/net effect bodies —
 agent-socket scan, audit-log parse, model gateway). Also complete + awaiting wiring: Bite D
