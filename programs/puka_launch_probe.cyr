@@ -95,18 +95,25 @@ fn main(): i64 {
     var pid = plp_spawn(puka);
     if (pid < 0) { plp_say("puka_launch_probe: spawn failed\n"); return 1; }
 
-    # 3) accept + composite puka's presented surface
-    var cfd = syscall(SYS_ACCEPT, sfd, 0, 0);
-    if (cfd < 0) { plp_say("puka_launch_probe: accept failed\n"); return 1; }
+    # 3) accept (poll the non-blocking TCP accept) + composite puka's surface
+    var cfd = 0 - 5;
+    var atr = 0;
+    while (cfd < 0) {
+        cfd = setu_srv_accept(sfd);
+        if (cfd < 0) {
+            atr = atr + 1;
+            if (atr > 3000) { plp_say("puka_launch_probe: accept timeout\n"); return 1; }
+            sys_sleep_ms(2);
+        }
+    }
     var sid = setu_srv_serve_accepted(cfd, comp, fb);
-    syscall(SYS_CLOSE, cfd);
-    if (sid < 0) { plp_say("puka_launch_probe: serve failed\n"); syscall(SYS_CLOSE, sfd); return 1; }
+    sock_close(cfd);
+    if (sid < 0) { plp_say("puka_launch_probe: serve failed\n"); sock_close(sfd); return 1; }
 
     # 4) dump the composited window
     var win = comp_get(comp, 0);
     plp_dump_ppm(fb, win_x(win), win_y(win), win_w(win), win_h(win), ppm);
-    syscall(SYS_CLOSE, sfd);
-    syscall(SYS_UNLINK, path);
+    sock_close(sfd);
     plp_say("puka_launch_probe: PASS — compositor spawned puka; composited its window -> PPM\n");
     return 0;
 }

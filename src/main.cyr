@@ -92,9 +92,8 @@ fn main(): i64 {
     var setu_path = "/tmp/aethersafha-setu.sock";
     var setu_sfd = setu_srv_listen(setu_path);
     if (setu_sfd >= 0) {
-        syscall(SYS_FCNTL, setu_sfd, 4, 2048);   # F_SETFL O_NONBLOCK
         setu_cap = 400;                          # spin (render-paced) long enough to catch a client
-        println("aethersafha: setu listener up");
+        println("aethersafha: setu listener up (TCP loopback:7700)");
     }
     #endif
 
@@ -125,10 +124,10 @@ fn main(): i64 {
         # setu: accept + composite one client present per frame (over the desktop).
         #ifndef CYRIUS_TARGET_AGNOS
         if (setu_sfd >= 0) {
-            var cfd = syscall(SYS_ACCEPT, setu_sfd, 0, 0);
+            var cfd = setu_srv_accept(setu_sfd);   # non-blocking; -5 = none pending
             if (cfd >= 0) {
                 var sid = setu_srv_serve_accepted(cfd, comp, fb);
-                syscall(SYS_CLOSE, cfd);
+                sock_close(cfd);
                 if (sid > 0) {
                     println("aethersafha: setu client presented surface");
                     println_int(sid);
@@ -141,7 +140,7 @@ fn main(): i64 {
         frame = frame + 1;
     }
     #ifndef CYRIUS_TARGET_AGNOS
-    if (setu_sfd >= 0) { syscall(SYS_CLOSE, setu_sfd); syscall(SYS_UNLINK, setu_path); }
+    if (setu_sfd >= 0) { sock_close(setu_sfd); }   # TCP — no socket file to unlink
     #endif
 
     println("aethersafha: frame loop ok");
