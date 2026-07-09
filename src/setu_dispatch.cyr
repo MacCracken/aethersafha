@@ -36,11 +36,22 @@ fn setu_srv_recv_committed(cfd, comp, out4): i64 {
     var w  = setu_msg_arg(am, 1);
     var ah = setu_msg_arg(am, 2);
     var stride = setu_msg_arg(am, 3);
+    var buf_id = setu_msg_arg(am, 5);           # arg5: 0 = inline pixels, >0 = shared buffer
     var nbytes = ah * stride;
     if (nbytes <= 0) { return 0 - 12; }
     if (nbytes > 16777216) { return 0 - 12; }   # 16 MB cap
-    var pix = alloc(nbytes);
-    if (setu_srv_read_exact(cfd, pix, nbytes) < 0) { return 0 - 6; }
+    var pix = 0;
+    if (buf_id > 0) {
+        # Sovereign shared-buffer present: map the client's buffer by id — no inline
+        # stream (which deadlocks on agnos when the payload exceeds TCP_RX_RING). The
+        # mapping is read by the blit in the caller; unmap is a follow-up refinement.
+        pix = setu_buf_map(buf_id, nbytes);
+        if (pix == 0) { return 0 - 14; }
+    }
+    if (buf_id <= 0) {
+        pix = alloc(nbytes);
+        if (setu_srv_read_exact(cfd, pix, nbytes) < 0) { return 0 - 6; }
+    }
 
     var cm = setu_msg_new();
     if (setu_srv_read_msg(cfd, cm) < 0) { return 0 - 6; }

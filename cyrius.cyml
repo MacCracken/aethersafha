@@ -90,6 +90,10 @@ modules = ["dist/kavach.cyr"]
 # are `setu_*` (no collision); its stdlib needs {string,fmt,alloc,vec,str,io,
 # syscalls,assert} are already a subset of [deps].stdlib above.
 [deps.setu]
-git = "https://github.com/MacCracken/setu.git"
-tag = "0.3.0"
+# TEMP path-override to prove the uncommitted setu sys_read/sys_write tagged-fd fix
+# pre-cut (server reads/writes on the accepted conn). REVERT to git+tag once setu is
+# cut. Per the never-fix-materialized-libs discipline (path = the right kind of temp).
+path = "../setu"
+# git = "https://github.com/MacCracken/setu.git"
+# tag = "0.3.0"
 modules = ["dist/setu.cyr"]
