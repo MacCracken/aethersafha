@@ -81,19 +81,32 @@ fn main(): i64 {
     println("aethersafha: a11y nodes synced:");
     println_int(axn);
 
-    # Native display protocol: stand up the setu listener so real dhancha clients
-    # can connect + present (native-display-protocol.md). Non-blocking accept, so
-    # the frame loop never stalls. AF_UNIX fail-closes on agnos → setu_sfd < 0
-    # there: the setu block is skipped and the loop keeps its bounded frame<3
-    # form (the agnos transport lands later); on Linux the cap is extended so a
-    # client has time to connect.
-    var setu_cap = 3;                            # agnos: bounded loop, no setu (AF_UNIX fail-closes; 3b adds a TCP transport)
-    #ifndef CYRIUS_TARGET_AGNOS
-    var setu_path = "/tmp/aethersafha-setu.sock";
+    # Native display protocol: stand up the setu listener (TCP loopback:7700) on
+    # BOTH targets. setu 0.3.0's transport is cross-platform — net.cyr routes to
+    # Linux BSD sockets on the host AND to agnos's kernel TCP (sock_listen #56 /
+    # sock_accept #57, loopback-delivered via the kernel lo_ring) on the sovereign
+    # kernel. Non-blocking accept, so the frame loop never stalls.
+    var setu_path = "/tmp/aethersafha-setu.sock";   # advisory under TCP (port 7700)
     var setu_sfd = setu_srv_listen(setu_path);
     if (setu_sfd >= 0) {
-        setu_cap = 400;                          # spin (render-paced) long enough to catch a client
         println("aethersafha: setu listener up (TCP loopback:7700)");
+    }
+    var setu_cap = 3;
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (setu_sfd >= 0) { setu_cap = 400; }           # host: spin (render-paced) long enough to catch a client
+    #endif
+
+    # First resident: on agnos the compositor LAUNCHES its first setu client — the
+    # on-device analog of the Linux puka_launch_probe. agnos has no fork; spawn_path
+    # #43 loads /bin/puka from ext2 and returns immediately (a pid), and the client
+    # connects back over setu loopback:7700 (composited in the frame loop below).
+    # /bin/puka is the first-resident slot; the agnos smoke seeds a slim setu client
+    # there until full puka builds --agnos (blocked on mabda's Linux SYS_IOCTL).
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (setu_sfd >= 0) {
+        var pk_pid = sys_spawn_path("/bin/puka", 9);   # non-blocking → pid (>=0) / -1
+        if (pk_pid >= 0) { println("aethersafha: launched first resident /bin/puka"); }
+        else { println("aethersafha: /bin/puka spawn failed (continuing)"); }
     }
     #endif
 
@@ -121,22 +134,31 @@ fn main(): i64 {
         }
         render_desktop(desk, fb);
         render_desktop_foreign(desk, fb);
-        # setu: accept + composite one client present per frame (over the desktop).
-        #ifndef CYRIUS_TARGET_AGNOS
+        # setu: accept + composite client presents (over the desktop) — BOTH
+        # targets now (setu 0.3.0 TCP transport runs on Linux AND agnos).
         if (setu_sfd >= 0) {
             var cfd = setu_srv_accept(setu_sfd);   # non-blocking; -5 = none pending
             if (cfd >= 0) {
+                println("aethersafha: setu client connected");   # DBG: TCP accept fired
                 var sid = setu_srv_serve_accepted(cfd, comp, fb);
                 sock_close(cfd);
                 if (sid > 0) {
                     println("aethersafha: setu client presented surface");
                     println_int(sid);
-                    running = 0;
+                    #ifndef CYRIUS_TARGET_AGNOS
+                    running = 0;                   # host: one present proves the wire; exit the bounded loop
+                    #endif
+                    # agnos: keep compositing (parked) so the harness screendumps the client's window
                 }
             }
         }
-        #endif
         bhumi_backend_present(be, now);
+        # agnos: cede the CPU each frame so the spawned setu client (puka, a
+        # spawn_path background proc) is scheduled to connect + present. The
+        # foreground compositor otherwise spins its render loop and starves it.
+        #ifdef CYRIUS_TARGET_AGNOS
+        sys_sched_yield();
+        #endif
         frame = frame + 1;
     }
     #ifndef CYRIUS_TARGET_AGNOS
