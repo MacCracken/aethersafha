@@ -10,6 +10,10 @@
 # Order matters: LISTEN first, THEN spawn puka, so puka's connect() never races
 # the listener (in production the compositor's setu listener is always up).
 #
+# This probe FORKS (plp_spawn) — a restricted dev sandbox that blocks/kills
+# clone(2) can't host it. For the fork-free transport proof (two separate
+# processes over the same TCP wire), use `setu_serve_probe` + `puka_setu_probe`.
+#
 # Run: PUKA_BIN=/abs/path/to/puka_setu_probe ./build/puka_launch_probe
 
 include "src/geom.cyr"
@@ -103,7 +107,7 @@ fn main(): i64 {
         if (cfd < 0) {
             atr = atr + 1;
             if (atr > 3000) { plp_say("puka_launch_probe: accept timeout\n"); return 1; }
-            sys_sleep_ms(2);
+            sleep_ms(2);                             # portable (chrono): poll() on Linux, #41 on agnos
         }
     }
     var sid = setu_srv_serve_accepted(cfd, comp, fb);

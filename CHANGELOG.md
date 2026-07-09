@@ -4,6 +4,48 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.0] - 2026-07-08 — the compositor speaks setu over TCP (sovereign display protocol, e2e)
+
+The setu server transport goes **cross-platform** (item 3b of the road-to-desktop):
+the compositor now accepts + composites real setu clients over **TCP loopback**
+(`127.0.0.1 : 7700`) on Linux **and** on agnos, so the sovereign desktop runs on
+the sovereign kernel — not just the host. Proven end-to-end: `puka` (client)
+connects over TCP and presents a rendered 320×192 terminal frame → this
+compositor accepts it (non-blocking poll) and composites it → a valid PPM with
+real content. This depends on **setu 0.3.0** (the TCP transport).
+
+### Added
+
+- **`programs/setu_serve_probe.cyr`** — a fork-free e2e proof of the TCP
+  transport: stands up the setu listener, polls the non-blocking accept until a
+  client connects, serves one present (recv surface + blit), and dumps the
+  composited window to a PPM. Run against `puka`'s `puka_setu_probe` as two
+  separate processes — decoupling the transport proof from `fork`+`execve`
+  (which a restricted dev sandbox can't host). Complements the fork-based
+  `puka_launch_probe` (compositor-spawns-client), which now documents that
+  limitation.
+
+### Changed
+
+- **`src/setu_server.cyr` delegates to setu's cross-platform transport.** The
+  server half (`setu_srv_listen` / `setu_srv_accept` / `setu_srv_read_*` /
+  `setu_srv_write_frame`) now forwards to setu's `setu_listen` / `setu_accept` /
+  `setu_read_*` / `setu_send`, which speak TCP on both targets and absorb agnos's
+  non-blocking-recv / partial-send quirks. The earlier AF_UNIX path (Linux-only,
+  fail-closed on agnos) is gone — the compositor speaks the same wire on Linux
+  AND agnos.
+- **`src/main.cyr`** — the setu accept block composites clients over the TCP
+  listener (`sock_close`, no socket-file unlink); the log line reflects
+  `TCP loopback:7700`.
+
+### Fixed
+
+- **Linux crash in the setu accept poll (`sys_sleep_ms` is agnos-only).** The
+  would-block yield in `setu_srv_accept_one` and the launch probe called the raw
+  `sys_sleep_ms` (defined only in the agnos syscall module), which compiled on
+  Linux but trapped (SIGILL) at runtime. Swapped to the portable `sleep_ms`
+  (chrono) — `poll()` on Linux, `#41` on agnos. This unblocked the e2e proof.
+
 ## [0.7.0] - 2026-07-08 — renderer decoupled from the shell (reusable window chrome)
 
 ### Changed

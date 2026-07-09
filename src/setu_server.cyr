@@ -34,7 +34,7 @@ fn setu_srv_accept_one(path, msg_out): i64 {
         if (cfd < 0) {
             tries = tries + 1;
             if (tries > 5000) { sock_close(sfd); return 0 - 5; }
-            sys_sleep_ms(2);
+            sleep_ms(2);                             # portable (chrono): poll() on Linux, #41 on agnos
         }
     }
     var rc = setu_recv(cfd, msg_out);

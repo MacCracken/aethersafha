@@ -1,6 +1,6 @@
 [package]
 name = "aethersafha"
-version = "0.7.0"
+version = "0.8.0"
 description = "aethersafha — AI-augmented AGNOS compositor (Cyrius port, from 27207 lines of Rust)"
 license = "GPL-3.0-only"
 language = "cyrius"
@@ -91,6 +91,5 @@ modules = ["dist/kavach.cyr"]
 # syscalls,assert} are already a subset of [deps].stdlib above.
 [deps.setu]
 git = "https://github.com/MacCracken/setu.git"
-path = "../setu"
-tag = "0.1.0"
+tag = "0.3.0"
 modules = ["dist/setu.cyr"]
