@@ -108,9 +108,9 @@ fn main(): i64 {
         # loopback:7700, presents its own surface bound to its own shared buffer, and
         # animates independently; the frame loop below cascades them to distinct positions.
         var pk1 = sys_spawn_path("/bin/puka", 9);         # #1 = present_probe (slim test-pattern client)
-        var pk2 = sys_spawn_path("/bin/dhwidget", 13);    # #2 = the dhancha widget client (real toolkit UI)
+        var pk2 = sys_spawn_path("/bin/crab", 9);         # #2 = crab, the sovereign file manager (dhancha app)
         if (pk1 >= 0) { println("aethersafha: launched setu client #1"); }
-        if (pk2 >= 0) { println("aethersafha: launched setu client #2 (dhancha)"); }
+        if (pk2 >= 0) { println("aethersafha: launched setu client #2 (crab)"); }
     }
     #endif
 
