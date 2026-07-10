@@ -241,19 +241,11 @@ fn setu_srv_serve_accepted(cfd, comp, fb): i64 {
     if (nbytes < 0) { return nbytes; }
     var win = load64(out4 + 0);
     var pix = load64(out4 + 8);
-    var w   = load64(out4 + 16);
-    var h   = load64(out4 + 24);
-    var wx = win_x(win);
-    var wy = win_y(win);
-    var py = 0;
-    while (py < h) {
-        var px = 0;
-        while (px < w) {
-            bhumi_fb_set(fb, wx + px, wy + py, load32(pix + (py * w + px) * 4));
-            px = px + 1;
-        }
-        py = py + 1;
-    }
+    # CACHE the presented pixels on the Window — render_window composites them into `fb` EVERY
+    # frame, so the surface persists on screen. (Was a one-shot blit here, overwritten by the
+    # next desktop redraw → the window vanished after one frame.) `fb` is now composited by the
+    # per-frame render path, not here. Surface dims live on the Window (comp_create_window w/h).
+    win_set_pix(win, pix);
     return win_id(win);
 }
 
@@ -269,17 +261,7 @@ fn setu_srv_serve_accepted_at(cfd, comp, fb, dstx, dsty): i64 {
     if (nbytes < 0) { return nbytes; }
     var win = load64(out4 + 0);
     var pix = load64(out4 + 8);
-    var w   = load64(out4 + 16);
-    var h   = load64(out4 + 24);
     win_move(win, dstx, dsty);
-    var py = 0;
-    while (py < h) {
-        var px = 0;
-        while (px < w) {
-            bhumi_fb_set(fb, dstx + px, dsty + py, load32(pix + (py * w + px) * 4));
-            px = px + 1;
-        }
-        py = py + 1;
-    }
+    win_set_pix(win, pix);          # persist: render_window re-composites every frame (see above)
     return win_id(win);
 }

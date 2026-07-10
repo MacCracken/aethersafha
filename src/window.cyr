@@ -21,7 +21,10 @@ enum WinOff {
     W_STATE = 40;   # WinState
     W_TITLE = 48;   # cstr pointer
     W_AGENT = 56;   # 1 = agent-owned window
-    W_SZ    = 64;
+    W_PIX   = 64;   # cached BGRA surface pixels (a setu client's presented frame), or 0.
+                    # Dims = W_W x W_H. render_window re-composites it EVERY frame so the
+                    # surface persists on screen (not overwritten by the next desktop redraw).
+    W_SZ    = 72;
 }
 
 # win_new(id, x, y, w, h, title_cstr) -> *Window (0 on OOM)
@@ -36,6 +39,7 @@ fn win_new(id, x, y, w, h, title): i64 {
     store64(p + W_STATE, WinState.WS_NORMAL);
     store64(p + W_TITLE, title);
     store64(p + W_AGENT, 0);
+    store64(p + W_PIX, 0);
     return p;
 }
 
@@ -47,6 +51,8 @@ fn win_h(p)     { return load64(p + W_H); }
 fn win_state(p) { return load64(p + W_STATE); }
 fn win_title(p) { return load64(p + W_TITLE); }
 fn win_is_agent(p) { return load64(p + W_AGENT); }
+fn win_pix(p) { return load64(p + W_PIX); }
+fn win_set_pix(p, ptr) { store64(p + W_PIX, ptr); return 0; }
 
 fn win_set_state(p, s) { store64(p + W_STATE, s); return 0; }
 fn win_set_agent(p, a) { store64(p + W_AGENT, a); return 0; }

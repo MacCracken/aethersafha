@@ -167,6 +167,23 @@ fn render_window(fb, win, focused): i64 {
     fill_rect(fb, deco_close_x(win), by, BTN_W, BTN_H, bhumi_xrgb(220, 80, 80));
     fill_rect(fb, deco_max_x(win), by, BTN_W, BTN_H, bhumi_xrgb(90, 180, 90));
     fill_rect(fb, deco_min_x(win), by, BTN_W, BTN_H, bhumi_xrgb(210, 190, 90));
+    # Composite the client's PRESENTED surface (setu shared-buffer pixels), if any, into the
+    # window body below the titlebar. Re-run EVERY frame from the cached buffer so the surface
+    # persists on screen — the desktop redraw above would otherwise overwrite it (it did: the
+    # present composited for one frame, then vanished, leaving the screendump blank). w×h are
+    # the surface dims (comp_create_window used the CREATE_SURFACE w/h). bhumi_fb_set clips to fb.
+    var spix = win_pix(win);
+    if (spix != 0) {
+        var sy = 0;
+        while (sy < h) {
+            var sx = 0;
+            while (sx < w) {
+                bhumi_fb_set(fb, x + sx, y + TITLEBAR_H + sy, load32(spix + (sy * w + sx) * 4));
+                sx = sx + 1;
+            }
+            sy = sy + 1;
+        }
+    }
     return 0;
 }
 
