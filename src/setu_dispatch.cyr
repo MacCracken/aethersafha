@@ -285,3 +285,30 @@ fn setu_srv_forward_key(comp, ev): i64 {
     setu_send(cfd, setu_input_key(win_id(win), usage, 0));
     return 1;
 }
+
+# Notify setu clients that focus MOVED from window index `old_idx` to `new_idx`:
+# send SETU_INPUT_FOCUS(id, 0) to the window losing focus and (id, 1) to the one
+# gaining it. No-op for a non-client window (win_cfd == 0) or an out-of-range index
+# (old_idx == -1 on the first-ever focus). This is the client-visible focus indicator
+# — clients render bright/dim from it, so focus is legible without a keypress.
+fn setu_srv_notify_focus(comp, old_idx, new_idx): i64 {
+    if (old_idx >= 0) {
+        if (old_idx < comp_count(comp)) {
+            var ow = comp_get(comp, old_idx);
+            if (ow != 0) {
+                var ocfd = win_cfd(ow);
+                if (ocfd != 0) { setu_send(ocfd, setu_input_focus(win_id(ow), 0)); }
+            }
+        }
+    }
+    if (new_idx >= 0) {
+        if (new_idx < comp_count(comp)) {
+            var nw = comp_get(comp, new_idx);
+            if (nw != 0) {
+                var ncfd = win_cfd(nw);
+                if (ncfd != 0) { setu_send(ncfd, setu_input_focus(win_id(nw), 1)); }
+            }
+        }
+    }
+    return 0;
+}

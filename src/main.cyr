@@ -107,10 +107,10 @@ fn main(): i64 {
         # Launch TWO setu clients — the multi-window desktop. Each connects back over
         # loopback:7700, presents its own surface bound to its own shared buffer, and
         # animates independently; the frame loop below cascades them to distinct positions.
-        var pk1 = sys_spawn_path("/bin/puka", 9);      # non-blocking → pid (>=0) / -1
-        var pk2 = sys_spawn_path("/bin/puka", 9);
+        var pk1 = sys_spawn_path("/bin/puka", 9);         # #1 = present_probe (slim test-pattern client)
+        var pk2 = sys_spawn_path("/bin/dhwidget", 13);    # #2 = the dhancha widget client (real toolkit UI)
         if (pk1 >= 0) { println("aethersafha: launched setu client #1"); }
-        if (pk2 >= 0) { println("aethersafha: launched setu client #2"); }
+        if (pk2 >= 0) { println("aethersafha: launched setu client #2 (dhancha)"); }
     }
     #endif
 
@@ -122,6 +122,7 @@ fn main(): i64 {
     var frame = 0;
     var running = 1;
     var accepted = 0;  # count of setu clients composited so far — cascades each new one
+    var prev_focus = 0 - 1;  # last-notified focus index; -1 forces the first notification
     #ifdef CYRIUS_TARGET_AGNOS
     while (running == 1) {                            # agnos: the real compositor loop — renders until quit
     #endif
@@ -163,6 +164,15 @@ fn main(): i64 {
                     # agnos: keep compositing so the harness screendumps the client windows
                 }
             }
+        }
+        # Focus-change detector: if focus moved this frame — a TAB in the input loop above,
+        # or a newly-connected client taking focus in the accept block — notify the affected
+        # setu clients (SETU_INPUT_FOCUS) so they re-render their focus indicator. One detector
+        # covers both focus sources.
+        var cur_focus = comp_focused(comp);
+        if (cur_focus != prev_focus) {
+            setu_srv_notify_focus(comp, prev_focus, cur_focus);
+            prev_focus = cur_focus;
         }
         bhumi_backend_present(be, now);
         # agnos: cede the CPU each frame so the spawned setu client (puka, a
