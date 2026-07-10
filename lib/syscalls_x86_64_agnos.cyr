@@ -68,6 +68,24 @@ enum SysNrAgnos {
     #   linkpath/linkpathlen = where the link is created (ext2 only). agnos #63 — the next free
     #   number after WINSIZE (#0–62 taken), kernel `symlink`#63 landed at agnos 1.51.0. Mirrors
     #   SYS_LINK=32's 4-arg ABI exactly. (issue 2026-06-29-agnos-sys-symlink-peer.)
+    # ---- agnos HDA audio band #64-69 (agnos 1.52.x Gate 2) ----
+    #   Frozen output stream: 48000 Hz / 16-bit / stereo (S16 interleaved, 4 B/frame).
+    #   Kernel does NO format conversion (dumb byte-mover) — the producer resamples.
+    #   All calls take an snd_id slot 0..3; #65-69 reject a slot not allocated-and-owned
+    #   by the caller (-1), like flock. (issue 2026-07-04-agnos-snd-audio-syscall-band-64-69.)
+    SYS_SND_OPEN   = 64;          # snd_open() → slot 0..3 / -1; auto-released on proc-exit
+    SYS_SND_CONFIG = 65;          # snd_config(slot, rate, fmt) → 0/-1; rate=48000, fmt=(bits<<8)|ch=0x1002
+    SYS_SND_WRITE  = 66;          # snd_write(slot, buf, frames) → frames / -1; a4=r10 bit0 = O_NONBLOCK
+    SYS_SND_CLOSE  = 67;          # snd_close(slot) → 0 / -1
+    SYS_SND_DRAIN  = 68;          # snd_drain(slot) → 0; blocks until play-out (~1s cap)
+    SYS_SND_AVAIL  = 69;          # snd_avail(slot) → free frames / -1; non-blocking
+    SYS_READLINK   = 70;          # readlink(path, pathlen, buf, buflen) → target bytes / -1 (a4=r10).
+    #   Symlink-INTROSPECTION peer of SYS_SYMLINK=63: reads the link's TEXT target NO-FOLLOW into
+    #   buf (≤ buflen, NOT NUL-terminated); -1 if path absent / not a symlink / target > buflen / non-ext2.
+    SYS_SHM_CREATE = 71;          # shm_create(size) → id (>=1) / -1 — kernel-owned COPY-based shared buffer
+    SYS_SHM_WRITE  = 72;          # shm_write(id, user_src, size) → 0 / -1
+    SYS_SHM_READ   = 73;          # shm_read(id, user_dst, size)  → 0 / -1
+    SYS_SHM_FREE   = 74;          # shm_free(id) → 0 / -1
 }
 
 # ================================================================
@@ -461,6 +479,51 @@ fn sys_link(target, targetlen, linkpath, linkpathlen): i64 {
 fn sys_symlink(target, targetlen, linkpath, linkpathlen): i64 {
     return syscall(SYS_SYMLINK, target, targetlen, linkpath, linkpathlen);
 }
+
+# Read the TEXT target of the symlink at `path` (len `pathlen`) into `buf` (cap `buflen`),
+# returning the target byte count (≤ buflen, NOT NUL-terminated) or -1. 4-arg, a4 in r10. The
+# no-follow INTROSPECTION peer of sys_symlink#63 (agnos readlink#70) — resolves the FINAL path
+# component WITHOUT following it, so a `--agnos` symlink manager (hapi) can SEE an existing link +
+# read its target (there is no lstat peer, and path-based sys_stat#33 FOLLOWS the final symlink).
+# -1 on: path absent / not a symlink / target > buflen / non-ext2. (issue 2026-07-08.)
+fn sys_readlink(path, pathlen, buf, buflen): i64 {
+    return syscall(SYS_READLINK, path, pathlen, buf, buflen);
+}
+
+# ---- agnos shm band (#71-74): COPY-based, kernel-owned shared buffer (agnos 1.53.9). A writer
+# sys_shm_write#72s a buffer, hands the 1-based id over its own IPC, a reader sys_shm_read#73s it —
+# no page mapping, no socket streaming (single-core present without the sock_send preemption deadlock
+# or the proc_free_address_space use-after-free). Backs the setu shared-buffer present
+# (setu/src/buf.cyr). ids are 1-based (0 = the setu "inline" sentinel); size ≤ 2 MB (one pmm page).
+# agnos-kernel-only — no host twin; a portable "shared buffer" keeps its own per-target split.
+# (issue 2026-07-09-agnos-sys-shm-peers.)
+fn sys_shm_create(size): i64         { return syscall(SYS_SHM_CREATE, size); }
+# shm_write(id, src, size) — copy user src → buffer id (is_user_range'd) → 0 / -1.
+fn sys_shm_write(id, src, size): i64 { return syscall(SYS_SHM_WRITE, id, src, size); }
+# shm_read(id, dst, size) — copy buffer id → user dst (is_user_range'd) → 0 / -1.
+fn sys_shm_read(id, dst, size): i64  { return syscall(SYS_SHM_READ, id, dst, size); }
+# shm_free(id) — release the buffer's page + slot → 0 / -1.
+fn sys_shm_free(id): i64             { return syscall(SYS_SHM_FREE, id); }
+
+# ---- agnos HDA audio band (#64-69) — the ring-3 half of the agnos 1.52.x Gate-2
+# freeze (kernel handlers land in parallel). Single frozen format: 48000 Hz / S16 /
+# stereo (4 B/frame), no kernel resample. snd_id slot 0..3; #65-69 reject a slot not
+# owned by the caller (-1). Consumers: vani agnos backend + cyrius-doom.
+# (issue 2026-07-04-agnos-snd-audio-syscall-band-64-69.)
+# snd_open() — grab the single output stream → slot 0..3 / -1 (auto-released on proc-exit).
+fn sys_snd_open(): i64 { return syscall(SYS_SND_OPEN); }
+# snd_config(slot, rate, fmt) — rate MUST=48000, fmt=(bits<<8)|ch MUST=0x1002 → 0 / -1.
+fn sys_snd_config(slot, rate, fmt): i64 { return syscall(SYS_SND_CONFIG, slot, rate, fmt); }
+# snd_write(slot, buf, frames) — blocking; S16 stereo, frames*4 bytes → frames / -1.
+fn sys_snd_write(slot, buf, frames): i64 { return syscall(SYS_SND_WRITE, slot, buf, frames); }
+# snd_write non-blocking — a4=r10 bit0=O_NONBLOCK (5-arg, like sys_symlink); may return 0=WOULD_BLOCK.
+fn sys_snd_write_nb(slot, buf, frames): i64 { return syscall(SYS_SND_WRITE, slot, buf, frames, 1); }
+# snd_close(slot) — release the slot → 0 / -1.
+fn sys_snd_close(slot): i64 { return syscall(SYS_SND_CLOSE, slot); }
+# snd_drain(slot) — block until queued audio plays out (~1s cap) → 0.
+fn sys_snd_drain(slot): i64 { return syscall(SYS_SND_DRAIN, slot); }
+# snd_avail(slot) — non-blocking free-frame count → free frames / -1.
+fn sys_snd_avail(slot): i64 { return syscall(SYS_SND_AVAIL, slot); }
 
 # ---- Process-exec / framebuffer / input / sched band (36–39, 42–44, 62) ----
 # The AGNOS base-system peers — see the SysNrAgnosProc enum + issue

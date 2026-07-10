@@ -4,7 +4,7 @@ version = "0.8.0"
 description = "aethersafha — AI-augmented AGNOS compositor (Cyrius port, from 27207 lines of Rust)"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.4.25"
+cyrius = "6.4.34"
 
 [build]
 entry = "src/main.cyr"
@@ -90,10 +90,6 @@ modules = ["dist/kavach.cyr"]
 # are `setu_*` (no collision); its stdlib needs {string,fmt,alloc,vec,str,io,
 # syscalls,assert} are already a subset of [deps].stdlib above.
 [deps.setu]
-# TEMP path-override to prove the uncommitted setu sys_read/sys_write tagged-fd fix
-# pre-cut (server reads/writes on the accepted conn). REVERT to git+tag once setu is
-# cut. Per the never-fix-materialized-libs discipline (path = the right kind of temp).
-path = "../setu"
-# git = "https://github.com/MacCracken/setu.git"
-# tag = "0.3.0"
+git = "https://github.com/MacCracken/setu.git"
+tag = "0.3.1"
 modules = ["dist/setu.cyr"]

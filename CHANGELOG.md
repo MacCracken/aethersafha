@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.1] - 2026-07-09 — the compositor composites a SHARED-BUFFER present on the sovereign kernel
+
+The setu present goes **shared-buffer** (setu 0.3.1): the server reads a client's pixels
+from a buffer referenced by id instead of an inline socket stream — the on-device unblock
+(a hundreds-of-KB inline payload deadlocks the single-CPU two-proc path through the 2 KB
+`TCP_RX_RING`). `aethersafha-setu-smoke.sh` is now **green on agnos**: a setu client connects,
+presents a 320×192 frame, and the compositor composites it (`setu client CONNECTED +
+PRESENTED + composited on agnos`). Linux e2e (`setu_serve_probe` + `present_probe`) unchanged.
+
+### Changed
+
+- **`setu_srv_recv_committed` reads the pixels from the client's shared buffer** — on an
+  ATTACH with `buf_id > 0` it `setu_buf_read`s the surface (agnos → the kernel shm band
+  `sys_shm_read`#73; Linux → the `/dev/shm` file) instead of `setu_srv_read_exact`ing an inline
+  stream. The inline path stays as the `buf_id == 0` fallback.
+- **setu dep → 0.3.1** (the shared-buffer protocol + backend); **cyrius pin 6.4.25 → 6.4.34**
+  (the native `sys_shm_*` wrappers). Note: aethersafha's materialized stdlib needed a
+  `cyrius lib sync --full` on the pin bump — `cyrius deps` alone left it stale.
+
 ## [0.8.0] - 2026-07-08 — the compositor speaks setu over TCP (sovereign display protocol, e2e)
 
 The setu server transport goes **cross-platform** (item 3b of the road-to-desktop):
