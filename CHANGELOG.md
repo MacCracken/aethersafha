@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.0] - 2026-07-10 — focus over setu + hosting a real dhancha app on the sovereign kernel
+
+The compositor now routes **focus** to clients (not just keystrokes) and hosts a heterogeneous
+desktop: the slim present_probe test client next to a real **dhancha widget app**. TAB cycles
+focus, the compositor tells each affected client when it gains or loses focus, and the clients
+render their own focus state — an interactive window manager on the sovereign kernel.
+
+### Added
+
+- **Focus over setu (`setu_srv_notify_focus`)** — when focus moves, the compositor sends
+  `SETU_INPUT_FOCUS(id, 0)` to the window losing focus and `(id, 1)` to the one gaining it, so a
+  client can render its own focus indicator (bright vs dim) without a keypress. A per-frame
+  focus-change detector in `main.cyr` (compares `comp_focused` to the last-notified index) covers
+  both TAB-driven focus and connect-time focus with one path.
+- **Heterogeneous clients** — the compositor's second resident is now the **dhancha widget client**
+  (`/bin/dhwidget`) rather than a second present_probe, so the desktop hosts a real toolkit app
+  (titled window + labelled buttons) alongside the test-pattern client. Verified on agnos via
+  `aethersafha-setu-smoke.sh` plus the new `setu-input-test.py` / `setu-focus-test.py` gates.
+
 ## [0.8.2] - 2026-07-09 — MULTI-WINDOW desktop + input routed over setu on the sovereign kernel
 
 The compositor now hosts **multiple** setu clients as distinct windows AND routes keyboard
