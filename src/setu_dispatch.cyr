@@ -266,5 +266,22 @@ fn setu_srv_serve_accepted_at(cfd, comp, fb, dstx, dsty): i64 {
     var pix = load64(out4 + 8);
     win_move(win, dstx, dsty);
     win_set_pix(win, pix);          # persist: render_window re-composites every frame (see above)
+    win_set_cfd(win, cfd);          # KEEP the connection: the compositor forwards input on it
     return win_id(win);
+}
+
+# Forward a bhumi key event to the FOCUSED setu client over its persistent
+# connection. Only key-DOWN events are sent (one SETU_INPUT_KEY per press). No-op
+# if the focused window is a compositor-seeded window (win_cfd == 0) or nothing is
+# focused. keysym = the bhumi HID usage; mods = 0 at this milestone. Returns 1 if a
+# key was forwarded, else 0. This is the S->C leg of setu input routing.
+fn setu_srv_forward_key(comp, ev): i64 {
+    if (bhumi_key_pressed(ev) == 0) { return 0; }        # ignore key-UP / non-key events
+    var win = comp_focused_window(comp);
+    if (win == 0) { return 0; }
+    var cfd = win_cfd(win);
+    if (cfd == 0) { return 0; }                          # focused window has no setu client
+    var usage = bhumi_key_usage(ev);
+    setu_send(cfd, setu_input_key(win_id(win), usage, 0));
+    return 1;
 }

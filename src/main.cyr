@@ -134,6 +134,7 @@ fn main(): i64 {
             while (i < n) {
                 var ev = load64(&events + i * 8);
                 if (input_handle(comp, ev) == InputAction.IA_QUIT) { running = 0; }
+                setu_srv_forward_key(comp, ev);   # route key-DOWN to the focused setu client
                 i = i + 1;
             }
         }
@@ -149,10 +150,12 @@ fn main(): i64 {
                 var cx = 30 + accepted * 330;
                 var cy = 50 + accepted * 210;
                 var sid = setu_srv_serve_accepted_at(cfd, comp, fb, cx, cy);
-                sock_close(cfd);
+                # NOTE: cfd is NOT closed — serve_accepted_at stored it on the Window
+                # (win_set_cfd) so the compositor can forward input to this client.
                 if (sid > 0) {
                     println("aethersafha: setu client presented surface");
                     println_int(sid);
+                    comp_focus(comp, comp_count(comp) - 1);   # focus the just-added client → input routes to it
                     accepted = accepted + 1;
                     #ifndef CYRIUS_TARGET_AGNOS
                     running = 0;                   # host: one present proves the wire; exit the bounded loop

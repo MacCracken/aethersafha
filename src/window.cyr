@@ -27,7 +27,10 @@ enum WinOff {
     W_BUFID = 72;   # setu shared-buffer id for a LIVE surface (> 0), or 0 for a static frame.
                     # When set, render_window RE-READS the client's buffer into W_PIX each frame,
                     # so a client that keeps writing its buffer produces a live-updating window.
-    W_SZ    = 80;
+    W_CFD   = 80;   # persistent setu client connection fd (a tagged sock fd, always > 0), or 0
+                    # for a compositor-seeded window with no client. Kept open AFTER the present
+                    # handshake so the compositor can forward input (SETU_INPUT_*) to the client.
+    W_SZ    = 88;
 }
 
 # win_new(id, x, y, w, h, title_cstr) -> *Window (0 on OOM)
@@ -44,6 +47,7 @@ fn win_new(id, x, y, w, h, title): i64 {
     store64(p + W_AGENT, 0);
     store64(p + W_PIX, 0);
     store64(p + W_BUFID, 0);
+    store64(p + W_CFD, 0);
     return p;
 }
 
@@ -59,6 +63,8 @@ fn win_pix(p) { return load64(p + W_PIX); }
 fn win_set_pix(p, ptr) { store64(p + W_PIX, ptr); return 0; }
 fn win_bufid(p) { return load64(p + W_BUFID); }
 fn win_set_bufid(p, id) { store64(p + W_BUFID, id); return 0; }
+fn win_cfd(p) { return load64(p + W_CFD); }
+fn win_set_cfd(p, fd) { store64(p + W_CFD, fd); return 0; }
 
 fn win_set_state(p, s) { store64(p + W_STATE, s); return 0; }
 fn win_set_agent(p, a) { store64(p + W_AGENT, a); return 0; }

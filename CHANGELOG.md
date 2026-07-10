@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.2] - 2026-07-09 — MULTI-WINDOW desktop + input routed over setu on the sovereign kernel
+
+The compositor now hosts **multiple** setu clients as distinct windows AND routes keyboard
+input to the focused one — the two steps that turn "a client composites" into "a desktop."
+Both are proven on agnos via QEMU screendumps (`aethersafha-setu-smoke.sh` green) and a new
+input-injection harness (`setu-input-test.py`, USB-xHCI `sendkey`).
+
+### Added
+
+- **Multi-window desktop** — `main.cyr` spawns TWO setu clients and cascades each accepted
+  one to a distinct position (`setu_srv_serve_accepted_at(cfd, comp, fb, 30+n*330, 50+n*210)`,
+  an `accepted` counter carried across frames). Screendump shows two independent windows, each
+  animating its own shared buffer (distinct per-client bar colours keyed off the shm id).
+- **Input over setu (the S→C forwarding leg)** — `setu_srv_forward_key(comp, ev)` sends a
+  `SETU_INPUT_KEY(win_id, bhumi_key_usage(ev), 0)` to the FOCUSED window's client for each
+  key-DOWN. Verified: injecting a key flips only the focused client (border/bar → white) while
+  the unfocused client is untouched — focus-routed, not broadcast.
+
+### Changed
+
+- **The setu client connection is now PERSISTENT.** `Window` gained `W_CFD` (the client's
+  tagged connection fd); `setu_srv_serve_accepted_at` stores it (`win_set_cfd`) and `main.cyr`
+  no longer closes `cfd` after the present handshake — the compositor keeps it open to forward
+  input. After COMMIT the socket is server→client only (compositor writes input, client reads),
+  so it never contends with the shared-buffer present path.
+- **The compositor focuses each client as it connects** (`comp_focus(comp, comp_count-1)`), so
+  forwarded keys route to the most-recently-attached window.
+
 ## [0.8.1] - 2026-07-09 — the compositor composites a SHARED-BUFFER present on the sovereign kernel
 
 The setu present goes **shared-buffer** (setu 0.3.1): the server reads a client's pixels
