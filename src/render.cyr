@@ -173,6 +173,13 @@ fn render_window(fb, win, focused): i64 {
     # present composited for one frame, then vanished, leaving the screendump blank). w×h are
     # the surface dims (comp_create_window used the CREATE_SURFACE w/h). bhumi_fb_set clips to fb.
     var spix = win_pix(win);
+    var bid = win_bufid(win);
+    # LIVE surface: pull the client's LATEST frame out of the shared buffer into the cache each
+    # frame. A client that keeps writing its buffer (setu_buf_write, no re-present) animates the
+    # window. bid == 0 (a one-shot static present) skips this and just blits the cached frame.
+    if (bid != 0) {
+        if (spix != 0) { setu_buf_read(bid, spix, w * h * 4); }
+    }
     if (spix != 0) {
         var sy = 0;
         while (sy < h) {

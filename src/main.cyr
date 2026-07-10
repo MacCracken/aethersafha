@@ -104,9 +104,13 @@ fn main(): i64 {
     # there until full puka builds --agnos (blocked on mabda's Linux SYS_IOCTL).
     #ifdef CYRIUS_TARGET_AGNOS
     if (setu_sfd >= 0) {
-        var pk_pid = sys_spawn_path("/bin/puka", 9);   # non-blocking → pid (>=0) / -1
-        if (pk_pid >= 0) { println("aethersafha: launched first resident /bin/puka"); }
-        else { println("aethersafha: /bin/puka spawn failed (continuing)"); }
+        # Launch TWO setu clients — the multi-window desktop. Each connects back over
+        # loopback:7700, presents its own surface bound to its own shared buffer, and
+        # animates independently; the frame loop below cascades them to distinct positions.
+        var pk1 = sys_spawn_path("/bin/puka", 9);      # non-blocking → pid (>=0) / -1
+        var pk2 = sys_spawn_path("/bin/puka", 9);
+        if (pk1 >= 0) { println("aethersafha: launched setu client #1"); }
+        if (pk2 >= 0) { println("aethersafha: launched setu client #2"); }
     }
     #endif
 
@@ -117,6 +121,7 @@ fn main(): i64 {
     var now = 1;
     var frame = 0;
     var running = 1;
+    var accepted = 0;  # count of setu clients composited so far — cascades each new one
     #ifdef CYRIUS_TARGET_AGNOS
     while (running == 1) {                            # agnos: the real compositor loop — renders until quit
     #endif
@@ -140,15 +145,19 @@ fn main(): i64 {
             var cfd = setu_srv_accept(setu_sfd);   # non-blocking; -5 = none pending
             if (cfd >= 0) {
                 println("aethersafha: setu client connected");   # DBG: TCP accept fired
-                var sid = setu_srv_serve_accepted(cfd, comp, fb);
+                # Cascade each accepted client to a distinct position — the multi-window desktop.
+                var cx = 30 + accepted * 330;
+                var cy = 50 + accepted * 210;
+                var sid = setu_srv_serve_accepted_at(cfd, comp, fb, cx, cy);
                 sock_close(cfd);
                 if (sid > 0) {
                     println("aethersafha: setu client presented surface");
                     println_int(sid);
+                    accepted = accepted + 1;
                     #ifndef CYRIUS_TARGET_AGNOS
                     running = 0;                   # host: one present proves the wire; exit the bounded loop
                     #endif
-                    # agnos: keep compositing (parked) so the harness screendumps the client's window
+                    # agnos: keep compositing so the harness screendumps the client windows
                 }
             }
         }

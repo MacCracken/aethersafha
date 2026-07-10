@@ -47,6 +47,9 @@ fn setu_srv_recv_committed(cfd, comp, out4): i64 {
         # by id — no inline stream (which deadlocks on agnos when the payload exceeds
         # TCP_RX_RING). Kernel/OS-owned buffer, so no cross-proc page lifetime hazard.
         if (setu_buf_read(buf_id, pix, nbytes) < 0) { return 0 - 14; }
+        # LIVE: record the buffer id so render_window RE-READS it every frame — a client
+        # that keeps writing its buffer (without re-presenting) produces a live window.
+        win_set_bufid(win, buf_id);
     }
     if (buf_id <= 0) {
         if (setu_srv_read_exact(cfd, pix, nbytes) < 0) { return 0 - 6; }

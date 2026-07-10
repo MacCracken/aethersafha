@@ -24,7 +24,10 @@ enum WinOff {
     W_PIX   = 64;   # cached BGRA surface pixels (a setu client's presented frame), or 0.
                     # Dims = W_W x W_H. render_window re-composites it EVERY frame so the
                     # surface persists on screen (not overwritten by the next desktop redraw).
-    W_SZ    = 72;
+    W_BUFID = 72;   # setu shared-buffer id for a LIVE surface (> 0), or 0 for a static frame.
+                    # When set, render_window RE-READS the client's buffer into W_PIX each frame,
+                    # so a client that keeps writing its buffer produces a live-updating window.
+    W_SZ    = 80;
 }
 
 # win_new(id, x, y, w, h, title_cstr) -> *Window (0 on OOM)
@@ -40,6 +43,7 @@ fn win_new(id, x, y, w, h, title): i64 {
     store64(p + W_TITLE, title);
     store64(p + W_AGENT, 0);
     store64(p + W_PIX, 0);
+    store64(p + W_BUFID, 0);
     return p;
 }
 
@@ -53,6 +57,8 @@ fn win_title(p) { return load64(p + W_TITLE); }
 fn win_is_agent(p) { return load64(p + W_AGENT); }
 fn win_pix(p) { return load64(p + W_PIX); }
 fn win_set_pix(p, ptr) { store64(p + W_PIX, ptr); return 0; }
+fn win_bufid(p) { return load64(p + W_BUFID); }
+fn win_set_bufid(p, id) { store64(p + W_BUFID, id); return 0; }
 
 fn win_set_state(p, s) { store64(p + W_STATE, s); return 0; }
 fn win_set_agent(p, a) { store64(p + W_AGENT, a); return 0; }
