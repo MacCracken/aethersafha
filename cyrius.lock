@@ -1,3 +1,4 @@
+commit	7738384a97bbef6c52a6ea0c6f10020cfeda7f69	setu	https://github.com/MacCracken/setu.git	0.5.0
 commit	9b28746811cf7fff3dffd44f0b6d21391b1528b9	sakshi	https://github.com/MacCracken/sakshi.git	2.4.3
 d9f3b17ddbbe1bba48917c3a679807b01c39c4a1ce776efdbdfbb7a1680e86e4  lib/tagged.cyr
 b3bd7477cac799687a501e1849484d2c952fa4b4c394f3bcd318e181177c56e1  lib/net.cyr
@@ -42,7 +43,7 @@ ff14f0d7999956754937f612c0aa60719c138f0967a81019cf99e08aae088087  lib/string.cyr
 29a44a0c507b82272c825ada25d56121cd05510bff0bb98c2693c963dfb7071b  lib/process.cyr
 9a376aec4f3ff245f1ece0ea6f445c74dbbfdd6d8509c29a51d19f2ae3f12674  lib/niyama.cyr
 31626715999cbbbf4cb785e033c4acbd2f69fc74c5590bbfd5fc15236510df85  lib/alloc.cyr
-29d771dbae8740ea50726be1a1fe9f364038fb652d95fa9f889c6946e62b671f  lib/sigil.cyr
+f39b7c1b2588ad1a35b4d6a09eff98493ffb69778f26c9bed4ecfcae5cf489d7  lib/sigil.cyr
 f27bc68c5114c6ac86a80b4314cd82edc4cd4c1412312966a92468bc572b28e7  lib/sandhi.cyr
 639aa6feb170319f983df4b39b827f29b26391b55de241c25e711f3880bce0a0  lib/flags.cyr
 ebae7da6892967158433e583f2f6eb2f957d5f13e4b6a266a2c5cd8b1237b45a  lib/syscalls_x86_64_linux.cyr

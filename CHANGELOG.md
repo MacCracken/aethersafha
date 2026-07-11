@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.1] - 2026-07-10 — full key events (press + release) for held-key clients
+
+The compositor now honours setu 0.5.0's `SETU_SURF_FULL_KEYS` opt-in **per surface**: a client
+that requests it (via the `CREATE_SURFACE` flags) receives key **press AND release**, so it can
+track HELD keys — a game holds a movement key and keeps moving. `setu_srv_forward_key` no longer
+drops key-UP for such surfaces (the make/break rides the `mods` arg, 1 = press / 0 = release);
+press-only clients (crab, present_probe) are byte-identical to before. Proven with cyrius-doom on
+the sovereign desktop — a balanced **10 press / 10 release** over setu (`agnos
+scripts/aethersafha-doom-input-smoke.sh`).
+
+### Changed
+
+- `[deps.setu]` pinned `0.3.1` → **`0.5.0`** (the full-key-events opt-in + `mods` make/break).
+- `Window` gains a `W_KEYMODE` field; `setu_srv_recv_committed` captures the requested key mode
+  from the `CREATE_SURFACE` flags at the handshake, and `setu_srv_forward_key` gates
+  release-forwarding on it (press-only stays the default).
+
 ## [0.9.0] - 2026-07-10 — focus over setu + hosting a real dhancha app on the sovereign kernel
 
 The compositor now routes **focus** to clients (not just keystrokes) and hosts a heterogeneous
