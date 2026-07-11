@@ -22,15 +22,18 @@ enum WinOff {
     W_TITLE = 48;   # cstr pointer
     W_AGENT = 56;   # 1 = agent-owned window
     W_PIX   = 64;   # cached BGRA surface pixels (a setu client's presented frame), or 0.
-                    # Dims = W_W x W_H. render_window re-composites it EVERY frame so the
-                    # surface persists on screen (not overwritten by the next desktop redraw).
+    # Dims = W_W x W_H. render_window re-composites it EVERY frame so the
+    # surface persists on screen (not overwritten by the next desktop redraw).
     W_BUFID = 72;   # setu shared-buffer id for a LIVE surface (> 0), or 0 for a static frame.
-                    # When set, render_window RE-READS the client's buffer into W_PIX each frame,
-                    # so a client that keeps writing its buffer produces a live-updating window.
+    # When set, render_window RE-READS the client's buffer into W_PIX each frame,
+    # so a client that keeps writing its buffer produces a live-updating window.
     W_CFD   = 80;   # persistent setu client connection fd (a tagged sock fd, always > 0), or 0
-                    # for a compositor-seeded window with no client. Kept open AFTER the present
-                    # handshake so the compositor can forward input (SETU_INPUT_*) to the client.
-    W_SZ    = 88;
+    # for a compositor-seeded window with no client. Kept open AFTER the present
+    # handshake so the compositor can forward input (SETU_INPUT_*) to the client.
+    W_KEYMODE = 88; # 1 = client requested FULL key events (SETU_SURF_FULL_KEYS in CREATE_SURFACE
+    # flags): forward press AND release with the make/break in mods. 0 = press-only
+    # (default) — the pre-0.5.0 behaviour every nav client keeps.
+    W_SZ    = 96;
 }
 
 # win_new(id, x, y, w, h, title_cstr) -> *Window (0 on OOM)
@@ -48,6 +51,7 @@ fn win_new(id, x, y, w, h, title): i64 {
     store64(p + W_PIX, 0);
     store64(p + W_BUFID, 0);
     store64(p + W_CFD, 0);
+    store64(p + W_KEYMODE, 0);
     return p;
 }
 
@@ -65,6 +69,8 @@ fn win_bufid(p) { return load64(p + W_BUFID); }
 fn win_set_bufid(p, id) { store64(p + W_BUFID, id); return 0; }
 fn win_cfd(p) { return load64(p + W_CFD); }
 fn win_set_cfd(p, fd) { store64(p + W_CFD, fd); return 0; }
+fn win_keymode(p) { return load64(p + W_KEYMODE); }
+fn win_set_keymode(p, m) { store64(p + W_KEYMODE, m); return 0; }
 
 fn win_set_state(p, s) { store64(p + W_STATE, s); return 0; }
 fn win_set_agent(p, a) { store64(p + W_AGENT, a); return 0; }

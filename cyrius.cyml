@@ -90,6 +90,7 @@ modules = ["dist/kavach.cyr"]
 # are `setu_*` (no collision); its stdlib needs {string,fmt,alloc,vec,str,io,
 # syscalls,assert} are already a subset of [deps].stdlib above.
 [deps.setu]
-git = "https://github.com/MacCracken/setu.git"
-tag = "0.3.1"
+# Local path-dep during the 0.5.0 full-key-events work (SETU_SURF_FULL_KEYS +
+# press/release forwarding). Switch to `tag = "0.5.0"` at release.
+path = "../setu"
 modules = ["dist/setu.cyr"]
