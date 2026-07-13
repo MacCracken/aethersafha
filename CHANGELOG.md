@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.2] - 2026-07-12 — the sovereign desktop theme system (MUDRA / SHANTA)
+
+Six divergent aesthetic explorations were consolidated to **two desktop themes**, unified by the
+question every one of them was really answering — *how do you make trust visible?* **MUDRA**
+(मुद्रा, "the seal") is the sovereign default (signed, radius-0, cyan verify-seal; trust reads
+loud); **SHANTA** (शान्त, "stillness") is the focus mode (warm, thin, one gold firefly + sage;
+trust reads quiet). Each ships in **dark and light** — four grounds from one token set. The
+compositor chrome now reads the active theme instead of hardcoded colours, with MUDRA · Carbon
+(dark) as the out-of-box look. Design doc: `agnosticos/docs/development/designs/desktop_consolidated/
+theme-system.html`.
+
+### Added
+
+- **`src/theme.cyr` — the AGNOS desktop theme tokens.** An `AeTheme` struct (colours as
+  `0xRRGGBB`) with slots `bg / panel / widget / line / ink / mute / faint / accent / alert / held`
+  plus `radius` and `font` (permille). Four constructors — `ae_theme_mudra_dark` / `_mudra_light`
+  / `_shanta_dark` / `_shanta_light` (exact hexes from the consolidated design) — full accessors,
+  the `0xRRGGBB` channel helpers `ae_color_r/g/b`, and the framebuffer packer **`ae_bhumi(c)` →
+  `bhumi_xrgb`**. A by-name registry (`ae_theme_by_name`, self-contained `ae_streq`) for config-
+  driven selection, and the compositor's single **active theme** (`ae_theme_active` lazy-defaults
+  to MUDRA · Carbon; `ae_theme_set_active` / `ae_theme_set_active_name`).
+- **`tests/theme.tcyr`** — 39 assertions locking every ground's token values, the channel helpers,
+  the registry, and the active-theme selector. All pass.
+
+### Changed
+
+- **`src/render.cyr` chrome now reads the active theme.** The window body, titlebar, title text,
+  and decoration buttons — plus a new 2px **accent seal-strip** marking the focused window — and
+  the desktop root background all resolve through `ae_theme_active()` / `ae_bhumi()`, replacing the
+  hardcoded `bhumi_xrgb(...)` literals. Focused windows raise to `widget` + the accent strip;
+  idle windows sit on `panel` with muted title text.
+- `src/main.cyr` includes `src/theme.cyr` ahead of `src/render.cyr` (the renderer consumes it).
+
+This is distinct from the legacy `theme_bridge.cyr` (the Rust-parity accessibility
+HighContrastTheme → Flutter bridge), which stays for the high-contrast a11y profile. Follow-ups:
+dhancha widgets + jalwa consuming the same tokens (the trigger to extract `theme.cyr` to a shared
+theme lib), and SHANTA's radius-14 rounding + firefly + luminance-provenance in the renderer.
+
 ## [0.9.1] - 2026-07-10 — full key events (press + release) for held-key clients
 
 The compositor now honours setu 0.5.0's `SETU_SURF_FULL_KEYS` opt-in **per surface**: a client
