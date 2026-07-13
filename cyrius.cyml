@@ -35,6 +35,16 @@ path = "../bhumi"
 tag = "1.0.0"
 modules = ["dist/bhumi.cyr"]
 
+# --- Desktop theme-token core: rupa (रूप — form / appearance). The ONE source of
+# the MUDRA / SHANTA palette; the compositor chrome packs its logical 0xRRGGBB
+# tokens to the bhumi framebuffer via ae_bhumi (src/theme.cyr). Extracted from the
+# compositor's own theme.cyr when dhancha became the second consumer.
+[deps.rupa]
+git = "https://github.com/MacCracken/rupa.git"
+path = "../rupa"
+tag = "0.1.0"
+modules = ["dist/rupa.cyr"]
+
 # --- Shared AGNOS domain primitives (was Rust `agnostik` 0.90.0). Error family
 # namespaced STIK_ERR_*/stik_err_*/stik_syserr_* at 1.3.3 to end the ERR_*
 # collision with agnodrm.

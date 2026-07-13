@@ -154,25 +154,25 @@ fn render_window(fb, win, focused): i64 {
     var y = win_y(win);
     var w = win_w(win);
     var h = win_h(win);
-    var th = ae_theme_active();
+    var th = rupa_theme_active();
     # body — the window content surface
-    fill_rect(fb, x, y + TITLEBAR_H, w, h - TITLEBAR_H, ae_bhumi(ae_theme_widget(th)));
+    fill_rect(fb, x, y + TITLEBAR_H, w, h - TITLEBAR_H, ae_bhumi(rupa_theme_widget(th)));
     # titlebar: panel when idle, raised (widget) when focused
-    var tb = ae_bhumi(ae_theme_panel(th));
-    if (focused == 1) { tb = ae_bhumi(ae_theme_widget(th)); }
+    var tb = ae_bhumi(rupa_theme_panel(th));
+    if (focused == 1) { tb = ae_bhumi(rupa_theme_widget(th)); }
     fill_rect(fb, x, y, w, TITLEBAR_H, tb);
     # a focused window gets a 2px accent seal-strip along the titlebar's lower edge
     # (the theme's ONE bold hue = "this window is active/verified")
-    if (focused == 1) { fill_rect(fb, x, y + TITLEBAR_H - 2, w, 2, ae_bhumi(ae_theme_accent(th))); }
+    if (focused == 1) { fill_rect(fb, x, y + TITLEBAR_H - 2, w, 2, ae_bhumi(rupa_theme_accent(th))); }
     # title text — primary ink when focused, muted otherwise
-    var tc = ae_bhumi(ae_theme_mute(th));
-    if (focused == 1) { tc = ae_bhumi(ae_theme_ink(th)); }
+    var tc = ae_bhumi(rupa_theme_mute(th));
+    if (focused == 1) { tc = ae_bhumi(rupa_theme_ink(th)); }
     draw_text(fb, win_title(win), x + 6, y + (TITLEBAR_H - FONT_H) / 2, tc);
     # decoration buttons: close = alert, maximize = held, minimize = faint
     var by = deco_btn_y(win);
-    fill_rect(fb, deco_close_x(win), by, BTN_W, BTN_H, ae_bhumi(ae_theme_alert(th)));
-    fill_rect(fb, deco_max_x(win), by, BTN_W, BTN_H, ae_bhumi(ae_theme_held(th)));
-    fill_rect(fb, deco_min_x(win), by, BTN_W, BTN_H, ae_bhumi(ae_theme_faint(th)));
+    fill_rect(fb, deco_close_x(win), by, BTN_W, BTN_H, ae_bhumi(rupa_theme_alert(th)));
+    fill_rect(fb, deco_max_x(win), by, BTN_W, BTN_H, ae_bhumi(rupa_theme_held(th)));
+    fill_rect(fb, deco_min_x(win), by, BTN_W, BTN_H, ae_bhumi(rupa_theme_faint(th)));
     # Composite the client's PRESENTED surface (setu shared-buffer pixels), if any, into the
     # window body below the titlebar. Re-run EVERY frame from the cached buffer so the surface
     # persists on screen — the desktop redraw above would otherwise overwrite it (it did: the
@@ -202,7 +202,7 @@ fn render_window(fb, win, focused): i64 {
 
 # render_frame: clear to desktop bg, then paint windows bottom-to-top.
 fn render_frame(comp, fb): i64 {
-    bhumi_fb_clear(fb, ae_bhumi(ae_theme_bg(ae_theme_active())));
+    bhumi_fb_clear(fb, ae_bhumi(rupa_theme_bg(rupa_theme_active())));
     var v = comp_windows(comp);
     var n = vec_len(v);
     var i = 0;

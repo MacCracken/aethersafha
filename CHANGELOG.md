@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.4] - 2026-07-12 — theme tokens extracted to the shared rupa lib
+
+The desktop theme system gained its second consumer (dhancha), so the tokens move out of
+the compositor into a shared leaf lib — **rupa** (रूप, "form / appearance") — that the
+compositor chrome, the widget toolkit, and apps all read. A toolkit/app cannot depend on
+the compositor, so the single source of truth has to live below both. Same look, same
+MUDRA · Carbon default; only the token *home* moved.
+
+### Changed
+
+- **`src/theme.cyr` slimmed to the compositor-specific packer.** The `AeTheme` struct, the
+  four MUDRA / SHANTA grounds, the accessors, the by-name registry, and the single active
+  theme all moved to **rupa 0.1.0**. This file now holds only `ae_bhumi(c)` — packing a
+  logical rupa `0xRRGGBB` token into the bhumi framebuffer colour via `rupa_color_r/g/b`.
+- **`src/render.cyr`** now reads the tokens through `rupa_theme_*` (`rupa_theme_active` /
+  `_widget` / `_panel` / `_accent` / `_ink` / `_mute` / `_faint` / `_alert` / `_held` /
+  `_bg`); `ae_bhumi` still does the pack. No visual change — MUDRA · Carbon stays the
+  out-of-box look.
+- **`tests/theme.tcyr`** is now an *integration* test (rupa tokens reachable from the
+  compositor + `ae_bhumi` packs correctly, 6 assertions); the 39 token-value assertions
+  moved to rupa's own `tests/theme.tcyr`.
+
+### Added
+
+- **`[deps.rupa]`** (`0.1.0`) — the shared theme-token core. Both targets build identically
+  (host 15,066,680 B / agnos 14,999,608 B) and the full suite stays green (20 files, 1071
+  assertions, 0 failed).
+
 ## [0.9.3] - 2026-07-12 — repin to cyrius 6.4.61 (setu-listener accept loop is now leak-free)
 
 The compositor's frame loop polls a **non-blocking `setu_srv_accept`** every frame

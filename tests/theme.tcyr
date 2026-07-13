@@ -1,77 +1,22 @@
-# theme — the sovereign AGNOS desktop theme tokens (MUDRA / SHANTA).
-# Locks the four grounds' exact token values, the 0xRRGGBB channel helpers, the
-# by-name registry, and the active-theme selector. Stdlib + [deps.*] (bhumi, for
-# ae_bhumi) auto-included via cyrius.cyml.
+# theme — aethersafha's binding to rupa. The token VALUES are locked in rupa's own
+# tests/theme.tcyr; here we verify the INTEGRATION: rupa's tokens are reachable from
+# the compositor, and ae_bhumi packs a logical 0xRRGGBB token into a bhumi framebuffer
+# colour. Stdlib + [deps.*] (rupa, bhumi) auto-included via cyrius.cyml.
 include "src/theme.cyr"
 
 fn main() {
     alloc_init();
 
-    # -- MUDRA · Carbon (dark) — the out-of-box default --------------------
-    test_group("theme — MUDRA Carbon (dark)");
-    var md = ae_theme_mudra_dark();
-    assert(md != 0, "mudra-dark constructs");
-    assert_eq(ae_theme_is_dark(md), 1, "mudra-dark is dark");
-    assert_eq(ae_theme_bg(md), 0x0B0C0E, "mudra-dark bg = carbon void");
-    assert_eq(ae_theme_widget(md), 0x1B1E24, "mudra-dark widget");
-    assert_eq(ae_theme_ink(md), 0xE7E9EF, "mudra-dark ink");
-    assert_eq(ae_theme_accent(md), 0x00E5FF, "mudra-dark accent = cyan verify seal");
-    assert_eq(ae_theme_alert(md), 0xFF4D4D, "mudra-dark alert = unsigned red");
-    assert_eq(ae_theme_held(md), 0xE9A23B, "mudra-dark held = amber");
-    assert_eq(ae_theme_radius(md), 0, "mudra radius = 0");
-    assert_eq(ae_theme_font(md), 1000, "font permille = 1.0");
+    test_group("aethersafha theme — rupa integration");
+    var t = rupa_theme_active();
+    assert(t != 0, "rupa active theme reachable from the compositor");
+    assert_eq(rupa_theme_accent(t), 0x00E5FF, "default active = MUDRA · Carbon cyan");
+    assert_eq(rupa_theme_bg(t), 0x0B0C0E, "default active bg = carbon void");
 
-    # -- MUDRA · Ledger (light) --------------------------------------------
-    test_group("theme — MUDRA Ledger (light)");
-    var ml = ae_theme_mudra_light();
-    assert_eq(ae_theme_is_dark(ml), 0, "mudra-light is light");
-    assert_eq(ae_theme_bg(ml), 0xEFEADD, "mudra-light bg = ledger paper");
-    assert_eq(ae_theme_accent(ml), 0x0090A6, "mudra-light accent = deep cyan (light contrast)");
-    assert_eq(ae_theme_radius(ml), 0, "mudra-light radius = 0");
-
-    # -- SHANTA · Nightfall (dark) -----------------------------------------
-    test_group("theme — SHANTA Nightfall (dark)");
-    var sd = ae_theme_shanta_dark();
-    assert_eq(ae_theme_is_dark(sd), 1, "shanta-dark is dark");
-    assert_eq(ae_theme_bg(sd), 0x14110C, "shanta-dark bg = warm void");
-    assert_eq(ae_theme_accent(sd), 0xE9C46A, "shanta-dark accent = gold firefly");
-    assert_eq(ae_theme_held(sd), 0x8FB27A, "shanta-dark held = sage");
-    assert_eq(ae_theme_radius(sd), 14, "shanta radius = 14 soft");
-
-    # -- SHANTA · First Light (light) --------------------------------------
-    test_group("theme — SHANTA First Light (light)");
-    var sl = ae_theme_shanta_light();
-    assert_eq(ae_theme_is_dark(sl), 0, "shanta-light is light");
-    assert_eq(ae_theme_bg(sl), 0xF2ECDD, "shanta-light bg = rice paper");
-    assert_eq(ae_theme_widget(sl), 0xFFFFFF, "shanta-light widget = white");
-    assert_eq(ae_theme_accent(sl), 0xC1963A, "shanta-light accent = warm gold");
-
-    # -- 0xRRGGBB channel helpers ------------------------------------------
-    test_group("theme — color channel helpers");
-    assert_eq(ae_color_r(0x00E5FF), 0x00, "R of cyan");
-    assert_eq(ae_color_g(0x00E5FF), 0xE5, "G of cyan");
-    assert_eq(ae_color_b(0x00E5FF), 0xFF, "B of cyan");
-    assert_eq(ae_color_r(0xE9C46A), 0xE9, "R of gold");
-    assert_eq(ae_color_g(0xE9C46A), 0xC4, "G of gold");
-    assert_eq(ae_color_b(0xE9C46A), 0x6A, "B of gold");
-
-    # -- registry (config-driven selection) --------------------------------
-    test_group("theme — by-name registry");
-    assert_eq(ae_theme_accent(ae_theme_by_name("shanta-dark")), 0xE9C46A, "by_name shanta-dark");
-    assert_eq(ae_theme_accent(ae_theme_by_name("mudra-light")), 0x0090A6, "by_name mudra-light");
-    assert_eq(ae_theme_by_name("does-not-exist"), 0, "by_name unknown = 0");
-
-    # -- active theme (compositor's single active) -------------------------
-    # NB order: default check BEFORE any set_active (mutates the module global).
-    test_group("theme — active selector");
-    assert_eq(ae_theme_accent(ae_theme_active()), 0x00E5FF, "default active = mudra-dark");
-    assert_eq(ae_theme_is_dark(ae_theme_active()), 1, "default active is dark");
-    ae_theme_set_active(ae_theme_shanta_light());
-    assert_eq(ae_theme_accent(ae_theme_active()), 0xC1963A, "set_active -> shanta-light");
-    assert_eq(ae_theme_set_active_name("mudra-dark"), 1, "set_active_name known = 1");
-    assert_eq(ae_theme_accent(ae_theme_active()), 0x00E5FF, "active back to mudra-dark");
-    assert_eq(ae_theme_set_active_name("bogus"), 0, "set_active_name unknown = 0");
-    assert_eq(ae_theme_accent(ae_theme_active()), 0x00E5FF, "active unchanged after bad name");
+    # ae_bhumi packs the token through the channel helpers into the bhumi format.
+    assert(ae_bhumi(rupa_theme_accent(t)) != 0, "ae_bhumi packs a non-black token");
+    assert_eq(ae_bhumi(0x000000), bhumi_xrgb(0, 0, 0), "ae_bhumi(black) == bhumi black");
+    assert_eq(ae_bhumi(0xE9C46A), bhumi_xrgb(0xE9, 0xC4, 0x6A), "ae_bhumi splits R/G/B correctly");
 
     return assert_summary();
 }
