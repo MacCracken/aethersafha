@@ -140,7 +140,7 @@ fn ai_suggestion_new(id, styp, title, desc, conf, action, dismissed, ts): i64 {
 fn ai_suggestion_default(id): i64 {
     var empty = str_from("");
     return ai_suggestion_new(id, AI_SuggestionType.AI_ST_PRODUCTIVITY,
-        empty, empty, 0, 0, 0, clock_epoch_secs());
+    empty, empty, 0, 0, 0, clock_epoch_secs());
 }
 
 fn ai_suggestion_id(p)        { return load64(p + AI_SUG_ID); }
@@ -628,7 +628,7 @@ fn ai_register_agent_hud(f, agent_id, name): i64 {
     var res = ai_res_new(0, 0, AI_GPU_NONE);
     var empty_task = str_from("");
     var state = ai_hud_new(agent_id, name, AI_AgentStatus.AI_AS_IDLE,
-        empty_task, 0, clock_epoch_secs(), res);
+    empty_task, 0, clock_epoch_secs(), res);
     map_u64_set(hud, agent_id, state);
     return 0;
 }
@@ -719,7 +719,7 @@ fn ai_suggest_workspace_switch(id, to, reason): i64 {
     var num = str_from_int(to + 1);
     var title = str_cat(prefix, num);
     return ai_generate_suggestion(id, AI_SuggestionType.AI_ST_CONTEXT_SWITCH,
-        title, reason, AI_WS_SWITCH_CONF);
+    title, reason, AI_WS_SWITCH_CONF);
 }
 
 # ai_optimize_resources — parity: `optimize_resources`.
@@ -728,7 +728,7 @@ fn ai_optimize_resources(id): i64 {
     var title = str_from("Resource Optimization");
     var desc = str_from("Consider suspending idle agents to free resources");
     return ai_generate_suggestion(id, AI_SuggestionType.AI_ST_RESOURCE_OPTIMIZATION,
-        title, desc, AI_OPT_RES_CONF);
+    title, desc, AI_OPT_RES_CONF);
 }
 
 # ---------------------------------------------------------------------------

@@ -423,17 +423,17 @@ fn sec_ui_perm_defs(u)   { return load64(u + SEC_U_PERM_DEFS); }
 fn sec_ui_initialize_permission_definitions(u): i64 {
     var defs = load64(u + SEC_U_PERM_DEFS);
     vec_push(defs, sec_permdef_new("file:read",
-        "Read files in specified directories", SecPermCategory.SEC_PC_FILESYSTEM, 0));
+    "Read files in specified directories", SecPermCategory.SEC_PC_FILESYSTEM, 0));
     vec_push(defs, sec_permdef_new("file:write",
-        "Create or modify files", SecPermCategory.SEC_PC_FILESYSTEM, 1));
+    "Create or modify files", SecPermCategory.SEC_PC_FILESYSTEM, 1));
     vec_push(defs, sec_permdef_new("file:delete",
-        "Delete files and directories", SecPermCategory.SEC_PC_FILESYSTEM, 1));
+    "Delete files and directories", SecPermCategory.SEC_PC_FILESYSTEM, 1));
     vec_push(defs, sec_permdef_new("network:outbound",
-        "Make outbound network connections", SecPermCategory.SEC_PC_NETWORK, 0));
+    "Make outbound network connections", SecPermCategory.SEC_PC_NETWORK, 0));
     vec_push(defs, sec_permdef_new("process:spawn",
-        "Start new processes", SecPermCategory.SEC_PC_PROCESS, 1));
+    "Start new processes", SecPermCategory.SEC_PC_PROCESS, 1));
     vec_push(defs, sec_permdef_new("agent:delegate",
-        "Delegate tasks to other agents", SecPermCategory.SEC_PC_AGENT, 1));
+    "Delegate tasks to other agents", SecPermCategory.SEC_PC_AGENT, 1));
     println("security-ui: initialized 6 permission definitions");
     return 0;
 }
@@ -853,8 +853,8 @@ fn sec_ui_emergency_kill_agent(u, agent_id, pid, now): i64 {
     # Record a resolved CRITICAL alert (Rust builds one with is_resolved: true).
     var id = sec_ui_next_id(u);
     var alert = sec_alert_new(id, "Emergency Kill: Agent",
-        "Agent was terminated via emergency kill switch",
-        SecThreatLevel.SEC_TL_CRITICAL, "security-ui", now, 0, 1);
+    "Agent was terminated via emergency kill switch",
+    SecThreatLevel.SEC_TL_CRITICAL, "security-ui", now, 0, 1);
     sec_ui_show_security_alert(u, alert);
     return SecErr.SEC_ERR_OK;
 }

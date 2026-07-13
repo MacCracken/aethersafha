@@ -20,7 +20,7 @@ fn make_window_event(id, app_cstr): i64 {
     var meta = map_new();
     map_set(meta, "app", str_from(app_cstr));
     return ai_event_new(id, AI_ContextEventType.AI_CE_WINDOW_OPENED,
-        str_from("test"), clock_epoch_secs(), meta);
+    str_from("test"), clock_epoch_secs(), meta);
 }
 
 # Build a FileOpened event carrying {"file": <file_cstr>}.
@@ -28,7 +28,7 @@ fn make_file_event(id, file_cstr): i64 {
     var meta = map_new();
     map_set(meta, "file", str_from(file_cstr));
     return ai_event_new(id, AI_ContextEventType.AI_CE_FILE_OPENED,
-        str_from("test"), clock_epoch_secs(), meta);
+    str_from("test"), clock_epoch_secs(), meta);
 }
 
 # Build an event of an arbitrary type with empty metadata.
@@ -79,7 +79,7 @@ fn main() {
     # --- generate_suggestion (test_ai_desktop_features_generate_suggestion) ---
     test_group("ai_features — generate_suggestion");
     var gs = ai_generate_suggestion(2, AI_SuggestionType.AI_ST_TASK_RECOMMENDATION,
-        str_from("Take a break"), str_from("You've been coding for 2 hours"), 850);
+    str_from("Take a break"), str_from("You've been coding for 2 hours"), 850);
     var gs_title_eq = str_eq(ai_suggestion_title(gs), str_from("Take a break"));
     assert_eq(gs_title_eq, 1, "generated title matches");
     assert_eq(ai_suggestion_conf(gs), 850, "generated confidence 850");
@@ -182,9 +182,9 @@ fn main() {
     test_group("ai_features — add_suggestion dedup");
     var fadd = ai_new();
     var s_a = ai_generate_suggestion(30, AI_SuggestionType.AI_ST_PRODUCTIVITY,
-        str_from("Same"), str_from("First"), 700);
+    str_from("Same"), str_from("First"), 700);
     var s_b = ai_generate_suggestion(31, AI_SuggestionType.AI_ST_PRODUCTIVITY,
-        str_from("Same"), str_from("Second"), 900);
+    str_from("Same"), str_from("Second"), 900);
     ai_add_suggestion(fadd, s_a);
     ai_add_suggestion(fadd, s_b);
     var same_cnt = count_title(ai_suggestions(fadd), "Same");
@@ -197,11 +197,11 @@ fn main() {
     test_group("ai_features — add_suggestion sort");
     var fsort = ai_new();
     ai_add_suggestion(fsort, ai_generate_suggestion(40, AI_SuggestionType.AI_ST_PRODUCTIVITY,
-        str_from("Low"), str_from("D"), 600));
+    str_from("Low"), str_from("D"), 600));
     ai_add_suggestion(fsort, ai_generate_suggestion(41, AI_SuggestionType.AI_ST_TASK_RECOMMENDATION,
-        str_from("High"), str_from("D"), 950));
+    str_from("High"), str_from("D"), 950));
     ai_add_suggestion(fsort, ai_generate_suggestion(42, AI_SuggestionType.AI_ST_SECURITY_ALERT,
-        str_from("Mid"), str_from("D"), 800));
+    str_from("Mid"), str_from("D"), 800));
     var sv = ai_suggestions(fsort);
     assert_eq(vec_len(sv), 3, "three suggestions");
     assert_eq(ai_suggestion_conf(vec_get(sv, 0)), 950, "sorted[0] = 950");
@@ -213,9 +213,9 @@ fn main() {
     test_group("ai_features — dedup different types kept");
     var fdt = ai_new();
     ai_add_suggestion(fdt, ai_generate_suggestion(50, AI_SuggestionType.AI_ST_PRODUCTIVITY,
-        str_from("Same Title"), str_from("D1"), 800));
+    str_from("Same Title"), str_from("D1"), 800));
     ai_add_suggestion(fdt, ai_generate_suggestion(51, AI_SuggestionType.AI_ST_SECURITY_ALERT,
-        str_from("Same Title"), str_from("D2"), 900));
+    str_from("Same Title"), str_from("D2"), 900));
     assert_eq(vec_len(ai_suggestions(fdt)), 2, "different types same title both kept");
 
     # --- proactive_suggestions filters dismissed
@@ -223,9 +223,9 @@ fn main() {
     test_group("ai_features — proactive filters dismissed");
     var fpd = ai_new();
     var pd1 = ai_generate_suggestion(60, AI_SuggestionType.AI_ST_PRODUCTIVITY,
-        str_from("S1"), str_from("D1"), 900);
+    str_from("S1"), str_from("D1"), 900);
     var pd2 = ai_generate_suggestion(61, AI_SuggestionType.AI_ST_TASK_RECOMMENDATION,
-        str_from("S2"), str_from("D2"), 800);
+    str_from("S2"), str_from("D2"), 800);
     ai_add_suggestion(fpd, pd1);
     ai_add_suggestion(fpd, pd2);
     ai_dismiss_suggestion(fpd, 60);
@@ -239,9 +239,9 @@ fn main() {
     test_group("ai_features — proactive filters low confidence");
     var fpl = ai_new();
     ai_add_suggestion(fpl, ai_generate_suggestion(70, AI_SuggestionType.AI_ST_PRODUCTIVITY,
-        str_from("Low"), str_from("D"), 300));
+    str_from("Low"), str_from("D"), 300));
     ai_add_suggestion(fpl, ai_generate_suggestion(71, AI_SuggestionType.AI_ST_TASK_RECOMMENDATION,
-        str_from("High"), str_from("D"), 900));
+    str_from("High"), str_from("D"), 900));
     var pl_out = ai_proactive_suggestions(fpl);
     assert_eq(vec_len(pl_out), 1, "low-confidence filtered out");
 
@@ -251,11 +251,11 @@ fn main() {
     test_group("ai_features — proactive threshold boundary");
     var fthr = ai_new();
     ai_add_suggestion(fthr, ai_generate_suggestion(80, AI_SuggestionType.AI_ST_PRODUCTIVITY,
-        str_from("Exactly 500"), str_from("D"), 500));
+    str_from("Exactly 500"), str_from("D"), 500));
     assert_eq(vec_len(ai_proactive_suggestions(fthr)), 0, "conf==500 excluded (> threshold)");
     var fabove = ai_new();
     ai_add_suggestion(fabove, ai_generate_suggestion(81, AI_SuggestionType.AI_ST_PRODUCTIVITY,
-        str_from("Above"), str_from("D"), 510));
+    str_from("Above"), str_from("D"), 510));
     assert_eq(vec_len(ai_proactive_suggestions(fabove)), 1, "conf==510 included");
 
     # --- proactive_suggestions empty (test_proactive_suggestions_empty) ---
@@ -266,7 +266,7 @@ fn main() {
     test_group("ai_features — dismiss marks entry");
     var fdis = ai_new();
     var dsug = ai_generate_suggestion(90, AI_SuggestionType.AI_ST_SECURITY_ALERT,
-        str_from("Alert"), str_from("D"), 950);
+    str_from("Alert"), str_from("D"), 950);
     ai_add_suggestion(fdis, dsug);
     assert_eq(ai_suggestion_dismissed(dsug), 0, "not dismissed before dismiss");
     ai_dismiss_suggestion(fdis, 90);

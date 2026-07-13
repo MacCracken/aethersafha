@@ -379,14 +379,14 @@ fn shint_notif_convert(external, id, now): i64 {
     var prio = shint_map_urgency(shint_ext_notif_urgency(external));
     var requires_action = shint_ext_notif_has_actions(external);
     return shell_notif_new(
-        id,
-        shint_ext_notif_app_name(external),
-        shint_ext_notif_title(external),
-        shint_ext_notif_body(external),
-        prio,
-        now,
-        requires_action,
-        0);
+    id,
+    shint_ext_notif_app_name(external),
+    shint_ext_notif_title(external),
+    shint_ext_notif_body(external),
+    prio,
+    now,
+    requires_action,
+    0);
 }
 
 # ================================================================

@@ -87,7 +87,7 @@ fn gest_point_ts(p)       { return load64(p + G_TP_TS); }
 fn gest_point_copy(p): i64 {
     if (p == 0) { return 0; }
     return gest_point(load64(p + G_TP_ID), load64(p + G_TP_X), load64(p + G_TP_Y),
-                      load64(p + G_TP_PRESS), load64(p + G_TP_TS));
+    load64(p + G_TP_PRESS), load64(p + G_TP_TS));
 }
 
 # ============================================================================
@@ -490,7 +490,7 @@ fn gest_recognise_single_finger(r): i64 {
         vec_push(tv, gest_point_copy(start));
         vec_push(tv, gest_point_copy(cur));
         var ev = gest_event_new(G_GestureKind.G_SWIPE, direction, 0, tv,
-                                0 - 1, gest_point_ts(cur));
+        0 - 1, gest_point_ts(cur));
         vec_push(recog, ev);
         return 0;
     }
@@ -500,7 +500,7 @@ fn gest_recognise_single_finger(r): i64 {
         var tvl = vec_new();
         vec_push(tvl, gest_point_copy(start));
         var evl = gest_event_new(G_GestureKind.G_LONGPRESS, 0, 0, tvl,
-                                 0 - 1, gest_point_ts(cur));
+        0 - 1, gest_point_ts(cur));
         vec_push(recog, evl);
         return 0;
     }
@@ -527,7 +527,7 @@ fn gest_recognise_single_finger(r): i64 {
             var tvd = vec_new();
             vec_push(tvd, gest_point_copy(start));
             var evd = gest_event_new(G_GestureKind.G_DOUBLETAP, 0, 0, tvd,
-                                     0 - 1, gest_point_ts(cur));
+            0 - 1, gest_point_ts(cur));
             vec_push(recog, evd);
             store64(r + G_GR_LAST_TAP_TIME, 0 - 1);
             store64(r + G_GR_LAST_TAP_VLD, 0);
@@ -535,7 +535,7 @@ fn gest_recognise_single_finger(r): i64 {
             var tvt = vec_new();
             vec_push(tvt, gest_point_copy(start));
             var evt = gest_event_new(G_GestureKind.G_TAP, 0, 0, tvt,
-                                     0 - 1, gest_point_ts(cur));
+            0 - 1, gest_point_ts(cur));
             vec_push(recog, evt);
             store64(r + G_GR_LAST_TAP_TIME, gest_point_ts(cur));
             store64(r + G_GR_LAST_TAP_X, gest_point_x(start));
@@ -588,7 +588,7 @@ fn gest_check_two_finger_gestures(r): i64 {
             vec_push(tvp, gest_point_copy(c0));
             vec_push(tvp, gest_point_copy(c1));
             var evp = gest_event_new(G_GestureKind.G_PINCH, scale, 0, tvp,
-                                     0 - 1, ts);
+            0 - 1, ts);
             vec_push(recog, evp);
         }
     }
@@ -604,7 +604,7 @@ fn gest_check_two_finger_gestures(r): i64 {
         vec_push(tvr, gest_point_copy(c0));
         vec_push(tvr, gest_point_copy(c1));
         var evr = gest_event_new(G_GestureKind.G_ROTATE, angle_diff, 0, tvr,
-                                 0 - 1, ts);
+        0 - 1, ts);
         vec_push(recog, evr);
     }
     return 0;

@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.3] - 2026-07-12 — repin to cyrius 6.4.61 (setu-listener accept loop is now leak-free)
+
+The compositor's frame loop polls a **non-blocking `setu_srv_accept`** every frame
+(`main.cyr`), and `net.cyr`'s `sock_accept` used to allocate on every would-block poll —
+a bump-heap leak that would grow over a long desktop session. **cyrius 6.4.61** fixes it
+(`accept(NULL, NULL)` for the never-read peer address + a shared `_net_eagain()` `Err`
+singleton for the would-block path, regression-gated by cyrius). This patch repins to
+receive the fix; the setu listener's accept loop no longer drips.
+
+### Changed
+
+- **cyrius pin 6.4.34 → 6.4.61** — picks up the `net.cyr` `sock_accept` per-poll
+  alloc-leak fix (consumer-filed, fixed upstream). Both targets rebuild identically
+  (host 15,066,680 B / agnos 14,999,608 B) and the full test suite stays green
+  (20 files, 1104 assertions, 0 failed).
+- **Formatting baseline refreshed to 6.4.61.** The newer formatter reformats a handful
+  of files that were clean under 6.4.34 (`ai_features`, `gestures`, `security_ui`,
+  `shell`, `shell_integration`, `main` + three test files) — mechanical whitespace only,
+  no logic change, so CI's fmt gate stays green on the new pin.
+
 ## [0.9.2] - 2026-07-12 — the sovereign desktop theme system (MUDRA / SHANTA)
 
 Six divergent aesthetic explorations were consolidated to **two desktop themes**, unified by the

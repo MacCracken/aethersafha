@@ -28,7 +28,7 @@ fn main() {
 
     # Custom alert (test_security_alert_custom).
     var ca = sec_alert_new(2, "Suspicious", "Unusual", SecThreatLevel.SEC_TL_HIGH,
-        "agent-runtime", 1000, 1, 0);
+    "agent-runtime", 1000, 1, 0);
     assert_eq(sec_alert_threat(ca), SecThreatLevel.SEC_TL_HIGH, "custom threat == High");
     assert_eq(sec_alert_requires_action(ca), 1, "custom requires_action");
 
@@ -78,7 +78,7 @@ fn main() {
     # -----------------------------------------------------------------------
     test_group("security_ui — show / dismiss alert");
     var al = sec_alert_new(10, "Test Alert", "Test", SecThreatLevel.SEC_TL_MEDIUM,
-        "test", 1000, 1, 0);
+    "test", 1000, 1, 0);
     sec_ui_show_security_alert(ui, al);
     var act1 = sec_ui_get_active_alerts(ui);
     assert_eq(vec_len(act1), 1, "show: 1 active alert");
@@ -334,7 +334,7 @@ fn main() {
 
     var col_ver = sec_badge_color_for_trust(SecTrustLevel.SEC_TRUST_VERIFIED);
     var b1 = sec_badge_new("agent-001", "test-agent", SecTrustLevel.SEC_TRUST_VERIFIED,
-        SecSandboxStatus.SEC_SB_FULL, col_ver, SecBadgeIcon.SEC_ICON_AGENT);
+    SecSandboxStatus.SEC_SB_FULL, col_ver, SecBadgeIcon.SEC_ICON_AGENT);
     sec_badge_mgr_assign(mgr, 1, b1);
     var got = sec_badge_mgr_get(mgr, 1);
     assert(t_ok(got), "assign then get badge");
@@ -345,7 +345,7 @@ fn main() {
 
     # Overwrite same surface -> len stays 1, new badge wins.
     var b1b = sec_badge_new("agent-002", "new-agent", SecTrustLevel.SEC_TRUST_UNVERIFIED,
-        SecSandboxStatus.SEC_SB_FULL, 0, SecBadgeIcon.SEC_ICON_AGENT);
+    SecSandboxStatus.SEC_SB_FULL, 0, SecBadgeIcon.SEC_ICON_AGENT);
     sec_badge_mgr_assign(mgr, 1, b1b);
     assert_eq(sec_badge_mgr_len(mgr), 1, "overwrite: len stays 1");
     var got2 = sec_badge_mgr_get(mgr, 1);
@@ -354,11 +354,11 @@ fn main() {
     # badges_by_trust — 2 Verified + 1 Untrusted across fresh surfaces.
     var mgr2 = sec_badge_mgr_new();
     var v_a = sec_badge_new(0, "a", SecTrustLevel.SEC_TRUST_VERIFIED,
-        SecSandboxStatus.SEC_SB_FULL, 0, SecBadgeIcon.SEC_ICON_AGENT);
+    SecSandboxStatus.SEC_SB_FULL, 0, SecBadgeIcon.SEC_ICON_AGENT);
     var v_b = sec_badge_new(0, "b", SecTrustLevel.SEC_TRUST_UNTRUSTED,
-        SecSandboxStatus.SEC_SB_FULL, 0, SecBadgeIcon.SEC_ICON_AGENT);
+    SecSandboxStatus.SEC_SB_FULL, 0, SecBadgeIcon.SEC_ICON_AGENT);
     var v_c = sec_badge_new(0, "c", SecTrustLevel.SEC_TRUST_VERIFIED,
-        SecSandboxStatus.SEC_SB_FULL, 0, SecBadgeIcon.SEC_ICON_AGENT);
+    SecSandboxStatus.SEC_SB_FULL, 0, SecBadgeIcon.SEC_ICON_AGENT);
     sec_badge_mgr_assign(mgr2, 10, v_a);
     sec_badge_mgr_assign(mgr2, 11, v_b);
     sec_badge_mgr_assign(mgr2, 12, v_c);

@@ -126,68 +126,68 @@ fn main(): i64 {
     var prev_focus = 0 - 1;  # last-notified focus index; -1 forces the first notification
     #ifdef CYRIUS_TARGET_AGNOS
     while (running == 1) {                            # agnos: the real compositor loop — renders until quit
-    #endif
-    #ifndef CYRIUS_TARGET_AGNOS
-    while ((running == 1) && (frame < setu_cap)) {    # host: bounded so the dev build terminates
-    #endif
-        var n = bhumi_backend_poll(be, &events, AE_MAXEV, now);
-        if (n != BHUMI_SEAT_DENIED) {
-            var i = 0;
-            while (i < n) {
-                var ev = load64(&events + i * 8);
-                if (input_handle(comp, ev) == InputAction.IA_QUIT) { running = 0; }
-                setu_srv_forward_key(comp, ev);   # route key-DOWN to the focused setu client
-                i = i + 1;
-            }
-        }
-        render_desktop(desk, fb);
-        render_desktop_foreign(desk, fb);
-        # setu: accept + composite client presents (over the desktop) — BOTH
-        # targets now (setu 0.3.0 TCP transport runs on Linux AND agnos).
-        if (setu_sfd >= 0) {
-            var cfd = setu_srv_accept(setu_sfd);   # non-blocking; -5 = none pending
-            if (cfd >= 0) {
-                println("aethersafha: setu client connected");   # DBG: TCP accept fired
-                # Cascade each accepted client to a distinct position — the multi-window desktop.
-                var cx = 30 + accepted * 330;
-                var cy = 50 + accepted * 210;
-                var sid = setu_srv_serve_accepted_at(cfd, comp, fb, cx, cy);
-                # NOTE: cfd is NOT closed — serve_accepted_at stored it on the Window
-                # (win_set_cfd) so the compositor can forward input to this client.
-                if (sid > 0) {
-                    println("aethersafha: setu client presented surface");
-                    println_int(sid);
-                    comp_focus(comp, comp_count(comp) - 1);   # focus the just-added client → input routes to it
-                    accepted = accepted + 1;
-                    #ifndef CYRIUS_TARGET_AGNOS
-                    running = 0;                   # host: one present proves the wire; exit the bounded loop
-                    #endif
-                    # agnos: keep compositing so the harness screendumps the client windows
+        #endif
+        #ifndef CYRIUS_TARGET_AGNOS
+        while ((running == 1) && (frame < setu_cap)) {    # host: bounded so the dev build terminates
+            #endif
+            var n = bhumi_backend_poll(be, &events, AE_MAXEV, now);
+            if (n != BHUMI_SEAT_DENIED) {
+                var i = 0;
+                while (i < n) {
+                    var ev = load64(&events + i * 8);
+                    if (input_handle(comp, ev) == InputAction.IA_QUIT) { running = 0; }
+                    setu_srv_forward_key(comp, ev);   # route key-DOWN to the focused setu client
+                    i = i + 1;
                 }
             }
+            render_desktop(desk, fb);
+            render_desktop_foreign(desk, fb);
+            # setu: accept + composite client presents (over the desktop) — BOTH
+            # targets now (setu 0.3.0 TCP transport runs on Linux AND agnos).
+            if (setu_sfd >= 0) {
+                var cfd = setu_srv_accept(setu_sfd);   # non-blocking; -5 = none pending
+                if (cfd >= 0) {
+                    println("aethersafha: setu client connected");   # DBG: TCP accept fired
+                    # Cascade each accepted client to a distinct position — the multi-window desktop.
+                    var cx = 30 + accepted * 330;
+                    var cy = 50 + accepted * 210;
+                    var sid = setu_srv_serve_accepted_at(cfd, comp, fb, cx, cy);
+                    # NOTE: cfd is NOT closed — serve_accepted_at stored it on the Window
+                    # (win_set_cfd) so the compositor can forward input to this client.
+                    if (sid > 0) {
+                        println("aethersafha: setu client presented surface");
+                        println_int(sid);
+                        comp_focus(comp, comp_count(comp) - 1);   # focus the just-added client → input routes to it
+                        accepted = accepted + 1;
+                        #ifndef CYRIUS_TARGET_AGNOS
+                        running = 0;                   # host: one present proves the wire; exit the bounded loop
+                        #endif
+                        # agnos: keep compositing so the harness screendumps the client windows
+                    }
+                }
+            }
+            # Focus-change detector: if focus moved this frame — a TAB in the input loop above,
+            # or a newly-connected client taking focus in the accept block — notify the affected
+            # setu clients (SETU_INPUT_FOCUS) so they re-render their focus indicator. One detector
+            # covers both focus sources.
+            var cur_focus = comp_focused(comp);
+            if (cur_focus != prev_focus) {
+                setu_srv_notify_focus(comp, prev_focus, cur_focus);
+                prev_focus = cur_focus;
+            }
+            bhumi_backend_present(be, now);
+            # agnos: cede the CPU each frame so the spawned setu client (puka, a
+            # spawn_path background proc) is scheduled to connect + present. The
+            # foreground compositor otherwise spins its render loop and starves it.
+            #ifdef CYRIUS_TARGET_AGNOS
+            sys_sched_yield();
+            #endif
+            frame = frame + 1;
         }
-        # Focus-change detector: if focus moved this frame — a TAB in the input loop above,
-        # or a newly-connected client taking focus in the accept block — notify the affected
-        # setu clients (SETU_INPUT_FOCUS) so they re-render their focus indicator. One detector
-        # covers both focus sources.
-        var cur_focus = comp_focused(comp);
-        if (cur_focus != prev_focus) {
-            setu_srv_notify_focus(comp, prev_focus, cur_focus);
-            prev_focus = cur_focus;
-        }
-        bhumi_backend_present(be, now);
-        # agnos: cede the CPU each frame so the spawned setu client (puka, a
-        # spawn_path background proc) is scheduled to connect + present. The
-        # foreground compositor otherwise spins its render loop and starves it.
-        #ifdef CYRIUS_TARGET_AGNOS
-        sys_sched_yield();
+        #ifndef CYRIUS_TARGET_AGNOS
+        if (setu_sfd >= 0) { sock_close(setu_sfd); }   # TCP — no socket file to unlink
         #endif
-        frame = frame + 1;
-    }
-    #ifndef CYRIUS_TARGET_AGNOS
-    if (setu_sfd >= 0) { sock_close(setu_sfd); }   # TCP — no socket file to unlink
-    #endif
 
-    println("aethersafha: frame loop ok");
-    return 0;
-}
+        println("aethersafha: frame loop ok");
+        return 0;
+    }

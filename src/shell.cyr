@@ -290,8 +290,8 @@ fn shell_item_has_action(p): i64 { if (load64(p + L_ACTION) != 0) { return 1; } 
 fn shell_item_clone(p): i64 {
     if (p == 0) { return 0; }
     return shell_item_new(load64(p + L_ID), load64(p + L_NAME), load64(p + L_DESC),
-                          load64(p + L_ICON), load64(p + L_APP), load64(p + L_ACTION),
-                          load64(p + L_SUGGESTED), load64(p + L_RELEVANCE));
+    load64(p + L_ICON), load64(p + L_APP), load64(p + L_ACTION),
+    load64(p + L_SUGGESTED), load64(p + L_RELEVANCE));
 }
 
 # ================================================================
