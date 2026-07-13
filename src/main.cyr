@@ -12,6 +12,7 @@ include "lib/bhumi.cyr"
 include "src/geom.cyr"
 include "src/window.cyr"
 include "src/compositor.cyr"
+include "src/theme.cyr"          # sovereign desktop theme tokens (MUDRA / SHANTA) — before render
 include "src/render.cyr"
 include "src/input.cyr"
 # Leaf subsystems + the desktop aggregate that wires them into the compositor.
