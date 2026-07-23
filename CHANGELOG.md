@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.5] - 2026-07-23
+
+### Changed — setu 0.6.0: client buffers are GPU-visible on agnos
+
+Picks up `setu` **0.6.0**, whose `setu_buf_create` now asks for `shm_create_gpu` **#86** before falling back
+to `shm_create` **#71**.
+
+⚠ **Why this matters beyond a version number.** `#71` allocates **system RAM**, which the agnos GPU cannot
+reach at all — bus-master is off by design and the engines see only the framebuffer aperture. The kernel
+rejects a `#71` slot at both GPU entry points (`gpu_blit_shm` #87: `src_mc == 0 ⇒ the GPU cannot read it`;
+`gpu_shader_op` #92: `GPO_E_BADSLOT`). Every shared surface in the desktop was allocated that way, so the
+whole iron-proven ring-3 GPU band had **no reachable consumer**. Buffers from this release are eligible for
+a hardware blit.
+
+No API change and no call-site change here — the buffer id behaves identically, and `#86` falls back to
+`#71` automatically on a machine with no GPU carveout (every QEMU boot).
+
+### Changed — cyrius pin → 6.4.71
+### Fixed — the host build was BROKEN before this cut
+
+`cyrius build src/main.cyr` failed with `refusing to emit binary with 1 reachable undefined function(s):
+thread_local_alloc`. The symbol exists in cyrius 6.4.71's stdlib but **not** in the materialised `lib/`
+snapshot this repo carried from its 6.4.61 pin — the stale-vendored-lib trap. The pin bump plus
+`cyrius lib sync --full` fixes it. The compositor now builds again; 133 + 19 tests pass.
+
+### Changed — `[deps.bhumi]` tag 1.0.0 → 1.1.0
+
+Stale: bhumi has been at 1.1.0 (agnos Set-1 keyboard decode) and the local `path` override was masking it,
+so CI resolved a different bhumi than local builds did.
+
+
 ## [0.9.4] - 2026-07-12 — theme tokens extracted to the shared rupa lib
 
 The desktop theme system gained its second consumer (dhancha), so the tokens move out of

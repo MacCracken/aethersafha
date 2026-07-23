@@ -85,7 +85,7 @@ fn _mehman_run_guest(spec, surface, out_exit_code): i64 {
 
     var sb = sandbox_create(cfg);
     if (sb == 0) {
-        mehman_err_print(MehmanError.SANDBOX_CREATE_FAILED, backend_name(Backend.PROCESS));
+        mehman_err_print(MehmanError.SANDBOX_CREATE_FAILED, os_backend_name(Backend.PROCESS));
         return MehmanError.SANDBOX_CREATE_FAILED;
     }
 
