@@ -29,6 +29,12 @@ fn setu_srv_recv_committed(cfd, comp, out4): i64 {
     var win = comp_create_window(comp, 0, 0, setu_msg_arg(m, 0), setu_msg_arg(m, 1), "setu-surface");
     if (win == 0) { return 0 - 9; }
     win_set_keymode(win, setu_msg_arg(m, 2) & SETU_SURF_FULL_KEYS);   # CREATE_SURFACE flags: full-key opt-in
+    # SETU_SURF_PREMULTIPLIED: the client declares premultiplied BGRA (c <= a), so this surface may be
+    # BLENDED per-pixel on the GPU (gpu_shader_op#92 op 0x01) instead of copied opaquely (#87).
+    # ⚠ Normalised to 0/1 rather than stored as the raw bit — win_premul() is read as a boolean.
+    var pmul = 0;
+    if ((setu_msg_arg(m, 2) & SETU_SURF_PREMULTIPLIED) != 0) { pmul = 1; }
+    win_set_premul(win, pmul);
     if (setu_srv_write_frame(cfd, setu_surface_created(win_id(win))) < 0) { return 0 - 7; }
 
     var am = setu_msg_new();

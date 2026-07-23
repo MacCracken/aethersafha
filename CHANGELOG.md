@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.7] - 2026-07-23
+
+### Added — `#92 gpu_shader_op` op 0x01: per-pixel PREMULTIPLIED blending on the shader cores
+
+`src/gpu.cyr` gains `ae_gpu_blend_rect`. A window whose client set `SETU_SURF_PREMULTIPLIED` is now
+composited with **#92** (premultiplied src-over on the GPU) instead of **#87** (opaque copy). This is the
+operation CP-DMA structurally cannot do: `#87` is a byte mover with no ALU and can only copy, while `#92`
+runs a real `out = src + dst * (1 - a/255)` per pixel.
+
+⚠ **Opt-in per surface, gated twice.** A surface is blended only if (a) its client set the flag at the
+CREATE_SURFACE handshake, and (b) `gpu_caps` **#89 bit3** says shader compositing is available — the
+kernel refuses `#92` with `E_UNPROVEN` unless the dispatch envelope was proven on this boot. Bit3 is a
+*separate* capability from bits 0-2, so opaque windows still take the hardware `#87` path when it is clear.
+
+⚠ **A premultiplied surface is never copied opaquely as a fallback.** `#87` ignores byte 3, so a
+half-transparent window would paint at full strength and look wrong rather than blended. If the shader path
+is unavailable the whole frame drops to the CPU present instead.
+
+⚠ **No cyrius wrapper exists for #92** — the band's wrappers stop at `sys_gpu_caps` (#89) and cyrius is
+hands-off, so this uses a raw `syscall(92, ...)` behind the `CYRIUS_TARGET_AGNOS` gate, exactly as agnos's
+own `/bin/gpublend` does. On Linux #92 is `chown(path, uid, gid)` and arg1 would be read as a real path —
+a metadata write if it ever resolved. The `#ifdef` is the only barrier.
+
+New `W_PREMUL` window slot (`W_SZ` 96 → 104) captures the flag at the handshake.
+
 ## [0.9.6] - 2026-07-23
 
 ### Added — HARDWARE COMPOSITING on agnos: the first consumer of the ring-3 GPU display band

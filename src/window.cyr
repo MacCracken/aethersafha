@@ -33,7 +33,12 @@ enum WinOff {
     W_KEYMODE = 88; # 1 = client requested FULL key events (SETU_SURF_FULL_KEYS in CREATE_SURFACE
     # flags): forward press AND release with the make/break in mods. 0 = press-only
     # (default) — the pre-0.5.0 behaviour every nav client keeps.
-    W_SZ    = 96;
+    W_PREMUL = 96;  # 1 = client declared SETU_SURF_PREMULTIPLIED: its pixels are premultiplied BGRA
+    # (c <= a), so the compositor may BLEND it per-pixel (gpu_shader_op#92 op 0x01)
+    # instead of copying it opaquely (gpu_blit_shm#87). 0 = default, opaque copy.
+    # ⚠ Must stay opt-in: a surface whose byte 3 is 0 — which a bare 0x00RRGGBB
+    # colour produces — is FULLY TRANSPARENT under #92 and its window vanishes.
+    W_SZ    = 104;
 }
 
 # win_new(id, x, y, w, h, title_cstr) -> *Window (0 on OOM)
@@ -70,6 +75,10 @@ fn win_set_bufid(p, id) { store64(p + W_BUFID, id); return 0; }
 fn win_cfd(p) { return load64(p + W_CFD); }
 fn win_set_cfd(p, fd) { store64(p + W_CFD, fd); return 0; }
 fn win_keymode(p) { return load64(p + W_KEYMODE); }
+
+# @public — SETU_SURF_PREMULTIPLIED opt-in (see W_PREMUL).
+fn win_premul(win): i64 { return load64(win + W_PREMUL); }
+fn win_set_premul(win, v): i64 { store64(win + W_PREMUL, v); return 0; }
 fn win_set_keymode(p, m) { store64(p + W_KEYMODE, m); return 0; }
 
 fn win_set_state(p, s) { store64(p + W_STATE, s); return 0; }

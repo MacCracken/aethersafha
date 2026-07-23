@@ -36,11 +36,15 @@
 # --- Probe state. Probed ONCE: gpu_caps is cheap but not free, and the answer cannot change mid-run. ---
 var ae_gpu_mode   = 0;    # 1 = hardware compositing available and armed
 var ae_gpu_probed = 0;
+var ae_gpu_blend  = 0;    # 1 = gpu_shader_op#92 is usable (caps bit3) — gates the PREMULTIPLIED path only
 
 # gpu_caps#89 flag bits (kernel: syscall.cyr gpu_caps_sys).
 var AE_GPU_CAP_PRESENT  = 1;    # bit0 — a GPU is bound
 var AE_GPU_CAP_ARMED    = 2;    # bit1 — the double-buffer is armed (a back buffer exists to composite into)
 var AE_GPU_CAP_CARVEOUT = 4;    # bit2 — a GPU carveout exists, so #86 slots can be served
+var AE_GPU_CAP_SHADER   = 8;    # bit3 — SHADER COMPOSITING available, i.e. gpu_shader_op#92 will actually
+                                # run. Mirrors the kernel's own gate: #92 refuses with E_UNPROVEN unless
+                                # the dispatch envelope was proven on THIS boot.
 
 # blit#39 a4 bit 40 — composite into the back buffer WITHOUT flipping. The explicit half of the
 # blit/present split: a compositor accumulates a frame, then calls #84 once.
@@ -64,6 +68,10 @@ fn ae_gpu_probe(): i64 {
     if ((flags & AE_GPU_CAP_ARMED) == 0)    { return 0; }
     if ((flags & AE_GPU_CAP_CARVEOUT) == 0) { return 0; }
     ae_gpu_mode = 1;
+    # bit3 is a SEPARATE capability from bit0-2: a GPU can serve opaque #87 blits while the shader
+    # compositing envelope is unproven. Opaque windows still go hardware; only the premultiplied ones
+    # need this.
+    if ((flags & AE_GPU_CAP_SHADER) != 0) { ae_gpu_blend = 1; }
     #endif
     return ae_gpu_mode;
 }
@@ -73,6 +81,44 @@ fn ae_gpu_probe(): i64 {
 # not be the thing that triggers a syscall.
 fn ae_gpu_active(): i64 {
     return ae_gpu_mode;
+}
+
+
+# ae_gpu_blend_rect — gpu_shader_op #92 op 0x01 (BLEND_RECT): PREMULTIPLIED src-over on the shader cores.
+# Returns 0 on success, non-zero on refusal.
+#
+# This is the one operation CP-DMA structurally cannot do. `#87` is a byte mover with no ALU, so it can only
+# COPY a surface; `#92` runs a real per-pixel blend — `out = src + dst * (1 - a/255)` — on the compute units.
+# Translucent window content is exactly the case that needs it.
+#
+# ⚠ THE SOURCE MUST BE PREMULTIPLIED (c <= a). Straight alpha does not error anywhere in the stack — it just
+# renders washed out, silently. Only surfaces that set SETU_SURF_PREMULTIPLIED reach here; sadish's
+# sd_premul() is the sanctioned producer.
+#
+# ⚠ THERE IS NO CYRIUS WRAPPER FOR #92. The band's wrappers stop at `sys_gpu_caps` (#89) — 6.4.71 has no
+# `sys_gpu_shader_op`, and cyrius is hands-off here. A raw `syscall(92, ...)` behind the existing
+# CYRIUS_TARGET_AGNOS gate is the sanctioned in-house idiom; agnos's own /bin/gpublend does exactly this.
+# ⚠ LINUX COLLISION: #92 is `chown(path, uid, gid)` there, and arg1 is a real user VA the kernel would read
+# as a path — a METADATA WRITE if it ever resolved. The `#ifdef` around this file's call sites is the only
+# barrier, which is why the raw syscall lives here and not in a shared helper.
+#
+# The descriptor is ONE 64-byte op record. Every dword the op does not define MUST be zero — the kernel
+# REJECTS a non-zero reserved field rather than ignoring it, which is what keeps today's unused dwords safe
+# to define in a later kernel without an ABI break.
+fn ae_gpu_blend_rect(bid, wh, dstxy): i64 {
+#ifdef CYRIUS_TARGET_AGNOS
+    var d[64];                                  # function-local => 64 BYTES = exactly one op record
+    var z = 0;
+    while (z < 16) { store32(&d + z * 4, 0); z = z + 1; }
+    store32(&d + 0, 1);                         # op = GPU_OP_BLEND_RECT (0x01)
+    store32(&d + 8, bid);                       # src_id — the GPU-visible shm slot (#86)
+    store32(&d + 16, wh);                       # (h << 16) | w
+    store32(&d + 20, dstxy);                    # (dy << 16) | dx
+    return syscall(92, &d, 64);                 # 0 = ok; -((idx<<8)|reason) names the failing op
+#endif
+#ifndef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+#endif
 }
 
 # ae_gpu_present_frame — composite and flip one frame on the GPU.
@@ -119,7 +165,16 @@ fn ae_gpu_present_frame(comp, fb): i64 {
             if (dy + h > fh) { return 0; }
             var wh = (h << 16) | w;
             var dstxy = (dy << 16) | dx;
-            if (sys_gpu_blit_shm(bid, wh, dstxy) != 0) { return 0; }
+            if (win_premul(win) == 1) {
+                # ⚠ A premultiplied surface must NOT be copied opaquely as a fallback — #87 ignores byte 3,
+                # so a half-transparent window would paint at full strength and look wrong rather than
+                # blended. If the shader path is unavailable, bail to the whole-frame CPU present instead.
+                if (ae_gpu_blend == 0) { return 0; }
+                if (ae_gpu_blend_rect(bid, wh, dstxy) != 0) { return 0; }
+            }
+            if (win_premul(win) == 0) {
+                if (sys_gpu_blit_shm(bid, wh, dstxy) != 0) { return 0; }
+            }
         }
         i = i + 1;
     }
