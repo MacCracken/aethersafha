@@ -14,6 +14,7 @@ include "src/window.cyr"
 include "src/compositor.cyr"
 include "src/theme.cyr"          # sovereign desktop theme tokens (MUDRA / SHANTA) — before render
 include "src/render.cyr"
+include "src/gpu.cyr"           # hardware compositing on agnos (#87 + #84) — after render.cyr for TITLEBAR_H
 include "src/input.cyr"
 # Leaf subsystems + the desktop aggregate that wires them into the compositor.
 include "src/theme_bridge.cyr"
@@ -54,6 +55,9 @@ fn main(): i64 {
         return 1;
     }
     var fb = bhumi_backend_fb(be);
+    # Probe hardware compositing ONCE, here, before the frame loop — never from a render path (a renderer
+    # must not be the thing that issues a syscall). ae_gpu_active() then just reads the result each frame.
+    ae_gpu_probe();
     println("aethersafha: bhumi backend up");
 
     # Desktop session: the compositor + all leaf subsystems (shell, AI, security,
@@ -175,7 +179,13 @@ fn main(): i64 {
                 setu_srv_notify_focus(comp, prev_focus, cur_focus);
                 prev_focus = cur_focus;
             }
-            bhumi_backend_present(be, now);
+            # Hardware compositing first: gpu.cyr blits the chrome layer DEFERRED, composites each
+            # client surface with gpu_blit_shm #87 straight out of its GPU-visible shm slot, and flips
+            # once with #84. Returns 0 on any refusal (no GPU, an off-screen window, a failed blit) and
+            # we fall through to the untouched CPU present — so QEMU and every non-AMD box are unaffected.
+            if (ae_gpu_present_frame(comp, fb) == 0) {
+                bhumi_backend_present(be, now);
+            }
             # agnos: cede the CPU each frame so the spawned setu client (puka, a
             # spawn_path background proc) is scheduled to connect + present. The
             # foreground compositor otherwise spins its render loop and starves it.

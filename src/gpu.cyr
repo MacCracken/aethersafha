@@ -1,0 +1,137 @@
+# gpu.cyr — hardware compositing on agnos: the first consumer of the ring-3 GPU display band.
+#
+# WHY THIS EXISTS. agnos ships an iron-proven ring-3 GPU band — `#84 present`, `#85 gpu_fill`,
+# `#86 shm_create_gpu`, `#87 gpu_blit_shm`, `#88 gpu_fill_rect`, `#89 gpu_caps` — and until this file it had
+# **zero callers anywhere in the ecosystem**. ~15 iron burns of proven capability that nothing used.
+#
+# ⚠ THE BLOCKER WAS NOT ALPHA, and the published diagnosis said it was. It was memory. `setu_buf_create`
+# allocated client surfaces with `shm_create` #71 = SYSTEM RAM, and the agnos GPU cannot reach system RAM at
+# all — bus-master is off by design and the engines see only the framebuffer aperture. The kernel therefore
+# rejected every client slot at both GPU entry points (`#87`: `src_mc == 0 ⇒ the GPU cannot read it`;
+# `#92`: `GPO_E_BADSLOT`). setu 0.6.0 fixed that in one line by asking for `shm_create_gpu` #86 first. The
+# alpha facts (sadish forcing 0xFF, bhumi packing X=0) are real but gate `#92`'s PREMULTIPLIED blend only —
+# they never blocked `#87`, which is an opaque blit. See [[reference_gpu_band_blocked_by_shm71_not_alpha]].
+#
+# WHAT THIS REPLACES. The CPU path did, per window, per frame:
+#   1. `setu_buf_read` (#73) — a full surface copy, kernel → userland
+#   2. a `bhumi_fb_set` loop — one `load32`+bounds-checked store PER PIXEL into the software framebuffer
+#   3. and then the whole framebuffer went to the kernel anyway via `blit` #39
+# `#87` does all of it in-kernel: the pixels never leave GPU-visible memory and never touch the CPU.
+#
+# ⚠ THE ORDERING IS THE WHOLE DESIGN, and it is why this is not a drop-in substitution. `#87` composites
+# into the KERNEL's blit back buffer, while chrome (titlebars, borders, text) is drawn into bhumi's
+# USERLAND software framebuffer. Getting a correct frame means both must land in the same buffer, in the
+# right order:
+#
+#   1. chrome → back buffer, via `blit` #39 with **DEFER_PRESENT (a4 bit 40)** so it does NOT flip
+#   2. each client surface → back buffer, via `#87`, landing ON TOP of the chrome
+#   3. ONE `#84 present` to flip the finished frame
+#
+# Without the defer bit, step 1 auto-presents and every window would flash a chrome-only frame before its
+# content arrived. Without step 3, nothing is ever shown.
+#
+# ⚠ FALLBACK IS NOT OPTIONAL. `#89` reports no GPU on QEMU (and on any non-AMD box), where the entire
+# desktop must still work. Every failure path here returns 0 and the caller runs the untouched CPU path.
+
+# --- Probe state. Probed ONCE: gpu_caps is cheap but not free, and the answer cannot change mid-run. ---
+var ae_gpu_mode   = 0;    # 1 = hardware compositing available and armed
+var ae_gpu_probed = 0;
+
+# gpu_caps#89 flag bits (kernel: syscall.cyr gpu_caps_sys).
+var AE_GPU_CAP_PRESENT  = 1;    # bit0 — a GPU is bound
+var AE_GPU_CAP_ARMED    = 2;    # bit1 — the double-buffer is armed (a back buffer exists to composite into)
+var AE_GPU_CAP_CARVEOUT = 4;    # bit2 — a GPU carveout exists, so #86 slots can be served
+
+# blit#39 a4 bit 40 — composite into the back buffer WITHOUT flipping. The explicit half of the
+# blit/present split: a compositor accumulates a frame, then calls #84 once.
+var AE_BLIT_DEFER = 0x10000000000;
+
+# ae_gpu_probe — ask the kernel once whether hardware compositing is really available.
+#
+# ⚠ Requires ALL THREE of present + armed + carveout, not just "a GPU is here". A GPU with no armed back
+# buffer has nothing to composite into, and one with no carveout cannot serve the `#86` slots the clients'
+# surfaces live in — either way `#87` would fail per-window and we would produce a frame with chrome and no
+# content. Cheaper to answer honestly once.
+fn ae_gpu_probe(): i64 {
+    if (ae_gpu_probed == 1) { return ae_gpu_mode; }
+    ae_gpu_probed = 1;
+    ae_gpu_mode = 0;
+    #ifdef CYRIUS_TARGET_AGNOS
+    var caps[32];                       # function-local => 32 BYTES, the #89 record size
+    if (sys_gpu_caps(&caps, 32) != 0) { return 0; }
+    var flags = load32(&caps + 0) & 0xFFFFFFFF;
+    if ((flags & AE_GPU_CAP_PRESENT) == 0)  { return 0; }
+    if ((flags & AE_GPU_CAP_ARMED) == 0)    { return 0; }
+    if ((flags & AE_GPU_CAP_CARVEOUT) == 0) { return 0; }
+    ae_gpu_mode = 1;
+    #endif
+    return ae_gpu_mode;
+}
+
+# ae_gpu_active — has the probe run AND said yes? render.cyr asks this to decide whether to skip its
+# per-pixel client composite. Never probes: the frame loop probes once at startup, and a render path must
+# not be the thing that triggers a syscall.
+fn ae_gpu_active(): i64 {
+    return ae_gpu_mode;
+}
+
+# ae_gpu_present_frame — composite and flip one frame on the GPU.
+# Returns 1 if the frame was presented on the GPU, 0 if the caller must fall back to the CPU present.
+#
+# ⚠ Returns 0 (not a partial frame) on ANY per-window failure, and the caller then presents the CPU way.
+# A half-composited frame is worse than a slower one: the chrome is already in the back buffer at that
+# point, so bailing without presenting leaves it unshown rather than showing content-less windows.
+fn ae_gpu_present_frame(comp, fb): i64 {
+    if (ae_gpu_mode != 1) { return 0; }
+    if (fb == 0) { return 0; }
+    #ifdef CYRIUS_TARGET_AGNOS
+    var px = bhumi_fb_pixels(fb);
+    var fw = bhumi_fb_width(fb);
+    var fh = bhumi_fb_height(fb);
+    if (px == 0) { return 0; }
+    if (fw < 1) { return 0; }
+    if (fh < 1) { return 0; }
+
+    # 1. Chrome layer -> back buffer, DEFERRED. dstxy = 0 (full-screen at the origin) | the defer bit.
+    if (sys_blit(px, fw, fh, AE_BLIT_DEFER) != 0) { return 0; }
+
+    # 2. Each client surface -> back buffer, in the SAME bottom-to-top order render_frame paints, so
+    #    overlapping windows stack identically to the CPU path.
+    var v = comp_windows(comp);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var win = vec_get(v, i);
+        var bid = win_bufid(win);
+        if (bid != 0) {
+            var w = win_w(win);
+            var h = win_h(win);
+            var dx = win_x(win);
+            var dy = win_y(win) + TITLEBAR_H;      # the body sits below the titlebar, as in render_window
+            # ⚠ REJECTS rather than clips (kernel: #87 bounds-checks against the back buffer), so an
+            # off-screen or partly-off-screen window must not be handed over — drop to the CPU path, which
+            # clips in bhumi_fb_set. Dragging a window past an edge is ordinary, not exceptional.
+            if (dx < 0) { return 0; }
+            if (dy < 0) { return 0; }
+            if (w < 1) { return 0; }
+            if (h < 1) { return 0; }
+            if (dx + w > fw) { return 0; }
+            if (dy + h > fh) { return 0; }
+            var wh = (h << 16) | w;
+            var dstxy = (dy << 16) | dx;
+            if (sys_gpu_blit_shm(bid, wh, dstxy) != 0) { return 0; }
+        }
+        i = i + 1;
+    }
+
+    # 3. ONE flip for the whole frame.
+    # ⚠ #84 returns 1 = PRESENTED / 0 = nothing to present — the one syscall in this band that does not use
+    # the 0-ok convention. Checking `!= 0` here would read success as failure; that exact mistake cost an
+    # iron burn on /bin/gpublend.
+    if (sys_gpu_present() != 1) { return 0; }
+    return 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+}

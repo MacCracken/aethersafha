@@ -4,6 +4,55 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.6] - 2026-07-23
+
+### Added — HARDWARE COMPOSITING on agnos: the first consumer of the ring-3 GPU display band
+
+`src/gpu.cyr`. agnos ships an iron-proven GPU band — `#84 present`, `#85 gpu_fill`, `#86 shm_create_gpu`,
+`#87 gpu_blit_shm`, `#88 gpu_fill_rect`, `#89 gpu_caps` — and until this release it had **zero callers
+anywhere in the ecosystem**. Roughly fifteen iron burns of proven capability that nothing used.
+
+**What it replaces, per window, per frame:** a `setu_buf_read` #73 full-surface copy kernel→userland, then a
+`bhumi_fb_set` loop doing one `load32` + bounds-checked store **per pixel** into the software framebuffer —
+after which the whole framebuffer went to the kernel anyway via `blit` #39. `#87` does all of it in-kernel;
+the pixels never leave GPU-visible memory and never touch the CPU.
+
+⚠ **The ordering is the design, which is why this is not a drop-in substitution.** `#87` composites into the
+**kernel's** back buffer while chrome is drawn into bhumi's **userland** software framebuffer. A correct
+frame needs both in the same buffer in the right order:
+
+1. chrome → back buffer via `blit` #39 with **`DEFER_PRESENT` (a4 bit 40)**, so it does *not* flip
+2. each client surface → back buffer via `#87`, landing on top of the chrome
+3. one `#84 present` to flip the finished frame
+
+Without the defer bit, step 1 auto-presents and every window flashes a chrome-only frame before its content
+arrives.
+
+⚠ **The blocker was never alpha.** The published diagnosis blamed the pixel convention (sadish forcing
+`0xFF`, bhumi packing `X=0`). Those facts are real but gate `#92`'s *premultiplied* blend only. What actually
+stopped `#87` was memory: setu allocated client surfaces with `shm_create` #71 = system RAM, which the agnos
+GPU cannot reach at all. setu **0.6.0** fixed that. `#87` is an opaque blit and needs no alpha convention.
+
+**Fallback is not optional and is the tested path.** `ae_gpu_probe()` runs **once** at startup and requires
+all three of `PRESENT | ARMED | CARVEOUT` — a GPU with no armed back buffer has nothing to composite into,
+and one with no carveout cannot serve the `#86` slots the surfaces live in. Any refusal — no GPU, an
+off-screen window (`#87` rejects rather than clips), a failed blit — returns 0 and the untouched CPU path
+runs. `ae_gpu_active()` never probes; a renderer must not be the thing that issues a syscall.
+
+⚠ `#84` returns **1 = presented** / 0 = nothing, the one call in this band that does not use the 0-ok
+convention. Reading it as `!= 0` cost an iron burn on `/bin/gpublend`; this checks `!= 1`.
+
+**Validated:** host + `--agnos` builds green · 133 + 19 tests pass · `cyrius fmt --check` clean ·
+`cyrius lint` 0 warnings · **`agnos/scripts/aethersafha-smoke.sh` PASS** — boots on agnos under QEMU where
+there is no AMD GPU, so the probe correctly answers no and the CPU path renders the desktop unchanged
+(12 distinct colours in the screendump). **The GPU arm itself is iron-only** — QEMU emulates no AMD GPU, so
+nothing here can prove a GPU-composited pixel without a burn.
+
+### Notes
+
+Patch rather than minor deliberately: no public API changed, and on any machine without an AMD GPU the
+behaviour is byte-identical. It only diverges on iron.
+
 ## [0.9.5] - 2026-07-23
 
 ### Changed — setu 0.6.0: client buffers are GPU-visible on agnos
