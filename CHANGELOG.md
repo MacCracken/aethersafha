@@ -4,100 +4,94 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.9.9] - 2026-07-25
+## [0.9.8] - 2026-07-25
 
-### Added — the damage model actually reduces now (0.9.8's caveat, closed)
+3D-arc Phase 0 (`chrome-gpu`): the compositor stops doing per-frame full-screen work on the CPU.
 
-0.9.8 shipped damage plumbing that **reduced nothing**: the per-frame clear touched every pixel, so
-damage was always the whole screen. Both halves are now real.
+### Added — rung 0a `chrome-clear`: the per-frame clear moves to the GPU
 
-**Damage is computed from what CHANGED**, not from where the windows are:
+`render_frame` called `bhumi_fb_clear`, a CPU `store32` loop over the **entire framebuffer**, once
+per frame — 480,000 stores at the console's 800x600, 921,600 at 1280x720. `#85 gpu_fill` had exposed
+a CP-DMA fill for four minor versions and **the compositor never called it.**
+
+New `ae_gpu_clear()` / `ae_gpu_clear_band()` route through `#85` when the probe reports present +
+armed + carveout, and fall back to the identical CPU loop otherwise.
+
+⭐ **Why this is rung 0 and not a later optimisation:** rung 9 puts a rasteriser on the GPU. Landing
+it into a compositor that still burns its frame budget on a CPU clear plus a full-framebuffer copy
+makes the win **invisible and unmeasurable** — you cannot see a GPU rasteriser through a CPU memcpy.
+
+⚠ **The CPU path is retained, not deleted.** It is both the fallback (no GPU, QEMU, an older
+kernel) and the **reference** the `#90` byte-compare oracle diffs against.
+
+### Added — a damage model that actually reduces work
+
+Damage is computed from what **changed**, not from where the windows are:
 
 ```
 damage = union over windows whose rect differs from last frame of { OLD rect, NEW rect }
 ```
 
-⛔ **Both rects are required.** Without the OLD one a moving window leaves its previous pixels
-behind — the vacated region is never cleared and never re-copied. That failure reads as *"the
-framebuffer is stale"* rather than *"the damage model is wrong"*, which is the expensive way to
-find it. New `W_PX/W_PY/W_PW/W_PH` on the window, stamped **after** the window is drawn (stamping
-at the top of the frame would destroy the "was" before damage is computed from it).
+A static desktop damages nothing; a dragged window damages the band it vacated plus the band it now
+occupies. Both the clear (`#85` band form) and the chrome copy (`#39`) are limited to that band.
+`rend_dmg_*` had existed at `render.cyr:68-105` the whole time and the frame loop never called it.
 
-⚠ **Live client surfaces are damaged even when they do not move.** `render_window` re-reads a
-`bufid` window's buffer every frame, so its *content* changes without its geometry changing.
-Treating those as undamaged would freeze animating windows — a bug that would look like a client
-problem, not a compositor one.
+**Three correctness traps, each of which fails in a way that misdirects:**
+
+⛔ **Both rects are required.** Without the OLD one, a moving window leaves its previous pixels
+behind — the vacated region is never cleared and never re-copied. That reads as *"the framebuffer is
+stale"* rather than *"the damage model is wrong"*. New `W_PX/W_PY/W_PW/W_PH`, stamped **after** the
+window is drawn: stamping at the top of the frame would destroy the "was" before damage is computed
+from it.
+
+⚠ **Live client surfaces are damaged without moving.** `render_window` re-reads a `bufid` window's
+buffer every frame, so content changes while geometry does not. Treating those as undamaged would
+freeze animating windows — and would look like a *client* bug.
 
 ⚠ **The first frame forces a full clear.** On frame 1 every window is "changed" (prev rect = -1), so
-damage covers only the window rects and the background outside them would never be initialised —
+damage covers only the window rects and the background outside them would never be initialised,
 leaving whatever the framebuffer held at boot. The symptom is garbage around the windows on the
-first frame only, which gets dismissed as a boot artifact instead of diagnosed.
+first frame only — which gets dismissed as a boot artifact instead of diagnosed.
 
-**The clear is now banded too**, via `#85 gpu_fill`'s new `(color, y0, h)` form (agnos 1.56.17),
-with a CPU fallback over the same rows retained as the `#90` byte-compare reference.
+⛔ **Full-width bands only, in both the clear and the present, and it is an ABI limit not a
+shortcut.** `#39` takes its source **tightly packed, w*4 bytes per row**, with no stride
+(`agnos syscall.cyr:3794`); CP-DMA fills **contiguous** memory. A damage rect's rows are not
+contiguous in the framebuffer; a full-width band's are. True rect support needs a stride on `#39`
+and a per-row fill loop for `#85` — `h` packets instead of 1 — and should be measured before being
+assumed worthwhile.
 
-⛔ Still full-width bands only, in both the clear and the present: CP-DMA fills and `#39` blits both
-operate on **contiguous** memory, and only a full-width band is contiguous. An arbitrary rect needs
-a per-row loop — `h` packets instead of 1 — and should be measured before being assumed worthwhile.
+### Changed — cyrius pin 6.4.71 → 6.4.78
 
-## [0.9.8] - 2026-07-25
+⛔ **The gap contained a P0 this repo was exposed to.** 6.4.75 fixed *"`fn_table` growth past 8192
+silently corrupted six fn-indexed side tables"* — and aethersafha's compiled unit carries **10,492
+functions**, well past that threshold. Every build at 6.4.71 was made with those tables corrupted,
+silently.
 
-### Added — 3D arc rung 0a `chrome-clear`: the per-frame clear moves to the GPU
+Also in the gap: 6.4.72 added the agnos GPU-band `#90`/`#91` wrappers (this repo still reaches `#91`
+by raw `syscall` — follow-up), 6.4.77 fixed 67 reserved intrinsic names misreporting as
+`got unknown`, and 6.4.73/78 fixed `cyrius audit` compiling project sources with no stdlib includes.
 
-`render_frame` called `bhumi_fb_clear`, a CPU `store32` loop over the **entire framebuffer**, once
-per frame — 480,000 stores at the console's 800x600, 921,600 at 1280x720. `#85 gpu_fill` has exposed
-a CP-DMA fill for four minor versions and **the compositor never called it.**
+### Fixed — a VARIABLE forward-reference broke three test files
 
-New `ae_gpu_clear()` routes through `#85` when the GPU probe says present + armed + carveout, and
-falls back to the identical CPU loop otherwise.
+`render.cyr: undefined variable 'ae_frame_dmg'` in `tests/render.tcyr`, `tests/shell_render.tcyr`
+and `tests/foreign.tcyr`. The damage globals were first declared in `gpu.cyr`, which is included
+**after** `render.cyr` (`main.cyr:16` vs `:17`). A cyrius **function** forward-reference resolves —
+which is why `render_frame` can call `ae_gpu_clear()` defined later, and why `ae_gpu_active()` has
+always worked — but a **variable** forward-reference does not. Now declared in `render.cyr` before
+use; `gpu.cyr` reads them as a backward reference.
 
-⭐ **Why this is rung 0 of the 3D arc and not a later optimisation:** rung 9 puts a rasteriser on the
-GPU. Landing it into a compositor that still burns its frame budget on a CPU clear plus a
-full-framebuffer copy makes the win **invisible and unmeasurable** — you cannot see a GPU rasteriser
-through a CPU memcpy.
+⛔ **The lesson is not "move the variable."** `cyrius build src/main.cyr` was **green** while those
+three tests failed to compile: a green umbrella build does **not** prove the modules compile
+independently, and the test harness compiles them in units that never reach `gpu.cyr`.
 
-⚠ **The CPU path is retained, not deleted.** It is both the fallback (no GPU, QEMU, an older kernel)
-and the **reference** that rung 0a's `#90` byte-compare oracle diffs against.
+### ⛔ Deferred — rung 0c `chrome-move` (`#91 gpu_blit_bb`)
 
-⛔ **The gate is a runtime file, not a `#ifdef`** — `touch /.ae-no-gpu-clear` selects the CPU path,
-`rm` selects the GPU path, restart the compositor to apply. Two reasons: the plan requires each
-rung-0 sub-bite to be bisectable **at the prompt** rather than costing a reflash per step; and a
-`#ifdef` could not have worked anyway — cyrius `-D` does **not** propagate into included files, so
-`-D AE_GPU_CLEAR` compiled **byte-identical** to no flag (15,511,080 either way). Measured, not
-assumed. That is the ATOM_DRY class: a flag that appears to gate something and gates nothing.
+0c would move a window by copying pixels instead of re-rasterising chrome. It was blocked while
+`render_frame` unconditionally cleared and repainted everything every frame — there was no "only a
+window moved" signal for `#91` to hook into. **The damage model above supplies that signal**, so 0c
+is now unblocked and is the next bite rather than a blocked one.
 
-### Added — damage tracking is wired into the present path (infrastructure only, see the caveat)
-
-`ae_gpu_present_frame` copied the chrome layer with an **unconditional full-framebuffer** `#39`
-blit every frame — ~1.9 MB at 800x600, ~3.7 MB at 1280x720, moved whether or not anything changed.
-`rend_dmg_*` had existed at `render.cyr:68-105` the entire time and the frame loop never called it.
-It now accumulates per-window damage and the present copies a band.
-
-⛔ **FULL-WIDTH BANDS ONLY, and that is a hard ABI limit rather than a shortcut.** `#39` takes its
-source **tightly packed, w*4 bytes per row** — there is no stride parameter
-(`kernel/core/syscall.cyr:3794`). An arbitrary damage rect's rows are not contiguous in the
-framebuffer and cannot be handed to it; a full-width band is. True rect damage needs a stride on
-`#39`, which is a kernel ABI change and therefore a separate bite — not something to smuggle into a
-rung specified as zero kernel code.
-
-⚠⚠ **THIS CURRENTLY REDUCES NOTHING, AND THAT IS STATED HERE RATHER THAN DISCOVERED LATER.** The
-per-frame clear touches every pixel, so damage is by definition the whole screen and the band is
-always full-height. The plumbing is correct and the reference path is intact, but the copy is the
-same size it was. Two ways forward, both real bites: make the clear a **rect** fill (`#85` fills the
-whole back buffer today, so this is a kernel change), or stop clearing every frame and only repaint
-newly-exposed regions (a compositor-model change, zero kernel code).
-
-### ⛔ Deferred — rung 0c `chrome-move` (`#91 gpu_blit_bb`) is BLOCKED, with a reason
-
-0c would use `#91` to move a window by copying pixels instead of re-rasterising chrome. **There is
-no move fast path to hook it into:** `render_frame` unconditionally clears and repaints every window
-from scratch, every frame. Creating that path means teaching the compositor "only a window moved,
-nothing else changed" — which requires the damage model above to actually reduce something first.
-
-**0c is therefore blocked on 0a's second half, which is blocked on the clear.** Recorded as a
-dependency rather than attempted, because a `#91` call bolted onto a full-repaint loop would move
-pixels that are about to be overwritten — a change that measures as neutral and reads as done.
-
+Tests: **19/19 files, 133/133 assertions.** Host and `--agnos` targets both build clean.
 
 ## [0.9.7] - 2026-07-23
 

@@ -65,6 +65,17 @@ fn rend_blend(dst, src, a): i64 {
     return (r << 16) | (g << 8) | b;
 }
 
+# ⛔ DECLARED HERE, NOT IN gpu.cyr, AND THE PLACEMENT IS LOAD-BEARING.
+# render.cyr is included BEFORE gpu.cyr (main.cyr:16 vs :17). A cyrius FUNCTION forward-reference
+# resolves — which is why render_frame can call ae_gpu_clear() defined later — but a VARIABLE
+# forward-reference does NOT. These two were first written into gpu.cyr, where `cyrius build
+# src/main.cyr` succeeded while three tests failed to compile with "undefined variable
+# 'ae_frame_dmg'" — the harness compiles render.cyr in a unit that never reaches gpu.cyr.
+# ⚠ The lesson is not "move the variable" — it is that a green `cyrius build` on the umbrella
+# does NOT prove the modules compile independently. Run `cyrius test`.
+var ae_frame_dmg = 0;              # the per-frame damage tracker (allocated at startup)
+var ae_dmg_primed = 0;             # 0 until the first frame has done a FULL clear
+
 # Damage tracker — a per-frame dirty-rect bounding box (parity: DamageTracker).
 enum DmgOff {
     D_VALID = 0;

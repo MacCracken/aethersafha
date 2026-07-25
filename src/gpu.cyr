@@ -117,10 +117,13 @@ fn ae_gpu_active(): i64 {
 # boot and byte-compared, which is rung 0a's actual oracle.
 var ae_gpu_clear_off = 0 - 1;      # -1 = not yet probed
 var ae_dmg_off = 0 - 1;            # -1 = not yet probed
-var ae_frame_dmg = 0;              # the tracker render_frame accumulates into
-# 0 until the first frame has done a FULL clear. Damage on frame 1 covers only the window rects,
-# so the background outside them would otherwise never be initialised.
-var ae_dmg_primed = 0;
+# ⛔ ae_frame_dmg / ae_dmg_primed ARE DECLARED IN render.cyr, NOT HERE, and that placement is
+# load-bearing. render.cyr is included BEFORE this file (main.cyr:16 vs :17) and a VARIABLE
+# forward-reference does not resolve in cyrius — only a FUNCTION one does. Declaring them here
+# compiled fine for `cyrius build src/main.cyr` and broke three tests with
+# "undefined variable 'ae_frame_dmg'", because the test harness compiles render.cyr in a unit
+# that does not reach this file. Backward references (this file reading render.cyr's globals)
+# are fine; forward ones are not.
 
 # Same runtime-file idiom as the clear gate, for the same reason: bisectable at the prompt.
 #     touch /.ae-no-damage  -> full-frame copy (the reference path)
