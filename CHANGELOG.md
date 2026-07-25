@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.9.8] - 2026-07-25
 
 ### Added — 3D arc rung 0a `chrome-clear`: the per-frame clear moves to the GPU
 
@@ -29,6 +29,38 @@ rung-0 sub-bite to be bisectable **at the prompt** rather than costing a reflash
 `#ifdef` could not have worked anyway — cyrius `-D` does **not** propagate into included files, so
 `-D AE_GPU_CLEAR` compiled **byte-identical** to no flag (15,511,080 either way). Measured, not
 assumed. That is the ATOM_DRY class: a flag that appears to gate something and gates nothing.
+
+### Added — damage tracking is wired into the present path (infrastructure only, see the caveat)
+
+`ae_gpu_present_frame` copied the chrome layer with an **unconditional full-framebuffer** `#39`
+blit every frame — ~1.9 MB at 800x600, ~3.7 MB at 1280x720, moved whether or not anything changed.
+`rend_dmg_*` had existed at `render.cyr:68-105` the entire time and the frame loop never called it.
+It now accumulates per-window damage and the present copies a band.
+
+⛔ **FULL-WIDTH BANDS ONLY, and that is a hard ABI limit rather than a shortcut.** `#39` takes its
+source **tightly packed, w*4 bytes per row** — there is no stride parameter
+(`kernel/core/syscall.cyr:3794`). An arbitrary damage rect's rows are not contiguous in the
+framebuffer and cannot be handed to it; a full-width band is. True rect damage needs a stride on
+`#39`, which is a kernel ABI change and therefore a separate bite — not something to smuggle into a
+rung specified as zero kernel code.
+
+⚠⚠ **THIS CURRENTLY REDUCES NOTHING, AND THAT IS STATED HERE RATHER THAN DISCOVERED LATER.** The
+per-frame clear touches every pixel, so damage is by definition the whole screen and the band is
+always full-height. The plumbing is correct and the reference path is intact, but the copy is the
+same size it was. Two ways forward, both real bites: make the clear a **rect** fill (`#85` fills the
+whole back buffer today, so this is a kernel change), or stop clearing every frame and only repaint
+newly-exposed regions (a compositor-model change, zero kernel code).
+
+### ⛔ Deferred — rung 0c `chrome-move` (`#91 gpu_blit_bb`) is BLOCKED, with a reason
+
+0c would use `#91` to move a window by copying pixels instead of re-rasterising chrome. **There is
+no move fast path to hook it into:** `render_frame` unconditionally clears and repaints every window
+from scratch, every frame. Creating that path means teaching the compositor "only a window moved,
+nothing else changed" — which requires the damage model above to actually reduce something first.
+
+**0c is therefore blocked on 0a's second half, which is blocked on the clear.** Recorded as a
+dependency rather than attempted, because a `#91` call bolted onto a full-repaint loop would move
+pixels that are about to be overwritten — a change that measures as neutral and reads as done.
 
 
 ## [0.9.7] - 2026-07-23

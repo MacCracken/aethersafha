@@ -116,6 +116,25 @@ fn ae_gpu_active(): i64 {
 # Restart the compositor to pick up a change. Both frames can then be captured with `#90` in one
 # boot and byte-compared, which is rung 0a's actual oracle.
 var ae_gpu_clear_off = 0 - 1;      # -1 = not yet probed
+var ae_dmg_off = 0 - 1;            # -1 = not yet probed
+var ae_frame_dmg = 0;              # the tracker render_frame accumulates into
+
+# Same runtime-file idiom as the clear gate, for the same reason: bisectable at the prompt.
+#     touch /.ae-no-damage  -> full-frame copy (the reference path)
+#     rm /.ae-no-damage     -> damage-limited band (default)
+fn ae_dmg_band_enabled(): i64 {
+    if (ae_frame_dmg == 0) { return 0; }
+    if (ae_dmg_off >= 0) {
+        if (ae_dmg_off == 1) { return 0; }
+        return 1;
+    }
+    ae_dmg_off = 0;
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (file_exists("/.ae-no-damage") == 1) { ae_dmg_off = 1; }
+    #endif
+    if (ae_dmg_off == 1) { return 0; }
+    return 1;
+}
 
 fn ae_gpu_clear_disabled(): i64 {
     if (ae_gpu_clear_off >= 0) { return ae_gpu_clear_off; }
@@ -200,8 +219,39 @@ fn ae_gpu_present_frame(comp, fb): i64 {
     if (fw < 1) { return 0; }
     if (fh < 1) { return 0; }
 
-    # 1. Chrome layer -> back buffer, DEFERRED. dstxy = 0 (full-screen at the origin) | the defer bit.
-    if (sys_blit(px, fw, fh, AE_BLIT_DEFER) != 0) { return 0; }
+    # 1. Chrome layer -> back buffer, DEFERRED.
+    #
+    # ⭐ RUNG 0a, SECOND HALF — DAMAGE-LIMITED. This was an UNCONDITIONAL full-framebuffer copy
+    # every frame: fw*fh*4 bytes, ~1.9 MB at 800x600 and ~3.7 MB at 1280x720, moved whether or
+    # not anything changed. `rend_dmg_*` has existed at render.cyr:68-105 the whole time and the
+    # frame loop never called it.
+    #
+    # ⛔ FULL-WIDTH BANDS ONLY, AND THAT IS A HARD ABI LIMIT, NOT A SHORTCUT.
+    # `#39 blit` takes its source **tightly packed, w*4 bytes per row** — there is no stride
+    # parameter (kernel/core/syscall.cyr:3794). An arbitrary damage RECT's rows are therefore not
+    # contiguous in the framebuffer and cannot be handed to it. A full-width band IS contiguous,
+    # so `[y0, y1)` costs one blit with no staging copy and no kernel change — which is what
+    # keeps rung 0 at "zero kernel code".
+    # ⚠ True rect damage needs a stride on #39. That is a kernel ABI change and therefore a
+    # SEPARATE bite, not something to smuggle in here.
+    var by0 = 0;
+    var by1 = fh;
+    if (ae_dmg_band_enabled() == 1) {
+        if (rend_dmg_valid(ae_frame_dmg) == 1) {
+            by0 = rend_dmg_y(ae_frame_dmg);
+            by1 = by0 + rend_dmg_h(ae_frame_dmg);
+            if (by0 < 0) { by0 = 0; }
+            if (by1 > fh) { by1 = fh; }
+            # ⚠ An empty or inverted band means "nothing changed" — but presenting nothing would
+            # leave the previous frame on screen, which is correct ONLY if truly nothing moved.
+            # Falling back to the full copy on a degenerate band is the safe direction: a wasted
+            # copy is invisible, a skipped one is a stale screen.
+            if (by1 <= by0) { by0 = 0; by1 = fh; }
+        }
+    }
+    var bh = by1 - by0;
+    # Rows are contiguous, so the sub-band's source is simply an offset into the same buffer.
+    if (sys_blit(px + by0 * fw * 4, fw, bh, AE_BLIT_DEFER | (by0 << 16)) != 0) { return 0; }
 
     # 2. Each client surface -> back buffer, in the SAME bottom-to-top order render_frame paints, so
     #    overlapping windows stack identically to the CPU path.
