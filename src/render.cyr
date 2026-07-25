@@ -214,20 +214,85 @@ fn render_window(fb, win, focused): i64 {
 
 # render_frame: clear to desktop bg, then paint windows bottom-to-top.
 fn render_frame(comp, fb): i64 {
-    # RUNG 0a: route the per-frame clear through the GPU when one is available. Falls back to
-    # the identical CPU loop otherwise — see ae_gpu_clear in gpu.cyr for why the CPU path stays.
-    ae_gpu_clear(fb, ae_bhumi(rupa_theme_bg(rupa_theme_active())));
-
-    # ⭐ RUNG 0a: ACCUMULATE DAMAGE so the present can copy a band instead of the whole screen.
-    # ⚠ THE CLEAR TOUCHES EVERY PIXEL, so a frame that clears is by definition fully damaged and
-    # the band is the whole screen. That is honest, not a bug: the win here is the PRESENT-side
-    # copy, and the interesting case is a frame whose windows moved within an unchanged
-    # background. Making the clear itself damage-aware is a later bite — it needs the clear to
-    # become a rect fill, which #85 does not take today (it fills the whole back buffer).
-    if (ae_frame_dmg != 0) {
-        rend_dmg_clear(ae_frame_dmg);
-        rend_dmg_add(ae_frame_dmg, 0, 0, bhumi_fb_width(fb), bhumi_fb_height(fb));
+    # ============================================================================================
+    # ⭐ THE DAMAGE MODEL — 3D arc Phase 0, completed. This is what makes the band worth having.
+    # ============================================================================================
+    # 0.9.8 shipped the plumbing and it reduced NOTHING, because the clear touched every pixel and
+    # so damage was always the whole screen. The fix is not a bigger clear-optimisation — it is
+    # computing damage from what ACTUALLY CHANGED:
+    #
+    #     damage = union over windows whose rect differs from last frame of { old rect, new rect }
+    #
+    # ⛔ BOTH RECTS ARE REQUIRED. Without the OLD one, a window that moves leaves its previous
+    # pixels behind: the vacated region is never cleared and never re-copied. That failure reads
+    # as "the framebuffer is stale", not as "the damage model is wrong", which is the expensive
+    # way to find it.
+    # ⚠ A window that has never been drawn has an impossible prev-rect (-1) and therefore always
+    # counts as changed — a new window must not be mistaken for a stationary one.
+    var fw = bhumi_fb_width(fb);
+    var fh = bhumi_fb_height(fb);
+    var wv = comp_windows(comp);
+    var wn = vec_len(wv);
+    var wi = 0;
+    if (ae_frame_dmg != 0) { rend_dmg_clear(ae_frame_dmg); }
+    while (wi < wn) {
+        var w0 = vec_get(wv, wi);
+        if (win_rect_changed(w0) == 1) {
+            if (ae_frame_dmg != 0) {
+                if (win_px(w0) >= 0) {
+                    rend_dmg_add(ae_frame_dmg, win_px(w0), win_py(w0),
+                                 win_pw(w0), win_ph(w0) + TITLEBAR_H);
+                }
+                rend_dmg_add(ae_frame_dmg, win_x(w0), win_y(w0),
+                             win_w(w0), win_h(w0) + TITLEBAR_H);
+            }
+        }
+        wi = wi + 1;
     }
+
+    # ⚠ A LIVE CLIENT SURFACE CHANGES WITHOUT ITS RECT MOVING. render_window re-reads a bufid
+    # window's buffer every frame, so its CONTENT is damaged even when its geometry is not.
+    # Treating those as undamaged would freeze animating windows — the one bug this model could
+    # introduce that looks like a client problem rather than a compositor one.
+    wi = 0;
+    while (wi < wn) {
+        var w1 = vec_get(wv, wi);
+        if (win_bufid(w1) != 0) {
+            if (ae_frame_dmg != 0) {
+                rend_dmg_add(ae_frame_dmg, win_x(w1), win_y(w1),
+                             win_w(w1), win_h(w1) + TITLEBAR_H);
+            }
+        }
+        wi = wi + 1;
+    }
+
+    # Clear only the damaged band. ⛔ Full-width, because #85's band and #39's band are both
+    # contiguous-memory operations — see gpu.cyr and syscall.cyr:3794.
+    # ⛔ THE FIRST FRAME MUST BE A FULL CLEAR, and this is not a corner case — it is the common
+    # startup path. On frame 1 every window is "changed" (prev rect = -1), so damage is the union
+    # of the WINDOW rects — and the background OUTSIDE every window would never be cleared at all,
+    # leaving whatever the framebuffer happened to contain at boot. The symptom is garbage around
+    # the windows on the first frame only, which is exactly the kind of thing that gets dismissed
+    # as a boot artifact instead of diagnosed.
+    var cy0 = 0;
+    var chh = fh;
+    if (ae_dmg_primed == 0) {
+        ae_dmg_primed = 1;
+        cy0 = 0;
+        chh = fh;
+    }
+    if (ae_dmg_primed == 1) {
+    if (ae_frame_dmg != 0) {
+        if (rend_dmg_valid(ae_frame_dmg) == 1) {
+            cy0 = rend_dmg_y(ae_frame_dmg);
+            chh = rend_dmg_h(ae_frame_dmg);
+            if (cy0 < 0) { chh = chh + cy0; cy0 = 0; }
+            if (cy0 + chh > fh) { chh = fh - cy0; }
+            if (chh < 0) { chh = 0; }
+        }
+    }
+    }
+    ae_gpu_clear_band(fb, ae_bhumi(rupa_theme_bg(rupa_theme_active())), cy0, chh);
 
     var v = comp_windows(comp);
     var n = vec_len(v);
@@ -237,11 +302,10 @@ fn render_frame(comp, fb): i64 {
         if (i == comp_focused(comp)) { focused = 1; }
         var win = vec_get(v, i);
         render_window(fb, win, focused);
-        # Each window contributes its own rect; the tracker keeps the union's bounding box.
-        if (ae_frame_dmg != 0) {
-            rend_dmg_add(ae_frame_dmg, win_x(win), win_y(win),
-                         win_w(win), win_h(win) + TITLEBAR_H);
-        }
+        # ⛔ STAMP THE PREV RECT LAST, after the window is drawn. Stamping at the top of the frame
+        # would destroy the "was" before damage is computed from it, and every move would leave
+        # its vacated region uncleared.
+        win_stamp_prev(win);
         i = i + 1;
     }
     return 0;

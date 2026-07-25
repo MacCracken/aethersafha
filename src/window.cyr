@@ -38,7 +38,18 @@ enum WinOff {
     # instead of copying it opaquely (gpu_blit_shm#87). 0 = default, opaque copy.
     # ⚠ Must stay opt-in: a surface whose byte 3 is 0 — which a bare 0x00RRGGBB
     # colour produces — is FULLY TRANSPARENT under #92 and its window vanishes.
-    W_SZ    = 104;
+    # ⭐ PREVIOUS-FRAME RECT — the 3D arc's Phase-0 damage chain.
+    # Damage is the union of where a window WAS and where it IS. Without the "was", a window that
+    # moves leaves its old pixels on screen: the vacated region is never cleared and never
+    # re-copied, and the bug looks like a stale framebuffer rather than a damage-model error.
+    # ⚠ Seeded to an IMPOSSIBLE rect (-1) so the first frame after creation is always treated as
+    # fully damaged — a window that has never been drawn must not be mistaken for one that has
+    # not moved.
+    W_PX    = 104;
+    W_PY    = 112;
+    W_PW    = 120;
+    W_PH    = 128;
+    W_SZ    = 136;
 }
 
 # win_new(id, x, y, w, h, title_cstr) -> *Window (0 on OOM)
@@ -57,7 +68,33 @@ fn win_new(id, x, y, w, h, title): i64 {
     store64(p + W_BUFID, 0);
     store64(p + W_CFD, 0);
     store64(p + W_KEYMODE, 0);
+    store64(p + W_PX, 0 - 1);
+    store64(p + W_PY, 0 - 1);
+    store64(p + W_PW, 0);
+    store64(p + W_PH, 0);
     return p;
+}
+
+# The previous-frame rect. render_frame reads these to compute damage, then stamps the current
+# rect over them at the END of the frame — never at the start, or the "was" is lost.
+fn win_px(p) { return load64(p + W_PX); }
+fn win_py(p) { return load64(p + W_PY); }
+fn win_pw(p) { return load64(p + W_PW); }
+fn win_ph(p) { return load64(p + W_PH); }
+fn win_stamp_prev(p): i64 {
+    store64(p + W_PX, load64(p + W_X));
+    store64(p + W_PY, load64(p + W_Y));
+    store64(p + W_PW, load64(p + W_W));
+    store64(p + W_PH, load64(p + W_H));
+    return 0;
+}
+# 1 = this window's rect differs from last frame's (moved, resized, or never drawn).
+fn win_rect_changed(p): i64 {
+    if (load64(p + W_PX) != load64(p + W_X)) { return 1; }
+    if (load64(p + W_PY) != load64(p + W_Y)) { return 1; }
+    if (load64(p + W_PW) != load64(p + W_W)) { return 1; }
+    if (load64(p + W_PH) != load64(p + W_H)) { return 1; }
+    return 0;
 }
 
 fn win_id(p)    { return load64(p + W_ID); }

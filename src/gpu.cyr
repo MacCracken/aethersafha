@@ -118,6 +118,9 @@ fn ae_gpu_active(): i64 {
 var ae_gpu_clear_off = 0 - 1;      # -1 = not yet probed
 var ae_dmg_off = 0 - 1;            # -1 = not yet probed
 var ae_frame_dmg = 0;              # the tracker render_frame accumulates into
+# 0 until the first frame has done a FULL clear. Damage on frame 1 covers only the window rects,
+# so the background outside them would otherwise never be initialised.
+var ae_dmg_primed = 0;
 
 # Same runtime-file idiom as the clear gate, for the same reason: bisectable at the prompt.
 #     touch /.ae-no-damage  -> full-frame copy (the reference path)
@@ -145,6 +148,38 @@ fn ae_gpu_clear_disabled(): i64 {
     if (file_exists("/.ae-no-gpu-clear") == 1) { ae_gpu_clear_off = 1; }
     #endif
     return ae_gpu_clear_off;
+}
+
+# ae_gpu_clear_band — clear only rows [y0, y0+h) via #85's band form, falling back to a CPU loop
+# over the same rows. ⛔ Full-width only: CP-DMA fills contiguous memory, and only a full-width
+# band is contiguous (the identical constraint #39 has on its source).
+# ⚠ h <= 0 means "nothing changed" — and that is a legitimate frame, not an error. Clearing
+# nothing is correct there; the present will copy nothing and the screen keeps last frame.
+fn ae_gpu_clear_band(fb, pixel, y0, h): i64 {
+    if (h <= 0) { return 1; }
+    var fh = bhumi_fb_height(fb);
+    if (y0 <= 0) { if (h >= fh) { return ae_gpu_clear(fb, pixel); } }
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (ae_gpu_clear_disabled() == 0) {
+        if (ae_gpu_mode == 1) {
+            if (syscall(85, pixel, y0, h) == 0) { return 1; }
+        }
+    }
+    #endif
+    # CPU fallback over the SAME rows — the reference the #90 byte-compare diffs against.
+    var px = bhumi_fb_pixels(fb);
+    var fw = bhumi_fb_width(fb);
+    if (px == 0) { return 0; }
+    var yy = y0;
+    while (yy < y0 + h) {
+        var xx = 0;
+        while (xx < fw) {
+            store32(px + (yy * fw + xx) * 4, pixel);
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    return 0;
 }
 
 fn ae_gpu_clear(fb, pixel): i64 {

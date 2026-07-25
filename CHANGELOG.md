@@ -4,6 +4,42 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.9] - 2026-07-25
+
+### Added — the damage model actually reduces now (0.9.8's caveat, closed)
+
+0.9.8 shipped damage plumbing that **reduced nothing**: the per-frame clear touched every pixel, so
+damage was always the whole screen. Both halves are now real.
+
+**Damage is computed from what CHANGED**, not from where the windows are:
+
+```
+damage = union over windows whose rect differs from last frame of { OLD rect, NEW rect }
+```
+
+⛔ **Both rects are required.** Without the OLD one a moving window leaves its previous pixels
+behind — the vacated region is never cleared and never re-copied. That failure reads as *"the
+framebuffer is stale"* rather than *"the damage model is wrong"*, which is the expensive way to
+find it. New `W_PX/W_PY/W_PW/W_PH` on the window, stamped **after** the window is drawn (stamping
+at the top of the frame would destroy the "was" before damage is computed from it).
+
+⚠ **Live client surfaces are damaged even when they do not move.** `render_window` re-reads a
+`bufid` window's buffer every frame, so its *content* changes without its geometry changing.
+Treating those as undamaged would freeze animating windows — a bug that would look like a client
+problem, not a compositor one.
+
+⚠ **The first frame forces a full clear.** On frame 1 every window is "changed" (prev rect = -1), so
+damage covers only the window rects and the background outside them would never be initialised —
+leaving whatever the framebuffer held at boot. The symptom is garbage around the windows on the
+first frame only, which gets dismissed as a boot artifact instead of diagnosed.
+
+**The clear is now banded too**, via `#85 gpu_fill`'s new `(color, y0, h)` form (agnos 1.56.17),
+with a CPU fallback over the same rows retained as the `#90` byte-compare reference.
+
+⛔ Still full-width bands only, in both the clear and the present: CP-DMA fills and `#39` blits both
+operate on **contiguous** memory, and only a full-width band is contiguous. An arbitrary rect needs
+a per-row loop — `h` packets instead of 1 — and should be measured before being assumed worthwhile.
+
 ## [0.9.8] - 2026-07-25
 
 ### Added — 3D arc rung 0a `chrome-clear`: the per-frame clear moves to the GPU
