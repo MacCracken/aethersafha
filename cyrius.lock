@@ -1,3 +1,4 @@
+commit	8b7e9b4342fe470a25c372b46b61d7b7fc10ec82	setu	https://github.com/MacCracken/setu.git	0.7.0
 commit	9b28746811cf7fff3dffd44f0b6d21391b1528b9	sakshi	https://github.com/MacCracken/sakshi.git	2.4.3
 d9f3b17ddbbe1bba48917c3a679807b01c39c4a1ce776efdbdfbb7a1680e86e4  lib/tagged.cyr
 b96a50f8df3b533649d09cd239578811a22097434e09d89b113ce8b7f56801db  lib/net.cyr

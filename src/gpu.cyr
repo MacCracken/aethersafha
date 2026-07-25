@@ -43,8 +43,8 @@ var AE_GPU_CAP_PRESENT  = 1;    # bit0 — a GPU is bound
 var AE_GPU_CAP_ARMED    = 2;    # bit1 — the double-buffer is armed (a back buffer exists to composite into)
 var AE_GPU_CAP_CARVEOUT = 4;    # bit2 — a GPU carveout exists, so #86 slots can be served
 var AE_GPU_CAP_SHADER   = 8;    # bit3 — SHADER COMPOSITING available, i.e. gpu_shader_op#92 will actually
-                                # run. Mirrors the kernel's own gate: #92 refuses with E_UNPROVEN unless
-                                # the dispatch envelope was proven on THIS boot.
+# run. Mirrors the kernel's own gate: #92 refuses with E_UNPROVEN unless
+# the dispatch envelope was proven on THIS boot.
 
 # blit#39 a4 bit 40 — composite into the back buffer WITHOUT flipping. The explicit half of the
 # blit/present split: a compositor accumulates a frame, then calls #84 once.
@@ -83,6 +83,68 @@ fn ae_gpu_active(): i64 {
     return ae_gpu_mode;
 }
 
+# ============================================================================================
+# 3D ARC RUNG 0a `chrome-clear` — pay the FIRST half of the #92 debt: stop clearing the whole
+# framebuffer on the CPU every single frame.
+# ============================================================================================
+# ⛔ WHAT THIS REPLACES. bhumi_fb_clear (bhumi/src/output.cyr:155) is a `store32` loop over the
+# ENTIRE framebuffer, run once per frame from render_frame. At the console's 800x600 that is
+# 480,000 stores a frame; at 1280x720 it is 921,600. The GPU has had a CP-DMA fill exposed as
+# `#85 gpu_fill` for four minor versions and **the compositor has never called it.**
+#
+# ⭐ WHY THIS IS RUNG 0 AND NOT AN OPTIMISATION FOR LATER. Rung 9 puts a rasteriser on the GPU.
+# If it lands into a compositor that still spends its whole frame budget on a CPU clear plus a
+# full-framebuffer copy, **the win is invisible and unmeasurable** — you cannot see a GPU
+# rasteriser through a CPU memcpy. The batching path has to exist before the thing it makes
+# faster does.
+#
+# ⚠ THE CPU PATH IS RETAINED, NOT DELETED. It is both the fallback (no GPU, QEMU, an old kernel
+# that does not advertise the op) and the REFERENCE the `#90` byte-compare oracle diffs against.
+# Deleting it would remove the only thing that can say the GPU clear is correct.
+# ⛔ THE GATE IS RUNTIME, NOT A BUILD FLAG, AND THAT IS DELIBERATE.
+# The plan asks for each rung-0 sub-bite to be "behind its own consumer flag so the operator can
+# bisect AT THE PROMPT". A `#ifdef` cannot do that — it costs a reflash per bisection step, and
+# this arc has already lost a night to reflash-per-hypothesis.
+# ⚠ It also could not work as written: cyrius `-D` does NOT propagate into included files (the
+# same caveat agnos's build.sh works around by prepending), so `-D AE_GPU_CLEAR` compiled
+# byte-identical to no flag at all — 15 511 080 bytes either way. That is the ATOM_DRY class:
+# a flag that appears to gate something and gates nothing. Measured, not assumed.
+#
+# So the gate is a FILE, the same idiom as the modeset arm-once latch:
+#     rm /.ae-no-gpu-clear   -> GPU clear (default)
+#     touch /.ae-no-gpu-clear -> CPU clear, the reference path
+# Restart the compositor to pick up a change. Both frames can then be captured with `#90` in one
+# boot and byte-compared, which is rung 0a's actual oracle.
+var ae_gpu_clear_off = 0 - 1;      # -1 = not yet probed
+
+fn ae_gpu_clear_disabled(): i64 {
+    if (ae_gpu_clear_off >= 0) { return ae_gpu_clear_off; }
+    ae_gpu_clear_off = 0;
+    #ifdef CYRIUS_TARGET_AGNOS
+    # ⚠ Probed ONCE. A per-frame stat would put a syscall in the frame loop, which is exactly the
+    # kind of cost this rung exists to remove.
+    if (file_exists("/.ae-no-gpu-clear") == 1) { ae_gpu_clear_off = 1; }
+    #endif
+    return ae_gpu_clear_off;
+}
+
+fn ae_gpu_clear(fb, pixel): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (ae_gpu_clear_disabled() == 1) {
+        bhumi_fb_clear(fb, pixel);
+        return 0;
+    }
+    if (ae_gpu_mode == 1) {
+        # #85 names only the colour; the KERNEL targets the armed back buffer. Ring 3 never
+        # supplies an address here, which is why this op needs no bounds argument.
+        if (syscall(85, pixel, 0, 0) == 0) { return 1; }
+    }
+    #endif
+    # Fallback / reference. ⚠ Also the path every non-agnos build takes, so the host build of the
+    # compositor is unaffected by this rung entirely.
+    bhumi_fb_clear(fb, pixel);
+    return 0;
+}
 
 # ae_gpu_blend_rect — gpu_shader_op #92 op 0x01 (BLEND_RECT): PREMULTIPLIED src-over on the shader cores.
 # Returns 0 on success, non-zero on refusal.
@@ -106,7 +168,7 @@ fn ae_gpu_active(): i64 {
 # REJECTS a non-zero reserved field rather than ignoring it, which is what keeps today's unused dwords safe
 # to define in a later kernel without an ABI break.
 fn ae_gpu_blend_rect(bid, wh, dstxy): i64 {
-#ifdef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_TARGET_AGNOS
     var d[64];                                  # function-local => 64 BYTES = exactly one op record
     var z = 0;
     while (z < 16) { store32(&d + z * 4, 0); z = z + 1; }
@@ -115,10 +177,10 @@ fn ae_gpu_blend_rect(bid, wh, dstxy): i64 {
     store32(&d + 16, wh);                       # (h << 16) | w
     store32(&d + 20, dstxy);                    # (dy << 16) | dx
     return syscall(92, &d, 64);                 # 0 = ok; -((idx<<8)|reason) names the failing op
-#endif
-#ifndef CYRIUS_TARGET_AGNOS
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     return 0 - 1;
-#endif
+    #endif
 }
 
 # ae_gpu_present_frame — composite and flip one frame on the GPU.

@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added — 3D arc rung 0a `chrome-clear`: the per-frame clear moves to the GPU
+
+`render_frame` called `bhumi_fb_clear`, a CPU `store32` loop over the **entire framebuffer**, once
+per frame — 480,000 stores at the console's 800x600, 921,600 at 1280x720. `#85 gpu_fill` has exposed
+a CP-DMA fill for four minor versions and **the compositor never called it.**
+
+New `ae_gpu_clear()` routes through `#85` when the GPU probe says present + armed + carveout, and
+falls back to the identical CPU loop otherwise.
+
+⭐ **Why this is rung 0 of the 3D arc and not a later optimisation:** rung 9 puts a rasteriser on the
+GPU. Landing it into a compositor that still burns its frame budget on a CPU clear plus a
+full-framebuffer copy makes the win **invisible and unmeasurable** — you cannot see a GPU rasteriser
+through a CPU memcpy.
+
+⚠ **The CPU path is retained, not deleted.** It is both the fallback (no GPU, QEMU, an older kernel)
+and the **reference** that rung 0a's `#90` byte-compare oracle diffs against.
+
+⛔ **The gate is a runtime file, not a `#ifdef`** — `touch /.ae-no-gpu-clear` selects the CPU path,
+`rm` selects the GPU path, restart the compositor to apply. Two reasons: the plan requires each
+rung-0 sub-bite to be bisectable **at the prompt** rather than costing a reflash per step; and a
+`#ifdef` could not have worked anyway — cyrius `-D` does **not** propagate into included files, so
+`-D AE_GPU_CLEAR` compiled **byte-identical** to no flag (15,511,080 either way). Measured, not
+assumed. That is the ATOM_DRY class: a flag that appears to gate something and gates nothing.
+
+
 ## [0.9.7] - 2026-07-23
 
 ### Added — `#92 gpu_shader_op` op 0x01: per-pixel PREMULTIPLIED blending on the shader cores
