@@ -4,6 +4,67 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.11.1] - 2026-08-02
+
+**The desktop composited on real silicon.** `run /bin/aethersafha --selftest` on archaemenid
+(AMD gfx90c / DCN2.1) returned **`run: exit 95`** — the client's exact sentinel words read back out
+of the GPU's own back buffer at the client's screen coordinates, margin clean, far frame clean.
+First time any of this repo's GPU path has executed on hardware. The bare desktop also rendered:
+MUDRA chrome, kashi titlebar text, cyan focus strip, traffic lights, on the panel.
+
+The same burn found two defects that only hardware could show.
+
+### Fixed — ⛔ THE COMPOSITOR ASKED THE KERNEL FOR THE SCREEN SIZE AND THREW THE ANSWER AWAY
+
+The boot log printed `gpu: console geometry matched to surface 800x600` and then, four lines later,
+this compositor printing `1280` / `720` — its fallback.
+
+`ae_query_geometry` tested `bhumi_output_query(&info) != BHUMI_FBINFO_SIZE`. agnos `#38 fbinfo`
+fills the struct and returns **0** (0-ok convention), and bhumi passed that 0 through while
+documenting "returns 24". So `0 != 24` sent **every agnos boot** to the hardcoded fallback. Fixed at
+the source in **bhumi 1.1.3**; this repo now also accepts any non-negative return and validates the
+struct's *contents* (the present bit plus sane dimensions), so a return-code convention changing one
+repo away cannot silently resize the desktop again.
+
+⛔ **This defeated 0.10.0's headline fix, in full, for its entire life.** That release shipped "THE
+COMPOSITOR WAS SIZED 1.6× WRONG FOR THE PANEL" specifically to stop assuming 1280x720 and *ask* —
+and the asking never once worked on iron. The photo from this burn shows the seeded "Files" window
+at (240,180) 520×360, which is the 1280x720 arithmetic; at the true 800x600 it is (150,150) 325×300.
+
+⚠ **The exit-95 result stands.** The oracle reads the kernel back buffer at the window body's
+coordinates, and `#87` blits to those same coordinates — both well inside 800x600 either way. What
+the wrong geometry corrupted was the chrome layer (`#39` clipped it) and, more importantly,
+`ae_gpu_window_admissible`, which was judging windows against a screen 1.6× larger than the real
+one — so it would admit a window the kernel then *rejects rather than clips*, dropping the whole
+frame to the CPU.
+
+### Added — the geometry line now says where the number came from
+
+⛔ It used to print two bare integers. `1280` / `720` is a perfectly plausible desktop size; nothing
+about it said *"I asked and discarded the reply."* A number alone cannot distinguish a measurement
+from a default, and that distinction was the entire bug. It now states which of the two it is.
+
+### Added — the frame loop names the key that stops it
+
+On the burn the desktop rendered and then **exited immediately** — `aethersafha: frame loop ok`,
+straight back to the prompt, with nothing said about why. `IA_QUIT` has exactly one source
+(`HID_ESC`), so either an Esc genuinely arrived or the Set-1 decode manufactured one, and those want
+opposite fixes. The loop now prints the HID usage and the frame number on quit.
+
+⚠ **Deliberately instrumented rather than guessed.** ⭐ The relevant fact for whoever reads the next
+boot: `kbscan#42` is a **raw** drain, so the compositor sees every scancode buffered since boot —
+including everything typed at the agnsh prompt to launch it.
+
+### Changed — `[deps.bhumi]` 1.1.2 → 1.1.3, `[deps.mehman]` 1.0.0 → 1.0.1
+
+⚠ mehman's published 1.0.0 tag still called `backend_name`, which kavach renamed to
+`os_backend_name` at 3.8.2; its source had followed but was never cut, and `path = "../mehman"`
+masked that in every local build until CI resolved the real tag. Fixed in **mehman 1.0.1**.
+
+### Verified
+
+Host + `--agnos` green; 21 suites, 0 failures; `--selftest` still exits 96 on a GPU-less host.
+
 ## [0.11.0] - 2026-08-02
 
 The compositor can be flashed, run on iron, and **report what happened**. Every piece of that
