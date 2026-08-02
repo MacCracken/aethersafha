@@ -1,0 +1,174 @@
+# aethersafha — the CPU-fallback oracle.
+#
+# ⭐ THE INVARIANT UNDER TEST, stated once so it is not weakened by later edits:
+#
+#     The exact 32-bit word a client wrote into its surface is readable at that client's
+#     screen coordinates after a frame, WHATEVER THE GPU DECIDED.
+#
+# That is an EXTERNAL invariant. The sentinels below are chosen by this file and are
+# derivable from no compositor state, so a compositor that shares every one of the
+# renderer's premises still cannot produce them by accident. This matters here more than
+# usual: this arc has twice paid an iron burn for a green oracle that compared two
+# implementations of the same idea (agnos gpu.md §2.1, "A GREEN ORACLE ON A SHARED
+# PREMISE PROVES NOTHING").
+#
+# ⛔ WHAT THIS CATCHES, and why the bug is invisible without forcing the mode.
+# render_window skips its per-pixel client composite whenever hardware compositing is
+# believed to be active. Before this suite, the belief was `ae_gpu_active()` — a global
+# set once at startup and never cleared. But ae_gpu_present_frame refuses a frame for
+# ordinary reasons (a window past an edge, a premultiplied surface with no shader path),
+# and on refusal the caller presents the framebuffer it has: chrome, and no window
+# content. The two decisions were made in different places from different data.
+#
+# ⚠ On a host build ae_gpu_probe() cannot set the mode — the whole probe is inside
+# `#ifdef CYRIUS_TARGET_AGNOS`. So the test writes `ae_gpu_mode` DIRECTLY. That is not a
+# hack around the seam; it is the only way to reach the branch on a machine with no GPU,
+# and it reproduces the agnos condition exactly: mode believed active, present refusing.
+#
+# Stdlib + [deps.*] auto-included via cyrius.cyml.
+include "lib/bhumi.cyr"
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/theme.cyr"
+include "src/render.cyr"
+include "src/gpu.cyr"
+
+# Sentinels. ⚠ Deliberately not black, not white, not any rupa token, and not a value any
+# fill_rect in the chrome path emits — so "the sentinel is present" cannot be satisfied by
+# a coincidence of the background or a decoration.
+enum Sentinel {
+    SENT_A = 0x00C0FFEE;
+    SENT_B = 0x00BADA55;
+}
+
+# Fill a w*h XRGB8888 client surface with one word, the way a setu client would.
+fn seed_surface(w, h, word): i64 {
+    var px = alloc(w * h * 4);
+    if (px == 0) { return 0; }
+    var i = 0;
+    while (i < w * h) {
+        store32(px + i * 4, word);
+        i = i + 1;
+    }
+    return px;
+}
+
+fn main() {
+    alloc_init();
+    kashi_font_init();
+
+    # ── Case 1 — a window the GPU would ACCEPT (fully on-screen) ────────────────
+    # Even here the host has no GPU, so the frame must fall back and the content must land.
+    test_group("gpu fallback — an accepted-shape window still shows its content");
+    var fb = bhumi_fb_new(400, 400);
+    bhumi_fb_clear(fb, 0);
+    var comp = comp_new();
+    var wa = comp_create_window(comp, 20, 20, 100, 100, "A");
+    win_set_pix(wa, seed_surface(100, 100, Sentinel.SENT_A));
+
+    # Force the belief that hardware compositing is live — the agnos condition.
+    ae_gpu_mode = 1;
+    ae_gpu_blend = 0;
+
+    ae_gpu_frame_plan(comp, fb);
+    render_window(fb, wa, 1);
+    # The body sits below the titlebar, exactly as render_window and gpu.cyr both place it.
+    assert_eq(bhumi_fb_get(fb, 20 + 50, 20 + TITLEBAR_H + 50),
+              Sentinel.SENT_A, "on-screen window: client word reaches the framebuffer");
+    assert_eq(bhumi_fb_get(fb, 20, 20 + TITLEBAR_H),
+              Sentinel.SENT_A, "on-screen window: top-left body pixel is the client's");
+
+    # ── Case 2 — a window the GPU REFUSES (runs past the bottom edge) ──────────────
+    # ⛔ This is the case that was silently blank. The kernel rejects rather than clips, so a
+    # window dragged past an edge — ordinary use, not an edge case — made EVERY window in
+    # the frame vanish, not just this one.
+    test_group("gpu fallback — a refused window still shows its content");
+    var fb2 = bhumi_fb_new(400, 400);
+    bhumi_fb_clear(fb2, 0);
+    var comp2 = comp_new();
+    var wb = comp_create_window(comp2, 10, 340, 80, 80, "B");   # 340 + 30 + 80 = 450 > 400
+    win_set_pix(wb, seed_surface(80, 80, Sentinel.SENT_B));
+    # ⚠ Deliberately NO bufid on the window that gets RENDERED. render_window pulls a live surface
+    # through setu_buf_read, and this suite does not include setu — it is testing the renderer's
+    # gate, not the transport. The admissibility group below uses its own bufid-bearing windows,
+    # which are never rendered.
+
+    ae_gpu_mode = 1;
+    ae_gpu_frame_plan(comp2, fb2);
+    render_window(fb2, wb, 1);
+    assert_eq(bhumi_fb_get(fb2, 10 + 40, 340 + TITLEBAR_H + 10),
+              Sentinel.SENT_B, "refused window: client word STILL reaches the framebuffer");
+
+    # ⚠ And the present must not issue a partial frame after declining.
+    assert_eq(ae_gpu_present_frame(comp2, fb2), 0, "a declined frame is not presented on the GPU");
+
+    # ── The admissibility rule itself, tested directly ────────────────────
+    # ⚠ ae_gpu_frame_plan short-circuits to 0 off agnos (there is no GPU frame on a host, ever),
+    # so asserting on IT here would be vacuous — it returns 0 whether or not the rule works. The
+    # rule is factored into a pure, #ifdef-free function precisely so it can be exercised on a
+    # machine with no GPU, instead of being tested by burning a boot on the operator's only box.
+    test_group("gpu fallback — the admissibility rule (pure, target-independent)");
+    var woff = win_new(40, 10, 340, 80, 80, "OFF");   # never rendered — see the note above
+    win_set_bufid(woff, 7);
+    assert_eq(ae_gpu_window_admissible(woff, 400, 400), 0, "past the bottom edge: refused");
+    assert_eq(ae_gpu_window_admissible(woff, 400, 800), 1, "same window, taller surface: admitted");
+    # ⚠ A window with NO client buffer has nothing for the GPU to blit, so it is trivially
+    # admissible whatever its geometry — the rule must not refuse a frame over chrome-only windows.
+    var wnobuf = win_new(41, 10, 340, 80, 80, "NOBUF");
+    assert_eq(ae_gpu_window_admissible(wnobuf, 400, 400), 1, "no client buffer: always admitted");
+    var wedge = win_new(50, 0, 0, 100, 100, "E");
+    win_set_bufid(wedge, 8);
+    assert_eq(ae_gpu_window_admissible(wedge, 100, 130), 1, "exactly flush with both edges: admitted");
+    assert_eq(ae_gpu_window_admissible(wedge, 99, 130), 0, "one column short: refused");
+    assert_eq(ae_gpu_window_admissible(wedge, 100, 129), 0, "one row short: refused");
+    win_move(wedge, 0 - 1, 0);
+    assert_eq(ae_gpu_window_admissible(wedge, 400, 400), 0, "negative x: refused");
+    win_move(wedge, 0, 0);
+    # A premultiplied surface with no shader path must be refused, not copied opaquely.
+    win_set_premul(wedge, 1);
+    ae_gpu_blend = 0;
+    assert_eq(ae_gpu_window_admissible(wedge, 400, 400), 0, "premultiplied, no shader path: refused");
+    ae_gpu_blend = 1;
+    assert_eq(ae_gpu_window_admissible(wedge, 400, 400), 1, "premultiplied, shader available: admitted");
+    ae_gpu_blend = 0;
+
+    # ── Case 3 — a bufid == 0 window (a one-shot static present) ────────────────
+    # Skipped by gpu.cyr's blit loop AND, before this fix, by render.cyr's CPU path — so
+    # it was drawn by nobody at all.
+    test_group("gpu fallback — a static (bufid 0) surface is drawn by someone");
+    var fb3 = bhumi_fb_new(200, 200);
+    bhumi_fb_clear(fb3, 0);
+    var comp3 = comp_new();
+    var wc = comp_create_window(comp3, 10, 10, 60, 60, "C");
+    win_set_pix(wc, seed_surface(60, 60, Sentinel.SENT_A));
+    assert_eq(win_bufid(wc), 0, "case 3 really is the bufid==0 shape");
+
+    ae_gpu_mode = 1;
+    ae_gpu_frame_plan(comp3, fb3);
+    render_window(fb3, wc, 0);
+    assert_eq(bhumi_fb_get(fb3, 10 + 30, 10 + TITLEBAR_H + 30),
+              Sentinel.SENT_A, "static surface: client word reaches the framebuffer");
+
+    # ── Case 4 — W_PREMUL is initialised, not inherited ───────────────────
+    # ⚠ lib/alloc.cyr is a bump allocator with no memset, so an uninitialised slot reads
+    # whatever the previous tenant left. win_new zeroed every other field and missed this
+    # one. A garbage premul flag routes an opaque surface down the blend path.
+    test_group("window — every field win_new owns is initialised");
+    var wd = win_new(99, 0, 0, 10, 10, "D");
+    assert_eq(win_premul(wd), 0, "W_PREMUL is zero on a fresh window");
+    assert_eq(win_keymode(wd), 0, "W_KEYMODE is zero on a fresh window");
+    assert_eq(win_bufid(wd), 0, "W_BUFID is zero on a fresh window");
+    assert_eq(win_cfd(wd), 0, "W_CFD is zero on a fresh window");
+
+    # ── Case 5 — the mode demotes on refusal instead of latching ────────────────
+    # A GPU that starts refusing must leave a WORKING CPU desktop behind, not a permanently
+    # chrome-only one.
+    test_group("gpu fallback — a hard refusal demotes the mode");
+    ae_gpu_mode = 1;
+    ae_gpu_demote();
+    assert_eq(ae_gpu_active(), 0, "demote clears the active flag");
+    assert_eq(ae_gpu_frame_plan(comp, fb), 0, "a demoted compositor plans no GPU frame");
+
+    return 0;
+}

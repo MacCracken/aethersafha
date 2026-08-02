@@ -106,7 +106,26 @@ symbols), each compiling + smoke-tested. Driven by the parity workflow.
 ## Out of scope (for v1.0)
 - Rust `system_tests.rs` port (verification code, not runtime) — re-expressed as
   `.tcyr` suites per module instead.
-- GPU acceleration — the software renderer is the v1.0 path. **mabda 4.0.2 is
-  already Cyrius-ported** (`dist/mabda.cyr`, also folded into the cyrius stdlib as
-  `lib/mabda.cyr`); wire it via `[deps.mabda]` (or a `gpu` build path) when
-  hardware acceleration is wanted. No blocker — just deferred.
+
+## ⛔ CORRECTED 2026-08-01 — GPU acceleration is NOT out of scope, and it does NOT go through mabda
+
+This section previously read *"GPU acceleration — the software renderer is the v1.0 path… wire it
+via `[deps.mabda]` when hardware acceleration is wanted."* Both halves are false, and the claim
+survived in three live documents at once (here, `parity-plan.md` "Bite H", and agnosticos'
+`planning/desktop-arc-handoff.md`), which is more than one session's worth of wasted direction.
+
+- **It already shipped.** GPU compositing landed across 0.9.6–0.9.8: `src/gpu.cyr` composites client
+  surfaces with `gpu_blit_shm` **#87** straight out of their GPU-visible shm slots, blends
+  premultiplied surfaces with `gpu_shader_op` **#92** op 0x01, and flips with `present` **#84**.
+- **There is no `[deps.mabda]` in this repo's manifest, and there does not need to be.** The path
+  is the agnos kernel's ring-3 GPU band (`#82`-`#94`), reached by direct syscall. mabda's GPU
+  surface rides Linux's driver stack; the sovereign compositor does not go through it.
+- **What is genuinely still open** is the rest of the band. The desktop consumes 6 of 13 band
+  numbers and 1 of 14 `#92` ops. Unconsumed and valuable: `#88 gpu_fill_rect` (kills the per-pixel
+  chrome rects), `#92` op 0x03 GLYPH_1BPP (all desktop text off the CPU), `#92` batching, `#90`/`#91`
+  (a readback oracle and GPU window-move), and the 3D ops `0x08`-`0x10`.
+
+⚠ **Nothing in this band has ever executed on iron.** No desktop binary appears in any `stage_one`
+call in agnos's `scripts/burn/stage-tools.sh`, and QEMU cannot substitute: it exposes no AMD PCI
+device, so `gpu_find` never matches, `gpu_present` stays 0, `gpu_caps` reports flags 0, and
+`ae_gpu_probe` answers 0. **A green desktop smoke says nothing about the GPU path, structurally.**

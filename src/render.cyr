@@ -67,14 +67,25 @@ fn rend_blend(dst, src, a): i64 {
 
 # ⛔ DECLARED HERE, NOT IN gpu.cyr, AND THE PLACEMENT IS LOAD-BEARING.
 # render.cyr is included BEFORE gpu.cyr (main.cyr:16 vs :17). A cyrius FUNCTION forward-reference
-# resolves — which is why render_frame can call ae_gpu_clear() defined later — but a VARIABLE
-# forward-reference does NOT. These two were first written into gpu.cyr, where `cyrius build
-# src/main.cyr` succeeded while three tests failed to compile with "undefined variable
-# 'ae_frame_dmg'" — the harness compiles render.cyr in a unit that never reaches gpu.cyr.
+# resolves but a VARIABLE forward-reference does NOT. These were first written into gpu.cyr, where
+# `cyrius build src/main.cyr` succeeded while three tests failed to compile with "undefined
+# variable 'ae_frame_dmg'" — the harness compiles render.cyr in a unit that never reaches gpu.cyr.
 # ⚠ The lesson is not "move the variable" — it is that a green `cyrius build` on the umbrella
 # does NOT prove the modules compile independently. Run `cyrius test`.
 var ae_frame_dmg = 0;              # the per-frame damage tracker (allocated at startup)
 var ae_dmg_primed = 0;             # 0 until the first frame has done a FULL clear
+
+# ⭐ THE FRAME PLAN — the single place "is this a GPU frame?" is decided.
+# Written once per frame by ae_gpu_frame_plan (gpu.cyr) BEFORE anything is rendered; read by
+# render_window below and by ae_gpu_present_frame. ⛔ Nothing else may set these, and nothing may
+# re-derive the answer: the bug this replaced was two places deciding the same question from
+# different data, so the renderer skipped its CPU composite for a frame the GPU then refused,
+# and the desktop showed chrome with no window content.
+# ⚠ Declared here rather than in gpu.cyr for the forward-reference reason above — and it also
+# keeps render.cyr free of any call INTO gpu.cyr, so the module still compiles standalone (which
+# is what tests/render.tcyr and tests/shell_render.tcyr rely on).
+var ae_gpu_frame_ok = 0;           # 1 = the GPU will composite this whole frame
+var ae_gpu_plan_n = 0;             # window count the plan was computed against (staleness guard)
 
 # Damage tracker — a per-frame dirty-rect bounding box (parity: DamageTracker).
 enum DmgOff {
@@ -192,16 +203,21 @@ fn render_window(fb, win, focused): i64 {
     var spix = win_pix(win);
     var bid = win_bufid(win);
     #
-    # ⚠ SKIPPED ENTIRELY under hardware compositing. When ae_gpu_active() is 1 the client surface is
+    # ⚠ SKIPPED ENTIRELY when the GPU has committed to this frame. The client surface is then
     # composited by the KERNEL straight out of its GPU-visible shm slot via gpu_blit_shm #87 (see
     # src/gpu.cyr), which replaces BOTH of the things below: the setu_buf_read #73 full-surface copy AND
     # the per-pixel loop. The pixels never enter userland and never touch the CPU. Chrome above still
     # renders here — #87 composites on top of it, which is exactly why gpu.cyr blits the chrome layer with
     # blit#39's DEFER bit first and presents once at the end.
     #
-    # ⚠ This is a forward reference to gpu.cyr, which is included AFTER this file (it needs TITLEBAR_H).
-    # It resolves because ae_gpu_active() only reads a global that the frame loop sets at startup.
-    if (ae_gpu_active() == 0) {
+    # ⛔ THE GATE IS ae_gpu_frame_ok, NOT "is there a GPU". It used to be `ae_gpu_active()` — a flag set
+    # once at startup meaning only "a GPU exists and is armed". But ae_gpu_present_frame refuses
+    # individual FRAMES for reasons this function cannot see (a window past an edge, a premultiplied
+    # surface with no shader path), and on refusal the caller presented the framebuffer as it stood:
+    # chrome, and no window content at all. ae_gpu_frame_plan now settles the question for the whole
+    # frame BEFORE any of it is drawn, so "the GPU will do it" and "so I will not" are the same fact
+    # read from the same place.
+    if (ae_gpu_frame_ok == 0) {
         # LIVE surface: pull the client's LATEST frame out of the shared buffer into the cache each
         # frame. A client that keeps writing its buffer (setu_buf_write, no re-present) animates the
         # window. bid == 0 (a one-shot static present) skips this and just blits the cached frame.
@@ -223,10 +239,25 @@ fn render_window(fb, win, focused): i64 {
     return 0;
 }
 
-# render_frame: clear to desktop bg, then paint windows bottom-to-top.
-fn render_frame(comp, fb): i64 {
+# rend_frame_damage(comp, fb): compute this frame's damage into ae_frame_dmg. Call ONCE at the
+# top of the frame, before anything is drawn.
+#
+# ⛔ THIS WAS `render_frame`, A WHOLE SECOND FRAME PATH THAT NOTHING CALLED.
+# 0.9.8 shipped `render_frame` carrying the damage model and the GPU clear, while the live loop
+# called `render_desktop` — so none of it ever executed: `#85` was never issued, `rend_dmg_new`
+# was reached only from a test, and the `#39` chrome blit was unconditionally full-frame while
+# the CHANGELOG described it as damage-limited. Two frame paths is the defect; the fix is one.
+# ⚠ THE MERGE DIRECTION WAS FORCED, NOT STYLISTIC: `render_desktop` paints the shell status panel
+# and `render_frame` does not, so making the loop call `render_frame` instead would silently have
+# dropped the panel. The damage half moved here, as a function `render_desktop` calls.
+# ⚠ The two paths also read DIFFERENT theme sources — `desk_bg_color` (the a11y HighContrastTheme,
+# via theme_bridge) versus `rupa_theme_bg`. rupa is the arc's shared token lib and the one the
+# window chrome, dhancha, crab and jalwa all read, so rupa wins and the desktop background now
+# matches the windows drawn on it.
+fn rend_frame_damage(comp, fb): i64 {
     # ============================================================================================
-    # ⭐ THE DAMAGE MODEL — 3D arc Phase 0, completed. This is what makes the band worth having.
+    # ⭐ THE DAMAGE MODEL. Computed every frame; NOT yet driving the blit — see gpu.cyr for why
+    # (the #84 buffer flip makes a single-frame band two-frames-stale on the other buffer).
     # ============================================================================================
     # 0.9.8 shipped the plumbing and it reduced NOTHING, because the clear touched every pixel and
     # so damage was always the whole screen. The fix is not a bigger clear-optimisation — it is
@@ -277,47 +308,14 @@ fn render_frame(comp, fb): i64 {
         wi = wi + 1;
     }
 
-    # Clear only the damaged band. ⛔ Full-width, because #85's band and #39's band are both
-    # contiguous-memory operations — see gpu.cyr and syscall.cyr:3794.
-    # ⛔ THE FIRST FRAME MUST BE A FULL CLEAR, and this is not a corner case — it is the common
-    # startup path. On frame 1 every window is "changed" (prev rect = -1), so damage is the union
-    # of the WINDOW rects — and the background OUTSIDE every window would never be cleared at all,
-    # leaving whatever the framebuffer happened to contain at boot. The symptom is garbage around
-    # the windows on the first frame only, which is exactly the kind of thing that gets dismissed
-    # as a boot artifact instead of diagnosed.
-    var cy0 = 0;
-    var chh = fh;
+    # ⛔ THE FIRST FRAME IS FULLY DAMAGED, and this is not a corner case — it is the common startup
+    # path. On frame 1 every window is "changed" (prev rect = -1), so damage is the union of the
+    # WINDOW rects, and the background OUTSIDE every window is not in it. A consumer that trusted
+    # that band would leave whatever the framebuffer held at boot showing around the windows — the
+    # kind of thing dismissed as a boot artifact instead of diagnosed.
     if (ae_dmg_primed == 0) {
         ae_dmg_primed = 1;
-        cy0 = 0;
-        chh = fh;
-    }
-    if (ae_dmg_primed == 1) {
-    if (ae_frame_dmg != 0) {
-        if (rend_dmg_valid(ae_frame_dmg) == 1) {
-            cy0 = rend_dmg_y(ae_frame_dmg);
-            chh = rend_dmg_h(ae_frame_dmg);
-            if (cy0 < 0) { chh = chh + cy0; cy0 = 0; }
-            if (cy0 + chh > fh) { chh = fh - cy0; }
-            if (chh < 0) { chh = 0; }
-        }
-    }
-    }
-    ae_gpu_clear_band(fb, ae_bhumi(rupa_theme_bg(rupa_theme_active())), cy0, chh);
-
-    var v = comp_windows(comp);
-    var n = vec_len(v);
-    var i = 0;
-    while (i < n) {
-        var focused = 0;
-        if (i == comp_focused(comp)) { focused = 1; }
-        var win = vec_get(v, i);
-        render_window(fb, win, focused);
-        # ⛔ STAMP THE PREV RECT LAST, after the window is drawn. Stamping at the top of the frame
-        # would destroy the "was" before damage is computed from it, and every move would leave
-        # its vacated region uncleared.
-        win_stamp_prev(win);
-        i = i + 1;
+        if (ae_frame_dmg != 0) { rend_dmg_add(ae_frame_dmg, 0, 0, fw, fh); }
     }
     return 0;
 }

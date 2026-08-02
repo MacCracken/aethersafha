@@ -84,123 +84,137 @@ fn ae_gpu_active(): i64 {
 }
 
 # ============================================================================================
-# 3D ARC RUNG 0a `chrome-clear` — pay the FIRST half of the #92 debt: stop clearing the whole
-# framebuffer on the CPU every single frame.
+# ⛔ THE `#85 gpu_fill` CLEAR ARM WAS REMOVED HERE. DO NOT RE-ADD IT WITHOUT DELETING THE
+#    `#39` CHROME BLIT IN THE SAME CHANGE. It was wrong by CONSTRUCTION, not by tuning.
 # ============================================================================================
-# ⛔ WHAT THIS REPLACES. bhumi_fb_clear (bhumi/src/output.cyr:155) is a `store32` loop over the
-# ENTIRE framebuffer, run once per frame from render_frame. At the console's 800x600 that is
-# 480,000 stores a frame; at 1280x720 it is 921,600. The GPU has had a CP-DMA fill exposed as
-# `#85 gpu_fill` for four minor versions and **the compositor has never called it.**
+# 0.9.8 shipped `ae_gpu_clear` / `ae_gpu_clear_band`, which issued `#85` against the armed back
+# buffer. Two facts make that unconditionally pointless in this frame shape:
 #
-# ⭐ WHY THIS IS RUNG 0 AND NOT AN OPTIMISATION FOR LATER. Rung 9 puts a rasteriser on the GPU.
-# If it lands into a compositor that still spends its whole frame budget on a CPU clear plus a
-# full-framebuffer copy, **the win is invisible and unmeasurable** — you cannot see a GPU
-# rasteriser through a CPU memcpy. The batching path has to exist before the thing it makes
-# faster does.
+#   1. `#85` clears `gpu_bb_a`/`gpu_bb_b` — the KERNEL's back buffer.
+#   2. Step 1 of ae_gpu_present_frame below then blits the whole chrome layer into THE SAME ROWS
+#      OF THE SAME BUFFER via `#39` DEFER (`gpu_blit_target`, agnos kernel/core/gpu.cyr — the
+#      `#39` target and the `#85` target are selected by the same `gpu_bb_back` predicate).
 #
-# ⚠ THE CPU PATH IS RETAINED, NOT DELETED. It is both the fallback (no GPU, QEMU, an old kernel
-# that does not advertise the op) and the REFERENCE the `#90` byte-compare oracle diffs against.
-# Deleting it would remove the only thing that can say the GPU clear is correct.
-# ⛔ THE GATE IS RUNTIME, NOT A BUILD FLAG, AND THAT IS DELIBERATE.
-# The plan asks for each rung-0 sub-bite to be "behind its own consumer flag so the operator can
-# bisect AT THE PROMPT". A `#ifdef` cannot do that — it costs a reflash per bisection step, and
-# this arc has already lost a night to reflash-per-hypothesis.
-# ⚠ It also could not work as written: cyrius `-D` does NOT propagate into included files (the
-# same caveat agnos's build.sh works around by prepending), so `-D AE_GPU_CLEAR` compiled
-# byte-identical to no flag at all — 15 511 080 bytes either way. That is the ATOM_DRY class:
-# a flag that appears to gate something and gates nothing. Measured, not assumed.
+# So every pixel `#85` wrote was overwritten, in the same frame, before anything was presented.
+# The clear cost a CP-DMA fill and bought nothing.
 #
-# So the gate is a FILE, the same idiom as the modeset arm-once latch:
-#     rm /.ae-no-gpu-clear   -> GPU clear (default)
-#     touch /.ae-no-gpu-clear -> CPU clear, the reference path
-# Restart the compositor to pick up a change. Both frames can then be captured with `#90` in one
-# boot and byte-compared, which is rung 0a's actual oracle.
-var ae_gpu_clear_off = 0 - 1;      # -1 = not yet probed
-var ae_dmg_off = 0 - 1;            # -1 = not yet probed
-# ⛔ ae_frame_dmg / ae_dmg_primed ARE DECLARED IN render.cyr, NOT HERE, and that placement is
-# load-bearing. render.cyr is included BEFORE this file (main.cyr:16 vs :17) and a VARIABLE
-# forward-reference does not resolve in cyrius — only a FUNCTION one does. Declaring them here
-# compiled fine for `cyrius build src/main.cyr` and broke three tests with
-# "undefined variable 'ae_frame_dmg'", because the test harness compiles render.cyr in a unit
-# that does not reach this file. Backward references (this file reading render.cyr's globals)
-# are fine; forward ones are not.
+# ⚠ AND IT CLEARED THE WRONG BUFFER FOR THE CPU HALF. `bhumi_fb_clear` targets the USERLAND
+# framebuffer — different memory entirely. On the GPU arm the userland buffer was therefore never
+# cleared at all, so chrome accumulated in it frame over frame. Wiring rung 0a up as written
+# would have shipped that bug, and the symptom (smearing chrome) reads as a renderer fault.
+#
+# ⭐ WHEN IT COMES BACK. `#85` becomes correct AND load-bearing the moment the chrome layer moves
+# wholly onto the GPU and the `#39` blit is deleted — clear the back buffer, then `#88 gpu_fill_rect`
+# the window and panel rects, then `#92` op 0x03 the title text. At that point nothing overwrites
+# the clear because there is no CPU layer left to copy over it. That is a separate, atomic bite:
+# the `#39` blit is the BOTTOM layer of the frame, so a half-migration has GPU-drawn chrome and
+# CPU-drawn chrome overwriting each other in whichever order the frame happens to run.
+#
+# ⚠ The runtime bisect gates (`/.ae-no-gpu-clear`, `/.ae-no-damage`) went with it. They were never
+# reachable — both sat behind the dead `render_frame`, so the one debugging affordance 0.9.8
+# claimed to ship did not exist at runtime. The idiom itself was sound and should return with the
+# GPU chrome layer; a gate that is never stat'd is worse than no gate, because it is believed.
 
-# Same runtime-file idiom as the clear gate, for the same reason: bisectable at the prompt.
-#     touch /.ae-no-damage  -> full-frame copy (the reference path)
-#     rm /.ae-no-damage     -> damage-limited band (default)
-fn ae_dmg_band_enabled(): i64 {
-    if (ae_frame_dmg == 0) { return 0; }
-    if (ae_dmg_off >= 0) {
-        if (ae_dmg_off == 1) { return 0; }
-        return 1;
+# ⛔ ae_frame_dmg / ae_gpu_frame_ok / ae_gpu_plan_n ARE DECLARED IN render.cyr, NOT HERE, and that
+# placement is load-bearing. render.cyr is included BEFORE this file (main.cyr:16 vs :17) and a
+# VARIABLE forward-reference does not resolve in cyrius — only a FUNCTION one does. Declaring them
+# here compiled fine for `cyrius build src/main.cyr` and broke three tests with "undefined
+# variable", because the test harness compiles render.cyr in a unit that does not reach this file.
+# ⚠ The lesson is not "move the variable" — it is that a green `cyrius build` on the umbrella does
+# NOT prove the modules compile independently. Run `cyrius test`.
+
+# ae_gpu_demote — give up on hardware compositing for the rest of this run.
+#
+# ⭐ WHY A COMPOSITOR MUST BE ABLE TO GIVE UP. `ae_gpu_mode` was previously write-once: set by the
+# startup probe and never cleared. A GPU that started refusing therefore left the compositor
+# permanently believing it was being composited by hardware — and because render_window skips its
+# CPU composite on that belief, the result was a desktop that showed chrome and no window content
+# FOREVER, with no way back. Degrading to a working software desktop is strictly better than a
+# fast empty one.
+fn ae_gpu_demote(): i64 {
+    ae_gpu_mode = 0;
+    ae_gpu_blend = 0;
+    ae_gpu_frame_ok = 0;
+    return 0;
+}
+
+# ae_gpu_frame_plan(comp, fb) — decide, BEFORE the frame is rendered and WITHOUT issuing a single
+# syscall, whether the GPU will take this whole frame. Returns 1 = GPU frame, 0 = CPU frame.
+#
+# ⭐ THIS EXISTS TO FIX AN ORDERING BUG, NOT TO ADD A CAPABILITY. The decision and its consumer
+# used to live in different places and read different data: render_window skipped its per-pixel
+# client composite whenever `ae_gpu_active()` was 1, but ae_gpu_present_frame independently
+# refused the frame for per-window reasons the renderer never saw (a window past an edge, a
+# premultiplied surface with no shader path). On refusal the caller presented the framebuffer it
+# had — chrome, and no window content.
+#
+# ⛔ IT WAS REACHABLE BY ORDINARY USE, not by an edge case. main.cyr cascades each new setu client
+# down and right; the third client lands past the bottom edge of an 800-tall surface, and `#87`
+# REJECTS rather than clips. One more client than expected and the whole desktop went blank.
+#
+# ⚠ ALL-OR-NOTHING, AND THAT IS FORCED BY Z-ORDER, not chosen for simplicity. It is tempting to
+# take the windows the GPU accepts and CPU-composite the rest. But the CPU-composited pixels reach
+# the back buffer inside the `#39` chrome blit, which lands FIRST — so any GPU-blitted window would
+# then paint over a CPU-composited window that is supposed to be ABOVE it. A mixed frame is only
+# correct if the accepted set happens to be the top of the stack, which nothing enforces.
+#
+# ⚠ COMPUTE ONCE, READ TWICE. render_window and ae_gpu_present_frame must never re-derive this
+# independently — if they ever disagree a window is composited twice or not at all. The plan
+# writes `ae_gpu_frame_ok` and both read it.
+# ae_gpu_window_admissible(win, fw, fh) — can `#87`/`#92` take THIS window? 1 = yes.
+#
+# ⭐ Factored out and deliberately FREE OF `#ifdef`, so the admissibility rule is testable on a
+# host with no GPU. The rule is the expensive half to get right and the half that silently blanked
+# the desktop; a rule that can only be exercised on the operator's single iron box is a rule that
+# gets tested by burning a boot.
+#
+# ⛔ THE KERNEL REJECTS RATHER THAN CLIPS (`#87` bounds-checks against the back buffer), so a
+# partly-off-screen window must never be handed over. Dragging a window past an edge is ordinary.
+fn ae_gpu_window_admissible(win, fw, fh): i64 {
+    if (win_bufid(win) == 0) { return 1; }   # no client buffer: nothing for the GPU to blit
+    var w = win_w(win);
+    var h = win_h(win);
+    var dx = win_x(win);
+    var dy = win_y(win) + TITLEBAR_H;        # the body sits below the titlebar, as in render_window
+    if (dx < 0) { return 0; }
+    if (dy < 0) { return 0; }
+    if (w < 1) { return 0; }
+    if (h < 1) { return 0; }
+    if (dx + w > fw) { return 0; }
+    if (dy + h > fh) { return 0; }
+    # A premultiplied surface needs the shader path; `#87` is an opaque copy that ignores byte 3
+    # and would paint a half-transparent window at full strength.
+    if (win_premul(win) == 1) {
+        if (ae_gpu_blend == 0) { return 0; }
     }
-    ae_dmg_off = 0;
-    #ifdef CYRIUS_TARGET_AGNOS
-    if (file_exists("/.ae-no-damage") == 1) { ae_dmg_off = 1; }
-    #endif
-    if (ae_dmg_off == 1) { return 0; }
     return 1;
 }
 
-fn ae_gpu_clear_disabled(): i64 {
-    if (ae_gpu_clear_off >= 0) { return ae_gpu_clear_off; }
-    ae_gpu_clear_off = 0;
-    #ifdef CYRIUS_TARGET_AGNOS
-    # ⚠ Probed ONCE. A per-frame stat would put a syscall in the frame loop, which is exactly the
-    # kind of cost this rung exists to remove.
-    if (file_exists("/.ae-no-gpu-clear") == 1) { ae_gpu_clear_off = 1; }
+fn ae_gpu_frame_plan(comp, fb): i64 {
+    ae_gpu_frame_ok = 0;
+    ae_gpu_plan_n = 0;
+    # ⚠ OFF AGNOS THERE IS NO GPU FRAME, EVER — and saying so HERE is what fixes the bug. The old
+    # code let the renderer believe hardware compositing was live on any build, then discovered at
+    # present time that it was not. The plan is the single place that belief is formed.
+    #ifndef CYRIUS_TARGET_AGNOS
+    return 0;
     #endif
-    return ae_gpu_clear_off;
-}
-
-# ae_gpu_clear_band — clear only rows [y0, y0+h) via #85's band form, falling back to a CPU loop
-# over the same rows. ⛔ Full-width only: CP-DMA fills contiguous memory, and only a full-width
-# band is contiguous (the identical constraint #39 has on its source).
-# ⚠ h <= 0 means "nothing changed" — and that is a legitimate frame, not an error. Clearing
-# nothing is correct there; the present will copy nothing and the screen keeps last frame.
-fn ae_gpu_clear_band(fb, pixel, y0, h): i64 {
-    if (h <= 0) { return 1; }
-    var fh = bhumi_fb_height(fb);
-    if (y0 <= 0) { if (h >= fh) { return ae_gpu_clear(fb, pixel); } }
-    #ifdef CYRIUS_TARGET_AGNOS
-    if (ae_gpu_clear_disabled() == 0) {
-        if (ae_gpu_mode == 1) {
-            if (syscall(85, pixel, y0, h) == 0) { return 1; }
-        }
-    }
-    #endif
-    # CPU fallback over the SAME rows — the reference the #90 byte-compare diffs against.
-    var px = bhumi_fb_pixels(fb);
+    if (ae_gpu_mode != 1) { return 0; }
+    if (fb == 0) { return 0; }
     var fw = bhumi_fb_width(fb);
-    if (px == 0) { return 0; }
-    var yy = y0;
-    while (yy < y0 + h) {
-        var xx = 0;
-        while (xx < fw) {
-            store32(px + (yy * fw + xx) * 4, pixel);
-            xx = xx + 1;
-        }
-        yy = yy + 1;
+    var fh = bhumi_fb_height(fb);
+    if (fw < 1) { return 0; }
+    if (fh < 1) { return 0; }
+    var v = comp_windows(comp);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        if (ae_gpu_window_admissible(vec_get(v, i), fw, fh) == 0) { return 0; }
+        i = i + 1;
     }
-    return 0;
-}
-
-fn ae_gpu_clear(fb, pixel): i64 {
-    #ifdef CYRIUS_TARGET_AGNOS
-    if (ae_gpu_clear_disabled() == 1) {
-        bhumi_fb_clear(fb, pixel);
-        return 0;
-    }
-    if (ae_gpu_mode == 1) {
-        # #85 names only the colour; the KERNEL targets the armed back buffer. Ring 3 never
-        # supplies an address here, which is why this op needs no bounds argument.
-        if (syscall(85, pixel, 0, 0) == 0) { return 1; }
-    }
-    #endif
-    # Fallback / reference. ⚠ Also the path every non-agnos build takes, so the host build of the
-    # compositor is unaffected by this rung entirely.
-    bhumi_fb_clear(fb, pixel);
-    return 0;
+    ae_gpu_frame_ok = 1;
+    ae_gpu_plan_n = n;
+    return 1;
 }
 
 # ae_gpu_blend_rect — gpu_shader_op #92 op 0x01 (BLEND_RECT): PREMULTIPLIED src-over on the shader cores.
@@ -247,7 +261,11 @@ fn ae_gpu_blend_rect(bid, wh, dstxy): i64 {
 # A half-composited frame is worse than a slower one: the chrome is already in the back buffer at that
 # point, so bailing without presenting leaves it unshown rather than showing content-less windows.
 fn ae_gpu_present_frame(comp, fb): i64 {
-    if (ae_gpu_mode != 1) { return 0; }
+    # ⛔ THE PLAN DECIDES, NOT THIS FUNCTION. ae_gpu_frame_plan already ran every window through
+    # ae_gpu_window_admissible BEFORE the frame was rendered, and render_window composited on the
+    # CPU iff the plan said no. Re-deriving the answer here would let the two disagree — the exact
+    # split-brain this reorder exists to remove.
+    if (ae_gpu_frame_ok != 1) { return 0; }
     if (fb == 0) { return 0; }
     #ifdef CYRIUS_TARGET_AGNOS
     var px = bhumi_fb_pixels(fb);
@@ -256,40 +274,33 @@ fn ae_gpu_present_frame(comp, fb): i64 {
     if (px == 0) { return 0; }
     if (fw < 1) { return 0; }
     if (fh < 1) { return 0; }
+    # ⚠ CONSISTENCY GUARD, not a second derivation. The setu accept block runs BETWEEN the plan and
+    # this call and can push a new window, which the plan never saw and render_window never drew.
+    # Compositing it here would blit a surface with no chrome under it. A changed count means the
+    # plan is stale: present on the CPU this frame and re-plan next.
+    if (vec_len(comp_windows(comp)) != ae_gpu_plan_n) { return 0; }
 
     # 1. Chrome layer -> back buffer, DEFERRED.
     #
-    # ⭐ RUNG 0a, SECOND HALF — DAMAGE-LIMITED. This was an UNCONDITIONAL full-framebuffer copy
-    # every frame: fw*fh*4 bytes, ~1.9 MB at 800x600 and ~3.7 MB at 1280x720, moved whether or
-    # not anything changed. `rend_dmg_*` has existed at render.cyr:68-105 the whole time and the
-    # frame loop never called it.
+    # ⛔ FULL FRAME, DELIBERATELY, AND THE DAMAGE BAND MUST NOT BE SWITCHED ON HERE.
+    # The damage tracker IS now computed every frame (render_desktop), and wiring it into this
+    # blit is a one-line change that looks obviously correct. It is not, and the reason is in the
+    # kernel, not here: `#84 present` FLIPS THE RENDER TARGET on every present (agnos
+    # kernel/core/gpu.cyr — `if (gpu_bb_back == 0) { gpu_bb_back = 1; } else { gpu_bb_back = 0; }`),
+    # and `#39` renders into whichever buffer that same predicate selects. So a band-limited blit
+    # updates buffer A this frame and buffer B the next, and the rows OUTSIDE this frame's band in
+    # A still hold what was there TWO frames ago. This file unions only the current frame's rects
+    # and accumulates nothing across the flip.
+    # ⚠ The symptom is a trailing ghost at a two-frame lag in exactly the rows a window vacated —
+    # which reads as "the framebuffer is stale", not as "the damage model is wrong", and on a
+    # single dev box that misreading costs burns. Enabling the band requires carrying the PREVIOUS
+    # frame's damage and blitting `union(cur, prev)`. That is its own bite.
     #
-    # ⛔ FULL-WIDTH BANDS ONLY, AND THAT IS A HARD ABI LIMIT, NOT A SHORTCUT.
-    # `#39 blit` takes its source **tightly packed, w*4 bytes per row** — there is no stride
-    # parameter (kernel/core/syscall.cyr:3794). An arbitrary damage RECT's rows are therefore not
-    # contiguous in the framebuffer and cannot be handed to it. A full-width band IS contiguous,
-    # so `[y0, y1)` costs one blit with no staging copy and no kernel change — which is what
-    # keeps rung 0 at "zero kernel code".
-    # ⚠ True rect damage needs a stride on #39. That is a kernel ABI change and therefore a
-    # SEPARATE bite, not something to smuggle in here.
-    var by0 = 0;
-    var by1 = fh;
-    if (ae_dmg_band_enabled() == 1) {
-        if (rend_dmg_valid(ae_frame_dmg) == 1) {
-            by0 = rend_dmg_y(ae_frame_dmg);
-            by1 = by0 + rend_dmg_h(ae_frame_dmg);
-            if (by0 < 0) { by0 = 0; }
-            if (by1 > fh) { by1 = fh; }
-            # ⚠ An empty or inverted band means "nothing changed" — but presenting nothing would
-            # leave the previous frame on screen, which is correct ONLY if truly nothing moved.
-            # Falling back to the full copy on a degenerate band is the safe direction: a wasted
-            # copy is invisible, a skipped one is a stale screen.
-            if (by1 <= by0) { by0 = 0; by1 = fh; }
-        }
-    }
-    var bh = by1 - by0;
-    # Rows are contiguous, so the sub-band's source is simply an offset into the same buffer.
-    if (sys_blit(px + by0 * fw * 4, fw, bh, AE_BLIT_DEFER | (by0 << 16)) != 0) { return 0; }
+    # ⛔ FULL-WIDTH BANDS ONLY WHEN IT DOES LAND. `#39 blit` takes its source tightly packed,
+    # w*4 bytes per row, with no stride parameter — an arbitrary damage RECT's rows are not
+    # contiguous in the framebuffer and cannot be handed to it. True rect damage needs a stride on
+    # `#39`, which is a kernel ABI change.
+    if (sys_blit(px, fw, fh, AE_BLIT_DEFER) != 0) { ae_gpu_demote(); return 0; }
 
     # 2. Each client surface -> back buffer, in the SAME bottom-to-top order render_frame paints, so
     #    overlapping windows stack identically to the CPU path.
@@ -300,30 +311,24 @@ fn ae_gpu_present_frame(comp, fb): i64 {
         var win = vec_get(v, i);
         var bid = win_bufid(win);
         if (bid != 0) {
+            # ⚠ NO BOUNDS RE-CHECK HERE. ae_gpu_window_admissible already cleared every window in
+            # this frame, and render_window skipped its CPU composite on the strength of that. A
+            # second, independently-written copy of the same rule is how the two drift apart.
             var w = win_w(win);
             var h = win_h(win);
             var dx = win_x(win);
             var dy = win_y(win) + TITLEBAR_H;      # the body sits below the titlebar, as in render_window
-            # ⚠ REJECTS rather than clips (kernel: #87 bounds-checks against the back buffer), so an
-            # off-screen or partly-off-screen window must not be handed over — drop to the CPU path, which
-            # clips in bhumi_fb_set. Dragging a window past an edge is ordinary, not exceptional.
-            if (dx < 0) { return 0; }
-            if (dy < 0) { return 0; }
-            if (w < 1) { return 0; }
-            if (h < 1) { return 0; }
-            if (dx + w > fw) { return 0; }
-            if (dy + h > fh) { return 0; }
             var wh = (h << 16) | w;
             var dstxy = (dy << 16) | dx;
+            # ⛔ A FAILURE HERE IS A GPU REFUSAL, NOT A GEOMETRY PROBLEM — geometry was settled by the
+            # plan. So demote: the next frame runs entirely on the CPU and the desktop keeps working.
+            # Without this the compositor retries a refusing GPU every frame forever while
+            # render_window keeps skipping its composite, and the screen stays blank.
             if (win_premul(win) == 1) {
-                # ⚠ A premultiplied surface must NOT be copied opaquely as a fallback — #87 ignores byte 3,
-                # so a half-transparent window would paint at full strength and look wrong rather than
-                # blended. If the shader path is unavailable, bail to the whole-frame CPU present instead.
-                if (ae_gpu_blend == 0) { return 0; }
-                if (ae_gpu_blend_rect(bid, wh, dstxy) != 0) { return 0; }
+                if (ae_gpu_blend_rect(bid, wh, dstxy) != 0) { ae_gpu_demote(); return 0; }
             }
             if (win_premul(win) == 0) {
-                if (sys_gpu_blit_shm(bid, wh, dstxy) != 0) { return 0; }
+                if (sys_gpu_blit_shm(bid, wh, dstxy) != 0) { ae_gpu_demote(); return 0; }
             }
         }
         i = i + 1;
@@ -333,7 +338,7 @@ fn ae_gpu_present_frame(comp, fb): i64 {
     # ⚠ #84 returns 1 = PRESENTED / 0 = nothing to present — the one syscall in this band that does not use
     # the 0-ok convention. Checking `!= 0` here would read success as failure; that exact mistake cost an
     # iron burn on /bin/gpublend.
-    if (sys_gpu_present() != 1) { return 0; }
+    if (sys_gpu_present() != 1) { ae_gpu_demote(); return 0; }
     return 1;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS

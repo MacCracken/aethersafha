@@ -36,8 +36,16 @@ enum WinOff {
     W_PREMUL = 96;  # 1 = client declared SETU_SURF_PREMULTIPLIED: its pixels are premultiplied BGRA
     # (c <= a), so the compositor may BLEND it per-pixel (gpu_shader_op#92 op 0x01)
     # instead of copying it opaquely (gpu_blit_shm#87). 0 = default, opaque copy.
-    # ⚠ Must stay opt-in: a surface whose byte 3 is 0 — which a bare 0x00RRGGBB
-    # colour produces — is FULLY TRANSPARENT under #92 and its window vanishes.
+    # ⚠ Must stay opt-in — but NOT for the reason three documents in this stack say.
+    # ⛔ "a surface whose byte 3 is 0 is FULLY TRANSPARENT under #92 and its window
+    # VANISHES" is WRONG, and it was asserted here, in setu's client.cyr and in
+    # dhancha's CHANGELOG. The kernel shader is `out = src + dst*(1 - src_a)`
+    # (agnos kernel/core/gpu.cyr, "PREMULTIPLIED f32"). At src_a = 0 that is
+    # `out = src + dst` — an ADDITIVE, OVER-BRIGHT GHOST, not a disappearance.
+    # It is nearly invisible over the near-black desktop void and blows out to
+    # clipped white over lighter chrome, which makes it HARDER to spot than a
+    # missing window, not easier. Anyone hunting a vanished window will not find it.
+    # The opt-in rule stands; only the predicted symptom was wrong.
     # ⭐ PREVIOUS-FRAME RECT — the 3D arc's Phase-0 damage chain.
     # Damage is the union of where a window WAS and where it IS. Without the "was", a window that
     # moves leaves its old pixels on screen: the vacated region is never cleared and never
@@ -68,6 +76,12 @@ fn win_new(id, x, y, w, h, title): i64 {
     store64(p + W_BUFID, 0);
     store64(p + W_CFD, 0);
     store64(p + W_KEYMODE, 0);
+    # ⛔ W_PREMUL WAS MISSING HERE while every other slot was zeroed, and the allocator does not
+    # cover for it: lib/alloc.cyr is a bump pointer with no memset, so an uninitialised field reads
+    # whatever the previous tenant of that address left behind. A garbage premul flag routes an
+    # ORDINARY OPAQUE surface down the `#92` blend path, where its zero alpha byte then makes it an
+    # additive ghost — a wrong picture with no error anywhere.
+    store64(p + W_PREMUL, 0);
     store64(p + W_PX, 0 - 1);
     store64(p + W_PY, 0 - 1);
     store64(p + W_PW, 0);

@@ -3,9 +3,36 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 
+> ⛔ **THIS FILE WAS TWELVE RELEASES STALE — corrected header 2026-08-01, body below still to do.**
+> It claimed version **0.7.0** and cyrius pin **6.3.43** while `VERSION` said **0.9.8** and
+> `cyrius.cyml` pinned **6.4.78**; its Dependencies section omitted **setu** and **rupa** entirely,
+> which are the display protocol and the theme core — not minor entries. A state file that is wrong
+> is worse than a missing one, because it is what a cold start reads first. The sections below the
+> Version block have **not** been re-verified; treat any specific claim in them as unproven until it
+> is checked against the tree.
+
 ## Version
 
-**0.7.0** (2026-07-08) — **renderer decoupled from the shell (reusable window chrome)**:
+**0.9.8** (2026-07-25), plus an unreleased change set — see [`../../CHANGELOG.md`](../../CHANGELOG.md).
+
+**Toolchain**: cyrius pin **6.4.78** (`cyrius.cyml [package].cyrius`). Released cyrius is **6.5.5**.
+
+**⛔ The `--agnos` build is currently BROKEN**, by a defect in vendored kavach 3.9.3, not by this
+repo: its Linux-only Firecracker/OCI backends call the Linux `sys_unlink(path)`/`sys_rmdir(path)`
+(agnos takes `(path, pathlen)`) with no target guard, and `cyrius build` prepends every `[deps.*]`
+module, so the whole consumer fails. Filed in both trees at
+[`../development/issues/2026-08-01-linux-only-backends-break-every-agnos-consumer.md`](issues/2026-08-01-linux-only-backends-break-every-agnos-consumer.md).
+⚠ Related: `[deps.kavach]` declares `tag = "3.7.0"` *and* `path = "../kavach"` — the path wins, so
+the vendored copy silently tracks the local checkout and the declared tag is not enforced.
+
+**GPU**: hardware compositing SHIPPED (0.9.6–0.9.8) via the agnos ring-3 band `#82`-`#94` — **not**
+via mabda; there is no `[deps.mabda]` and none is needed. ⚠ **None of it has ever run on iron**, and
+QEMU cannot substitute (no AMD PCI device ⇒ `gpu_find` never matches ⇒ caps flags 0 ⇒ the probe
+answers 0, so every GPU branch is dead for the run).
+
+---
+
+**Historical, from the 0.7.0 entry** (2026-07-08) — **renderer decoupled from the shell (reusable window chrome)**:
 the shell status-panel renderer (`render_shell_panel` + `panel_bar_w`/`panel_net_color`/
 `PanelK`), which coupled to `shell.cyr`'s `SystemStatus` + `SH_NetStatus`, moved out of
 `render.cyr` into a new **`src/shell_render.cyr`** (the shell → render bridge). `render.cyr`

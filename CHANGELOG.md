@@ -4,6 +4,163 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+The compositor runs its own code, at the size the screen actually is, and no longer blanks the
+desktop when the GPU declines a frame.
+
+### Fixed — ⛔ THE FRAME PATH SHIPPED IN 0.9.8 WAS NEVER CALLED
+
+`render_frame` (`src/render.cyr`) carried the damage model and the `#85` GPU clear. The live loop
+called `render_desktop` (`src/desktop.cyr`). Nothing called `render_frame` — every other occurrence
+of the name in `src/` was a comment.
+
+So none of 0.9.8's rung-0a work ever executed: `#85 gpu_fill` was never issued, `rend_dmg_new` was
+reached only from `tests/render.tcyr`, `ae_frame_dmg` stayed 0 so every damage computation was a
+no-op behind its own null guard, and the `#39` chrome blit was **unconditionally full-frame** while
+this file described it as damage-limited. Both runtime bisect gates (`/.ae-no-gpu-clear`,
+`/.ae-no-damage`) sat behind the dead function and were never stat'd — the one debugging affordance
+0.9.8 claimed to ship did not exist at runtime.
+
+There is now **one** frame path. ⚠ The merge direction was forced, not stylistic: `render_desktop`
+paints the shell status panel and `render_frame` does not, so pointing the loop at `render_frame`
+would have silently dropped the panel. The damage half moved to `rend_frame_damage`, which
+`render_desktop` calls.
+
+⚠ **The two paths also disagreed about the theme.** `render_desktop` cleared to `desk_bg_color`
+(the a11y HighContrastTheme, via theme_bridge) while the windows drawn on top of it were already
+themed from **rupa** — so the desktop void and its windows came from different palettes. rupa wins:
+it is the shared token core the chrome, dhancha, crab and jalwa all read. `desk_bg_color` is
+retained (the accessibility profile is a real, separate concern) but no longer paints the desktop.
+
+### Fixed — ⛔ THE COMPOSITOR WAS SIZED 1.6× WRONG FOR THE PANEL
+
+`AE_W = 1280; AE_H = 720` was hardcoded and handed straight to `bhumi_backend_open`. The compositor
+never called `bhumi_output_query` (`#38 fbinfo`) — `grep` found no use of it anywhere in `src/`.
+
+archaemenid's scanout surface is **800×600, pitch 832 px**: the firmware leaves an 800×600 surface
+DCN-scaled up to the 2560×1440 link, and agnos reads the real viewport from the live HUBP register
+at boot and prints it in every burn (`console geometry matched to surface 800x600 pitch 3328 bytes`).
+
+⚠ **The failure was silent, which is why it survived.** `#39 blit` **clips** to `fb_width`/`fb_height`
+rather than erroring, so a 1280×720 desktop presented onto an 800×600 surface simply shows its
+top-left corner. Nothing logs and nothing returns non-zero. The shell panel — which correctly places
+its indicators at `fb_width - pad - w` — put every one of them past x=1234, entirely outside the
+visible 800 columns. **The panel code was right; it was handed a lie.**
+
+New `ae_query_geometry()` reads fbinfo at startup and falls back to 1280×720 only when the query
+answers −1 (every host build), so the Linux dev build is unaffected. The seeded "Files" window and
+the setu client cascade are now proportional to the queried surface, and the cascade **wraps** —
+the old fixed step put the third client at (690,470), off the bottom of an 800-tall surface.
+
+⚠ **Layout uses fbinfo's width, never `gpu_caps#89`'s.** caps reports `bw = gpu_bb_pitch / 4`, and on
+this box the pitch in pixels (832) **exceeds** the visible width (800); laying out to caps would push
+chrome into the invisible gutter — the same class of mistake, one register removed.
+
+### Fixed — the CPU fallback was not a fallback: a declined frame showed chrome and no windows
+
+`render_window` skipped its per-pixel client composite whenever `ae_gpu_active()` was 1 — a flag set
+once at startup meaning only *"a GPU exists and is armed"*. But `ae_gpu_present_frame` refuses
+individual **frames** for reasons the renderer never saw (a window past an edge, a premultiplied
+surface with no shader path), and on refusal the caller presented the framebuffer as it stood. The
+decision and its consumer lived in different places and read different data.
+
+⛔ **Reachable by ordinary use, not by an edge case.** The client cascade put the third setu client
+where `dy + h` ran past the bottom edge, and the kernel **rejects rather than clips** — so one more
+client than expected took the entire desktop blank, permanently, with no error anywhere.
+
+Fixed by **reordering, not by adding capability**. New `ae_gpu_frame_plan(comp, fb)` runs every
+window through the admissibility rule **before** the frame is rendered, issues no syscall, and
+publishes one answer (`ae_gpu_frame_ok`) that both `render_window` and `ae_gpu_present_frame` read.
+⚠ All-or-nothing, and that is **forced by z-order**: CPU-composited pixels reach the back buffer
+inside the `#39` chrome blit, which lands first, so a GPU-blitted window would paint over a
+CPU-composited window that is meant to be above it.
+
+- New `ae_gpu_window_admissible(win, fw, fh)` holds the rule, deliberately **free of `#ifdef`** so it
+  is testable on a machine with no GPU instead of by burning a boot on the operator's only box.
+- A **staleness guard**, not a second derivation: the setu accept block runs between the plan and the
+  present and can push a window the plan never saw and the renderer never drew. A changed window
+  count means present on the CPU this frame and re-plan next.
+- New `ae_gpu_demote()` — a hard refusal from `#87`/`#92`/`#84` now clears the mode, so a wedged GPU
+  degrades to a working software desktop. `ae_gpu_mode` was previously write-once, so a GPU that
+  started refusing left the compositor blank **forever** with no way back.
+
+### Fixed — `win_new` never initialised `W_PREMUL`
+
+Every other slot was zeroed and this one was not, and `lib/alloc.cyr` is a bump pointer with no
+memset — so a recycled Window reads whatever the previous tenant left. A garbage premul flag routes
+an ordinary opaque surface down the `#92` blend path: a wrong picture, with no error anywhere.
+
+### Removed — the `#85 gpu_fill` clear arm, which was wrong by construction
+
+⛔ **Do not re-add it without deleting the `#39` chrome blit in the same change.** `#85` clears
+`gpu_bb_a`/`gpu_bb_b`; step 1 of `ae_gpu_present_frame` then blits the whole chrome layer into **the
+same rows of the same buffer** (the `#39` target and the `#85` target are selected by the same
+`gpu_bb_back` predicate). Every pixel `#85` wrote was overwritten, in the same frame, before anything
+was presented.
+
+⚠ **And it cleared the wrong buffer for the CPU half.** `bhumi_fb_clear` targets the *userland*
+framebuffer — different memory — so on the GPU arm the userland buffer was never cleared at all and
+chrome would accumulate frame over frame. Wiring rung 0a up as written would have shipped that bug,
+and the symptom (smearing chrome) reads as a renderer fault.
+
+`#85` becomes correct **and** load-bearing once the chrome layer moves wholly onto the GPU and the
+`#39` blit is deleted — clear, then `#88 gpu_fill_rect` the window and panel rects, then `#92` op 0x03
+the title text. That is a separate, atomic bite: the `#39` blit is the *bottom* layer of the frame, so
+a half-migration has GPU-drawn and CPU-drawn chrome overwriting each other.
+
+### Added — the damage tracker is allocated and computed, and deliberately NOT wired to the blit
+
+`ae_frame_dmg = rend_dmg_new()` at startup, and `rend_frame_damage` runs every frame.
+
+⛔ **Enabling the damage-limited blit is a one-line change that looks obviously correct and is not.**
+`#84 present` **flips the render target** on every present (agnos `kernel/core/gpu.cyr`:
+`if (gpu_bb_back == 0) { gpu_bb_back = 1; } else { gpu_bb_back = 0; }`), and `#39` renders into
+whichever buffer that same predicate selects. A band-limited blit therefore updates buffer A this
+frame and B the next, so rows outside this frame's band in A still hold what was there **two frames
+ago**. This file unions only the current frame's rects and accumulates nothing across the flip. The
+symptom is a trailing ghost at a two-frame lag in exactly the rows a window vacated — which reads as
+*"the framebuffer is stale"*, not as *"the damage model is wrong"*. Enabling it requires carrying the
+previous frame's damage and blitting `union(cur, prev)`.
+
+### Added — `tests/gpu_fallback.tcyr`, an external-invariant oracle (20 suites green, was 19)
+
+*"The exact 32-bit word a client wrote into its surface is readable at that client's screen
+coordinates after a frame, whatever the GPU decided."* Sentinels `0x00C0FFEE` / `0x00BADA55` are
+chosen by the test and derivable from no compositor state, so a renderer sharing every one of the
+compositor's premises cannot produce them by accident.
+
+⚠ **It was run against the unfixed tree first and it failed** — `got 1777188` (`0x1B21A4`, the theme's
+window-body fill) where the client's word belonged. A test that passes before the fix is testing
+nothing. Covers the accepted shape, the refused shape, the `bufid == 0` shape, the admissibility rule
+directly (both sides of each bound, negative origin, premultiplied with and without a shader path),
+`W_PREMUL` initialisation, and demotion.
+
+### Fixed — the "an alpha-0 surface VANISHES under `#92`" claim, asserted in three places, is wrong
+
+`src/window.cyr` said a surface whose byte 3 is 0 is *"FULLY TRANSPARENT under #92 and its window
+vanishes"*; setu's `client.cyr` and dhancha's CHANGELOG say the same. The kernel shader is
+`out = src + dst*(1 - src_a)`. At `src_a = 0` that is `out = src + dst` — an **additive, over-bright
+ghost**, not a disappearance. It is nearly invisible over the near-black desktop void and blows out
+to clipped white over lighter chrome, which makes it **harder** to spot than a missing window, not
+easier. Anyone hunting a vanished window will not find it. The opt-in rule stands; only the predicted
+symptom was wrong. Three documents agreeing was a shared-premise oracle.
+
+### Known — ⛔ the `--agnos` build is BLOCKED by a kavach defect, so this change is host-verified only
+
+`cyrius build --agnos` fails in vendored `lib/kavach.cyr`, at both the pinned 6.4.78 and 6.5.5:
+kavach 3.9.3's Firecracker and OCI backends call the **Linux** `sys_unlink(path)` / `sys_rmdir(path)`
+(agnos takes `(path, pathlen)`), plus `sys_mount` and a bare `SYS_CHDIR`, with no
+`CYRIUS_TARGET_AGNOS` guard anywhere in either file. Since `cyrius build` prepends every `[deps.*]`
+module, this breaks the whole consumer, not just the backend.
+
+⚠ **The pin did not hold and nothing said so.** This manifest declares `[deps.kavach] tag = "3.7.0"`
+*and* `path = "../kavach"`; the path override wins, so `lib/kavach.cyr` is byte-identical to the local
+checkout at **3.9.3**. The build worked on 2026-07-25 and stopped working with no change to this repo.
+
+Filed in both trees as `docs/development/issues/2026-08-01-linux-only-backends-break-every-agnos-consumer.md`.
+**Host build and all 20 test suites are green; the agnos build of this change is unverified.**
+
 ## [0.9.8] - 2026-07-25
 
 3D-arc Phase 0 (`chrome-gpu`): the compositor stops doing per-frame full-screen work on the CPU.

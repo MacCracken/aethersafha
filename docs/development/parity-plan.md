@@ -136,8 +136,16 @@ into the surface buffer (M2 handoff — tested). **Presentation done**:
 hosted window's content (line-aware `draw_text_lines`); the desktop tracks foreign
 apps; pixel-tested. Remaining: per-ABI shim; real XRGB pixel fidelity (mehman ADR 0004).
 
-### Bite H — GPU acceleration (mabda) · optional · —
-Wire mabda 4.0.2 (`[deps.mabda]`) when hardware accel is wanted. Off the v1.0 path.
+### ~~Bite H — GPU acceleration (mabda)~~ · ⛔ WRONG PREMISE, corrected 2026-08-01
+GPU acceleration **shipped** across 0.9.6–0.9.8 and it does **not** go through mabda. `src/gpu.cyr`
+talks to the agnos kernel's ring-3 GPU band (`#82`-`#94`) directly — `#87 gpu_blit_shm` per client
+surface, `#92 gpu_shader_op` op 0x01 for premultiplied blending, `#84 present` to flip. There is no
+`[deps.mabda]` in the manifest and none is needed; mabda's GPU surface rides Linux's driver stack.
+
+⚠ **What remains is consuming the rest of the band** (`#88 gpu_fill_rect`, `#92` op 0x03 glyphs,
+`#92` batching, `#90`/`#91`, the 3D ops `0x08`-`0x10`), and **validating any of it on iron** — no
+desktop binary has ever been staged to archaemenid, and QEMU cannot stand in for it. See
+[`roadmap.md`](roadmap.md).
 
 ---
 

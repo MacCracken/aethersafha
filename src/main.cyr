@@ -32,9 +32,48 @@ include "src/setu_server.cyr"    # native display-protocol transport (setu)
 include "src/setu_dispatch.cyr"  # setu → compositor dispatch (surface → Window + blit)
 
 enum AeConfig {
-    AE_W     = 1280;
-    AE_H     = 720;
-    AE_MAXEV = 64;
+    # ⚠ FALLBACK ONLY — these are what the compositor opens at when it cannot ASK. See
+    # ae_query_w/ae_query_h. They are not the desktop size and must never be used as one.
+    AE_FALLBACK_W = 1280;
+    AE_FALLBACK_H = 720;
+    AE_MAXEV      = 64;
+}
+
+# ⭐ ASK THE KERNEL HOW BIG THE SCREEN IS. Do not assume.
+#
+# ⛔ THE COMPOSITOR USED TO HARDCODE 1280x720 AND OPEN bhumi AT THAT SIZE. archaemenid's scanout
+# surface is 800x600 (pitch 832 px) — the firmware leaves an 800x600 surface DCN-scaled up to the
+# 2560x1440 link, and agnos reads the real viewport out of the live HUBP register at boot and
+# prints it in every burn: "console geometry matched to surface 800x600 pitch 3328 bytes".
+#
+# ⚠ THE FAILURE IS SILENT, WHICH IS WHY IT SURVIVED. `#39 blit` CLIPS to fb_width/fb_height rather
+# than erroring, so a 1280x720 desktop presented onto an 800x600 surface simply shows its top-left
+# corner. Nothing logs, nothing returns non-zero. The shell status panel — which correctly places
+# its indicators at `fb_width - pad - w` — put every one of them past x=1234, entirely outside the
+# visible 800 columns. The panel code was right; it was handed a lie.
+#
+# ⚠ USE fbinfo's WIDTH FOR LAYOUT, NEVER gpu_caps#89's. caps reports `bw = gpu_bb_pitch / 4`, and
+# on this box the pitch in pixels (832) EXCEEDS the visible width (800). Laying out to caps would
+# push chrome into the invisible gutter — the same class of mistake one register removed.
+#
+# ⚠ Returns the fallback on any host build (bhumi_output_query is agnos-only and answers -1), so
+# the Linux dev build is unaffected.
+var ae_geom_w = 0;
+var ae_geom_h = 0;
+fn ae_query_geometry(): i64 {
+    ae_geom_w = AE_FALLBACK_W;
+    ae_geom_h = AE_FALLBACK_H;
+    var info[24];                       # function-local => 24 BYTES == BHUMI_FBINFO_SIZE
+    if (bhumi_output_query(&info) != BHUMI_FBINFO_SIZE) { return 0; }
+    var w = bhumi_fbinfo_width(&info);
+    var h = bhumi_fbinfo_height(&info);
+    # ⚠ A zero or absurd answer is worse than no answer: it would open a framebuffer nothing can
+    # be drawn into. Keep the fallback rather than trust a degenerate reading.
+    if (w < 64) { return 0; }
+    if (h < 64) { return 0; }
+    ae_geom_w = w;
+    ae_geom_h = h;
+    return 1;
 }
 
 # Open the bhumi backend under a full output+input capability. -> *BhumiBackend (0 fail)
@@ -49,16 +88,27 @@ fn main(): i64 {
     kashi_font_init();   # populate the VGA 8x16 glyph tables (kashi font-data core)
     println("aethersafha: AI-augmented AGNOS compositor (Cyrius port)");
 
-    var be = ae_backend_open(AE_W, AE_H);
+    ae_query_geometry();
+    var be = ae_backend_open(ae_geom_w, ae_geom_h);
     if (be == 0) {
         println("aethersafha: bhumi backend open failed");
         return 1;
     }
     var fb = bhumi_backend_fb(be);
     # Probe hardware compositing ONCE, here, before the frame loop — never from a render path (a renderer
-    # must not be the thing that issues a syscall). ae_gpu_active() then just reads the result each frame.
+    # must not be the thing that issues a syscall). ae_gpu_frame_plan then reads the result each frame.
     ae_gpu_probe();
+    # The per-frame damage tracker. ⚠ ALLOCATED HERE OR NOT AT ALL: rend_dmg_new was previously
+    # reached only from a test, so ae_frame_dmg stayed 0 and every damage computation in the frame
+    # path was a no-op guarded by `if (ae_frame_dmg != 0)`. Damage is COMPUTED now; it deliberately
+    # does not drive the blit — see CHANGELOG [Unreleased] "the damage tracker is allocated and
+    # computed, and deliberately NOT wired to the blit", and the #84 buffer-flip note in gpu.cyr.
+    ae_frame_dmg = rend_dmg_new();
     println("aethersafha: bhumi backend up");
+    # ⭐ Print the geometry the compositor is actually using. One line, and it is the instrument
+    # that would have caught the 1280x720-onto-800x600 crop immediately instead of never.
+    println_int(ae_geom_w);
+    println_int(ae_geom_h);
 
     # Desktop session: the compositor + all leaf subsystems (shell, AI, security,
     # a11y, gestures, theme, tray, plugins) wired together.
@@ -67,7 +117,13 @@ fn main(): i64 {
     # The terminal is now puka — a setu CLIENT that connects at runtime (its own
     # window arrives over setu), not a compositor-seeded placeholder. Files stays
     # as a demo window until it too is a real client.
-    comp_create_window(comp, 240, 180, 520, 360, "Files");
+    # ⚠ PROPORTIONAL TO THE REAL SURFACE, not to the old 1280x720 assumption. The literal
+    # (240,180,520x360) was ~19%/25% in and ~41%x50% of a 1280x720 desktop; on the 800x600 the
+    # compositor actually gets, the same fractions keep it on-screen and roughly where it looked
+    # right. A hardcoded 520-wide window on an 800-wide surface is not wrong so much as unbalanced,
+    # and the next surface size would break it again.
+    comp_create_window(comp, ae_geom_w * 3 / 16, ae_geom_h / 4,
+                       ae_geom_w * 13 / 32, ae_geom_h / 2, "Files");
     desktop_add_tray_item(desk, 1, "network", "Network");
     # Host a foreign-ABI app as a kavach-sandboxed guest (mehman "swallow" seam),
     # run it, and present its captured stdout as the window's content (M2 handoff).
@@ -144,6 +200,12 @@ fn main(): i64 {
                     i = i + 1;
                 }
             }
+            # ⛔ PLAN BEFORE YOU DRAW. ae_gpu_frame_plan decides, for the WHOLE frame and without
+            # issuing a syscall, whether the GPU will composite it — and render_window reads that
+            # decision to know whether to do its own per-pixel client composite. Calling this after
+            # the render (or not at all) is the bug this ordering exists to prevent: the renderer
+            # skipping its work for a frame the GPU then refuses, leaving chrome and no content.
+            ae_gpu_frame_plan(comp, fb);
             render_desktop(desk, fb);
             render_desktop_foreign(desk, fb);
             # setu: accept + composite client presents (over the desktop) — BOTH
@@ -153,8 +215,17 @@ fn main(): i64 {
                 if (cfd >= 0) {
                     println("aethersafha: setu client connected");   # DBG: TCP accept fired
                     # Cascade each accepted client to a distinct position — the multi-window desktop.
-                    var cx = 30 + accepted * 330;
-                    var cy = 50 + accepted * 210;
+                    # ⛔ THE OLD STEP RAN CLIENTS OFF THE SCREEN, and `#87` REJECTS rather than clips,
+                    # so the third client (690,470) with a 400-tall surface put dy+h past the bottom
+                    # edge and took the WHOLE FRAME down to the CPU path — or, before the plan existed,
+                    # to a blank desktop. Step proportionally and WRAP, so the cascade stays inside the
+                    # top-left third of whatever surface we were given and cannot run off it.
+                    # ⚠ The compositor cannot know a client's surface size before CREATE_SURFACE, so
+                    # this bounds the ORIGIN, not the extent — the plan still has to catch an
+                    # oversized client, and now it does so without blanking anything.
+                    var step = accepted % 3;
+                    var cx = 30 + step * (ae_geom_w / 6);
+                    var cy = 50 + step * (ae_geom_h / 6);
                     var sid = setu_srv_serve_accepted_at(cfd, comp, fb, cx, cy);
                     # NOTE: cfd is NOT closed — serve_accepted_at stored it on the Window
                     # (win_set_cfd) so the compositor can forward input to this client.

@@ -100,8 +100,15 @@ modules = ["dist/kavach.cyr"]
 # are `setu_*` (no collision); its stdlib needs {string,fmt,alloc,vec,str,io,
 # syscalls,assert} are already a subset of [deps].stdlib above.
 [deps.setu]
-# Pinned to 0.5.0 — full key events (press + release) for held-key clients:
-# SETU_SURF_FULL_KEYS opt-in + the per-surface make/break forwarding this compositor honours.
+# ⚠ COMMENT CORRECTED 2026-08-01 — it said "Pinned to 0.5.0" over a `tag = "0.7.0"` line, and had
+# said so through two bumps. A stale pin comment is worse than none: it is what a reader checks
+# INSTEAD of the field below it. (puka and dhancha carry the same rotted comment, saying 0.3.0.)
+# 0.6.0 — client buffers are GPU-VISIBLE on agnos (`shm_create_gpu` #86 before `shm_create` #71).
+#         This is what makes a client surface blittable at all: #71 is system RAM, which the agnos
+#         GPU cannot reach, and the kernel rejects such a slot at both #87 and #92.
+# 0.7.0 — SETU_SURF_PREMULTIPLIED (flag bit 1), the opt-in this compositor routes to #92 op 0x01.
+# 0.5.0 — full key events (press + release); SETU_SURF_FULL_KEYS + the per-surface make/break
+#         forwarding this compositor honours.
 git = "https://github.com/MacCracken/setu.git"
 tag = "0.7.0"
 modules = ["dist/setu.cyr"]

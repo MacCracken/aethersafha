@@ -88,18 +88,37 @@ fn desk_bg_color(d): i64 {
     return theme_hc_background(desk_theme(d)) & 0xFFFFFF;
 }
 
-# render_desktop(d, fb): the full desktop frame — clear to the themed background,
-# paint the window stack (focus-tinted), then the shell status panel on top.
+# render_desktop(d, fb): the full desktop frame — compute damage, clear to the themed
+# background, paint the window stack (focus-tinted), then the shell status panel on top.
+#
+# ⭐ THIS IS THE ONE FRAME PATH. It absorbed the damage half of the former `render_frame`
+# (render.cyr), which nothing called — see the note there. Everything the frame does now happens
+# in one place, in one order, so "what the compositor draws" is answerable by reading one function.
+#
+# ⚠ THE BACKGROUND IS A RUPA TOKEN, NOT `desk_bg_color`. The two frame paths disagreed: this one
+# cleared to the a11y HighContrastTheme's background while the windows drawn on top of it were
+# already themed from rupa, so the desktop void and its windows came from different palettes.
+# rupa is the shared token core every consumer reads (compositor chrome, dhancha, crab, jalwa),
+# so it wins. `desk_bg_color` is retained — the accessibility profile is a real, separate concern
+# and theme_bridge is still its home — it is simply no longer what paints the desktop.
 fn render_desktop(d, fb): i64 {
     var comp = desk_comp(d);
-    bhumi_fb_clear(fb, desk_bg_color(d));
+    # ⛔ BEFORE the clear. Damage is computed from each window's PREVIOUS rect, and the stamp that
+    # overwrites it happens at the END of this function.
+    rend_frame_damage(comp, fb);
+    bhumi_fb_clear(fb, ae_bhumi(rupa_theme_bg(rupa_theme_active())));
     var v = comp_windows(comp);
     var n = vec_len(v);
     var i = 0;
     while (i < n) {
         var focused = 0;
         if (i == comp_focused(comp)) { focused = 1; }
-        render_window(fb, vec_get(v, i), focused);
+        var win = vec_get(v, i);
+        render_window(fb, win, focused);
+        # ⛔ STAMP THE PREV RECT LAST, after the window is drawn. Stamping at the top of the frame
+        # would destroy the "was" before damage is computed from it, and every move would leave
+        # its vacated region uncleared.
+        win_stamp_prev(win);
         i = i + 1;
     }
     render_shell_panel(fb, desk_shell(d));
