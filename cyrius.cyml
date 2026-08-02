@@ -1,6 +1,6 @@
 [package]
 name = "aethersafha"
-version = "0.11.1"
+version = "0.12.0"
 description = "aethersafha — AI-augmented AGNOS compositor (Cyrius port, from 27207 lines of Rust)"
 license = "GPL-3.0-only"
 language = "cyrius"
@@ -110,5 +110,5 @@ modules = ["dist/kavach.cyr"]
 # 0.5.0 — full key events (press + release); SETU_SURF_FULL_KEYS + the per-surface make/break
 #         forwarding this compositor honours.
 git = "https://github.com/MacCracken/setu.git"
-tag = "0.7.0"
+tag = "0.7.2"
 modules = ["dist/setu.cyr"]

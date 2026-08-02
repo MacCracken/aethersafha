@@ -32,6 +32,51 @@ include "src/setu_server.cyr"    # native display-protocol transport (setu)
 include "src/setu_dispatch.cyr"  # setu → compositor dispatch (surface → Window + blit)
 include "src/selftest.cyr"       # `--selftest`: the iron verdict (exit code, external-invariant oracle)
 
+# ⭐ `--clients`: a BOUNDED, SELF-REPORTING run of the real desktop, for the one question a photo
+# cannot answer — did the setu clients actually arrive?
+#
+# ⛔ THE 2026-08-02 BURN COULD NOT BE READ. The log said "launched setu client #1" and "#2 (crab)"
+# and then nothing, and the operator quit at frame 128 because no window had appeared. That is
+# consistent with TWO opposite states — the clients died on load, or they were still connecting and
+# the run ended too early — and the desktop's normal output cannot distinguish them. Asking the
+# operator to hold a desktop open for an unspecified duration and judge by eye is not an experiment.
+#
+# So this runs the SAME loop, stops on its own at a generous cap or as soon as both clients have
+# presented, and exits with a code in the gpucopy convention. No photo, no timing judgement.
+var ae_probe = 0;
+# Quit keys seen while probing. ⛔ A DIAGNOSTIC A KEYPRESS CAN TRUNCATE IS NOT A DIAGNOSTIC: the
+# 2026-08-02 --clients run reported 93 after stopping at frame 191 on an Esc, nowhere near its cap,
+# so the verdict meant "nothing yet" and was documented as "nothing ever". Probe runs now ignore the
+# quit key and say how many they ignored.
+var ae_quit_ignored = 0;
+var ae_probe_t0 = 0;
+var ae_probe_next_report = 0;
+# 1 = at least one spawn_path refused, so a "no client connected" verdict has a known cause.
+var ae_spawn_failed = 0;
+enum AeProbe {
+    # ⛔ THE BUDGET IS WALL TIME, NOT FRAMES, and the first version got this wrong. What a spawned
+    # client needs in order to load from ext2, start, and complete a loopback TCP connect is SECONDS
+    # and scheduler slices — neither of which a frame count measures. Frame duration differs by more
+    # than an order of magnitude between QEMU and iron, so any frame cap is either far too short on
+    # one or far too long on the other.
+    AE_PROBE_MS     = 30000;
+    # Pure backstop, deliberately far above anything the time budget will reach, so it binds ONLY if
+    # the clock is broken. A frame cap that can bind before the timer is the bug above, restated.
+    AE_PROBE_FRAMES = 200000;
+    AE_PROBE_REPORT_MS = 5000;   # progress cadence, so the log shows the run stayed alive
+}
+
+# Monotonic milliseconds, or 0 where there is no such clock (host). ⚠ Returning 0 makes the elapsed
+# test inert off agnos rather than wrong — the host loop is already bounded by setu_cap.
+fn ae_now_ms(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return sys_uptime_ms();
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+}
+
 enum AeConfig {
     # ⚠ FALLBACK ONLY — these are what the compositor opens at when it cannot ASK. See
     # ae_query_w/ae_query_h. They are not the desktop size and must never be used as one.
@@ -132,6 +177,7 @@ fn main(): i64 {
     # `_ae_entry()` — see the note at the bottom. Under the old implicit entry the arguments would
     # have read null and `--selftest` would have silently launched the desktop instead.
     if (ae_has_flag("--selftest") == 1) { return ae_selftest(); }
+    if (ae_has_flag("--clients") == 1) { ae_probe = 1; }
 
     println("aethersafha: AI-augmented AGNOS compositor (Cyrius port)");
 
@@ -208,6 +254,15 @@ fn main(): i64 {
     if (setu_sfd >= 0) {
         println("aethersafha: setu listener up (TCP loopback:7700)");
     }
+    # ⛔ A FAILED LISTEN USED TO PRINT NOTHING AT ALL, and that cost a burn's second run. The
+    # compositor came up, drew its desktop, reported "windows: 1", and looked completely healthy
+    # while being STRUCTURALLY INCAPABLE of hosting a client — there was no socket to accept on.
+    # The absence of one line is not a signal anyone reads; the desktop simply looked like it had
+    # no clients, which is also what a working listener with slow clients looks like.
+    if (setu_sfd < 0) {
+        println("aethersafha: the display socket could not be opened — no app can connect this run");
+        println_int(setu_sfd);
+    }
     var setu_cap = 3;
     #ifndef CYRIUS_TARGET_AGNOS
     if (setu_sfd >= 0) { setu_cap = 400; }           # host: spin (render-paced) long enough to catch a client
@@ -228,6 +283,10 @@ fn main(): i64 {
         var pk2 = sys_spawn_path("/bin/crab", 9);         # #2 = crab, the sovereign file manager (dhancha app)
         if (pk1 >= 0) { println("aethersafha: launched setu client #1"); }
         if (pk2 >= 0) { println("aethersafha: launched setu client #2 (crab)"); }
+        # Same reasoning as the listener above: only the success path printed, so a client that
+        # never left the ground was indistinguishable from one that was merely slow to connect.
+        if (pk1 < 0) { println("aethersafha: could not start the first app"); ae_spawn_failed = 1; }
+        if (pk2 < 0) { println("aethersafha: could not start the file manager"); ae_spawn_failed = 1; }
     }
     #endif
 
@@ -240,6 +299,8 @@ fn main(): i64 {
     var running = 1;
     var accepted = 0;  # count of setu clients composited so far — cascades each new one
     var prev_focus = 0 - 1;  # last-notified focus index; -1 forces the first notification
+    ae_probe_t0 = ae_now_ms();
+    ae_probe_next_report = AE_PROBE_REPORT_MS;
     #ifdef CYRIUS_TARGET_AGNOS
     while (running == 1) {                            # agnos: the real compositor loop — renders until quit
         #endif
@@ -259,10 +320,21 @@ fn main(): i64 {
                     # ⚠ kbscan#42 is a RAW drain: the compositor sees every scancode buffered since
                     # boot, including everything typed at the agnsh prompt to launch it.
                     if (input_handle(comp, ev) == InputAction.IA_QUIT) {
-                        running = 0;
-                        println("aethersafha: quit on a key, usage then frame:");
-                        println_int(bhumi_key_usage(ev));
-                        println_int(frame);
+                        # ⛔ A PROBE RUN IGNORES THE QUIT KEY. --clients exists to answer a question
+                        # deterministically, and the previous build let a single Esc at frame 191 end
+                        # it 30 seconds early while still reporting the "nothing ever connected" code.
+                        # ⚠ Counted, not silently dropped — an ignored keypress is a fact about the
+                        # run, and on this box a stray scancode is plausible (the console echoed
+                        # `-0 -clients` for a line whose argv was demonstrably correct).
+                        if (ae_probe == 1) {
+                            ae_quit_ignored = ae_quit_ignored + 1;
+                        }
+                        if (ae_probe == 0) {
+                            running = 0;
+                            println("aethersafha: quit on a key, usage then frame:");
+                            println_int(bhumi_key_usage(ev));
+                            println_int(frame);
+                        }
                     }
                     setu_srv_forward_key(comp, ev);   # route key-DOWN to the focused setu client
                     i = i + 1;
@@ -331,13 +403,67 @@ fn main(): i64 {
             #ifdef CYRIUS_TARGET_AGNOS
             sys_sched_yield();
             #endif
+            # --clients: stop as soon as the question is answered, or at the cap. ⚠ Placed with the
+            # frame counter so it sees the SAME frame the accept block just ran.
+            if (ae_probe == 1) {
+                if (accepted >= 2) { running = 0; }
+                if (frame >= AE_PROBE_FRAMES) { running = 0; }
+                var el = ae_now_ms() - ae_probe_t0;
+                if (el >= AE_PROBE_MS) { running = 0; }
+                # Progress, so the log proves the run stayed alive rather than wedged. Only while
+                # nothing has connected — once a client is up the accept lines say it.
+                if (el >= ae_probe_next_report) {
+                    ae_probe_next_report = ae_probe_next_report + AE_PROBE_REPORT_MS;
+                    if (accepted == 0) {
+                        println("aethersafha: still waiting for an app, milliseconds so far:");
+                        println_int(el);
+                    }
+                }
+            }
             frame = frame + 1;
         }
-        #ifndef CYRIUS_TARGET_AGNOS
+        # ⛔⛔ THE LISTENING SOCKET LEAKED ON agnos, AND IT COST THE SECOND RUN OF A BURN.
+        # This close was inside `#ifndef CYRIUS_TARGET_AGNOS`, so the one target whose compositor
+        # loop is meant to run forever — and therefore the one that actually gets quit and relaunched
+        # by hand — was the target that never released port 7700. The 2026-08-02 log shows it exactly:
+        # run 1 prints "setu listener up" and launches both clients; run 2 prints NO listener line at
+        # all, hosts nothing, and otherwise looks like a perfectly healthy desktop.
+        # ⚠ There was never a reason for the guard. `sock_close` is portable (net.cyr routes it to
+        # BSD sockets on Linux and to the agnos kernel TCP band), and the comment beside it — "TCP,
+        # no socket file to unlink" — is if anything MORE true on agnos. This reads like a leftover
+        # from the AF_UNIX era that nobody revisited when the transport became TCP on both targets.
         if (setu_sfd >= 0) { sock_close(setu_sfd); }   # TCP — no socket file to unlink
-        #endif
 
+        # ⭐ SAY WHAT THE RUN ACTUALLY ACHIEVED. "frame loop ok" is true of a desktop that hosted two
+        # apps and of one that hosted none, which is why the burn above could not be read: both
+        # clients printed "launched" and then nothing ever said whether either arrived. Reporting the
+        # accepted count against the frame count separates "the clients died" from "you quit before
+        # they connected" without another boot.
+        println("aethersafha: at exit — frames, then apps that connected:");
+        println_int(frame);
+        println_int(accepted);
         println("aethersafha: frame loop ok");
+
+        # --clients verdict. Read as `run: exit N`.
+        #   95 both apps connected and presented    94 one did    93 neither, though both started
+        #   92 the display socket never opened      91 an app could not be started at all
+        # ⚠ 93 vs 91 is the distinction the last burn could not make, and they point at different
+        # repos: 91 is the kernel's spawn_path / the image, 93 is the client or the setu path.
+        # ⚠ 93 is NOT "too early" — this ran to a fixed cap, so it means they genuinely never arrived.
+        if (ae_probe == 1) {
+            # ⭐ REPORT THE BUDGET THAT WAS ACTUALLY SPENT. A verdict is only as good as the run
+            # behind it, and the previous build emitted 93 from a run cut short at frame 191. These
+            # two numbers make that unmistakable: an elapsed time near AE_PROBE_MS means the budget
+            # was genuinely spent, anything far below it means the run ended for another reason.
+            println("aethersafha: probe ran for milliseconds, and ignored this many quit keys:");
+            println_int(ae_now_ms() - ae_probe_t0);
+            println_int(ae_quit_ignored);
+            if (setu_sfd < 0) { return 92; }
+            if (ae_spawn_failed == 1) { return 91; }
+            if (accepted >= 2) { return 95; }
+            if (accepted == 1) { return 94; }
+            return 93;
+        }
         return 0;
     }
 

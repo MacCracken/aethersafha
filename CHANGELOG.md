@@ -4,6 +4,112 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.12.0] - 2026-08-02
+
+The desktop's first setu clients reached iron and neither one arrived. Two of the three reasons
+turned out to be defects in this file; the third is now a question the compositor answers itself.
+
+### Fixed — ⛔ THE LISTENING SOCKET LEAKED ON agnos, WHICH SILENTLY DISABLED EVERY RUN AFTER THE FIRST
+
+`sock_close(setu_sfd)` sat inside `#ifndef CYRIUS_TARGET_AGNOS`. So the one target whose compositor
+loop is designed to run forever — and therefore the one that actually gets quit and relaunched by
+hand — was the only target that never released port 7700.
+
+The burn log shows it exactly: run 1 prints `setu listener up` and launches both clients; **run 2
+prints no listener line at all**, hosts nothing, and is otherwise indistinguishable from a healthy
+desktop (`desktop up — windows: 1`, geometry correct, Esc works).
+
+⚠ There was never a reason for the guard. `sock_close` is portable — `net.cyr` routes it to BSD
+sockets on Linux and the agnos kernel TCP band — and the comment beside it ("TCP, no socket file to
+unlink") is if anything *more* true on agnos. It reads as a leftover from the AF_UNIX era that was
+not revisited when the transport became TCP on both targets.
+
+### Fixed — a failed listen, and a failed client launch, printed NOTHING
+
+`setu_srv_listen` was only reported on success. A compositor that cannot open its display socket is
+**structurally incapable of hosting an app**, and it announced that by staying quiet — which is also
+exactly what a working listener with slow clients looks like. Same for `spawn_path`: only `pk >= 0`
+printed, so a client that never left the ground read identically to one still connecting.
+
+⭐ The general shape, and it has now cost two separate readings this week: **the absence of a line is
+not a signal.** Anything worth printing on success is worth printing on failure, or the log cannot
+be read backwards.
+
+### Added — `--clients`: a bounded, self-reporting run of the real desktop
+
+⛔ **The burn could not be read, and no amount of staring at it would have helped.** The log said
+`launched setu client #1` / `#2 (crab)` and then nothing, and the run ended at frame 128 when no
+window had appeared. That is consistent with two *opposite* states — the clients died on load, or
+they were still connecting — and the desktop's normal output cannot separate them. Asking the
+operator to hold a desktop open for an unspecified time and judge by eye is not an experiment.
+
+`run /bin/aethersafha --clients` runs the **same loop**, stops on its own once both clients have
+presented or at a fixed 5000-frame cap, and exits with a code:
+
+| exit | meaning |
+|---|---|
+| 95 | both apps connected and presented |
+| 94 | one did |
+| 93 | neither, though both started — the client or the setu path |
+| 92 | the display socket never opened |
+| 91 | an app could not be started at all — the kernel's `spawn_path` or the image |
+
+⚠ **93 and 91 point at different repos**, which is the distinction the last burn could not make.
+⚠ **93 is not "too early"** — the run goes to a fixed **30 s wall-clock** budget and ignores the quit
+key, so it means they genuinely never arrived. (The first draft of this bounded on FRAMES and honoured
+Esc, which made that sentence false; see the two sections below, folded in before release.)
+⭐ It reuses the production loop rather than a copy of it, so the answer is about the desktop that
+ships, not about a probe that resembles it.
+
+### Added — an exit summary on every run
+
+`frame loop ok` is equally true of a desktop that hosted two apps and one that hosted none. The loop
+now reports the frame count and the number of clients that connected, so an ordinary run is legible
+without the probe flag.
+
+### Fixed — ⛔ the first draft of `--clients` COULD BE TRUNCATED BY A KEYPRESS
+
+The first cut of `--clients` reused the desktop's frame loop, which honours `HID_ESC` → `IA_QUIT`,
+so a quit key ended the run wherever it landed and the verdict was emitted anyway — while this entry
+claimed the opposite (*"93 is not 'too early' — the run goes to a fixed cap"*). Caught on iron before
+the version was ever tagged.
+
+The first iron `--clients` run proves it: `quit on a key … 41 … 191`, then `at exit — frames 192,
+apps connected 0`, then `run: exit 93` — a cap of 5000 frames, stopped at 192. **The code meant
+"nothing had connected yet" and the documentation said "nothing ever connected".** A diagnostic a
+keypress can truncate is not a diagnostic, and one whose docs overstate it is worse than none.
+
+A probe run now **ignores the quit key**, counts how many it ignored, and reports that count at exit
+alongside the elapsed time. ⚠ Counted rather than silently dropped: an ignored keypress is a fact
+about the run, and on this box a stray scancode is plausible — the console echoed `-0 -clients` for
+a line whose argv was demonstrably correct (exit 93 is only reachable when the exact `--clients`
+match sets probe mode), which is the known flaky xHCI HID path showing up in the echo.
+
+### Changed — ⛔ the probe budget is WALL TIME, not frames
+
+Frames were the wrong unit and the reason the cap was set where it was. What a spawned client needs
+in order to load from ext2, start, and complete a loopback TCP connect is **seconds and scheduler
+slices**; a frame count measures neither, and frame duration differs by more than an order of
+magnitude between QEMU and iron. Any single frame cap is far too short on one and far too long on
+the other.
+
+The budget is now **30 s of `sys_uptime_ms`**, with the frame cap kept at 200000 purely as a backstop
+should the clock be broken — deliberately far above anything the timer will reach, because a frame
+cap that can bind before the timer *is* the bug above restated. Progress prints every 5 s while
+nothing has connected, so the log shows the run stayed alive rather than wedged.
+
+⭐ **Exit 93 now means what it always claimed**: 30 seconds elapsed, both clients started, neither
+ever connected. The exit line reports the elapsed milliseconds so that is checkable rather than
+asserted.
+
+### Note — one hypothesis checked and discarded before it reached anyone
+
+archaemenid has a live NIC, unlike the QEMU boxes this path was proven on, so "loopback TCP is being
+routed to the wire" was worth ruling out. It is wrong: agnos `net_tx` (`kernel/core/net.cyr`) tests
+`net_is_loopback(dst)` and queues to the loopback ring **before** it ever consults `nic_ready`, so a
+live NIC does not divert `127.x` traffic. Recorded because a plausible-and-wrong theory left lying
+around gets picked up later as fact.
+
 ## [0.11.1] - 2026-08-02
 
 **The desktop composited on real silicon.** `run /bin/aethersafha --selftest` on archaemenid
@@ -12,7 +118,8 @@ of the GPU's own back buffer at the client's screen coordinates, margin clean, f
 First time any of this repo's GPU path has executed on hardware. The bare desktop also rendered:
 MUDRA chrome, kashi titlebar text, cyan focus strip, traffic lights, on the panel.
 
-The same burn found two defects that only hardware could show.
+The same burn found one defect that only hardware could show — and one *suspected* defect that the
+instrumentation added here promptly cleared.
 
 ### Fixed — ⛔ THE COMPOSITOR ASKED THE KERNEL FOR THE SCREEN SIZE AND THREW THE ANSWER AWAY
 
@@ -44,16 +151,23 @@ frame to the CPU.
 about it said *"I asked and discarded the reply."* A number alone cannot distinguish a measurement
 from a default, and that distinction was the entire bug. It now states which of the two it is.
 
-### Added — the frame loop names the key that stops it
+### Added — the frame loop names the key that stops it, and the answer was "nothing was wrong"
 
-On the burn the desktop rendered and then **exited immediately** — `aethersafha: frame loop ok`,
-straight back to the prompt, with nothing said about why. `IA_QUIT` has exactly one source
-(`HID_ESC`), so either an Esc genuinely arrived or the Set-1 decode manufactured one, and those want
-opposite fixes. The loop now prints the HID usage and the frame number on quit.
+The previous burn's log ended `aethersafha: frame loop ok` with nothing said about why, which read
+as a compositor that quit on its own. `IA_QUIT` has exactly one source (`HID_ESC`), so either an Esc
+genuinely arrived or the Set-1 decode manufactured one — opposite fixes. Rather than guess, the loop
+now prints the HID usage and the frame number on quit.
 
-⚠ **Deliberately instrumented rather than guessed.** ⭐ The relevant fact for whoever reads the next
-boot: `kbscan#42` is a **raw** drain, so the compositor sees every scancode buffered since boot —
-including everything typed at the agnsh prompt to launch it.
+✅ **Resolved on the next boot: `usage 41` (0x29 = Esc), `frame 113`.** The operator pressed Esc to
+leave the desktop, after 113 rendered frames. The exit path was correct the whole time; the log
+simply could not say so. **No code defect existed here** — the defect was in what the program chose
+to report about itself.
+
+⭐ Kept, because it is cheap and it is the difference between a fact and a theory. An instrument that
+costs one `println` on a path taken once per run, and that can retire a suspected bug without
+spending a boot on the operator's only machine, has already paid for itself.
+⚠ Worth knowing when reading these: `kbscan#42` is a **raw** drain, so the compositor sees every
+scancode buffered since boot, including whatever was typed at the agnsh prompt to launch it.
 
 ### Changed — `[deps.bhumi]` 1.1.2 → 1.1.3, `[deps.mehman]` 1.0.0 → 1.0.1
 
