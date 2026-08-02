@@ -54,6 +54,47 @@ FAIL
 Reproduces identically under the pinned 6.4.78 toolchain and under 6.5.5, so it is not toolchain
 drift on the consumer's side.
 
+## ⭐ THE REGRESSION HAS A DATE, AND IT IS NOT A GRADUAL DRIFT
+
+`src/confine.cyr` is **new in kavach 3.9.1, released 2026-07-25** (its own CHANGELOG entry: *"the
+child-side confinement sequence, shared by every backend that forks… extracted from `spawn.cyr`"*).
+aethersafha's last successfully-built `--agnos` binary is dated **2026-07-25 11:24**.
+
+So the sequence is: aethersafha built clean against a local kavach at ≤ 3.9.0; 3.9.1 landed
+`confine.cyr` later that day; aethersafha's `path = "../kavach"` override picked it up with no
+manifest change; and its `--agnos` build has been broken ever since **with nobody noticing, because
+nothing in CI or the smokes rebuilds that target.**
+
+⭐ **The important nuance: agnos did not newly LOSE anything.** `sys_fork`/`sys_execve` were always
+absent there. What 3.9.1 changed is that the fork path became **REACHABLE** from the compilation
+unit — cyrius only refuses to emit on *reachable* undefined functions. This is why the fix is
+guarding entry points rather than porting a process model.
+
+## What has been done (2026-08-01) and what remains
+
+**Done — the arity/model half, host build and 554 tests still green:**
+
+- `src/util.cyr` gained `kv_unlink` / `kv_rmdir` / `kv_waitpid`, the one place the target difference
+  lives; 25 call sites across 8 files now route through them.
+- ⚠ **`kv_waitpid` is not an arity adapter, it is a MODEL adapter.** Linux writes a packed
+  wait-status word; agnos `sys_waitpid(pid)` returns the exit code **directly** (cyrius's own
+  `syscalls_x86_64_agnos.cyr` says so). Every caller here decodes `(status >> 8) & 255`, so handing
+  them a bare code would put it in the **signal** field — a child exiting 11 would read as
+  "killed by SIGSEGV". The agnos arm synthesises the packed word.
+- Guarded, each **failing closed** rather than fabricating success: `_spawn_enter_rootfs`,
+  `confine_child`, `spawn_namespaces_available`, `spawn_seccomp_available`, `confine_capture`,
+  `_oci_run`. ⛔ None returns 0 on agnos — a sandbox that reports success without confining anything
+  is the worst failure this file could have.
+
+**Remaining — three reachable undefined symbols, and this needs the owner, not another sweep pass:**
+
+- `sys_fork` at `src/persistent.cyr:69` and `src/spawn.cyr:139`
+- `sys_dup2` in `_spawn_redirect_stdio` (`src/confine.cyr:157,168,169`) and the fork children
+- `json_v_parse_str` — **not kavach's**; a bayan JSON symbol, and a separate matter
+
+⛔ **Do NOT reach for `--allow-undef`.** It emits a binary containing undefined functions, which is
+exactly the class of silent wrongness this ecosystem keeps paying for in hardware burns.
+
 ## Suggested fix
 
 These backends are **inherently Linux-only** — agnos has no Firecracker VMM, no OCI runtime, and
