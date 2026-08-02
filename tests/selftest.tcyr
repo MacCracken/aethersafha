@@ -1,0 +1,177 @@
+# aethersafha — the iron selftest's ORACLE, tested on a machine with no GPU.
+#
+# ⛔ WHAT IS BEING PROTECTED HERE. `ae_selftest` itself only runs on agnos: every syscall it makes
+# (`#86`, `#72`, `#90`, `#73`) is inside `#ifdef CYRIUS_TARGET_AGNOS`. That would leave the part
+# most likely to be WRONG — the band arithmetic and the negative-control scans — verifiable only by
+# burning a boot on the operator's single AMD box. So the verification logic is deliberately kept
+# free of `#ifdef` and exercised here against SYNTHETIC captures, and the burn is then spent on the
+# hardware rather than on the arithmetic.
+#
+# ⭐ EVERY CASE BELOW IS A FAULT THE CHECKER MUST REJECT, not a restatement of what it accepts. A
+# suite that only feeds a correct capture through a checker proves the happy path and nothing else;
+# these plant the specific corruptions a real blit produces — a one-row shift, a short row, a
+# whole-buffer smear, a wrong origin — and require each to be caught.
+#
+# Stdlib + [deps.*] auto-included via cyrius.cyml.
+include "src/selftest.cyr"
+
+# A 128x128 synthetic capture. Filled with a poison word that is deliberately NOT a sentinel, so
+# "the checker found a sentinel" can only mean the test put one there.
+enum StTest {
+    ST_POISON = 0x00DEAD01;
+    ST_CAPW   = 128;
+    ST_CAPH   = 128;
+}
+
+fn st_new_capture(): i64 {
+    var buf = alloc(ST_CAPW * ST_CAPH * 4);
+    var i = 0;
+    while (i < ST_CAPW * ST_CAPH) {
+        store32(buf + i * 4, ST_POISON);
+        i = i + 1;
+    }
+    return buf;
+}
+
+# Stamp the 64x64 banded surface into `cap` with its top-left at (ox,oy) — i.e. simulate a composite
+# that landed at that origin. `dy_shift` displaces it vertically to model a geometry error.
+fn st_stamp(cap, ox, oy, w, h): i64 {
+    var y = 0;
+    while (y < h) {
+        var v = ae_st_band_value(y);
+        var x = 0;
+        while (x < w) {
+            var cx = ox + x;
+            var cy = oy + y;
+            if ((cx >= 0) && (cx < ST_CAPW)) {
+                if ((cy >= 0) && (cy < ST_CAPH)) {
+                    store32(cap + (cy * ST_CAPW + cx) * 4, v);
+                }
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    # ── The band map itself ─────────────────────────────────────────────────
+    # ⚠ Boundaries, not midpoints. An off-by-one in the band map would move every later
+    # expectation with it and the suite would agree with itself.
+    test_group("selftest oracle — the band map is exact at every boundary");
+    assert_eq(ae_st_band_value(0),  AE_ST_S0, "row 0 is band 0");
+    assert_eq(ae_st_band_value(15), AE_ST_S0, "row 15 is the last of band 0");
+    assert_eq(ae_st_band_value(16), AE_ST_S1, "row 16 is the first of band 1");
+    assert_eq(ae_st_band_value(31), AE_ST_S1, "row 31 is the last of band 1");
+    assert_eq(ae_st_band_value(32), AE_ST_S2, "row 32 is the first of band 2");
+    assert_eq(ae_st_band_value(47), AE_ST_S2, "row 47 is the last of band 2");
+    assert_eq(ae_st_band_value(48), AE_ST_S3, "row 48 is the first of band 3");
+    assert_eq(ae_st_band_value(63), AE_ST_S3, "row 63 is the last of band 3");
+
+    # The four sentinels must be mutually distinct, or a shift could alias into a "correct" read.
+    test_group("selftest oracle — the four sentinels are distinct");
+    assert_eq(ae_st_is_sentinel(AE_ST_S0), 1, "S0 is recognised");
+    assert_eq(ae_st_is_sentinel(AE_ST_S3), 1, "S3 is recognised");
+    assert_eq(ae_st_is_sentinel(ST_POISON), 0, "the poison word is not a sentinel");
+    assert_eq(ae_st_is_sentinel(0x00000000), 0, "black is not a sentinel");
+    assert_eq(ae_st_is_sentinel(0x00FFFFFF), 0, "white is not a sentinel");
+
+    # ── The source painter ──────────────────────────────────────────────────
+    test_group("selftest oracle — the source surface is painted in bands");
+    var src = alloc(AE_ST_SURF_W * AE_ST_SURF_H * 4);
+    ae_st_fill_source(src, AE_ST_SURF_W, AE_ST_SURF_H);
+    assert_eq(ae_st_px(src, 0, 0, AE_ST_SURF_W), AE_ST_S0, "source top-left is band 0");
+    assert_eq(ae_st_px(src, 63, 15, AE_ST_SURF_W), AE_ST_S0, "source band 0 spans the full width");
+    assert_eq(ae_st_px(src, 0, 16, AE_ST_SURF_W), AE_ST_S1, "source row 16 begins band 1");
+    assert_eq(ae_st_px(src, 63, 63, AE_ST_SURF_W), AE_ST_S3, "source bottom-right is band 3");
+
+    # ── A CORRECT composite passes ──────────────────────────────────────────
+    test_group("selftest oracle — a correctly placed surface passes every check");
+    var ok = st_new_capture();
+    st_stamp(ok, AE_ST_MARGIN, AE_ST_MARGIN, AE_ST_SURF_W, AE_ST_SURF_H);
+    assert_eq(ae_st_check_bands(ok, ST_CAPW, AE_ST_MARGIN, AE_ST_MARGIN), 0,
+    "a correct capture reports no bad band");
+    assert_eq(ae_st_scan_margin(ok, ST_CAPW, ST_CAPH, AE_ST_MARGIN, AE_ST_MARGIN,
+    AE_ST_SURF_W, AE_ST_SURF_H), 0,
+    "a correct capture leaks nothing outside the window");
+
+    # ── FAULT 1 — a one-row vertical shift ──────────────────────────────────
+    # ⛔ This is the case the first draft of ae_st_check_bands MISSED. Sampling band middles
+    # tolerates a shift of up to 7 rows; only probing the first and last row of each band catches it.
+    # The titlebar offset is applied in three separate places, so this is the realistic error.
+    test_group("selftest oracle — a ONE-ROW shift is caught");
+    var sh1 = st_new_capture();
+    st_stamp(sh1, AE_ST_MARGIN, AE_ST_MARGIN + 1, AE_ST_SURF_W, AE_ST_SURF_H);
+    assert_neq(ae_st_check_bands(sh1, ST_CAPW, AE_ST_MARGIN, AE_ST_MARGIN), 0,
+    "a surface one row too low fails the band check");
+    var sh2 = st_new_capture();
+    st_stamp(sh2, AE_ST_MARGIN, AE_ST_MARGIN - 1, AE_ST_SURF_W, AE_ST_SURF_H);
+    assert_neq(ae_st_check_bands(sh2, ST_CAPW, AE_ST_MARGIN, AE_ST_MARGIN), 0,
+    "a surface one row too high fails the band check");
+
+    # ── FAULT 2 — a gross shift names the band ──────────────────────────────
+    test_group("selftest oracle — a gross shift names which band went wrong");
+    var sh30 = st_new_capture();
+    st_stamp(sh30, AE_ST_MARGIN, AE_ST_MARGIN + 16, AE_ST_SURF_W, AE_ST_SURF_H);
+    assert_eq(ae_st_check_bands(sh30, ST_CAPW, AE_ST_MARGIN, AE_ST_MARGIN), 1,
+    "a full-band displacement is reported against band 1");
+
+    # ── FAULT 3 — a short row (wrong stride / truncated copy) ───────────────
+    # ⚠ Every sampled ROW is still in the right band; only the far column is missing. A checker that
+    # probed rows but not columns would call this a pass.
+    test_group("selftest oracle — a short row is caught");
+    var shortr = st_new_capture();
+    st_stamp(shortr, AE_ST_MARGIN, AE_ST_MARGIN, AE_ST_SURF_W - 8, AE_ST_SURF_H);
+    assert_neq(ae_st_check_bands(shortr, ST_CAPW, AE_ST_MARGIN, AE_ST_MARGIN), 0,
+    "a surface 8 columns short fails the band check");
+
+    # ── FAULT 4 — the whole-buffer smear ────────────────────────────────────
+    # ⛔ THE CASE THE BAND CHECK ALONE CANNOT SEE. If the blit filled the entire back buffer with the
+    # pattern, every band probe reads exactly what it expects and the picture is completely wrong.
+    # Only the margin scan rejects it — which is why the selftest runs both and why the far negative
+    # control exists.
+    test_group("selftest oracle — a whole-buffer smear passes the bands and FAILS the margin");
+    var smear = st_new_capture();
+    var sy = 0 - AE_ST_MARGIN;
+    while (sy < ST_CAPH) {
+        st_stamp(smear, AE_ST_MARGIN, sy, AE_ST_SURF_W, AE_ST_SURF_H);
+        sy = sy + AE_ST_SURF_H;
+    }
+    assert_eq(ae_st_check_bands(smear, ST_CAPW, AE_ST_MARGIN, AE_ST_MARGIN), 0,
+    "the smear is invisible to the band check — this is the point");
+    assert_eq(ae_st_scan_margin(smear, ST_CAPW, ST_CAPH, AE_ST_MARGIN, AE_ST_MARGIN,
+    AE_ST_SURF_W, AE_ST_SURF_H), 1,
+    "the margin scan rejects the smear");
+
+    # ── FAULT 5 — a single stray pixel outside the window ───────────────────
+    test_group("selftest oracle — one stray pixel outside the window is enough to fail");
+    var stray = st_new_capture();
+    st_stamp(stray, AE_ST_MARGIN, AE_ST_MARGIN, AE_ST_SURF_W, AE_ST_SURF_H);
+    store32(stray + (5 * ST_CAPW + 5) * 4, AE_ST_S2);
+    assert_eq(ae_st_scan_margin(stray, ST_CAPW, ST_CAPH, AE_ST_MARGIN, AE_ST_MARGIN,
+    AE_ST_SURF_W, AE_ST_SURF_H), 1,
+    "a lone sentinel in the margin is caught");
+
+    # ── The contamination / far-control scan ────────────────────────────────
+    # ⭐ This is the NULL CALIBRATION the driver runs before the first frame. If it ever answers 1 on
+    # a freshly poisoned buffer, the instrument is broken and every verdict downstream is void.
+    test_group("selftest oracle — the null calibration is honest");
+    var clean = st_new_capture();
+    assert_eq(ae_st_scan_for_sentinel(clean, ST_CAPW, ST_CAPH), 0,
+    "a poisoned buffer holds no sentinel");
+    store32(clean + (100 * ST_CAPW + 100) * 4, AE_ST_S1);
+    assert_eq(ae_st_scan_for_sentinel(clean, ST_CAPW, ST_CAPH), 1,
+    "a single planted sentinel anywhere is found");
+
+    # ── The host arm of the driver ──────────────────────────────────────────
+    # ⚠ 96 is "nothing was proven", NOT "pass". A host build has no sovereign GPU band, and the one
+    # outcome that must never occur is this returning 95 on a machine that composited nothing.
+    test_group("selftest driver — a build with no GPU band proves nothing and says so");
+    assert_eq(ae_selftest(), 96, "the host arm reports 96, never 95");
+
+    assert_summary();
+    return 0;
+}

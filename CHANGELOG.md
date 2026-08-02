@@ -4,7 +4,129 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.11.0] - 2026-08-02
+
+The compositor can be flashed, run on iron, and **report what happened**. Every piece of that
+sentence was missing yesterday.
+
+### Fixed — ⛔ THE `--agnos` BUILD, BROKEN SINCE 2026-07-25, IS GREEN
+
+`cyrius build --agnos` now emits a 15,591,456-byte static x86-64 ELF64 — the shape
+`agnos/scripts/burn/stage-tools.sh` requires.
+
+The fault was never in this repo. kavach's Linux-only backends named `sys_getgid`, `sys_lstat`,
+`sys_fork`, `sys_dup2`, `sys_execve` and `sys_setsid` — none of which exist on agnos — and since
+`cyrius build` prepends every `[deps.*]` module, the whole consumer failed even though the
+compositor sandboxes nothing.
+
+⛔ **kavach 3.10.0 claimed to have fixed this and had not, for a reason worth carrying forward: an
+`#ifdef` early-return does not remove the rest of a function from the build.** That release added
+`#ifdef CYRIUS_TARGET_AGNOS return 0; #endif` guards to six confinement entry points and reported
+the compositor unblocked. The guard is a *runtime* branch — every statement after it still compiles
+and every symbol it names must still resolve — so `spawn_namespaces_available` returned early on
+agnos and *still* referenced `sys_getgid` twenty lines later. Fixed properly in **kavach 3.11.0**
+with six compile-time shims (`kv_getgid` / `kv_lstat` / `kv_fork` / `kv_dup2` / `kv_execve` /
+`kv_setsid`), whose two arms are selected by the preprocessor.
+
+⚠ `[deps.kavach]` still declares `path = "../kavach"` alongside its tag, and **the path wins** — the
+vendored copy tracks the local checkout regardless of what the tag says. That is how this repo's
+build changed with no change to this repo. The tag now reads 3.11.0; the hazard is unchanged.
+
+### Added — `--selftest`: the compositor's iron verdict
+
+⛔ **Nothing in this desktop's GPU path has ever run on hardware, and QEMU cannot make it.** It
+exposes no AMD PCI device, so `gpu_find` never matches, `gpu_caps` reports flags 0, `ae_gpu_probe`
+answers 0, and every GPU branch in `gpu.cyr` is dead for the entire run. A green desktop smoke
+proves the CPU fallback — which was never the part in doubt. Hardware compositing has been shipping
+since 0.9.6 with **zero** evidence behind it.
+
+`run /bin/aethersafha --selftest` seeds a window's shared buffer with a four-band sentinel pattern,
+drives the **real** `ae_gpu_frame_plan` → `render_desktop` → `ae_gpu_present_frame` sequence, captures
+the finished frame through `#90 gpu_readback_shm`, pulls it back with `#73`, and exits with a coded
+verdict — `95` = the GPU composited the client's surface at the client's coordinates. Same contract
+as `gpufill` / `gpublit` / `gpucopy` / `gputri`, because an exit code is the only channel a program
+that owns the screen has.
+
+⭐ **The oracle is external.** The sentinels (`0x00C0FFEE`, `0x00BADA55`, `0x00FACADE`, `0x005EEDED`)
+are chosen by the test and derivable from no compositor state — not a rupa token, not a chrome fill,
+not the framebuffer's boot contents. A renderer sharing every one of the compositor's premises still
+cannot produce one by accident. This arc has already published a wrong claim that three documents
+agreed on; agreement is not evidence.
+
+⭐ **Self-contained by design** — one process, no setu client, no `spawn_path`, no loopback TCP, no
+two-proc scheduling. Every one of those is a way for a run to fail for reasons unrelated to the GPU.
+A non-95 exit points at the compositing path and nothing else.
+
+⚠ **Three negative controls, because the positive check alone is not sufficient.** A *whole-buffer
+smear* satisfies every band probe while the picture is completely wrong, so the margin ring must
+come back clean; a second frame captured 300 px away must contain no sentinel at all; and the
+landing buffer is poisoned and scanned **before** the first frame, because `#90` fails silently —
+a stale read returns plausible pixels, never an error.
+
+### Added — a pre-flip capture hook inside the shipping frame function
+
+⛔ **It fires before `#84`, and that is not a preference.** `present` toggles `gpu_bb_back`, so a
+readback issued after the flip samples the buffer the frame did *not* draw into and returns the
+previous frame in full, with no error. On a static desktop that looks almost right — the worst
+failure mode an instrument can have.
+
+⚠ The hook lives in `ae_gpu_present_frame` itself, not in a probe that mimics it. A verification
+path that is not the production path grades the mimic; this repo has paid for that twice already
+(`render_frame` carrying a damage model the live loop never called, and the GPU decision living
+apart from its consumer).
+
+### Fixed — the compositor had no entry point, no exit code, and silently ignored every argument
+
+`main.cyr` ended at `main`'s closing brace and relied on cycc's auto-emitted call. It ran, which is
+why nobody noticed, and it cost two things that only matter on iron: **there was no exit code** (the
+return value went nowhere), and **argv was unsafe to read**. Now enters through a bare top-level
+`_ae_entry()` + `SYS_EXIT`, the form every staged agnos tool uses.
+
+⛔ **And `args_init()` was never called, so the first `--selftest` build launched the DESKTOP.**
+`argc()`/`argv()` are not ambient — without that call `_args_base` is 0 and `argc()` answers 0
+forever. The flag was not rejected; it was invisible. Exit 0, a desktop on screen, and a burn that
+would have read as "the desktop came up" while the oracle never ran.
+
+⚠ `SYS_EXIT`, never a literal 60: agnos renumbers the enum and exit is **0** there, so `syscall(60,
+r)` is a no-op that only appears to work because cycc's implicit exit follows it.
+
+### Added — `tests/selftest.tcyr`, 29 assertions (21 suites green, was 20)
+
+The verification logic is deliberately `#ifdef`-free so it is testable on a machine with no GPU —
+otherwise the part most likely to be wrong (band arithmetic, negative-control scans) would be
+verifiable only by burning a boot on the operator's single AMD box.
+
+⚠ **Every case is a fault the checker must REJECT**, not a restatement of what it accepts: a
+one-row shift, a full-band displacement, a short row, a whole-buffer smear, a lone stray pixel, a
+pre-contaminated buffer.
+
+⛔ **The first draft of `ae_st_check_bands` sampled band MIDDLES and would have missed a shift of up
+to 7 rows** — the sample simply lands elsewhere in the same 16-row band and compares equal. It now
+probes the first and last row of every band plus the left and right columns. The titlebar offset is
+applied independently in three places that have already disagreed once this arc, so a one-row error
+is the realistic one.
+
+⚠ The suite was verified to be capable of failing: neutering `ae_st_scan_margin` to `return 0` turns
+it red at exactly the two cases only it covers (`27 passed, 2 failed`). A suite that has never been
+seen red is not known to be a gate.
+
+### Changed — the desktop is staged for burn
+
+`agnos/scripts/burn/stage-tools.sh` grows its first desktop row, and `burn-prep.sh` grows the guard
+it applies to every other oracle: the flag the operator is told to type must exist in the binary
+that gets flashed. ⚠ Absent the flag, `--selftest` falls through to the desktop — success-shaped,
+with no verdict.
+
+### Known — still unproven
+
+⚠ **This is a staged binary and a green host suite, not a burn.** Exit 95 has never been observed.
+Everything above makes the question *askable* on iron for the first time; it does not answer it.
+
+⚠ `src/apps.cyr` still names `sys_fork`/`sys_dup2`/`sys_execve` for its Command Palette spawn. They
+are unreachable on agnos today and DCE drops them, but that is reachability analysis holding the
+line, not a guard — and `app_launch_terminal` should route to `sys_spawn_path` #43 there instead.
+
+## [0.10.0] - 2026-08-02
 
 The compositor runs its own code, at the size the screen actually is, and no longer blanks the
 desktop when the GPU declines a frame.
@@ -160,6 +282,26 @@ checkout at **3.9.3**. The build worked on 2026-07-25 and stopped working with n
 
 Filed in both trees as `docs/development/issues/2026-08-01-linux-only-backends-break-every-agnos-consumer.md`.
 **Host build and all 20 test suites are green; the agnos build of this change is unverified.**
+
+### Changed — cyrius pin 6.4.78 -> 6.5.5; bhumi 1.1.2, rupa 0.1.2, kashi 1.0.4, setu 0.7.1, kavach 3.10.0
+
+Part of the whole-desktop-stack toolchain catch-up cut on this date — fourteen repos moved together
+so the next burn runs binaries built by ONE compiler instead of six different ones.
+
+⚠ **The pin was documentation, not enforcement.** `cyrius build` compiles with the INSTALLED `cycc`,
+prints a `toolchain drift` warning, and carries on — so 0.9.8 was already being built by 6.5.5.
+
+⛔ **`[deps.kavach]` declared `tag = "3.7.0"` while also carrying `path = "../kavach"`, and the path
+WINS.** The vendored copy silently tracked a sibling checkout, so this repo's `--agnos` build broke
+on 2026-07-25 — the day kavach 3.9.1 landed `confine.cyr` — with no change to this repo and nothing
+to announce it. The tag now names what is actually consumed. **A pin that is not enforced is worse
+than no pin: it is what a reader checks INSTEAD of reality.**
+
+### Why the minor bump rather than a patch
+
+Two removals: `render_frame` (`src/render.cyr`) and `ae_gpu_clear` / `ae_gpu_clear_band`
+(`src/gpu.cyr`), plus a behaviour change in what `render_window` gates on. Nothing outside this repo
+consumed any of them — the compositor is `publish = false` — but a removal is a removal.
 
 ## [0.9.8] - 2026-07-25
 

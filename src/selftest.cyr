@@ -1,0 +1,403 @@
+# selftest.cyr — the compositor's iron verdict. `run /bin/aethersafha --selftest` -> `run: exit N`.
+#
+# ⛔ WHY THIS EXISTS. Nothing in this desktop's GPU path has ever executed on hardware. Not one
+# desktop binary appears in any `stage_one` call in agnos's `scripts/burn/stage-tools.sh`, and QEMU
+# cannot stand in for the missing burn: it exposes no AMD PCI device, so `gpu_find` never matches,
+# `gpu_present` stays 0, `gpu_caps` reports flags 0, and `ae_gpu_probe` answers 0. Every GPU branch
+# in gpu.cyr is dead for the entire run. **A green desktop smoke says nothing about `#87`/`#92`/`#84`,
+# structurally** — it proves the CPU fallback, which is not the thing anyone doubts.
+#
+# ⛔ AND A COMPOSITOR CANNOT BE READ BY LOOKING AT IT. It owns the screen it would report on. Every
+# self-validating proof agnos already stages — `gpufill`, `gpublit`, `gpublend`, `gpucov`, `gpucopy`,
+# `gputri`, `gputex`, `modeset` — answers as an EXIT CODE precisely because that is the only channel
+# a graphical program has on a box whose display it has taken over. This file gives the desktop the
+# same channel. `run: exit 95` = the GPU composited a client surface correctly on real silicon.
+#
+# ⭐ THE ORACLE IS EXTERNAL, WHICH IS THE WHOLE POINT. The sentinel words below are chosen by this
+# file and are derivable from NO compositor state — not from a rupa theme token, not from a chrome
+# fill, not from the framebuffer's boot contents. A renderer that shares every one of the
+# compositor's premises still cannot produce `0x00C0FFEE` at a coordinate by accident. Comparing the
+# compositor against its own idea of what it drew would be a shared-premise oracle, and this repo has
+# already been bitten by one: the "alpha-0 surface VANISHES under #92" claim was asserted in three
+# documents at once and was wrong in all three.
+#
+# ⭐ SELF-CONTAINED ON PURPOSE — one process, no setu client, no second proc. The desktop's existing
+# on-device proofs all need a spawned client to connect back over loopback, which drags in
+# `spawn_path`, the scheduler, the serial-kstack yield recipe and TCP. Every one of those is a way
+# for the run to fail for a reason that has nothing to do with the GPU. This seeds a window's shared
+# buffer directly, so a non-95 exit points at the compositing path and nothing else.
+#
+# ⚠ IT MEASURES THE SHIPPING FRAME, NOT A COPY OF IT. The capture is a branch inside the real
+# `ae_gpu_present_frame` (gpu.cyr, `ae_gpu_cap_*`), and the frame below is driven through the same
+# `ae_gpu_frame_plan` -> `render_desktop` -> `ae_gpu_present_frame` sequence main.cyr runs. A probe
+# that reimplemented the frame would grade the reimplementation — the exact failure that let 0.9.8
+# ship a damage model in `render_frame` that the live loop never called.
+
+# ---- Sentinels ----------------------------------------------------------------------------------
+# Four DISTINCT values, one per horizontal band, so the check discriminates SPATIALLY. A single
+# solid fill would pass under a shifted, short, row-reversed or wrong-stride copy; four bands name
+# which one went wrong. (gpucopy learned this the same way — see its burn arc.)
+#
+# ⚠ Byte 3 is 0 in all four. `#87` is an opaque copy that ignores byte 3, and the kernel's back
+# buffer is read back as XRGB — so a sentinel with a high byte set would compare unequal for a
+# reason that has nothing to do with whether the blit worked.
+enum AeStSentinel {
+    AE_ST_S0 = 0x00C0FFEE;
+    AE_ST_S1 = 0x00BADA55;
+    AE_ST_S2 = 0x00FACADE;
+    AE_ST_S3 = 0x005EEDED;
+}
+
+# Client surface: 64x64, four 16-row bands. Capture: 128x128 centred on the body, so the body sits
+# at capture offset (32,32) and is ringed by 32px of desktop that MUST NOT contain a sentinel.
+enum AeStGeom {
+    AE_ST_SURF_W  = 64;
+    AE_ST_SURF_H  = 64;
+    AE_ST_BAND_H  = 16;
+    AE_ST_CAP_W   = 128;
+    AE_ST_CAP_H   = 128;
+    AE_ST_MARGIN  = 32;
+    AE_ST_WIN_X   = 100;
+    AE_ST_WIN_Y   = 100;
+    # Where the far negative control samples — a region the client surface never reaches.
+    AE_ST_FAR_X   = 400;
+    AE_ST_FAR_Y   = 380;
+}
+
+# ⚠ MODULE-GLOBAL `var X[N]` IS N x u64 (8N BYTES), while a FUNCTION-LOCAL one is N BYTES. These are
+# module-global, so the counts below are eighths of the byte sizes:
+#   ae_st_src = 2048 * 8 = 16384 B = 64*64*4   (the client surface)
+#   ae_st_cap = 4096 * 8 = 32768 B = 128*128*2 ... NO — 128*128*4 is 65536, so 8192 entries.
+# Getting this wrong is a silent out-of-bounds, not a compile error.
+var ae_st_src[2048];    # 16384 B — 64x64 XRGB source pixels
+var ae_st_cap[8192];    # 65536 B — 128x128 XRGB readback landing buffer
+
+# ---- Pure verification logic (deliberately free of #ifdef, so the host can test it) --------------
+#
+# ⭐ The syscall driver below only runs on agnos, which would leave the part most likely to be
+# WRONG — the band arithmetic and the negative-control scan — exercisable only by burning a boot on
+# the operator's single box. Same reasoning as `ae_gpu_window_admissible`: keep the rule pure, test
+# it on any machine, and let the burn test the hardware rather than the arithmetic.
+
+# 1 if `v` is one of the four sentinels.
+fn ae_st_is_sentinel(v): i64 {
+    if (v == AE_ST_S0) { return 1; }
+    if (v == AE_ST_S1) { return 1; }
+    if (v == AE_ST_S2) { return 1; }
+    if (v == AE_ST_S3) { return 1; }
+    return 0;
+}
+
+# The sentinel a source row belongs to, by band.
+fn ae_st_band_value(row): i64 {
+    if (row < AE_ST_BAND_H) { return AE_ST_S0; }
+    if (row < AE_ST_BAND_H * 2) { return AE_ST_S1; }
+    if (row < AE_ST_BAND_H * 3) { return AE_ST_S2; }
+    return AE_ST_S3;
+}
+
+# Paint the 64x64 banded source into `buf` (a userland byte buffer, w*h*4 bytes).
+fn ae_st_fill_source(buf, w, h): i64 {
+    var y = 0;
+    while (y < h) {
+        var v = ae_st_band_value(y);
+        var x = 0;
+        while (x < w) {
+            store32(buf + (y * w + x) * 4, v);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return 0;
+}
+
+# Read one pixel out of a tightly-packed XRGB buffer.
+fn ae_st_px(buf, x, y, w): i64 {
+    return load32(buf + (y * w + x) * 4) & 0xFFFFFFFF;
+}
+
+# Verify the four bands at capture offset (ox,oy). -> 0 all correct, else the 1-based band that
+# mismatched, so a shift or a row-order fault names itself instead of just saying "wrong".
+#
+# ⛔ PROBES BAND EDGES, NOT BAND MIDDLES, AND THE DIFFERENCE IS THE WHOLE SENSITIVITY OF THE TEST.
+# Sampling the middle of each 16-row band tolerates a shift of up to 7 rows in either direction —
+# the sample simply lands elsewhere in the same band and compares equal. Probing the FIRST and LAST
+# row of every band makes a one-row shift fail immediately: shift down and `oy+0` reads desktop
+# instead of S0; shift up and `oy+15` reads S1 where S0 belongs.
+#
+# ⚠ A one-row error is the likely one here, not a hypothetical: the titlebar offset (`+ TITLEBAR_H`)
+# is applied independently in `render_window`, in `ae_gpu_window_admissible` and in
+# `ae_gpu_present_frame`, and those three have already disagreed with each other once this arc.
+#
+# ⚠ Also probes the left and right COLUMNS of band 0. A short copy or a wrong stride keeps every
+# sampled row in the correct band while truncating each one, and a column-blind check calls that
+# correct.
+fn ae_st_check_bands(cap, capw, ox, oy): i64 {
+    if (ae_st_px(cap, ox + 10, oy + 0, capw)  != AE_ST_S0) { return 1; }
+    if (ae_st_px(cap, ox + 10, oy + 15, capw) != AE_ST_S0) { return 1; }
+    if (ae_st_px(cap, ox + 0, oy + 8, capw)   != AE_ST_S0) { return 1; }
+    if (ae_st_px(cap, ox + AE_ST_SURF_W - 1, oy + 8, capw) != AE_ST_S0) { return 1; }
+    if (ae_st_px(cap, ox + 10, oy + 16, capw) != AE_ST_S1) { return 2; }
+    if (ae_st_px(cap, ox + 10, oy + 31, capw) != AE_ST_S1) { return 2; }
+    if (ae_st_px(cap, ox + 10, oy + 32, capw) != AE_ST_S2) { return 3; }
+    if (ae_st_px(cap, ox + 10, oy + 47, capw) != AE_ST_S2) { return 3; }
+    if (ae_st_px(cap, ox + 10, oy + 48, capw) != AE_ST_S3) { return 4; }
+    if (ae_st_px(cap, ox + 10, oy + AE_ST_SURF_H - 1, capw) != AE_ST_S3) { return 4; }
+    return 0;
+}
+
+# Scan a whole capture for ANY sentinel word. -> 1 if one is present.
+#
+# ⭐ THIS IS THE NULL CALIBRATION, and without it the test is not measuring what it claims. If the
+# blit smeared across the buffer, filled the whole surface, or landed at the wrong origin, the band
+# check above could still pass while the picture was badly wrong. Requiring the sentinel to be
+# ABSENT where the window is not is what turns "the pixels exist somewhere" into "the pixels are at
+# the client's coordinates".
+fn ae_st_scan_for_sentinel(cap, capw, caph): i64 {
+    var y = 0;
+    while (y < caph) {
+        var x = 0;
+        while (x < capw) {
+            if (ae_st_is_sentinel(ae_st_px(cap, x, y, capw)) == 1) { return 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return 0;
+}
+
+# Scan only the MARGIN ring of the body capture — everything outside the rect
+# (ox,oy)..(ox+bw, oy+bh). -> 1 if a sentinel leaked outside the window body.
+fn ae_st_scan_margin(cap, capw, caph, ox, oy, bw, bh): i64 {
+    var y = 0;
+    while (y < caph) {
+        var x = 0;
+        while (x < capw) {
+            var inside = 0;
+            if ((x >= ox) && (x < ox + bw)) {
+                if ((y >= oy) && (y < oy + bh)) { inside = 1; }
+            }
+            if (inside == 0) {
+                if (ae_st_is_sentinel(ae_st_px(cap, x, y, capw)) == 1) { return 1; }
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return 0;
+}
+
+# ---- The driver ---------------------------------------------------------------------------------
+#
+# EXIT CODES — the verdict channel. Read as `run: exit N`.
+#   95  every check passed: the GPU composited the client surface at the client's coordinates.
+#   96  no GPU / not armed / no carveout. QEMU's honest answer and NOT a failure — it means the
+#       run proved nothing about hardware, which is exactly what should be reported rather than
+#       a green that was never earned.
+#   90  bhumi backend would not open.
+#   91  the scanout surface is too small to place the test window and its capture ring.
+#   92  #86 shm_create_gpu refused the client surface slot.
+#   93  #86 refused the capture slot.
+#   94  #72 shm_write could not seed the source surface.
+#   80  ae_gpu_frame_plan REFUSED the frame — admissibility, before any syscall was issued.
+#   81  ae_gpu_present_frame returned 0: the GPU declined and demoted to the CPU path.
+#   82  the capture hook never ran, so the frame never reached the flip. ⚠ DISTINCT from 83: the
+#       fault is upstream of the readback and hunting the GPU would be the wrong search.
+#   83  #90 gpu_readback_shm rejected the capture.
+#   84  #73 shm_read could not pull the capture to userland.
+#   70..73  band 1..4 of the composited surface is wrong (shift / short copy / row order / stride).
+#   74  a sentinel appeared OUTSIDE the window body — the pixels landed, but not where the client
+#       put them.
+#   75  the far negative control found a sentinel 300px away: the surface leaked across the buffer.
+#   76  a sentinel was ALREADY in the capture buffer before the frame ran. The instrument is
+#       contaminated and no later comparison from this run means anything.
+fn ae_selftest(): i64 {
+    #ifndef CYRIUS_TARGET_AGNOS
+    # ⚠ Not "unsupported" — the same honest 96 a GPU-less agnos box answers. This test's subject is
+    # hardware compositing, and a host build has none; saying so is the correct result, not an error.
+    println("aethersafha selftest: this build has no sovereign GPU band, nothing was proven");
+    return 96;
+    #endif
+    #ifdef CYRIUS_TARGET_AGNOS
+    println("aethersafha selftest: starting");
+
+    ae_query_geometry();
+    var be = ae_backend_open(ae_geom_w, ae_geom_h);
+    if (be == 0) {
+        println("aethersafha selftest: the display backend would not open");
+        return 90;
+    }
+    var fb = bhumi_backend_fb(be);
+    var fw = bhumi_fb_width(fb);
+    var fh = bhumi_fb_height(fb);
+    # The window body sits at (WIN_X, WIN_Y + TITLEBAR_H); the capture ring extends MARGIN beyond it
+    # on every side, and the far control samples further right and down again.
+    if (fw < AE_ST_FAR_X + AE_ST_CAP_W) {
+        println("aethersafha selftest: the screen is too narrow to place the test window");
+        return 91;
+    }
+    if (fh < AE_ST_FAR_Y + AE_ST_CAP_H) {
+        println("aethersafha selftest: the screen is too short to place the test window");
+        return 91;
+    }
+
+    if (ae_gpu_probe() != 1) {
+        println("aethersafha selftest: no usable graphics hardware here, so nothing was proven");
+        return 96;
+    }
+    println("aethersafha selftest: graphics hardware is present and armed");
+
+    # The client's surface must live in a GPU-VISIBLE slot. #86 is the peer of #71 that the engines
+    # can actually reach; a #71 slot is system RAM and the kernel rejects it at every GPU entry
+    # point. That one distinction is why the whole band had no consumer until setu 0.6.0.
+    var sbytes = AE_ST_SURF_W * AE_ST_SURF_H * 4;
+    var sid = sys_shm_create_gpu(sbytes);
+    if (sid < 1) {
+        println("aethersafha selftest: could not get a graphics-visible buffer for the test window");
+        return 92;
+    }
+    # ⚠ A SEPARATE SLOT FOR THE CAPTURE. #90 WRITES into its target, so capturing into the client's
+    # own slot would overwrite the pixels under test between the blit and the comparison — and the
+    # check would then be reading its own capture back as though it were the source.
+    var cid = sys_shm_create_gpu(AE_ST_CAP_W * AE_ST_CAP_H * 4);
+    if (cid < 1) {
+        sys_shm_free(sid);
+        println("aethersafha selftest: could not get a graphics-visible buffer for the readback");
+        return 93;
+    }
+
+    ae_st_fill_source(&ae_st_src, AE_ST_SURF_W, AE_ST_SURF_H);
+    if (sys_shm_write(sid, &ae_st_src, sbytes) != 0) {
+        sys_shm_free(sid);
+        sys_shm_free(cid);
+        println("aethersafha selftest: could not load the test pattern into the window buffer");
+        return 94;
+    }
+
+    # NULL CALIBRATION. Poison the landing buffer and prove the sentinels are not already in it
+    # before a single frame has run. A capture buffer that arrives pre-loaded with the answer would
+    # make every later comparison meaningless — and #90 fails SILENTLY, returning plausible pixels
+    # rather than an error, so "the readback did nothing" is a real and undetectable outcome.
+    var pz = 0;
+    while (pz < AE_ST_CAP_W * AE_ST_CAP_H) {
+        store32(&ae_st_cap + pz * 4, 0x00DEAD01);
+        pz = pz + 1;
+    }
+    if (ae_st_scan_for_sentinel(&ae_st_cap, AE_ST_CAP_W, AE_ST_CAP_H) == 1) {
+        sys_shm_free(sid);
+        sys_shm_free(cid);
+        println("aethersafha selftest: the readback buffer was contaminated before the test ran");
+        return 76;
+    }
+
+    # A one-window desktop: the real aggregate, the real window model, one client surface.
+    var desk = desktop_new();
+    var comp = desk_comp(desk);
+    var win = comp_create_window(comp, AE_ST_WIN_X, AE_ST_WIN_Y,
+    AE_ST_SURF_W, AE_ST_SURF_H, "selftest");
+    win_set_bufid(win, sid);
+    # Opaque, so the frame takes `#87` rather than the `#92` shader path. Proving the plain
+    # hardware blit first is the right order: `#92` needs the shader envelope proven on this boot
+    # (caps bit3), so folding both into one verdict would let a missing envelope read as a broken
+    # blit.
+    win_set_premul(win, 0);
+
+    var bx = AE_ST_WIN_X - AE_ST_MARGIN;
+    var by = AE_ST_WIN_Y + TITLEBAR_H - AE_ST_MARGIN;
+
+    # ---- Frame 1: composite, capture the window body and its surrounding ring ----
+    ae_gpu_capture_arm(cid, bx, by, AE_ST_CAP_W, AE_ST_CAP_H);
+    if (ae_gpu_frame_plan(comp, fb) != 1) {
+        ae_gpu_capture_disarm();
+        sys_shm_free(sid);
+        sys_shm_free(cid);
+        println("aethersafha selftest: the compositor declined to put this frame on the hardware");
+        return 80;
+    }
+    render_desktop(desk, fb);
+    if (ae_gpu_present_frame(comp, fb) != 1) {
+        ae_gpu_capture_disarm();
+        sys_shm_free(sid);
+        sys_shm_free(cid);
+        println("aethersafha selftest: the hardware refused the frame and fell back to software");
+        return 81;
+    }
+    var rc1 = ae_gpu_capture_result();
+    if (rc1 == 0 - 99) {
+        ae_gpu_capture_disarm();
+        sys_shm_free(sid);
+        sys_shm_free(cid);
+        println("aethersafha selftest: the frame never reached the point where it is captured");
+        return 82;
+    }
+    if (rc1 != 0) {
+        ae_gpu_capture_disarm();
+        sys_shm_free(sid);
+        sys_shm_free(cid);
+        println("aethersafha selftest: the hardware would not read the finished frame back");
+        return 83;
+    }
+    if (sys_shm_read(cid, &ae_st_cap, AE_ST_CAP_W * AE_ST_CAP_H * 4) != 0) {
+        ae_gpu_capture_disarm();
+        sys_shm_free(sid);
+        sys_shm_free(cid);
+        println("aethersafha selftest: the captured frame could not be brought back for checking");
+        return 84;
+    }
+
+    var band = ae_st_check_bands(&ae_st_cap, AE_ST_CAP_W, AE_ST_MARGIN, AE_ST_MARGIN);
+    if (band != 0) {
+        ae_gpu_capture_disarm();
+        sys_shm_free(sid);
+        sys_shm_free(cid);
+        println("aethersafha selftest: the window content came back wrong — band");
+        println_int(band);
+        return 69 + band;
+    }
+    println("aethersafha selftest: the window content is exactly what the client wrote");
+
+    if (ae_st_scan_margin(&ae_st_cap, AE_ST_CAP_W, AE_ST_CAP_H,
+    AE_ST_MARGIN, AE_ST_MARGIN, AE_ST_SURF_W, AE_ST_SURF_H) == 1) {
+        ae_gpu_capture_disarm();
+        sys_shm_free(sid);
+        sys_shm_free(cid);
+        println("aethersafha selftest: window pixels appeared outside the window");
+        return 74;
+    }
+    println("aethersafha selftest: nothing of the window appears outside its own edges");
+
+    # ---- Frame 2: the far negative control ----
+    # ⭐ The band check proves the pixels ARRIVED; this proves they arrived HERE and nowhere else. A
+    # whole-buffer fill, a wrong-origin blit, or a stale capture that happened to hold the pattern
+    # all pass the first check and fail this one.
+    var pz2 = 0;
+    while (pz2 < AE_ST_CAP_W * AE_ST_CAP_H) {
+        store32(&ae_st_cap + pz2 * 4, 0x00DEAD02);
+        pz2 = pz2 + 1;
+    }
+    ae_gpu_capture_arm(cid, AE_ST_FAR_X, AE_ST_FAR_Y, AE_ST_CAP_W, AE_ST_CAP_H);
+    ae_gpu_frame_plan(comp, fb);
+    render_desktop(desk, fb);
+    var p2 = ae_gpu_present_frame(comp, fb);
+    var rc2 = ae_gpu_capture_result();
+    ae_gpu_capture_disarm();
+    if (p2 == 1) {
+        if (rc2 == 0) {
+            if (sys_shm_read(cid, &ae_st_cap, AE_ST_CAP_W * AE_ST_CAP_H * 4) == 0) {
+                if (ae_st_scan_for_sentinel(&ae_st_cap, AE_ST_CAP_W, AE_ST_CAP_H) == 1) {
+                    sys_shm_free(sid);
+                    sys_shm_free(cid);
+                    println("aethersafha selftest: window pixels turned up far away from the window");
+                    return 75;
+                }
+                println("aethersafha selftest: the rest of the screen is clean");
+            }
+        }
+    }
+
+    sys_shm_free(sid);
+    sys_shm_free(cid);
+    println("aethersafha selftest: the graphics hardware composited the desktop correctly");
+    return 95;
+    #endif
+}

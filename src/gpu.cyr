@@ -138,6 +138,55 @@ fn ae_gpu_demote(): i64 {
     return 0;
 }
 
+# --- Pre-flip capture: the only way a compositor can be graded on iron ------------------------
+#
+# ⭐ WHY THE HOOK LIVES IN THE SHIPPING FUNCTION INSTEAD OF A TEST COPY OF IT. The obvious way to
+# prove GPU compositing on hardware is a separate probe binary that mimics ae_gpu_present_frame.
+# That proves the MIMIC works. This repo has already paid for that mistake twice: `render_frame`
+# carried the whole 0.9.8 damage model while the live loop ran `render_desktop`, and the GPU
+# decision lived in ae_gpu_present_frame while its consumer read a different flag in render_window.
+# A verification path that is not the production path is a shared-premise oracle wearing a lab coat.
+# So the capture is a branch INSIDE the real frame — armed by the selftest, dead weight otherwise.
+#
+# ⛔ IT MUST FIRE BEFORE `#84`, AND THAT IS NOT A PREFERENCE. `present` FLIPS the render target
+# (agnos kernel/core/gpu.cyr toggles `gpu_bb_back` on every present), so a readback issued after the
+# flip samples the buffer this frame did NOT draw into — returning the PREVIOUS frame's pixels, in
+# full, with no error. On a static desktop those look almost right, which is the worst possible
+# failure for an instrument: it would report a working GPU path from a frame the GPU never touched.
+#
+# ⚠ `#90` fails SILENTLY by design — a wrong or stale read returns plausible pixels, never an error
+# code (agnos gpu.md C2g-1: a reused slot once returned a stale ghost). So a 0 return here means
+# "the syscall was accepted", nothing more. The verdict has to come from comparing VALUES that the
+# compositor could not have produced; see selftest.cyr.
+#
+# ⚠ The capture slot must NEVER be a slot a window is sourcing from. `#90` writes into it, so
+# capturing into a live client surface would overwrite the very pixels under test between the blit
+# and the comparison, and the test would then read its own capture back as if it were the source.
+var ae_gpu_cap_slot = 0;         # 0 = disarmed. Production runs with this 0 and skips the branch.
+var ae_gpu_cap_wh   = 0;         # (h << 16) | w
+var ae_gpu_cap_xy   = 0;         # (sy << 16) | sx
+# -99 = the hook never executed, which is a DISTINCT and important answer from "#90 returned an
+# error": it means the frame never reached step 3 at all (the plan refused, a blit failed, the
+# window count changed), and reporting that as a readback failure would send the next session
+# hunting the GPU when the fault was upstream of it.
+var ae_gpu_cap_rc   = 0 - 99;
+
+fn ae_gpu_capture_arm(slot, sx, sy, w, h): i64 {
+    ae_gpu_cap_slot = slot;
+    ae_gpu_cap_wh = (h << 16) | w;
+    ae_gpu_cap_xy = (sy << 16) | sx;
+    ae_gpu_cap_rc = 0 - 99;
+    return 0;
+}
+
+fn ae_gpu_capture_disarm(): i64 {
+    ae_gpu_cap_slot = 0;
+    return 0;
+}
+
+# The #90 return from the most recent armed frame, or -99 if the hook did not run.
+fn ae_gpu_capture_result(): i64 { return ae_gpu_cap_rc; }
+
 # ae_gpu_frame_plan(comp, fb) — decide, BEFORE the frame is rendered and WITHOUT issuing a single
 # syscall, whether the GPU will take this whole frame. Returns 1 = GPU frame, 0 = CPU frame.
 #
@@ -332,6 +381,12 @@ fn ae_gpu_present_frame(comp, fb): i64 {
             }
         }
         i = i + 1;
+    }
+
+    # 2b. Pre-flip capture, if the selftest armed one. See the ae_gpu_cap_* block above for why this
+    #     is here and not in a probe of its own, and why it cannot be moved below the present.
+    if (ae_gpu_cap_slot != 0) {
+        ae_gpu_cap_rc = sys_gpu_readback_shm(ae_gpu_cap_slot, ae_gpu_cap_wh, ae_gpu_cap_xy);
     }
 
     # 3. ONE flip for the whole frame.

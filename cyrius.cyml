@@ -1,6 +1,6 @@
 [package]
 name = "aethersafha"
-version = "${file:VERSION}"
+version = "0.11.0"
 description = "aethersafha — AI-augmented AGNOS compositor (Cyrius port, from 27207 lines of Rust)"
 license = "GPL-3.0-only"
 language = "cyrius"
@@ -32,7 +32,7 @@ stdlib = [
 [deps.bhumi]
 git = "https://github.com/MacCracken/bhumi.git"
 path = "../bhumi"
-tag = "1.1.1"
+tag = "1.1.2"
 modules = ["dist/bhumi.cyr"]
 
 # --- Desktop theme-token core: rupa (रूप — form / appearance). The ONE source of
@@ -42,7 +42,7 @@ modules = ["dist/bhumi.cyr"]
 [deps.rupa]
 git = "https://github.com/MacCracken/rupa.git"
 path = "../rupa"
-tag = "0.1.1"
+tag = "0.1.2"
 modules = ["dist/rupa.cyr"]
 
 # --- Shared AGNOS domain primitives (was Rust `agnostik` 0.90.0). Error family
@@ -69,7 +69,7 @@ modules = ["dist/agnodrm.cyr"]
 [deps.kashi]
 git = "https://github.com/MacCracken/kashi.git"
 path = "../kashi"
-tag = "1.0.3"
+tag = "1.0.4"
 modules = ["src/font_data.cyr"]
 
 # --- Compat / "swallow" backend: does XWayland's job the sovereign way — hosts foreign-ABI app
@@ -90,7 +90,7 @@ modules = ["src/types.cyr", "src/surface.cyr", "src/sandbox.cyr"]
 [deps.kavach]
 git = "https://github.com/MacCracken/kavach.git"
 path = "../kavach"
-tag = "3.9.3"
+tag = "3.11.0"
 modules = ["dist/kavach.cyr"]
 
 # --- DISPLAY plane contract: setu (सेतु — bridge). The dhancha client ↔ this
@@ -100,7 +100,7 @@ modules = ["dist/kavach.cyr"]
 # are `setu_*` (no collision); its stdlib needs {string,fmt,alloc,vec,str,io,
 # syscalls,assert} are already a subset of [deps].stdlib above.
 [deps.setu]
-# ⚠ COMMENT CORRECTED 2026-08-01 — it said "Pinned to 0.5.0" over a `tag = "0.7.0"` line, and had
+# ⚠ COMMENT CORRECTED 2026-08-01 — it said "Pinned to 0.5.0" over a `tag = "0.7.1"` line, and had
 # said so through two bumps. A stale pin comment is worse than none: it is what a reader checks
 # INSTEAD of the field below it. (puka and dhancha carry the same rotted comment, saying 0.3.0.)
 # 0.6.0 — client buffers are GPU-VISIBLE on agnos (`shm_create_gpu` #86 before `shm_create` #71).

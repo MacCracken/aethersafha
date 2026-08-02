@@ -3,32 +3,42 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 
-> ⛔ **THIS FILE WAS TWELVE RELEASES STALE — corrected header 2026-08-01, body below still to do.**
-> It claimed version **0.7.0** and cyrius pin **6.3.43** while `VERSION` said **0.9.8** and
-> `cyrius.cyml` pinned **6.4.78**; its Dependencies section omitted **setu** and **rupa** entirely,
-> which are the display protocol and the theme core — not minor entries. A state file that is wrong
-> is worse than a missing one, because it is what a cold start reads first. The sections below the
-> Version block have **not** been re-verified; treat any specific claim in them as unproven until it
-> is checked against the tree.
+> ⛔ **THIS FILE WAS TWELVE RELEASES STALE — header corrected 2026-08-01, refreshed again 2026-08-02
+> at 0.11.0. The body below the Version block has still NOT been re-verified**; treat any specific
+> claim in it as unproven until it is checked against the tree. A state file that is wrong is worse
+> than a missing one, because it is what a cold start reads first.
 
 ## Version
 
-**0.9.8** (2026-07-25), plus an unreleased change set — see [`../../CHANGELOG.md`](../../CHANGELOG.md).
+**0.11.0** (2026-08-02) — see [`../../CHANGELOG.md`](../../CHANGELOG.md).
 
-**Toolchain**: cyrius pin **6.4.78** (`cyrius.cyml [package].cyrius`). Released cyrius is **6.5.5**.
+**Toolchain**: cyrius pin **6.5.5** (`cyrius.cyml [package].cyrius`), level with released cyrius.
+⚠ The pin is documentation, not enforcement: `cyrius build` compiles with the **installed** `cycc`,
+prints a `toolchain drift` warning, and carries on. Verify provenance with
+`~/.cyrius/versions/<pin>/bin/cyrius` when it matters.
 
-**⛔ The `--agnos` build is currently BROKEN**, by a defect in vendored kavach 3.9.3, not by this
-repo: its Linux-only Firecracker/OCI backends call the Linux `sys_unlink(path)`/`sys_rmdir(path)`
-(agnos takes `(path, pathlen)`) with no target guard, and `cyrius build` prepends every `[deps.*]`
-module, so the whole consumer fails. Filed in both trees at
-[`../development/issues/2026-08-01-linux-only-backends-break-every-agnos-consumer.md`](issues/2026-08-01-linux-only-backends-break-every-agnos-consumer.md).
-⚠ Related: `[deps.kavach]` declares `tag = "3.7.0"` *and* `path = "../kavach"` — the path wins, so
-the vendored copy silently tracks the local checkout and the declared tag is not enforced.
+**✅ The `--agnos` build is GREEN** as of 2026-08-02 — 15,591,456 B, static x86-64 ELF64, the shape
+`agnos/scripts/burn/stage-tools.sh` requires. It had been broken since **2026-07-25** by vendored
+kavach's Linux-only backends naming syscalls agnos does not define; fixed in **kavach 3.11.0** with
+six compile-time shims. ⛔ kavach 3.10.0 had *reported* this fixed and had not — an `#ifdef`
+early-return is a runtime branch that does not remove the rest of the function from the build, so
+the guarded functions still referenced the undefined symbols. Filed in both trees at
+[`issues/2026-08-01-linux-only-backends-break-every-agnos-consumer.md`](issues/2026-08-01-linux-only-backends-break-every-agnos-consumer.md).
+⚠ Unchanged hazard: `[deps.kavach]` declares a tag **and** `path = "../kavach"`, and **the path
+wins** — the vendored copy tracks the local checkout whatever the tag says. That is why this repo's
+build changed with no change to this repo.
 
 **GPU**: hardware compositing SHIPPED (0.9.6–0.9.8) via the agnos ring-3 band `#82`-`#94` — **not**
 via mabda; there is no `[deps.mabda]` and none is needed. ⚠ **None of it has ever run on iron**, and
 QEMU cannot substitute (no AMD PCI device ⇒ `gpu_find` never matches ⇒ caps flags 0 ⇒ the probe
 answers 0, so every GPU branch is dead for the run).
+
+**Iron readiness (0.11.0)**: the compositor is now **staged** as `/bin/aethersafha` and carries a
+self-validating oracle — `run /bin/aethersafha --selftest` → `run: exit 95` means the GPU composited
+a client surface at the client's coordinates, verified against sentinels no compositor state can
+produce. ⚠ **Exit 95 has never been observed.** This makes the question askable on iron for the
+first time; it does not answer it. Bare `run /bin/aethersafha` starts the real desktop and never
+returns — that is the demo, not the verdict.
 
 ---
 
