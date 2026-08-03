@@ -14,6 +14,13 @@
 # clone(2) can't host it. For the fork-free transport proof (two separate
 # processes over the same TCP wire), use `setu_serve_probe` + `puka_setu_probe`.
 #
+# ⛔ LINUX-ONLY, AND THE TCP WIRE IT NAMES IS RETIRED ON agnos (2026-08-03). This probe forks,
+# so it never ran on agnos in the first place; setu's Linux arm is NOT retired and this stays
+# valid on the host. But TCP-on-loopback was ruled the wrong primitive for local display IPC on
+# the sovereign kernel — retired there on ARCHITECTURAL grounds, replaced by the agnos socket
+# `anu` (agnos docs/development/planning/ipc.md §9, revert inventory §10). The agnos analog of
+# this launch-then-connect-back flow is the compositor's own spawn_path path in src/main.cyr.
+#
 # Run: PUKA_BIN=/abs/path/to/puka_setu_probe ./build/puka_launch_probe
 
 include "src/geom.cyr"

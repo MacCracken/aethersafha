@@ -56,7 +56,10 @@ var ae_spawn_failed = 0;
 enum AeProbe {
     # ⛔ THE BUDGET IS WALL TIME, NOT FRAMES, and the first version got this wrong. What a spawned
     # client needs in order to load from ext2, start, and complete a loopback TCP connect is SECONDS
-    # and scheduler slices — neither of which a frame count measures. Frame duration differs by more
+    # and scheduler slices — neither of which a frame count measures.
+    # ⚠ The "loopback TCP connect" leg is retired on agnos (2026-08-03, architectural — see the
+    # setu listener banner below); the WALL-TIME-not-frames reasoning is transport-independent and
+    # holds unchanged for a anu connect, which still costs an ext2 load and scheduler slices. Frame duration differs by more
     # than an order of magnitude between QEMU and iron, so any frame cap is either far too short on
     # one or far too long on the other.
     AE_PROBE_MS     = 30000;
@@ -244,6 +247,14 @@ fn main(): i64 {
     println("aethersafha: a11y nodes synced:");
     println_int(axn);
 
+    # ⛔ RETIRED ON agnos (2026-08-03) — TCP-on-loopback is the WRONG PRIMITIVE for local
+    # display IPC on the sovereign kernel. Operator ruling; retired on ARCHITECTURAL grounds,
+    # not because it failed to work. The replacement is the agnos socket `anu` — agnos
+    # docs/development/planning/ipc.md §9 (decision) and §10 (revert inventory). The code below
+    # stands until the anu seam lands; treat it as a path being replaced, not a design to copy.
+    # ⚠ setu's LINUX arm is NOT retired. Linux is a separate target, not a fallback — BSD
+    # sockets under `#ifndef CYRIUS_TARGET_AGNOS` remain the supported host transport.
+    #
     # Native display protocol: stand up the setu listener (TCP loopback:7700) on
     # BOTH targets. setu 0.3.0's transport is cross-platform — net.cyr routes to
     # Linux BSD sockets on the host AND to agnos's kernel TCP (sock_listen #56 /
@@ -272,6 +283,8 @@ fn main(): i64 {
     # on-device analog of the Linux puka_launch_probe. agnos has no fork; spawn_path
     # #43 loads /bin/puka from ext2 and returns immediately (a pid), and the client
     # connects back over setu loopback:7700 (composited in the frame loop below).
+    # ⛔ The loopback:7700 leg of this connect-back is RETIRED on agnos (architectural — see the
+    # listener banner above); the launch-then-connect-back SHAPE survives onto anu unchanged.
     # /bin/puka is the first-resident slot; the agnos smoke seeds a slim setu client
     # there until full puka builds --agnos (blocked on mabda's Linux SYS_IOCTL).
     #ifdef CYRIUS_TARGET_AGNOS
@@ -350,6 +363,10 @@ fn main(): i64 {
             render_desktop_foreign(desk, fb);
             # setu: accept + composite client presents (over the desktop) — BOTH
             # targets now (setu 0.3.0 TCP transport runs on Linux AND agnos).
+            # ⛔ "runs on Linux AND agnos" is a statement about the CURRENT code, not a design
+            # endorsement: the agnos side of this wire is RETIRED (architectural — see the listener
+            # banner) and moves to anu. The accept/dispatch/composite logic below is transport-
+            # agnostic and carries over; only the fd's provenance changes.
             if (setu_sfd >= 0) {
                 var cfd = setu_srv_accept(setu_sfd);   # non-blocking; -5 = none pending
                 if (cfd >= 0) {
@@ -422,6 +439,10 @@ fn main(): i64 {
             }
             frame = frame + 1;
         }
+        # ⚠ HISTORICAL — this note describes the agnos TCP listener, a transport RETIRED on
+        # architectural grounds 2026-08-03 (see the listener banner above). The bug and its fix
+        # were real; keep the LESSON (close the listener on every target, unconditionally) when
+        # the listener becomes a anu endpoint. Do not read it as endorsing port 7700.
         # ⛔⛔ THE LISTENING SOCKET LEAKED ON agnos, AND IT COST THE SECOND RUN OF A BURN.
         # This close was inside `#ifndef CYRIUS_TARGET_AGNOS`, so the one target whose compositor
         # loop is meant to run forever — and therefore the one that actually gets quit and relaunched

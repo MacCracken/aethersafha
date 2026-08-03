@@ -11,7 +11,10 @@
 - [ ] Rust → Cyrius surface parity verified (module-by-module against `rust-old/`)
 - [ ] Test coverage adequate for the surface area (≥80% target)
 - [ ] Benchmarks captured in `docs/benchmarks.md`
-- [ ] Runs on the agnos kernel via bhumi (real scanout + input)
+- [x] Runs on the agnos kernel via bhumi (real scanout + input) — ✅ `--selftest` → `exit 95` on
+      archaemenid (0.11.1: GPU-composited a client surface at the client's coordinates); geometry read
+      live from the kernel. ⚠ **Pointer input is still absent on iron** (agnos xhci matches only HID
+      boot *keyboard*), so "real input" is keyboard-only.
 - [ ] CHANGELOG complete from v0.1.0 onward
 - [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`)
 
@@ -61,11 +64,15 @@ symbols), each compiling + smoke-tested. Driven by the parity workflow.
 - Remaining (feature depth): notifications surface, input→gestures, quick-settings,
   panel text labels (cpu/mem %), scene-graph/damage-driven redraw.
 
-### M3 — Renderer + compositor depth (v0.3.0)
-- Damage tracking, scene graph, decorations, bitmap text (`renderer.rs` full).
-- Input routing to focused surface, drag/resize state machines, workspaces.
-- Native display protocol surface — sovereign, greenfield (see ADR 0001 +
-  Bite F); **not** a Wayland port. Incremental, one message at a time.
+### M3 — Renderer + compositor depth (v0.3.0) — 🚧 protocol SHIPPED, depth partial
+- **Native display protocol — ✅ SHIPPED and LIVE.** `setu` is the sovereign wire (ADR 0001, not a
+  Wayland port): server transport + dispatch (`src/setu_server.cyr`, `src/setu_dispatch.cyr`),
+  shared-buffer present, full key events. **Two real clients composited as windows on agnos from a
+  foreground launch** (2026-08-02, QEMU) — `/bin/puka` and `/bin/crab`, verified on the framebuffer.
+- Decorations + bitmap text (kashi) ✅ · damage tracking present but the damage-limited blit is
+  **not safe to enable** with the obvious one-liner (`#84` flips the render target — needs
+  `union(cur, prev)`; see state.md).
+- Remaining: scene graph, drag/resize state machines, workspaces, input routing depth.
 
 ### M4 — Apps + capture + plugins (v0.4.0)
 - **`apps.cyr` 🚧 C1+C2 done** — app framework + data-model apps + the Command Palette allowlist/basename
@@ -81,7 +88,7 @@ symbols), each compiling + smoke-tested. Driven by the parity workflow.
 - HUD widgets (`hud/{gpu,domain,crew}_status.cyr`) — HTTP polling of daimon MCP.
 
 ### M5 — mehman (foreign-app swallow backend) — 🚧 started (v0.5.0+)
-- mehman 1.0.0 + kavach 3.6.0 **wired** via `src/foreign.cyr`: guest-spec +
+- mehman 1.0.1 + kavach 3.11.0 **wired** via `src/foreign.cyr`: guest-spec +
   foreign-surface descriptor + `desktop_host_foreign` → a compositor window;
   `main` hosts a demo guest.
 - Guest **execution + capture** via `foreign_run` → `mehman_sandbox_capture_guest`
@@ -92,6 +99,17 @@ symbols), each compiling + smoke-tested. Driven by the parity workflow.
   desktop tracks hosted foreign apps (`desk_foreign`); pixel-tested. ✅
 - Remaining: consume mehman 1.0.0's per-ABI `guest`/`shim` modules; real XRGB pixel
   fidelity beyond the stdout-as-framebuffer MVP (mehman ADR 0004).
+
+## Backlog
+
+- **Premultiplied compositing (`#92` op 0x01) has never run against a real client.** No client sets
+  `SETU_SURF_PREMULTIPLIED` — not puka, crab, jalwa, or dhancha — so every surface today takes the
+  opaque `gpu_blit_shm` **#87** path, which ignores byte 3. Producers that emit alpha 0
+  (`puka/src/render/pixfmt.cyr`, jalwa `gui/draw.cyr`) are a latent hazard for whoever opts in
+  first, not a live defect. ▶ **Unblocked 2026-08-02** — two clients now connect and present from a
+  foreground launch, so the "wait until a client reliably presents" gate is met. The remaining
+  prerequisite is a producer that actually emits premultiplied pixels; crab is the nearest candidate,
+  being alpha-255 clean throughout.
 
 ## Known cleanup
 - **Deferred deps** (mehman / agnostik / agnodrm): `cyrius build` auto-prepends

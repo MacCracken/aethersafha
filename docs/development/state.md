@@ -1,181 +1,57 @@
 # aethersafha — Current State
 
-> Refreshed every release. CLAUDE.md is preferences/process/procedures
-> (durable); this file is **state** (volatile).
+> **⛔ 60-LINE CAP. NOT A LOG.** History belongs in [`../../CHANGELOG.md`](../../CHANGELOG.md), milestones in
+> [`roadmap.md`](roadmap.md). This file reached 181 lines by absorbing release narrative, and carried a
+> version, a toolchain pin and eight dependency versions that were all wrong. Over the cap means cut prose,
+> never facts. **Last refresh** 2026-08-02.
 
-> ⛔ **THIS FILE WAS TWELVE RELEASES STALE — header corrected 2026-08-01, refreshed again 2026-08-02
-> at 0.11.0. The body below the Version block has still NOT been re-verified**; treat any specific
-> claim in it as unproven until it is checked against the tree. A state file that is wrong is worse
-> than a missing one, because it is what a cold start reads first.
+## TRUE — measured today
 
-## Version
+| Field | Value | Source |
+|---|---|---|
+| Version | **0.12.0** | [`VERSION`](../../VERSION) |
+| Cyrius pin | **6.5.5** | `cyrius.cyml [package].cyrius` |
+| Modules / tests | 25 `src/*.cyr` · **21 `.tcyr` suites** | `ls` |
+| `--agnos` build | **GREEN** — staged `/bin/aethersafha` 15,592,080 B, static ELF64 | `agnos/build/rootfs/bin/` |
+| Backend | **bhumi** 1.1.3 (scanout + input). GPU via the agnos ring-3 band `#82`-`#94` — **not** mabda; there is no `[deps.mabda]` | `cyrius.cyml` |
 
-**0.11.0** (2026-08-02) — see [`../../CHANGELOG.md`](../../CHANGELOG.md).
+**Deps** (all declare a tag **and** a `path` override): bhumi 1.1.3 · rupa 0.1.2 · agnostik 1.3.4 ·
+agnodrm 1.5.0 · kashi 1.0.4 · mehman 1.0.1 · kavach 3.11.0 · setu 0.7.2.
+⛔ **The path WINS over the tag.** The vendored copy tracks the local checkout whatever the tag says — that
+is why this repo's `--agnos` build broke for a week with no change to this repo (kavach 3.9.1's Linux-only
+backends), and why a green build here does not prove the declared graph builds.
 
-**Toolchain**: cyrius pin **6.5.5** (`cyrius.cyml [package].cyrius`), level with released cyrius.
-⚠ The pin is documentation, not enforcement: `cyrius build` compiles with the **installed** `cycc`,
-prints a `toolchain drift` warning, and carries on. Verify provenance with
-`~/.cyrius/versions/<pin>/bin/cyrius` when it matters.
+## Proven, and by what
 
-**✅ The `--agnos` build is GREEN** as of 2026-08-02 — 15,591,456 B, static x86-64 ELF64, the shape
-`agnos/scripts/burn/stage-tools.sh` requires. It had been broken since **2026-07-25** by vendored
-kavach's Linux-only backends naming syscalls agnos does not define; fixed in **kavach 3.11.0** with
-six compile-time shims. ⛔ kavach 3.10.0 had *reported* this fixed and had not — an `#ifdef`
-early-return is a runtime branch that does not remove the rest of the function from the build, so
-the guarded functions still referenced the undefined symbols. Filed in both trees at
-[`issues/2026-08-01-linux-only-backends-break-every-agnos-consumer.md`](issues/2026-08-01-linux-only-backends-break-every-agnos-consumer.md).
-⚠ Unchanged hazard: `[deps.kavach]` declares a tag **and** `path = "../kavach"`, and **the path
-wins** — the vendored copy tracks the local checkout whatever the tag says. That is why this repo's
-build changed with no change to this repo.
+- **Composites on iron.** `run /bin/aethersafha --selftest` → **`exit 95`** on archaemenid (AMD gfx90c /
+  DCN2.1), 0.11.1: the client's sentinel words read back out of the GPU's own back buffer at the client's
+  coordinates, margin ring clean, far frame clean. `#87` / `#90` / `#84` are iron-proven for **one opaque
+  client surface**.
+- **Hosts two real clients, foreground, in QEMU** (2026-08-02): `aethersafha` typed at the agnsh prompt —
+  no `&` — reaches **connected 2, presented 2** with `/bin/puka` (setu's `present_probe`) and `/bin/crab`
+  (the dhancha file manager) composited as windows, crab rendering real ext2 directory contents. Verified
+  on the **framebuffer**, not the serial: the screendump carries crab's panes and the probe's own
+  `0x00003000` / `0x00FF0000` bands.
+  ⚠ This required an agnos kernel fix (1.56.34, syscall-kstack direct-map on the `#37` restore path) and
+  agnoshi routing the foreground through `spawn_path #43` + a waitpid poll instead of `execwait #37`.
+  **Not yet re-confirmed on iron.**
 
-**GPU**: hardware compositing SHIPPED (0.9.6–0.9.8) via the agnos ring-3 band `#82`-`#94` — **not**
-via mabda; there is no `[deps.mabda]` and none is needed. ⚠ **None of it has ever run on iron**, and
-QEMU cannot substitute (no AMD PCI device ⇒ `gpu_find` never matches ⇒ caps flags 0 ⇒ the probe
-answers 0, so every GPU branch is dead for the run).
+## Open
 
-**Iron readiness (0.11.0)**: the compositor is now **staged** as `/bin/aethersafha` and carries a
-self-validating oracle — `run /bin/aethersafha --selftest` → `run: exit 95` means the GPU composited
-a client surface at the client's coordinates, verified against sentinels no compositor state can
-produce. ⚠ **Exit 95 has never been observed.** This makes the question askable on iron for the
-first time; it does not answer it. Bare `run /bin/aethersafha` starts the real desktop and never
-returns — that is the demo, not the verdict.
+- **`#92` premultiplied compositing has never run** — on iron or in QEMU. No client sets
+  `SETU_SURF_PREMULTIPLIED`, so every surface takes the opaque `#87` path. Backlogged in
+  [`roadmap.md`](roadmap.md).
+- **6 of 13 GPU band numbers consumed**, 1 of 14 `#92` ops. Unconsumed and zero-kernel-change: `#88`
+  `gpu_fill_rect` (wrapper vendored, never called) · `#92` op 0x03 GLYPH_1BPP · `#92` batching · `#89`
+  bytes +4..+31 · `#90`/`#91`.
+- **No pointer input on iron** — agnos xhci matches only HID boot *keyboard* (protocol 0x01).
+- **Damage-limited blit is not safe to enable with the obvious one-liner.** `#84 present` FLIPS the render
+  target, so a single-frame damage rect leaves the other buffer two frames stale. Needs `union(cur, prev)`.
+- **`src/apps.cyr` names `sys_fork`/`sys_dup2`/`sys_execve`** — DCE'd on agnos by reachability, not by a
+  guard. `app_launch_terminal` should route to `sys_spawn_path` #43 there.
 
----
+## Pointers
 
-**Historical, from the 0.7.0 entry** (2026-07-08) — **renderer decoupled from the shell (reusable window chrome)**:
-the shell status-panel renderer (`render_shell_panel` + `panel_bar_w`/`panel_net_color`/
-`PanelK`), which coupled to `shell.cyr`'s `SystemStatus` + `SH_NetStatus`, moved out of
-`render.cyr` into a new **`src/shell_render.cyr`** (the shell → render bridge). `render.cyr`
-now holds only shell-agnostic primitives (`fill_rect`, `rend_blend`, damage tracker,
-`deco_*`, `render_window`/`render_frame`, kashi `draw_char`/`draw_text`) and is reusable
-on its own — `programs/puka_desktop_probe.cyr` now includes it directly and frames each
-hosted setu client (puka, dhancha) with real compositor chrome including **bitmap title
-TEXT**, replacing its inlined fill-only titlebar. Pure module split; behavior identical.
-
-Built on **0.6.0** (2026-07-08) — **native display protocol (setu server + frame-loop
-integration)**: the compositor side of the sovereign dhancha ↔ aethersafha wire —
-`src/setu_server.cyr` (AF_UNIX transport, length-from-header framing), `src/setu_dispatch.cyr`
-(`CREATE_SURFACE` → real `Window`, buffer receive + bhumi-framebuffer blit, verified),
-and `src/main.cyr` standing up a non-blocking setu listener that composites real client
-presents in the actual frame loop. Proven on Linux against a real dhancha `DhClient`;
-`AF_UNIX` fail-closes on agnos so the agnos loop is untouched. Adds the `setu` 0.1.0
-contract-lib dependency. The final kernel-scanout hop is agnos-only.
-
-Built on **0.5.0** (2026-07-03) — **Bite C (built-in apps) — C1 + C2**: the app framework
-(`AppError`/`AppType`/`AppWindow` + the `DesktopApplications` aggregate), the data-model apps
-(FileManager, AgentManager, AuditViewer, ModelManager), and the **Command Palette** security surface +
-**real process spawn** (30-program allowlist + `Path::file_name` basename-strip; direct
-fork+execve capturing stdout + real exit status → `Ok(stdout)`/`WindowError`; browser/Shruti
-detached launch); 133 assertions. Toolchain `6.3.42` → `6.3.43`.
-
-Built on **0.4.2** (screen capture + recording, Bite D), **0.4.1** (foreign guest surface
-presentation), **0.4.0** (mehman foreign-app hosting + kavach-sandboxed guest execution), 0.3.0
-(kashi fonts, B3 desktop wiring), and the 0.2.0 parity milestone. Ported from Rust via
-`cyrius port`; 27,207 lines preserved at `rust-old/` as the parity oracle.
-
-## Toolchain
-
-- **Cyrius pin**: `6.3.43` (in `cyrius.cyml [package].cyrius`)
-- Build: `cyrius lib sync --full && cyrius deps && cyrius build src/main.cyr build/aethersafha`
-  (the `lib sync --full` is required — the declared stdlib set exceeds the incremental pin).
-
-## Source
-
-- Rust reference: 27,207 lines at `rust-old/` (frozen, do not edit).
-- Cyrius port: **20 modules**; compiles clean + runs on the bhumi seam.
-  - **Core (M1/Bite A)** — `geom`, `window`, `compositor`, `render`, `input`, `main`.
-    compositor: workspaces + context types + move/switch + secure/agent-aware modes
-    + window-at-point hit-test; renderer: alpha blend + damage tracking + window
-    **decorations** (close/max/min buttons + `deco_hit`) + **bitmap text** via the
-    **kashi** IBM VGA 8×16 console font (`draw_char`/`draw_text`; window titles render);
-    input: **window-management shortcuts** (Tab focus-cycle, F4 close, F5 maximize-
-    toggle, F6 minimize) via `input_map`/`input_apply`.
-  - **Leaf (M2)** — `theme_bridge`, `gestures`, `accessibility`, `ai_features`,
-    `shell`, `security_ui`, `shell_integration`, `plugin_host` (all 8). Parity vs
-    `rust-old/` (heap offset-accessor structs, prefixed symbols); behaviorally tested.
-  - **Wiring (B3, complete)** — `desktop` aggregate owns the compositor + all 8 leaf
-    managers, created by `main`. `render_desktop` is the unified frame: clear to the
-    **theme** background (`desk_bg_color`), paint windows, draw the **shell** status
-    panel (`render_shell_panel` — cpu/mem/battery bars, net dot, notification badge —
-    which lives in `shell_render.cyr`, the shell → render bridge, so `render.cyr`
-    itself carries no shell symbols and is reusable standalone).
-    Live cross-subsystem links: compositor→accessibility (`desktop_sync_accessibility`),
-    theme→renderer, shell→renderer, shell_integration tray. (ai/security/gestures/
-    plugin instantiated; deeper feature wiring is follow-on.)
-  - **Foreign (M5, mehman)** — `foreign` hosts a foreign-ABI app as a kavach-sandboxed
-    guest, runs + **captures** its stdout (`mehman_sandbox_capture_guest`), and
-    **presents** the captured surface as the hosted window's content
-    (`render_desktop_foreign` / `render_foreign_content`, painted after `render_desktop`).
-  - **Screen capture (M4/Bite D1, standalone)** — `screen_capture`
-    (`ScreenCaptureManager`): per-agent permission model + sliding-window rate limiting +
-    secure-mode authorization + capture-history ring buffer + full-screen/region/window
-    capture off a bhumi framebuffer + byte-exact RAW/BMP/PNG encoders (hand-rolled
-    Adler-32/CRC-32/zlib-STORED). Not yet wired into the compositor surface.
-  - **Screen recording (M4/Bite D2, standalone)** — `screen_recording`
-    (`ScreenRecordingManager`), built on D1: recording sessions (target/format/interval/
-    `max_frames`/`max_duration`), a start → capture-frame → pause/resume → stop state
-    machine, a per-session frame ring buffer (cap 100; `frame_count`/`total_bytes` count
-    all frames ever), one-recording-per-agent, and `capture_frame` → `scap_mgr_capture` →
-    `RecordedFrame`. Caps use `-1 == None` (so `Some(0)` is distinct). Not yet wired.
-  - **Apps (M4/Bite C1+C2, standalone)** — `apps` framework (`AppError`/`AppType`/`AppWindow`
-    + the `DesktopApplications` aggregate) + data-model apps (FileManager, AgentManager,
-    AuditViewer, ModelManager) + 8 WebBrowser configs + Shruti + the **Command Palette** (allowlist +
-    `Path::file_name` basename-strip + **real fork+execve spawn** capturing stdout + exit status;
-    browser/Shruti detached launch). fs/net effect bodies (C3) stubbed to clean-env fallback. Not wired.
-
-## Tests
-
-- **18 `.tcyr` files, all green.** Core: `aethersafha` (38), `render` (29 — decoration
-  hit-test + bitmap text pixel test; now shell-free), `shell_render` (14 — panel bars +
-  net-status color + `render_shell_panel` shell→framebuffer smoke), `input` (13),
-  `leaf_modules` (11), `desktop` (15). mehman: `foreign` (23 — guest spec/surface + host-as-window +
-  sandboxed run + capture + **presentation pixel test**). capture: `screen_capture`
-  (90 — permissions / rate-limit / secure-mode / region-clamp / window / history +
-  RAW/BMP/PNG encoder checksums), `screen_recording` (72 — session lifecycle / state
-  machine / frame + duration limits / ring buffer / one-per-agent / queries). apps:
-  `apps` (133 — framework / data-model apps / aggregate / Command Palette allowlist + basename +
-  real echo/true/false spawn / launch guards). Behavioral per-module: `theme_bridge`, `gestures`,
-  `accessibility`, `ai_features`, `shell`, `security_ui`, `shell_integration`, `plugin_host`.
-- Run: `cyrius tests tests/` (or a single `cyrius test tests/<file>.tcyr`).
-
-## Dependencies
-
-- **stdlib** (auto-prepended) — syscalls, string, alloc, atomic, fmt, vec, str,
-  slice, hashmap, fnptr, io, fs, process, args, tagged, result, chrono, math,
-  assert, bench.
-Active (auto-prepended; stdlib declared per each dep's reviewed needs):
-- **bhumi** 1.0.0 — platform backend (output/input/seat).
-- **agnostik** 1.3.3 — shared domain primitives (errors namespaced `STIK_ERR_*`).
-- **agnodrm** 1.4.5 — udev/DRM device model (errors namespaced `DRM_ERR_*`).
-- **kashi** 1.0.2 — bitmap console fonts (freestanding `font_data.cyr`, VGA 8×16).
-- **mehman** 1.0.0 + **kavach** 3.6.0 — foreign-app "swallow" backend (the sovereign compat
-  lane — does XWayland's job). Consumed via `src/foreign.cyr` (host → sandboxed run → capture → present);
-  we pull only `types`/`surface`/`sandbox` (1.0.0 also ships per-ABI `guest`/`shim`
-  modules, not yet consumed). Pulls the full TLS/crypto stdlib
-  cascade (net, sandhi, thread_local, random, freelist, sync, async, fdlopen,
-  dynlib, mmap, tls, tls_native*, sha1, keccak, sigil, sakshi — all declared in
-  `[deps].stdlib`). `[deps.kavach]` is declared explicitly (its `Backend`/`config`/
-  `sandbox_*` surface is named directly by mehman's sandbox module).
-
-Deferred:
-- **mabda** 4.0.2 — GPU, off the v1.0 path.
-
-Opt-in stdlib: `cyrius build` prepends every `[deps.*]` module, so each dep's
-stdlib needs must be declared in `[deps].stdlib` (reviewed from its `dist/*.deps`
-sidecar + referenced symbols). That's by design — it keeps the dependency surface
-visible, not a bug.
-
-## Consumers
-
-_None yet (top-level application, `publish = false`)._
-
-## Next
-
-**Bite C — C1+C2 done** — the app framework + data model + aggregate + the **Command Palette spawn**
-(real fork+execve, allowlist-gated, capturing stdout + exit status) + browser/Shruti detached
-launch (133 assertions). Next on the apps track: **C3** (the fs/net effect bodies —
-agent-socket scan, audit-log parse, model gateway). Also complete + awaiting wiring: Bite D
-(capture + recording). Other large unported layers: HUD widgets (Bite E), the native
-display protocol surface (Bite F — sovereign/greenfield, highest-risk; ADR 0001). **mehman track (Bite G)**: consume 1.0.0's
-per-ABI `guest`/`shim` + real XRGB pixel fidelity (mehman ADR 0004). See
-[`roadmap.md`](roadmap.md) / [`parity-plan.md`](parity-plan.md).
+Ladder + milestones → [`roadmap.md`](roadmap.md) · per-release history → [`../../CHANGELOG.md`](../../CHANGELOG.md) ·
+parity vs the frozen 27,207-line Rust oracle at `rust-old/` → [`parity-plan.md`](parity-plan.md) ·
+GPU band contract → agnos `docs/development/agnos-userland-abi.md` · protocol → `setu`.

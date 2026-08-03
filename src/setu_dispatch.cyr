@@ -6,6 +6,14 @@
 # compositor (compositor.cyr / window.cyr) + the bhumi framebuffer — kept
 # separate from setu_server.cyr so the pure transport carries no compositor refs.
 # All fns `setu_srv_*` (the dispatch half).
+#
+# ⛔ TRANSPORT NOTE (2026-08-03): the agnos arm of the underlying transport — TCP on loopback —
+# is RETIRED on architectural grounds and moves to the agnos socket `anu` (agnos
+# docs/development/planning/ipc.md §9; revert inventory §10). setu's LINUX arm is NOT retired.
+# ⭐ This file is deliberately transport-agnostic: everything below operates on an
+# already-accepted `cfd` through `setu_srv_read_*` / `setu_srv_write_frame`, so the anu
+# migration should not touch the dispatch logic at all. Where a comment below names TCP
+# specifically (e.g. the TCP_RX_RING deadlock note), read it as a property of the OLD wire.
 
 # Close the client + listening fds and remove the socket file.
 fn setu_srv_dispatch_close(cfd, sfd, path): i64 {

@@ -1,5 +1,17 @@
 # aethersafha — setu display-protocol listener (server-side TRANSPORT).
 #
+# ⛔⛔ RETIREMENT BANNER (2026-08-03) — THE agnos ARM OF THIS TRANSPORT IS RETIRED.
+# Operator ruling: TCP-on-loopback is the WRONG PRIMITIVE for local display IPC on the sovereign
+# kernel. This is an ARCHITECTURAL retirement — it is NOT a claim that the transport never worked
+# (an honest, hook-free harness did connect and present two clients on agnos on 2026-08-02). The
+# replacement is the agnos socket `anu`: agnos docs/development/planning/ipc.md §9 for the
+# decision, §10 for the revert inventory. When anu lands, the `setu_srv_*` names and every
+# caller below stay put — only what `setu_listen`/`setu_accept` sit on changes.
+# ⚠ setu's LINUX arm is NOT retired and must not be removed. Linux is a separate target, not a
+# fallback; BSD sockets under `#ifndef CYRIUS_TARGET_AGNOS` remain the supported host transport.
+# ⛔ The transport itself lives in the setu dep (materialized at lib/setu.cyr — hand edits there
+# are reverted on the next repin). Changing it is a setu tag bump, not an edit in this repo.
+#
 # setu OWNS the transport now (item 3b — CROSS-PLATFORM TCP loopback via the
 # cyrius `net.cyr` socket layer). This file DELEGATES to setu's `setu_listen` /
 # `setu_accept` / `setu_read_*` / `setu_send` (which handle the Linux BSD-socket

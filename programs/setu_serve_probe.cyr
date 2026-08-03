@@ -1,5 +1,13 @@
 # setu_serve_probe.cyr — prove the setu TCP transport e2e WITHOUT fork.
 #
+# ⛔ SCOPE NARROWED (2026-08-03). This probe is a LINUX-HOST probe — no agnos arm, dumps a PPM
+# to /tmp — and on that target it remains valid: setu's Linux arm (BSD sockets) is NOT retired.
+# What it can no longer be cited for is the agnos display path. TCP-on-loopback was ruled the
+# WRONG PRIMITIVE for local display IPC on the sovereign kernel and is retired there on
+# ARCHITECTURAL grounds (not because it failed to work); the replacement is the agnos socket
+# `anu` — agnos docs/development/planning/ipc.md §9, revert inventory §10. A PASS here proves
+# the host wire and the dispatch/composite path, and says nothing about agnos either way.
+#
 # This is puka_launch_probe MINUS the compositor-spawns-client fork: it stands up
 # the setu listener (TCP loopback:7700), polls the non-blocking accept until a
 # client connects, serves ONE present (recv surface + blit into the framebuffer),
@@ -89,6 +97,8 @@ fn main(): i64 {
     var win = comp_get(comp, 0);
     ssp_dump_ppm(fb, win_x(win), win_y(win), win_w(win), win_h(win), ppm);
     sock_close(sfd);
+    # ⚠ Scope of this PASS: the LINUX host wire + dispatch/composite. Not an agnos claim — the
+    # agnos arm of this transport is retired (see the banner at the top of this file).
     ssp_say("setu_serve_probe: PASS — client presented over TCP; composited -> PPM\n");
     return 0;
 }

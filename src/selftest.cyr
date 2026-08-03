@@ -26,6 +26,10 @@
 # `spawn_path`, the scheduler, the serial-kstack yield recipe and TCP. Every one of those is a way
 # for the run to fail for a reason that has nothing to do with the GPU. This seeds a window's shared
 # buffer directly, so a non-95 exit points at the compositing path and nothing else.
+# ⭐ AND THAT DECISION AGED WELL. The loopback/TCP leg named above was retired on agnos 2026-08-03
+# (architectural — wrong primitive for local display IPC; replaced by the agnos socket `anu`,
+# agnos docs/development/planning/ipc.md §9). Because this file depends on NO transport, the
+# retirement does not touch it: exit 95 remains a live, valid GPU-compositing verdict on iron.
 #
 # ⚠ IT MEASURES THE SHIPPING FRAME, NOT A COPY OF IT. The capture is a branch inside the real
 # `ae_gpu_present_frame` (gpu.cyr, `ae_gpu_cap_*`), and the frame below is driven through the same

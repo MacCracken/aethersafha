@@ -1,4 +1,4 @@
-commit	5fb6ebf6ac04a68ad40287fc1cfebee16ac6b8e5	setu	https://github.com/MacCracken/setu.git	0.7.2
+commit	83fddf5427dc960d7654f6602d1ad0b14b1cfea2	setu	https://github.com/MacCracken/setu.git	0.7.4
 commit	fd959cc82542f8484a7eb535de8f333b76561c35	sakshi	https://github.com/MacCracken/sakshi.git	2.4.7
 d9f3b17ddbbe1bba48917c3a679807b01c39c4a1ce776efdbdfbb7a1680e86e4  lib/tagged.cyr
 b96a50f8df3b533649d09cd239578811a22097434e09d89b113ce8b7f56801db  lib/net.cyr
@@ -95,7 +95,7 @@ e46a35925484d3afbfaaac02676f51adaab953608879158d52f1b997fb5920a8  lib/vec.cyr
 e5c01430c59451f1e4e75e371b7c5d25cbf3b4b02f2eb30e680358bbb809ffbb  lib/sync.cyr
 724cb440922e89ff60c76eba23670eeee53b9d1f3ffdde31ebe2e2f9badda9ed  lib/slice.cyr
 1fe386009b4001573c4111d1852468db6215e8223ef637ecb85881fbe56f1153  lib/tls_native_hs12.cyr
-7f52bad509733f335837812338356c328873072b02909e1a59555a608c65f127  lib/setu.cyr
+8ace143979c9c49b6c4b971315629ab42941cb8d8d5cfbec4cb4cfc0758bd614  lib/setu.cyr
 5c60803482e41924217c1dcd38e86d966f4ee75e9c15cba8bf698a56b8ed794d  lib/rupa.cyr
 9fd6444e8cfcf7950837e955473adc5bab6d7bf4fa2c15f8ce2578360c4100eb  lib/hashmap.cyr
 f39294af5dc32bec02ec7d2204ca82033abe4f4bafc78e9be792eb178132e244  lib/fnptr.cyr

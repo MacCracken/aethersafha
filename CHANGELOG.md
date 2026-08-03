@@ -768,6 +768,15 @@ press-only clients (crab, present_probe) are byte-identical to before. Proven wi
 the sovereign desktop — a balanced **10 press / 10 release** over setu (`agnos
 scripts/aethersafha-doom-input-smoke.sh`).
 
+> ⛔ **RETRACTED 2026-08-03 — "proven on the sovereign desktop" was a FALSE GREEN.**
+> `aethersafha-doom-input-smoke.sh` was one of the `aethersafha-*` smokes that built its kernel with
+> `AETHERSAFHA_SETU_SELFTEST=1`, and that hook assigned `net_ip = 0x7F000001` so the setu client's
+> SYN source matched its destination and the handshake closed. No ordinary agnos boot could get a
+> setu client connected, so the press/release counts prove the *forwarding logic*, not that it ran
+> over a real agnos connection. The hook and that smoke script were deleted 2026-08-03; the desktop
+> transport is the agnos socket (`anu`), not TCP. See agnos
+> `docs/development/planning/ipc.md` §10.
+
 ### Changed
 
 - `[deps.setu]` pinned `0.3.1` → **`0.5.0`** (the full-key-events opt-in + `mods` make/break).
@@ -793,6 +802,14 @@ render their own focus state — an interactive window manager on the sovereign 
   (`/bin/dhwidget`) rather than a second present_probe, so the desktop hosts a real toolkit app
   (titled window + labelled buttons) alongside the test-pattern client. Verified on agnos via
   `aethersafha-setu-smoke.sh` plus the new `setu-input-test.py` / `setu-focus-test.py` gates.
+  > ⛔ **RETRACTED 2026-08-03 — "verified on agnos" here was a FALSE GREEN.** The gate passed only
+  > because the `AETHERSAFHA_SETU_SELFTEST` kernel hook assigned `net_ip = 0x7F000001` before
+  > launching the compositor, making src == dst so agnos's 4-tuple match succeeded. On an ordinary
+  > boot the compositor↔client handshake could not complete, so nothing about the two-client desktop
+  > was proven on agnos at this version. The hook, its `build.sh` define, and
+  > `aethersafha-setu-smoke.sh` were all deleted 2026-08-03. TCP-on-loopback was the WRONG PRIMITIVE for the desktop transport (it is retired on architectural grounds, not because it could not work) —
+  > the replacement is the agnos socket (`anu`). See agnos
+  > `docs/development/planning/ipc.md` §10.
 
 ## [0.8.2] - 2026-07-09 — MULTI-WINDOW desktop + input routed over setu on the sovereign kernel
 
@@ -800,6 +817,18 @@ The compositor now hosts **multiple** setu clients as distinct windows AND route
 input to the focused one — the two steps that turn "a client composites" into "a desktop."
 Both are proven on agnos via QEMU screendumps (`aethersafha-setu-smoke.sh` green) and a new
 input-injection harness (`setu-input-test.py`, USB-xHCI `sendkey`).
+
+> ⛔ **RETRACTED 2026-08-03 — "proven on agnos" here was a FALSE GREEN, and it is the load-bearing
+> claim of this entire version.** `aethersafha-setu-smoke.sh` was green only because the
+> `AETHERSAFHA_SETU_SELFTEST` kernel hook assigned `net_ip = 0x7F000001` before launching the
+> compositor. agnos puts `net_ip` in a SYN's SOURCE, so a client dialling `127.0.0.1` got its
+> SYN-ACK addressed to `net_ip`, `tcp_find_conn` never matched, and the connection died — *except*
+> under that hook, where src == dst == 127.0.0.1 made the match succeed. Before `net_src_for` (agnos 1.56.34) no ordinary boot could
+> complete a setu handshake. ⭐ AFTER that fix it DID connect un-rigged — `aethersafha-clients-test.py`
+> reached "connected: 2, presented: 2" on 2026-08-02 (QEMU, `-smp 1`; never on iron; `-smp 4` fault-kills). The multi-window desktop and setu input routing are proven on **Linux
+> only** at this version. Hook, `build.sh` define and smoke script all deleted 2026-08-03; TCP is a
+> **retired** desktop transport, replaced by the agnos socket (`anu`). See agnos
+> `docs/development/planning/ipc.md` §10.
 
 ### Added
 
@@ -831,6 +860,18 @@ from a buffer referenced by id instead of an inline socket stream — the on-dev
 presents a 320×192 frame, and the compositor composites it (`setu client CONNECTED +
 PRESENTED + composited on agnos`). Linux e2e (`setu_serve_probe` + `present_probe`) unchanged.
 
+> ⛔ **RETRACTED 2026-08-03 — this "green on agnos" was a FALSE GREEN, and it is the first one.**
+> The smoke passed only because the `AETHERSAFHA_SETU_SELFTEST` kernel hook assigned
+> `net_ip = 0x7F000001` before launching the compositor, making the client's SYN source equal its
+> destination so agnos's `tcp_find_conn` matched. Before `net_src_for` (agnos 1.56.34), without the hook the handshake could not close,
+> so **"a setu client connects … on agnos" was not true on an ordinary boot AT THIS VERSION** (it did
+> become true, un-rigged, post-`net_src_for` — QEMU `-smp 1`, 2026-08-02) — every later entry
+> that cites this smoke inherits the same defect. The shared-buffer present change itself
+> (`setu_buf_read` over inline pixels) stands; the *agnos connection* it was demonstrated over does
+> not. Hook, `build.sh` define and smoke script deleted 2026-08-03; TCP-on-loopback as the display
+> transport is retired in favour of the agnos socket (`anu`). See agnos
+> `docs/development/planning/ipc.md` §10.
+
 ### Changed
 
 - **`setu_srv_recv_committed` reads the pixels from the client's shared buffer** — on an
@@ -850,6 +891,16 @@ the sovereign kernel — not just the host. Proven end-to-end: `puka` (client)
 connects over TCP and presents a rendered 320×192 terminal frame → this
 compositor accepts it (non-blocking poll) and composites it → a valid PPM with
 real content. This depends on **setu 0.3.0** (the TCP transport).
+
+> ⛔ **RETRACTED 2026-08-03 — the "and on agnos" half of this claim was not honestly proven AT THIS VERSION.**
+> The e2e above ran on **Linux**. On agnos, a client dialling `127.0.0.1` sent a SYN sourced from
+> `net_ip`, so its SYN-ACK came back addressed to `net_ip`, `tcp_find_conn` found no match, and the
+> connection died — the handshake could only close under the `AETHERSAFHA_SETU_SELFTEST` kernel
+> hook, which assigned `net_ip = 0x7F000001` and made src == dst. That hook is the rigging behind
+> every "green on agnos" from 0.8.1 through 0.9.x, and it was deleted 2026-08-03 along with its
+> `build.sh` define and the smoke scripts built on it. **TCP-on-loopback was the wrong primitive for
+> a local display protocol and is retired**; the sovereign desktop transport is the agnos socket
+> (`anu`). See agnos `docs/development/planning/ipc.md` §10.
 
 ### Added
 

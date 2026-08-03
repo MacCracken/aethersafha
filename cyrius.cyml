@@ -110,5 +110,5 @@ modules = ["dist/kavach.cyr"]
 # 0.5.0 — full key events (press + release); SETU_SURF_FULL_KEYS + the per-surface make/break
 #         forwarding this compositor honours.
 git = "https://github.com/MacCracken/setu.git"
-tag = "0.7.2"
+tag = "0.7.4"
 modules = ["dist/setu.cyr"]
