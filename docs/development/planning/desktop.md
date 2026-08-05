@@ -16,7 +16,8 @@ type: planning
 > *shipped-at-1.56.17* in agnos. Compositor rungs in this file carry the `AE-` prefix; kernel band
 > numbers keep their `#NN` syscall form.
 
-**Last refresh** 2026-08-03 — iron burn at 4 CPUs, `AE-1`/`AE-5` promoted.
+**Last refresh** 2026-08-05 — the boot-console half closed on iron (agnos 1.56.36/37/38, all burned PASS); the local-IPC band named,
+numbered and unblocked; agnos 1.56.39 landed three of the kernel items below.
 
 ---
 
@@ -92,6 +93,40 @@ the faulting address was always a stack or data page. One-line fix, `agnos/kerne
 re-tested at 4 CPUs, which is what archaemenid actually runs.
 → [`agnos/docs/development/issues/2026-08-02-large-image-ptload-pde-absent-smp.md`](https://github.com/MacCracken/agnos/blob/main/docs/development/issues/2026-08-02-large-image-ptload-pde-absent-smp.md)
 
+### ⭐ Frame cost — measured 2026-08-05, and the "a little slow" carry-forward is CLOSED
+
+The operator's *"aethersafha is a little slow"* came from the **1.56.36** burn — the same burn that
+took the panel from 800x600 to native **2560x1440**, i.e. **7.68x the pixels**. One burn apart, and
+that is the whole diagnosis: the question was never "is the compositor slow", it was "which per-pixel
+loop grew". Answerable on the HOST, no burn needed — the clear and the chrome fills are portable.
+
+⛔ **The pixel COUNT was not the interesting number. The per-pixel COST was.** At 2560x1440, before:
+
+| | pixels | time | per pixel |
+|---|---|---|---|
+| `bhumi_fb_clear`, whole screen | 3,686,400 | 3.83 ms | **1.03 ns** |
+| chrome, 2 windows (`fill_rect`) | 1,843,200 | 23.45 ms | **12.72 ns** |
+
+Half the pixels, six times the time — **12.3x more expensive per pixel for byte-identical stores**.
+All overhead, no memory: each pixel took a function call, four bounds compares and `_bhumi_fb_addr`,
+which together re-read **seven** `load64`s from the framebuffer header to store four bytes. None of
+those seven can change during a fill. `fill_rect` now clamps once and walks rows; new `blit_rect`
+does the same for the client-surface copy.
+
+| at 2560x1440 | before | after | |
+|---|---|---|---|
+| chrome, 2 windows | 23.45 ms | **2.57 ms** | **9.1x** |
+| CPU surface copy, 2 windows | 23.97 ms | **4.18 ms** | **5.7x** |
+| **GPU frame** (clear + chrome) | **27.24 ms** | **6.40 ms** | **4.3x** |
+| **CPU frame** (GPU refused / every QEMU run) | **51.21 ms** | **10.58 ms** | **4.8x** |
+
+Bench: `tests/aethersafha.bcyr`. Correctness: 21/21 suites, 56/56 in `render.tcyr` (direct clipping
+coverage added, with a negative control proving it detects a missing source-offset advance), and on
+agnos at `-smp 4` both launch paths reach 2/2 exit 95 while the `desktop`-mode framebuffer is
+**pixel-count identical** to the pre-change run — the same picture, 4x faster.
+
+⚠ **What this does NOT fix:** the clear, now **60% of a GPU frame**. That is `AE-0a`'s job.
+
 ### Build state — measured 2026-08-02
 
 Versions at that measurement: **agnos 1.56.35** (open) · **aethersafha 0.12.0** · **setu 0.7.3**
@@ -114,7 +149,7 @@ on the substrate that can actually see it.
 | Rung | What it is | Status |
 |---|---|---|
 | `AE-0` | Frame loop, chrome, shell panel, window decoration, focus | shipped; iron-rendered |
-| `AE-0a` | Damage tracking (`#85` frame damage → damage-limited `#39` blit) | ⛔ **still dead.** `render_frame` had zero callers and was merged into `render_desktop` (0.11.0). Re-enabling needs `union(cur, prev)` first — `#84 present` FLIPS the render target, so a single-frame damage band leaves the other buffer two frames stale, which reads as "stale framebuffer", not "wrong damage model" |
+| `AE-0a` | Damage tracking (`#85` frame damage → damage-limited `#39` blit) | ⛔ **still dead — and now the single biggest frame cost.** After the row-walking fix below, the full-screen clear is **3.83 ms of a 6.40 ms GPU frame (60%)**. It wants the damage model, not a faster loop. Still blocked on the same thing:  `render_frame` had zero callers and was merged into `render_desktop` (0.11.0). Re-enabling needs `union(cur, prev)` first — `#84 present` FLIPS the render target, so a single-frame damage band leaves the other buffer two frames stale, which reads as "stale framebuffer", not "wrong damage model" |
 | `AE-1` | setu listener + accept + a hosted client surface | shipped; ⭐ **iron-proven 2026-08-03** (2/2 presented on the panel) |
 | `AE-2` | GPU composite of a client surface (`#86`→`#87`→`#84`) | **iron-proven** for one opaque surface |
 | `AE-3` | Frame plan before render (`ae_gpu_frame_plan` publishes `ae_gpu_frame_ok`; both GPU and CPU sides read it; `ae_gpu_demote()` degrades a refusing GPU) | shipped 0.11.0 — all-or-nothing is **forced by z-order**, not chosen |
@@ -234,7 +269,7 @@ syscall 7 is `open(name, namelen, flags)`**, so `syscall(7, &pfds, 1, 200)` woul
 
 ## 5. Open decisions
 
-### D1 — the setu transport — ✅ **RULED 2026-08-03: TCP is a WRONG PREMISE, the answer is `anu`**
+### D1 — the setu transport — ✅ **RULED 2026-08-03: TCP is a WRONG PREMISE. The answer is the kernel `chan_*` band on `#97`**
 
 ⛔ **This is no longer an open question and must never be reopened as one.** The operator ruled on
 2026-08-03: TCP-on-loopback as the desktop/display transport is a wrong premise, and the corrupting
@@ -257,7 +292,7 @@ improves on the concept.
 candidate designs**, and **twelve judge verdicts** across sovereignty / correctness / generality /
 increment. Its final synthesis agent died with the account and a second attempt to run that one phase
 failed on an account limit, which left the decision itself outstanding for a day — **it has since
-landed (`anu`, below), so nothing here is open.** Everything is on disk and must not be re-derived.
+landed (below), so nothing here is open.** Everything is on disk and must not be re-derived.
 
 ⭐⭐ **THE SINGLE SOURCE OF TRUTH IS NOW agnos
 [`docs/development/planning/ipc.md`](https://github.com/MacCracken/agnos/blob/main/docs/development/planning/ipc.md)** —
@@ -266,14 +301,27 @@ the constraints, the three designs, the verdict table with every fatal flaw, the
 **Do not restart the design phase, and do not copy its tables here** — this section is a pointer by
 design.
 
-✅ **DECIDED 2026-08-03 — `anu`**, a kernel-owned channel on one syscall `#96`, where authority is
-re-derived per operation so an **inherited handle is inert by construction**, a child is **placed**
-holding a connected end rather than dialling, and **the batch IS the poll**. Full design, migration and
-kill criteria: **ipc.md §9**. ⛔ Two things there need the operator before any code: **`#96` is contested
-with `fork`**, and the name.
+✅ **DECIDED 2026-08-03** — a kernel-owned channel on one syscall, where authority is re-derived per
+operation so an **inherited handle is inert by construction**, a child is **placed** holding a connected
+end rather than dialling, and **the batch IS the poll**. Full design, migration and kill criteria:
+**ipc.md §9**.
+
+⭐⭐ **UNBLOCKED 2026-08-05 — both operator decisions closed, and `#96` is NOT the number.**
+- **Syscall `#97 chan_op`.** `#96` stays reserved for **`fork`** (agora's blocker, `roadmap.md:41`). The
+  operator assigned both; this is no longer contested and must not be re-opened.
+- ⛔ **It gets NO codename, and that is a rule.** The design carried a Sanskrit working name (`anu`) and
+  ipc.md §9.7 spent one of its six operator decisions choosing it. Operator: *"it doesn't need a special
+  name, it's in the kernel — unless we're splitting it out to its own repo."* The band is **`chan_*`**,
+  VFS tag **`VFS_CHAN = 11`**, ops **`CH_*`** — the convention `pipe_*` / `shm_*` / `sock_*` / `net_*`
+  already use. **A name is a distribution fact**: it exists so a thing can be found across a repo
+  boundary, and a band that never leaves one kernel has no boundary to cross. Naming lanes apply to
+  standalone repos only. If this is ever split out, *that* is when it earns a name.
+
+⭐ **Sequencing is also unblocked**: ipc.md §9.7 item 3 made bites 4–9 wait on K1, and **K1 is done**
+(2026-08-03, `EFER.NXE`). agnos **1.56.40** is the band.
 
 **The only things this section asserts on its own:**
-- ⛔ **anu REPLACES TCP on agnos — it is not a second transport.** No fallback, no compile-time
+- ⛔ **THE CHANNEL BAND REPLACES TCP on agnos — it is not a second transport.** No fallback, no compile-time
   option, no runtime switch, no rollback to loopback:7700. At bite 6 setu's agnos TCP arm is **deleted**;
   at bite 7 `setu_srv_listen` and the accept block are **removed**. Revertibility comes from bite order
   — bites 0–5 land no consumer — not from keeping the rejected path alive.
@@ -318,7 +366,7 @@ override is not a stopgap, it disables the tag as a test.
 ⛔ **Read this as a KEEP-THE-LIGHTS-ON interim, not as a transport under development.** The 2026-08-03
 ruling stands over all of it: TCP-on-loopback is a wrong premise for the desktop and is being removed,
 so `net_src_for`, the kernel floor and the 0.7.3 repin exist only to keep today's clients running until
-`anu` lands. **Do not invest further in this path**, and do not read "RESOLVED" here as "the transport
+the band lands. **Do not invest further in this path**, and do not read "RESOLVED" here as "the transport
 works now" — the only agnos setu greens that ever existed on the *smoke* path were manufactured by the
 `AETHERSAFHA_SETU_SELFTEST` hook (§4).
 
@@ -409,21 +457,22 @@ rescue manifest for those two must declare **both** `[deps.mabda]` and `[deps.sa
 
 ## 6. The agnos **1.56.35** cut — the desktop's kernel half
 
-> ✅ **OPEN as of 2026-08-02.** 1.56.34 (HDMI audio) closed the same day, on the operator's call. The
-> cut's authoritative scope is agnos [`CHANGELOG.md`](https://github.com/MacCracken/agnos/blob/main/CHANGELOG.md);
-> this table is the rationale behind it. ⛔ `version-bump.sh` regenerated `kernel/version.cyr`, so the
-> `build/agnos` on disk is a **1.56.34** artifact and is no longer flashable — `burn-verify` will
-> correctly refuse it until a fresh `burn-prep.sh`.
+> ⭐ **SIX OF EIGHT ARE DONE — status as of 2026-08-05.** K1 + K6 closed in the 1.56.35 cut itself;
+> **K3 / K4 / K5 landed at agnos 1.56.39**. Remaining: **K7** (the channel band, agnos **1.56.40**) and
+> **K8** (the PTY, downstream of it). K2 is moot under the retired transport.
+> The authoritative scope of each cut is agnos [`CHANGELOG.md`](https://github.com/MacCracken/agnos/blob/main/CHANGELOG.md);
+> this table is the rationale behind it. ⛔ Whatever `build/agnos` is on disk at any moment is only
+> flashable straight out of `burn-prep.sh` — any smoke or test run rebuilds it without the burn flags.
 
 | # | Item | Why |
 |---|---|---|
-| K1 ⭐ | **Root-cause the `-smp 4` PT_LOAD PDE-absent fault** | The arc's only remaining reproducible failure, and it reproduces in QEMU. Probe the PT_LOAD loop of `elf_load_from_file` (the **#43** path, not the in-memory `#3` path) reading each PDE back through `cr3 → PML4[0] → PDPT[0] → PD` right after `proc_map_page`. ⚠ `fmt_hex_buf` emits **zero characters for a zero value** — guard every hex print of a possibly-zero value and calibrate against a known answer, or the probe exposes itself and not the kernel |
+| ~~K1~~ ✅ | ~~**Root-cause the `-smp 4` PT_LOAD PDE-absent fault**~~ **DONE 1.56.35** — it was `EFER.NXE` never enabled on the APs (`smp.cyr:514`), so bit 63 of a paging entry was RESERVED and `proc_map_page_nx` set it on every W^X data page and user stack. Not a loader bug at all. | The arc's only remaining reproducible failure, and it reproduces in QEMU. Probe the PT_LOAD loop of `elf_load_from_file` (the **#43** path, not the in-memory `#3` path) reading each PDE back through `cr3 → PML4[0] → PDPT[0] → PD` right after `proc_map_page`. ⚠ `fmt_hex_buf` emits **zero characters for a zero value** — guard every hex print of a possibly-zero value and calibrate against a known answer, or the probe exposes itself and not the kernel |
 | K2 | `net_tcp.cyr:395` `tcp_conn_count >= 8` → `>= 16`; surface `lo_dropped` / `lo_count` via `net_config #61` | A loopback connection consumes **two** slots, so listener + 2 clients = 5 and a **4th client fails**. Backing store is already 35 slots. `lo_dropped` is incremented and **never printed anywhere**, and a lo-ring drop costs a full 1 s TCP RTO. ⚠ Both may be moot depending on D1 |
-| K3 | `spawn_path #43` fd-redirect arm | #43 never calls `exec_redirect_apply` (#37 does), so the three desktop procs interleave on the console unserialised — this has **already corrupted a verdict** (`a11y nodes synced:run: exit 142` landed mid-line) |
-| K4 | Raise the loader's user-image floor `0x200000` → `0x400000` (`elf.cyr:253`, `:277`) | Today a segment could override PD[1], where the boot TSS RSP0 seeds live. Measured: **every** binary already bases its first PT_LOAD at 0x400000, so it costs nothing and retires the class |
-| K5 | Make `pmm_kva_for_access` (`vmm.cyr:341-345`) return `DIRECTMAP_BASE + phys` unconditionally | If the identity-VA class is closed at all, close it in **one** place — six call sites, versus patching one and leaving a byte-identical hazard twelve lines below. ⚠ `pmm_setup_directmap` runs at `main.cyr:228`, **after** `pmm_migrate_bitmap` (:219) |
-| K6 | **CHANGELOG `net_src_for`** | It exists in `net.cyr:203` and in the shipped `build/agnos`, with no entry under any version — and setu's client comments cite 1.56.34 and 1.56.35 inconsistently *because* of that gap. This is the half that decides what setu writes |
-| K7 | Whatever D1 lands | The agnos-socket design session's kernel half. ⭐ **The design phase is DONE** — three worked designs + twelve verdicts at agnos [`planning/ipc.md`](https://github.com/MacCracken/agnos/blob/main/docs/development/planning/ipc.md); only the synthesis is missing, and ipc.md §7 lists what it must resolve. All three candidates land at **`#96`**, and all three ship **non-blocking-only** — a true blocked state needs a new proc state, a `sched_next` that skips it, a ready-edge, **and** a relaxation of `do_context_switch`'s unconditional ready-reset, which is a **scheduler arc** and should be named as one, not smuggled in here |
+| ~~K3~~ ✅ | ~~`spawn_path #43` fd-redirect arm~~ **DONE 1.56.39** — `spawn_redirect_apply(pid)`, apply-only into the child's **private** fd table (no restore: `#43` has no "afterwards"), refusing when `proc_fd_base[pid] == 0` because that is the global table. | #43 never calls `exec_redirect_apply` (#37 does), so the three desktop procs interleave on the console unserialised — this has **already corrupted a verdict** (`a11y nodes synced:run: exit 142` landed mid-line) |
+| ~~K4~~ ✅ | ~~Raise the loader's user-image floor `0x200000` → `0x400000`~~ **DONE 1.56.39** — at **all four** sites, not the two named here: both loaders' `e_entry` *and* `PT_LOAD` checks, because `elf_load` (the in-memory `#3` path) carried the byte-identical hazard. Measured free: all **44** staged binaries already base at `0x400000` / `e_entry 0x4000b0`. | Today a segment could override PD[1], where the boot TSS RSP0 seeds live. Measured: **every** binary already bases its first PT_LOAD at 0x400000, so it costs nothing and retires the class |
+| ~~K5~~ ✅ | ~~Make `pmm_kva_for_access` return `DIRECTMAP_BASE + phys` unconditionally~~ **DONE 1.56.39.** ⚠ The ordering warning here was wrong in detail and harmless in effect: the constraint is not `pmm_migrate_bitmap` but that the direct map installs at `main.cyr:232` while the earliest call site is `hda_probe` at `:661`. Also dropped the `vmm_map(phys, phys, 0x83)` side effect — verified call site by call site that every caller uses only the returned handle. | If the identity-VA class is closed at all, close it in **one** place — six call sites, versus patching one and leaving a byte-identical hazard twelve lines below. ⚠ `pmm_setup_directmap` runs at `main.cyr:228`, **after** `pmm_migrate_bitmap` (:219) |
+| ~~K6~~ ✅ | ~~**CHANGELOG `net_src_for`**~~ **DONE** — documented under agnos 1.56.34, where it actually landed. | It exists in `net.cyr:203` and in the shipped `build/agnos`, with no entry under any version — and setu's client comments cite 1.56.34 and 1.56.35 inconsistently *because* of that gap. This is the half that decides what setu writes |
+| K7 ⭐ | **The kernel `chan_*` band on `#97`** — agnos **1.56.40** | What D1 landed. ⭐ **Design, name, number and sequencing are ALL settled**; ipc.md §9 has the full design, the twelve-bite migration and the kill criteria, §9.6 the bite table, §10 the TCP removal inventory. `#96` is **`fork`**'s. Bites 0/1/2 are the unblocked prefix (the `epoll_wait` bare-`hlt` fix, shm owner+epoch warn-only, `proc_epoch[16]`). It ships **non-blocking-only** — a true blocked state needs a new proc state, a `sched_next` that skips it, a ready-edge, **and** a relaxation of `do_context_switch`'s unconditional ready-reset, which is a **scheduler arc** and should be named as one, not smuggled in here |
 | K8 | **An agnos PTY, "of sorts"** (D2, operator-decided) | A terminal without a controlling channel is a picture of a terminal. ⭐ **Downstream of K7/D1, not parallel to it** — a PTY decomposes into (i) a local channel, (ii) inheritance by a `spawn_path #43` child, (iii) a line discipline. agnos is missing (i) and (ii), which is *exactly* what D1 decides; only (iii) is terminal-specific. Mine `exec_redirect #62` (a working save/swap/restore of a `vfs_table` entry around a child) as the existing sovereign idiom rather than porting POSIX |
 
 ---
@@ -477,6 +526,36 @@ make: the log said `launched setu client #1` / `#2 (crab)` and then nothing, whi
   `stage-tools.sh`, no `cyrius build` anywhere in it. It is the desktop verification tool.
   ⛔ `AE_CLIENTS_MODE=both` is documented-broken in the file itself: the fg run orphans two spinning
   clients and the bg run then reports `launched: False`. **One mode per boot.**
+- ⛔ **AN ARM THAT DID NOT RUN IS NOT AN ARM THAT FAILED — fixed 2026-08-05.** Because one mode runs
+  per boot, one of `fg_code`/`bg_code` is `None` on almost every run *purely because that arm was
+  never launched* — and the verdict block tested the codes alone. Measured that day against agnos
+  1.56.39, while **both** arms independently reached exit 95 at `AE_CLIENTS_SMP=4`:
+  `MODE=bg` printed *"Backgrounded (`&`) works; **FOREGROUND does not**"* and then invented a cause
+  for it — *"⇒ agnsh's blocking execwait #37 frame prevents the spawned clients being scheduled"* —
+  for a path it never launched; `MODE=fg` printed *"Both clients present on **BOTH** launch paths"*
+  from one path. A false red and a false green out of the same block. It now records `ran_fg` /
+  `ran_bg` **at the launch sites** (never re-derived from `MODE` at verdict time), prints
+  `— (not run in this mode)` for an unrun arm, reports each arm that ran on its own, and gates the
+  cross-path comparison on both having run. ⚠ `None` now means one thing only: **ran and produced no
+  exit code** (stall/timeout), which is a failure. This is the same defect the `desktop` and `armed`
+  guards were each added for, surviving in the one block those guards jump over.
+- ✅ **THE FRAMEBUFFER IS NOW A GATE IN `desktop` MODE, not a suggestion — 2026-08-05.** This section
+  used to say the counts were printed and not gated; the block itself only advised *"judge this on
+  the FRAMEBUFFER counts"* while `rc` still rested entirely on the compositor's own serial claim.
+  ⛔ **And the counts mean different things per mode, which was never stated.** `--clients` stops
+  ~1.09 s in, so in `fg`/`bg`/`both`/`armed` the screendump lands *after* the run ended and is a
+  picture of the **console** — zero client pixels there is the EXPECTED result and says nothing
+  about the desktop. Every mode now prints which case it is in.
+  ⚠ **The gate deliberately excludes dim-green.** Measured with both clients presented: dim-green
+  **952,731 px** of a 2048×2048 capture (22.7% of the screen) — a client's 1-px border cannot be a
+  fifth of the panel, so that count is dominated by compositor chrome in the same dark range, and
+  gating on it would pass a desktop **hosting nothing** (the exact 0.12.0 leaked-listener state in
+  §4). The gate is present_probe's own bars + bright border: **signal 3,500 px · console null 0 px**
+  (measured twice), floor **200** via `AE_CLIENTS_FBMIN`. Negative control run: forcing the floor
+  above the signal makes the harness **exit 1**, so the gate is wired to the exit code, not printed
+  beside it. ⚠ Two honest gaps: bright-green reads **0 even on a passing run**, so the red bar
+  carries this gate alone; and dim-green was excluded by reasoning from the pixel count, **not** from
+  a measured hosting-nothing control.
 - ⚠ The smokes consume **hyphen-named July artifacts** (`aethersafha-agnos`, `present_probe-agnos`,
   `crab-agnos`) that are byte-different from the underscore-named ones burn-prep flashes. Repoint them
   at `build/rootfs/bin/…`, which is what the newest harness already does and what `install-media.sh`

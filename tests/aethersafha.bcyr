@@ -5,8 +5,100 @@
 # For sub-1us ops use batch_size >= 1000 to amortize clock_gettime overhead
 # (~240 ns per start/stop pair on x86_64 Linux). See lib/bench.cyr header for
 # the full overhead-vs-batching guidance.
+#
+# ⭐ WHY THE RENDER BENCHES BELOW EXIST. The 1.56.36 iron burn took the panel from 800x600 to
+# native 2560x1440, and the operator's report on that same burn was that "aethersafha is a little
+# slow". Those two facts are one burn apart, and 2560x1440 is 7.68x the pixels of 800x600 — so the
+# question is not "is the compositor slow" but "which per-pixel loop grew". That is a measurement,
+# and it is answerable on the HOST: the clear and the chrome fills are portable code that runs
+# identically on Linux and agnos.
+#
+# ⛔ What is NOT answerable here is the client-surface path — on iron the kernel composites it via
+# gpu_blit_shm #87 and it never touches the CPU. It is benched anyway because it IS the live path
+# whenever the GPU refuses the frame, and on every QEMU run.
+#
+# ⛔ Report ns/FRAME, not ns/pixel. A per-pixel number hides the geometry, which is the whole point.
+include "lib/bhumi.cyr"
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/render.cyr"
 
 fn bench_noop(): i64 { return 0; }
+
+# One full-screen clear — what render_desktop does before drawing anything.
+fn bench_clear(fb): i64 {
+    bhumi_fb_clear(fb, 0x00101018);
+    return 0;
+}
+
+# The chrome a two-window desktop paints every frame. Mirrors render_window's fill_rect calls
+# (src/render.cyr:181-197) without pulling in the compositor object graph.
+fn bench_chrome(fb, w, h): i64 {
+    var i = 0;
+    while (i < 2) {
+        var x = 40 + i * 60;
+        var y = 40 + i * 60;
+        fill_rect(fb, x, y + 30, w, h - 30, 0x00202028);        # window body  (render.cyr:181)
+        fill_rect(fb, x, y, w, 30, 0x00303040);                 # titlebar     (render.cyr:185)
+        fill_rect(fb, x, y + 28, w, 2, 0x0000C0FF);             # focus strip  (render.cyr:188)
+        fill_rect(fb, x + w - 24, y + 6, 18, 18, 0x00FF4040);   # close        (render.cyr:195)
+        fill_rect(fb, x + w - 46, y + 6, 18, 18, 0x00FFC040);   # max          (render.cyr:196)
+        fill_rect(fb, x + w - 68, y + 6, 18, 18, 0x00808080);   # min          (render.cyr:197)
+        i = i + 1;
+    }
+    return 0;
+}
+
+# The CPU client-surface copy, as render_window issues it.
+fn bench_surface_copy(fb, spix, w, h): i64 {
+    blit_rect(fb, 40, 70, spix, w, h);
+    return 0;
+}
+
+fn bench_geometry(label, fw, fh, ww, wh): i64 {
+    var fb = bhumi_fb_new(fw, fh);
+    if (fb == 0) { println("  fb alloc FAILED"); return 1; }
+
+    println(label);
+    print("  fb ", 5);
+    print_num(fw);
+    print("x", 1);
+    print_num(fh);
+    print("  window ", 10);
+    print_num(ww);
+    print("x", 1);
+    print_num(wh);
+    println("");
+
+    var bc = bench_new("clear (full screen)");
+    bench_batch_start(bc);
+    var i = 0;
+    while (i < 20) { bench_clear(fb); i = i + 1; }
+    bench_batch_stop(bc, 20);
+    bench_report(bc);
+
+    var bh = bench_new("chrome, 2 windows");
+    bench_batch_start(bh);
+    i = 0;
+    while (i < 20) { bench_chrome(fb, ww, wh); i = i + 1; }
+    bench_batch_stop(bh, 20);
+    bench_report(bh);
+
+    var spix = alloc(ww * wh * 4);
+    var bs = bench_new("cpu surface copy, 2 windows");
+    bench_batch_start(bs);
+    i = 0;
+    while (i < 20) {
+        bench_surface_copy(fb, spix, ww, wh);
+        bench_surface_copy(fb, spix, ww, wh);
+        i = i + 1;
+    }
+    bench_batch_stop(bs, 20);
+    bench_report(bs);
+
+    return 0;
+}
 
 fn main(): i64 {
     alloc_init();
@@ -16,6 +108,14 @@ fn main(): i64 {
     while (i < 1000000) { bench_noop(); i = i + 1; }
     bench_batch_stop(b, 1000000);
     bench_report(b);
+
+    println("");
+    println("=== render hot path, per FRAME (lower is better) ===");
+    # The two geometries the arc actually ran at. 800x600 is every proof before 1.56.36;
+    # 2560x1440 is archaemenid's panel after it, and is what "a little slow" was reported against.
+    bench_geometry("BEFORE 1.56.36", 800, 600, 400, 300);
+    println("");
+    bench_geometry("AFTER  1.56.36", 2560, 1440, 1280, 720);
     return 0;
 }
 

@@ -28,22 +28,116 @@ enum Deco {
 }
 
 # fill_rect: fill [x,x+w) x [y,y+h) with color, clamped to framebuffer bounds.
+#
+# ⭐ CLAMP ONCE, THEN WRITE ROWS. This used to call `bhumi_fb_set` per pixel, and that was THE
+# compositor frame cost — the thing behind the operator's "aethersafha is a little slow" on the
+# 1.56.36 burn, which is the same burn that took the panel from 800x600 to native 2560x1440
+# (7.68x the pixels).
+#
+# ⛔ THE PIXEL COUNT WAS NEVER THE INTERESTING NUMBER — THE PER-PIXEL COST WAS. Measured on the
+# host at 2560x1440 (`tests/aethersafha.bcyr`), BEFORE this change:
+#
+#     bhumi_fb_clear, whole screen  3,686,400 px   3.790 ms   ->  1.03 ns/px
+#     chrome, 2 windows             1,843,200 px  23.448 ms   -> 12.72 ns/px
+#
+# HALF the pixels, SIX TIMES the time — 12.3x more expensive per pixel for byte-identical stores.
+# All of that gap is per-pixel overhead, not memory: every single pixel went through a function
+# call, four bounds comparisons, and `_bhumi_fb_addr` — which between them re-read **seven**
+# `load64`s out of the framebuffer header (width, height, pixels, pitch, bpp) and did two
+# multiplies, to store four bytes. None of those seven values can change inside a fill.
+#
+# So: resolve the header once, clip the rectangle once, and walk rows with a precomputed base and
+# stride. Identical pixels land — the old loop clipped per pixel and simply skipped out-of-bounds
+# writes, which for a rectangle is exactly a clipped rectangle — and `bhumi_fb_set` remains the
+# right call for genuinely scattered single pixels. Uses only bhumi's PUBLIC accessors, so this
+# needs no change to bhumi and no tag bump.
 fn fill_rect(fb, x, y, w, h, color): i64 {
+    var x0 = x;
+    var y0 = y;
+    var x1 = x + w;
+    var y1 = y + h;
+    if (x0 < 0) { x0 = 0; }
+    if (y0 < 0) { y0 = 0; }
     var fw = bhumi_fb_width(fb);
     var fh = bhumi_fb_height(fb);
-    var yy = y;
-    var y1 = y + h;
+    if (x1 > fw) { x1 = fw; }
+    if (y1 > fh) { y1 = fh; }
+    # Empty after clipping — also the h<=0 / w<=0 case the old loop handled by never entering.
+    if (x1 <= x0) { return 0; }
+    if (y1 <= y0) { return 0; }
+
+    var pitch = bhumi_fb_pitch(fb);
+    var bpp   = bhumi_fb_bpp(fb);
+    var row   = (bhumi_fb_pixels(fb) + y0 * pitch) + x0 * bpp;
+    var span  = (x1 - x0) * bpp;
+    var yy    = y0;
     while (yy < y1) {
-        if ((yy >= 0) && (yy < fh)) {
-            var xx = x;
-            var x1 = x + w;
-            while (xx < x1) {
-                if ((xx >= 0) && (xx < fw)) {
-                    bhumi_fb_set(fb, xx, yy, color);
-                }
-                xx = xx + 1;
-            }
+        var p = row;
+        var e = row + span;
+        while (p < e) {
+            store32(p, color);
+            p = p + bpp;
         }
+        row = row + pitch;
+        yy = yy + 1;
+    }
+    return 0;
+}
+
+# blit_rect: copy an sw x sh XRGB8888 source at `src` to (dx,dy), clipped to the framebuffer.
+#
+# ⭐ The row-walking peer of fill_rect, for the client-surface copy. Same finding, same fix: the
+# copy loop in render_window called `bhumi_fb_set` per pixel and measured 23.974 ms/frame for two
+# 1280x720 surfaces on the host — marginally WORSE than the chrome fill, for a straight copy.
+#
+# ⚠ This path does NOT run on iron when the GPU takes the frame (the kernel composites the surface
+# out of its GPU-visible shm slot via `gpu_blit_shm #87` and the pixels never enter userland). It
+# is still worth fixing and is not dead code: it is the live path on **every QEMU run**, and on any
+# iron frame `ae_gpu_frame_plan` refuses. A fallback nobody measures is how a "GPU-accelerated"
+# desktop ends up shipping its slow path.
+#
+# ⛔ CLIPPING MUST SKIP SOURCE PIXELS, NOT JUST DESTINATION ONES. The old per-pixel loop got this
+# for free — an out-of-bounds `bhumi_fb_set` dropped the write and the source index moved on. Here
+# the source offset has to be advanced by the same amount the destination was clipped by, or a
+# partly-offscreen window draws the wrong part of its own surface.
+fn blit_rect(fb, dx, dy, src, sw, sh): i64 {
+    if (src == 0) { return 0; }
+    if (sw <= 0) { return 0; }
+    if (sh <= 0) { return 0; }
+
+    var sx0 = 0;
+    var sy0 = 0;
+    var x0 = dx;
+    var y0 = dy;
+    if (x0 < 0) { sx0 = 0 - x0; x0 = 0; }        # clipped off the left: skip that many src columns
+    if (y0 < 0) { sy0 = 0 - y0; y0 = 0; }        # clipped off the top:  skip that many src rows
+    var x1 = dx + sw;
+    var y1 = dy + sh;
+    var fw = bhumi_fb_width(fb);
+    var fh = bhumi_fb_height(fb);
+    if (x1 > fw) { x1 = fw; }
+    if (y1 > fh) { y1 = fh; }
+    if (x1 <= x0) { return 0; }
+    if (y1 <= y0) { return 0; }
+
+    var pitch = bhumi_fb_pitch(fb);
+    var bpp   = bhumi_fb_bpp(fb);
+    var drow  = (bhumi_fb_pixels(fb) + y0 * pitch) + x0 * bpp;
+    var srow  = (src + sy0 * sw * 4) + sx0 * 4;
+    var n     = x1 - x0;
+    var yy    = y0;
+    while (yy < y1) {
+        var d = drow;
+        var s = srow;
+        var i = 0;
+        while (i < n) {
+            store32(d, load32(s));
+            d = d + bpp;
+            s = s + 4;
+            i = i + 1;
+        }
+        drow = drow + pitch;
+        srow = srow + sw * 4;
         yy = yy + 1;
     }
     return 0;
@@ -224,17 +318,9 @@ fn render_window(fb, win, focused): i64 {
         if (bid != 0) {
             if (spix != 0) { setu_buf_read(bid, spix, w * h * 4); }
         }
-        if (spix != 0) {
-            var sy = 0;
-            while (sy < h) {
-                var sx = 0;
-                while (sx < w) {
-                    bhumi_fb_set(fb, x + sx, y + TITLEBAR_H + sy, load32(spix + (sy * w + sx) * 4));
-                    sx = sx + 1;
-                }
-                sy = sy + 1;
-            }
-        }
+        # Row-walking copy (blit_rect) rather than the per-pixel bhumi_fb_set loop this used to be.
+        # Same pixels, same clipping; measured 23.974 ms -> see blit_rect's header for the numbers.
+        if (spix != 0) { blit_rect(fb, x, y + TITLEBAR_H, spix, w, h); }
     }
     return 0;
 }

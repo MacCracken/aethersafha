@@ -70,6 +70,100 @@ fn main() {
     var notall = (setpx < 128);
     assert(notall, "'A' glyph is not a solid block");
 
+    # ⭐ CLIPPING — fill_rect and blit_rect clamp the rectangle ONCE and then walk rows, rather
+    # than testing every pixel against the bounds. That is a 8.7x speedup and it is also where a
+    # clamp-once rewrite can silently disagree with the per-pixel original, so every edge is
+    # asserted here rather than inferred from "the suite still passes". The old loop's behaviour
+    # is the contract: out-of-bounds pixels are DROPPED, never wrapped and never clamped onto the
+    # edge, and the in-bounds remainder is unaffected.
+    test_group("render — fill_rect clipping");
+    var cfb = bhumi_fb_new(20, 10);
+    var red = bhumi_xrgb(255, 0, 0);
+    var blu = bhumi_xrgb(0, 0, 255);
+
+    bhumi_fb_clear(cfb, 0);
+    fill_rect(cfb, 2, 2, 4, 3, red);
+    assert_eq(bhumi_fb_get(cfb, 2, 2), red, "in-bounds: first pixel");
+    assert_eq(bhumi_fb_get(cfb, 5, 4), red, "in-bounds: last pixel");
+    assert_eq(bhumi_fb_get(cfb, 6, 2), 0, "in-bounds: one past the right edge untouched");
+    assert_eq(bhumi_fb_get(cfb, 2, 5), 0, "in-bounds: one past the bottom edge untouched");
+    assert_eq(bhumi_fb_get(cfb, 1, 2), 0, "in-bounds: one before the left edge untouched");
+
+    bhumi_fb_clear(cfb, 0);
+    fill_rect(cfb, 0 - 3, 1, 5, 2, red);
+    assert_eq(bhumi_fb_get(cfb, 0, 1), red, "clipped left: column 0 filled");
+    assert_eq(bhumi_fb_get(cfb, 1, 1), red, "clipped left: the surviving 2 columns filled");
+    assert_eq(bhumi_fb_get(cfb, 2, 1), 0, "clipped left: nothing beyond x+w");
+
+    bhumi_fb_clear(cfb, 0);
+    fill_rect(cfb, 1, 0 - 2, 2, 5, red);
+    assert_eq(bhumi_fb_get(cfb, 1, 0), red, "clipped top: row 0 filled");
+    assert_eq(bhumi_fb_get(cfb, 1, 2), red, "clipped top: the surviving rows filled");
+    assert_eq(bhumi_fb_get(cfb, 1, 3), 0, "clipped top: nothing beyond y+h");
+
+    bhumi_fb_clear(cfb, 0);
+    fill_rect(cfb, 18, 8, 10, 10, red);
+    assert_eq(bhumi_fb_get(cfb, 18, 8), red, "clipped bottom-right: the in-bounds corner is filled");
+    assert_eq(bhumi_fb_get(cfb, 19, 9), red, "clipped bottom-right: last framebuffer pixel filled");
+    assert_eq(bhumi_fb_get(cfb, 0, 0), 0, "clipped bottom-right: no wrap to the far corner");
+
+    bhumi_fb_clear(cfb, 0);
+    fill_rect(cfb, 50, 50, 4, 4, red);
+    fill_rect(cfb, 0 - 50, 0 - 50, 4, 4, red);
+    assert_eq(bhumi_fb_get(cfb, 0, 0), 0, "fully offscreen draws nothing (positive and negative)");
+    assert_eq(bhumi_fb_get(cfb, 19, 9), 0, "fully offscreen leaves the far corner alone");
+
+    bhumi_fb_clear(cfb, 0);
+    fill_rect(cfb, 2, 2, 0, 5, red);
+    fill_rect(cfb, 2, 2, 5, 0, red);
+    fill_rect(cfb, 2, 2, 0 - 4, 5, red);
+    fill_rect(cfb, 2, 2, 5, 0 - 4, red);
+    assert_eq(bhumi_fb_get(cfb, 2, 2), 0, "zero and negative w/h draw nothing");
+
+    test_group("render — blit_rect clipping");
+    # 4x3 source, each pixel encodes its own (x,y) so a wrong offset is visible, not just wrong.
+    var src = alloc(4 * 3 * 4);
+    var sy2 = 0;
+    while (sy2 < 3) {
+        var sx2 = 0;
+        while (sx2 < 4) {
+            store32(src + (sy2 * 4 + sx2) * 4, bhumi_xrgb(0, sy2 + 1, sx2 + 1));
+            sx2 = sx2 + 1;
+        }
+        sy2 = sy2 + 1;
+    }
+
+    bhumi_fb_clear(cfb, 0);
+    blit_rect(cfb, 5, 4, src, 4, 3);
+    assert_eq(bhumi_fb_get(cfb, 5, 4), bhumi_xrgb(0, 1, 1), "in-bounds: src (0,0) lands at (5,4)");
+    assert_eq(bhumi_fb_get(cfb, 8, 6), bhumi_xrgb(0, 3, 4), "in-bounds: src (3,2) lands at (8,6)");
+    assert_eq(bhumi_fb_get(cfb, 9, 4), 0, "in-bounds: one past the right edge untouched");
+
+    # ⛔ THE ONE THAT MATTERS. The per-pixel original got source clipping for free — a dropped
+    # write still advanced the source index. Walking rows does not: the source pointer must be
+    # advanced by exactly the amount the destination was clipped by, or a partly-offscreen window
+    # draws the WRONG PART of its own surface, which reads as a corrupt client, not as a clip bug.
+    bhumi_fb_clear(cfb, 0);
+    blit_rect(cfb, 0 - 2, 0 - 1, src, 4, 3);
+    assert_eq(bhumi_fb_get(cfb, 0, 0), bhumi_xrgb(0, 2, 3),
+              "clipped top-left: (0,0) shows src (2,1), NOT src (0,0)");
+    assert_eq(bhumi_fb_get(cfb, 1, 1), bhumi_xrgb(0, 3, 4),
+              "clipped top-left: (1,1) shows src (3,2)");
+    assert_eq(bhumi_fb_get(cfb, 2, 0), 0, "clipped top-left: nothing past the source's right edge");
+
+    bhumi_fb_clear(cfb, 0);
+    blit_rect(cfb, 18, 9, src, 4, 3);
+    assert_eq(bhumi_fb_get(cfb, 18, 9), bhumi_xrgb(0, 1, 1), "clipped bottom-right: corner pixel");
+    assert_eq(bhumi_fb_get(cfb, 19, 9), bhumi_xrgb(0, 1, 2), "clipped bottom-right: second column");
+    assert_eq(bhumi_fb_get(cfb, 0, 0), 0, "clipped bottom-right: no wrap onto the next row");
+
+    bhumi_fb_clear(cfb, 0);
+    blit_rect(cfb, 50, 50, src, 4, 3);
+    blit_rect(cfb, 3, 3, 0, 4, 3);
+    blit_rect(cfb, 3, 3, src, 0, 3);
+    blit_rect(cfb, 3, 3, src, 4, 0);
+    assert_eq(bhumi_fb_get(cfb, 3, 3), 0, "offscreen, null src, and zero dims all draw nothing");
+
     return assert_summary();
 }
 

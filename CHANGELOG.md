@@ -4,6 +4,76 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed — the compositor's per-pixel loops walk rows; ~4x faster frames at native resolution
+
+Closes the carry-forward from the agnos 1.56.36 iron burn — operator: *"working... aethersafha is a
+little slow but we can deal with that later."*
+
+⭐ **That report and the native-resolution modeset were the SAME burn.** 1.56.36 took archaemenid's
+panel from 800x600 to 2560x1440 — **7.68x the pixels** — so the question was never "is the compositor
+slow", it was "which per-pixel loop just grew". Measurable on the host: the clear and the chrome fills
+are portable code that runs identically on Linux and agnos.
+
+⛔ **The pixel COUNT was not the interesting number — the per-pixel COST was.** Measured at 2560x1440
+(`tests/aethersafha.bcyr`, added for this):
+
+| | pixels | before | per pixel |
+|---|---|---|---|
+| `bhumi_fb_clear`, whole screen | 3,686,400 | 3.83 ms | **1.03 ns** |
+| chrome, 2 windows (`fill_rect`) | 1,843,200 | 23.45 ms | **12.72 ns** |
+
+**Half the pixels, six times the time — 12.3x more expensive per pixel for byte-identical stores.**
+The whole gap was per-pixel overhead, not memory: every pixel went through a function call, four
+bounds comparisons, and `_bhumi_fb_addr`, which between them re-read **seven** `load64`s out of the
+framebuffer header (width, height, pixels, pitch, bpp) and did two multiplies — to store four bytes.
+None of those seven values can change during a fill.
+
+`fill_rect` now clamps the rectangle once and walks rows from a precomputed base and stride. New
+`blit_rect` does the same for the client-surface copy, which `render_window` previously did with the
+same per-pixel call.
+
+| at 2560x1440 | before | after | |
+|---|---|---|---|
+| chrome, 2 windows | 23.45 ms | **2.57 ms** | **9.1x** |
+| CPU surface copy, 2 windows | 23.97 ms | **4.18 ms** | **5.7x** |
+| clear (untouched) | 3.83 ms | 3.83 ms | — |
+| **GPU frame** (clear + chrome; kernel does the surface via `#87`) | **27.24 ms** | **6.40 ms** | **4.3x** |
+| **CPU frame** (GPU refused, and every QEMU run) | **51.21 ms** | **10.58 ms** | **4.8x** |
+
+Uses only bhumi's public accessors (`bhumi_fb_pixels` / `_pitch` / `_bpp`), so no bhumi change and no
+tag bump. `bhumi_fb_set` remains correct and is still the right call for scattered single pixels.
+
+⚠ **The clear is now 60% of a GPU frame** and is the next item. It wants the damage model, not a
+faster loop — and that needs `union(cur, prev)` first, because `#84 present` flips the render target
+(desktop.md §2 `AE-0a`).
+
+⚠ **The CPU surface copy does not run on iron when the GPU takes the frame** — the kernel composites
+out of the client's GPU-visible shm slot and the pixels never enter userland. It is fixed anyway
+because it is the live path on every QEMU run and on any frame `ae_gpu_frame_plan` refuses. A
+fallback nobody measures is how a "GPU-accelerated" desktop ships its slow path.
+
+### Added — direct clipping coverage for `fill_rect` and `blit_rect`
+
+Both functions had only indirect coverage (via `shell_render` and `gpu_fallback`), and clamp-once is
+exactly where a rewrite can silently disagree with a per-pixel original. `tests/render.tcyr` now
+asserts every edge: in-bounds, clipped left/top/bottom-right, fully offscreen both directions, and
+zero/negative dimensions.
+
+⛔ **The source-offset case is the one that matters.** The per-pixel loop got source clipping for
+free — a dropped write still advanced the source index. Row-walking does not: the source pointer must
+advance by exactly the amount the destination was clipped by, or a partly-offscreen window draws the
+**wrong part of its own surface**, which reads as a corrupt client rather than a clip bug. The test
+encodes each source pixel's own coordinates so a wrong offset is visible, not merely wrong.
+**Negative control:** removing the source-offset advance fails exactly those two assertions
+(54 passed, 2 failed), so the test can detect the bug it was written for.
+
+**Verified:** 21/21 suites, 56/56 in `render.tcyr`, `--agnos` build clean, and on agnos at
+`AE_CLIENTS_SMP=4` both launch paths reach connected 2 / presented 2 / exit 95. ⭐ In `desktop` mode
+the framebuffer is **pixel-count identical** to the pre-change run — dim-green 952,731, red bar 3,500,
+non-black 4,194,304 — i.e. the same picture, drawn 4x faster.
+
 ## [0.12.0] - 2026-08-02
 
 The desktop's first setu clients reached iron and neither one arrived. Two of the three reasons
