@@ -9,7 +9,7 @@
 
 | Field | Value | Source |
 |---|---|---|
-| Version | **0.12.0** | [`VERSION`](../../VERSION) |
+| Version | **0.12.1** | [`VERSION`](../../VERSION) |
 | Cyrius pin | **6.5.5** | `cyrius.cyml [package].cyrius` |
 | Modules / tests | 25 `src/*.cyr` · **21 `.tcyr` suites** | `ls` |
 | `--agnos` build | **GREEN** — staged `/bin/aethersafha` 15,592,080 B, static ELF64 | `agnos/build/rootfs/bin/` |

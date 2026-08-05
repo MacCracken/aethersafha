@@ -127,14 +127,14 @@ agnos at `-smp 4` both launch paths reach 2/2 exit 95 while the `desktop`-mode f
 
 ⚠ **What this does NOT fix:** the clear, now **60% of a GPU frame**. That is `AE-0a`'s job.
 
-### Build state — measured 2026-08-02
+### Build state — measured 2026-08-05
 
-Versions at that measurement: **agnos 1.56.35** (open) · **aethersafha 0.12.0** · **setu 0.7.3**
-(kernel floor agnos ≥ 1.56.34) · **crab 0.4.4** · **bhumi 1.1.3** · **puka 0.6.7** · **mishran 0.5.3**.
+Versions: **agnos 1.56.39** (open) · **aethersafha 0.12.1** · **setu 0.7.3** (kernel floor
+agnos ≥ 1.56.34) · **crab 0.4.4** · **bhumi 1.1.3** · **puka 0.6.7** · **mishran 0.5.3**.
 
 | Binary | `--agnos` | Size |
 |---|---|---|
-| `aethersafha` (`src/main.cyr`) | ✅ | 15,592,080 B (full sigil link — expected, not a regression) |
+| `aethersafha` (`src/main.cyr`) | ✅ | 16,120,664 B (was 15,592,080 B at 0.12.0; the full sigil link dominates — [[reference_sigil_link_explains_binary_bloat]], expected, not a regression) |
 | `crab` (`crab/src/main.cyr`) | ✅ | 327,064 B |
 | `present_probe` (`setu/programs/present_probe.cyr`, staged as `/bin/puka`) | ✅ | 101,736 B |
 | **real `puka`** | ⛔ **BLOCKED** | 1,504,576 B *once `[deps.mabda]` is removed* |

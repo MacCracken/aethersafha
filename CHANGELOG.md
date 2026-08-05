@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.12.1] - 2026-08-05 — the per-pixel cost, not the pixel count
 
 ### Changed — the compositor's per-pixel loops walk rows; ~4x faster frames at native resolution
 
