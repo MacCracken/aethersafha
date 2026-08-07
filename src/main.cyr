@@ -418,7 +418,28 @@ fn main(): i64 {
                             println_int(frame);
                         }
                     }
-                    setu_srv_forward_key(comp, ev);   # route key-DOWN to the focused setu client
+                    # ⭐ TAB CYCLES FOCUS — and until now it did NOT, while a comment further down
+                    # ("a TAB in the input loop above") asserted that it did. A desktop whose focus
+                    # can never move is not one: every key went to whichever client was added LAST,
+                    # forever, and a second client could not be typed into at all. Caught when puka's
+                    # terminal received zero key events on a run where the compositor was forwarding
+                    # correctly — to the other window.
+                    # ⛔ TAB IS CONSUMED, NOT FORWARDED. A focus key that also reaches the client
+                    # would type a literal tab into the window you just switched away from.
+                    var kdone = 0;
+                    if (bhumi_key_pressed(ev) == 1) {
+                        if (bhumi_key_usage(ev) == 0x2B) {          # HID usage 0x2B = Tab
+                            var n_win = comp_count(comp);
+                            if (n_win > 1) {
+                                var nf = comp_focused(comp) + 1;
+                                if (nf >= n_win) { nf = 0; }
+                                comp_focus(comp, nf);
+                                println("aethersafha: focus cycled by TAB");
+                            }
+                            kdone = 1;
+                        }
+                    }
+                    if (kdone == 0) { setu_srv_forward_key(comp, ev); }   # key-DOWN -> focused client
                     i = i + 1;
                 }
             }
