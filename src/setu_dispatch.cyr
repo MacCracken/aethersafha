@@ -317,6 +317,9 @@ fn setu_srv_handshake_step(st, cfd, comp, dstx, dsty): i64 {
     var m = setu_msg_new();
     var p = setu_poll_input(cfd, m);
     if (p == 0) { return 0; }                      # nothing this frame — NOT an error
+    # ⛔ DO NOT ADD A DIAGNOSTIC `sys_chan_recv` HERE. A debug probe that reads the channel to
+    # find out *why* the poll failed CONSUMES A RECORD, so the very handshake frame being chased
+    # disappears into the diagnostic. A read is not a peek on a record transport.
     if (p < 0) { return 0 - 6; }
     var state = load64(st);
 

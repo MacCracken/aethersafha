@@ -1,8 +1,16 @@
 # The Firecracker and OCI backends call the LINUX syscall wrappers unguarded — every `--agnos` consumer fails to compile
 
+**Status:** ✅ **FIXED upstream in kavach — verified 2026-08-07 at kavach 3.11.7.** Never closed here;
+caught by an issue-rot audit, not by anything noticing on its own.
+
+⭐ **kavach fixed it the right way**: rather than sprinkling `#ifdef` at eight call sites, it factored
+the convention mapping into guarded wrappers in `src/util.cyr` (agnos `sys_unlink(path, strlen(path))`
+vs Linux `sys_unlink(path)`), and the backends call those. Zero raw `sys_unlink` / `sys_rmdir` remain
+in `src/backend_firecracker.cyr` or `src/backend_oci.cyr`. aethersafha builds `--agnos` clean.
+
 **Discovered:** 2026-08-01, building aethersafha `--agnos` during the desktop-arc GPU work
-**Severity:** High — it is a hard compile error, and it blocks the whole consumer, not just the backend
-**Affects:** kavach 3.9.3 (`src/backend_firecracker.cyr`, `src/backend_oci.cyr`)
+**Severity (at the time):** High — a hard compile error blocking the whole consumer, not just the backend
+**Affected:** kavach 3.9.3 (`src/backend_firecracker.cyr`, `src/backend_oci.cyr`)
 
 ## Summary
 

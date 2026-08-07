@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased] — the compositor stops listening (ipc bite 7)
+
+### Changed — clients are PLACED, not accepted
+
+⭐⭐ **`setu_srv_listen` and the accept block are gone on agnos.** For each client the compositor now
+**mints** a channel (`CH_MINT`), **endows** one end to the child (`CH_ENDOW`, which returns the fd
+number the child will hold), stages `AGNOS_CHAN=<fd>` into the `#43` env blob, and spawns the client
+**already holding a connected end**. There is no port, no dial, no accept, and no window in which a
+client can connect to something that isn't the compositor.
+
+Handshake driving moved to `setu_srv_handshake_step` — a 4-state machine (await CREATE → await ATTACH
+→ await COMMIT → done) stepped once per client per frame, because *the batch IS the poll*: a
+would-block is a result, not an error, so one slow client cannot stall the frame loop or the others.
+
+Requires **agnos ≥ 1.56.40** and **setu > 0.8.1**. ⚠ `crab` and this repo carry a TEMP
+`path = "../setu"` override in `cyrius.cyml` until setu is cut; both must revert to the tag.
+
+### Fixed — the diagnostic that ate the evidence
+
+⛔ The poll-failure branch called `sys_chan_recv` to report *which* kernel error class it hit. On a
+record transport **a read is not a peek**: that probe consumed the handshake record it was trying to
+explain, so the instrumented build failed differently from the build under diagnosis. Removed, with a
+comment at the site so it is not re-added.
+
+### Fixed — function-local `var chan_fd[4]` is FOUR BYTES, not four slots
+
+⛔ The per-client arrays were sized as if module-scope rules applied (N×u64). Function-local `var X[N]`
+allocates **N bytes**, so client 1's store at offset 8 walked off the end and smashed adjacent locals.
+This is exactly why one client worked and two did not — and it read as an IPC bug for hours. Arrays
+widened to `[32]`. [[feedback_cyrius_var_array_u64_units]]
+
+Proven: two independent clients (`present_probe` + `crab`) both present under QEMU `-smp 4` —
+`presented: 2`, external framebuffer oracle 3500 client-coloured px.
+
 ## [0.12.1] - 2026-08-05 — the per-pixel cost, not the pixel count
 
 ### Changed — the compositor's per-pixel loops walk rows; ~4x faster frames at native resolution

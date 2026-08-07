@@ -309,9 +309,15 @@ fn main(): i64 {
     # ⛔ ORDER MATTERS: endow immediately before the spawn it is for. The arm is per-CPU and one-shot,
     # so minting both channels first and then spawning both would place the SECOND endowment into the
     # FIRST child and leave the second with nothing.
-    var chan_fd[4];        # compositor-side ends, one per spawned client
-    var chan_served[4];    # 1 once that client's surface has been committed
-    var chan_st[4];        # per-client handshake scratch (see setu_srv_handshake_step)
+    # ⛔ FUNCTION-LOCAL `var X[N]` IS N **BYTES** IN CYRIUS, not N u64s — module-scope is the 8N form.
+    # These were [4] and indexed with `+ pi * 8`, so client 0 filled the whole 4-byte allocation and
+    # client 1's store ran straight off the end into the adjacent locals. That is exactly why ONE
+    # client presented and TWO presented nothing: the second spawn corrupted the first's state.
+    # 4 slots x 8 bytes = 32. [[feedback_cyrius_var_array_u64_units]]
+    var chan_fd[32];       # compositor-side ends, one per spawned client
+    var chan_served[32];   # 1 once that client's surface has been committed
+    var chan_st[32];       # per-client handshake scratch (see setu_srv_handshake_step)
+    var chan_fail[32];     # consecutive handshake failures per client
     var chan_n = 0;
     #ifdef CYRIUS_TARGET_AGNOS
     var envbuf = alloc(64);
@@ -343,6 +349,7 @@ fn main(): i64 {
                     var zi = 0;
                     while (zi < 8) { store64(stbuf + zi * 8, 0); zi = zi + 1; }
                     store64(&chan_st + chan_n * 8, stbuf);
+                    store64(&chan_fail + chan_n * 8, 0);
                     chan_n = chan_n + 1;
                     println("aethersafha: client spawned on a placed channel");
                     println_int(afd);
@@ -451,6 +458,17 @@ fn main(): i64 {
                         println_int(psid);
                         comp_focus(comp, comp_count(comp) - 1);
                         accepted = accepted + 1;
+                    }
+                    # ⛔ A HANDSHAKE ERROR IS NOT TERMINAL ON THE FIRST OCCURRENCE. This used to mark
+                    # the client served (i.e. give up forever) the first time it saw a negative — but a
+                    # client that stats a directory tree before it connects (crab does, ~37 entries)
+                    # is merely SLOW, and a transient read error while it is still starting is not the
+                    # same fact as a client that died. Count consecutive failures and only give up
+                    # after several, so "not ready yet" and "gone" stop being the same verdict.
+                    if (psid < 0) {
+                        var fails = load64(&chan_fail + pi * 8) + 1;
+                        store64(&chan_fail + pi * 8, fails);
+                        if (fails < 200) { psid = 0; }
                     }
                     if (psid < 0) {
                         # A handshake error is terminal for THIS client — mark it served so the loop
