@@ -17,9 +17,11 @@
 # `setu_accept` / `setu_read_*` / `setu_send` (which handle the Linux BSD-socket
 # AND agnos kernel-TCP #47-57 paths, plus the agnos non-blocking-recv /
 # partial-send quirks). The earlier AF_UNIX path — Linux-only, fail-closed on
-# agnos — is GONE: the compositor speaks the same TCP-loopback wire on Linux AND
-# agnos, so the desktop runs on the sovereign kernel, not just the host. All fns
-# stay `setu_srv_*`; the message→Window dispatch lives in setu_dispatch.cyr.
+# ⭐ TCP IS GONE FROM BOTH TARGETS. agnos does not listen at all — clients are minted a channel and
+# spawned holding an endowed end. Linux listens on AF_UNIX/SOCK_SEQPACKET, the same record semantics
+# as the band. All fns stay `setu_srv_*`; the message→Window dispatch lives in setu_dispatch.cyr.
+# ⚠ `setu_srv_listen` / `setu_srv_accept` / `setu_srv_accept_one` are LINUX-ONLY paths now: setu's
+# agnos arm refuses both, so on agnos they return a negative code and the compositor never calls them.
 
 # Bind + listen the setu endpoint. Returns the listening fd (>= 0) or a negative
 # code. The fd is non-blocking (setu_accept polls) so the frame loop never stalls.
@@ -45,12 +47,12 @@ fn setu_srv_accept_one(path, msg_out): i64 {
         cfd = setu_srv_accept(sfd);
         if (cfd < 0) {
             tries = tries + 1;
-            if (tries > 5000) { sock_close(sfd); return 0 - 5; }
+            if (tries > 5000) { sys_close(sfd); return 0 - 5; }
             sleep_ms(2);                             # portable (chrono): poll() on Linux, #41 on agnos
         }
     }
     var rc = setu_recv(cfd, msg_out);
-    sock_close(cfd);
-    sock_close(sfd);
+    sys_close(cfd);
+    sys_close(sfd);
     return rc;
 }

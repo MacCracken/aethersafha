@@ -255,12 +255,11 @@ fn main(): i64 {
     # ⚠ setu's LINUX arm is NOT retired. Linux is a separate target, not a fallback — BSD
     # sockets under `#ifndef CYRIUS_TARGET_AGNOS` remain the supported host transport.
     #
-    # Native display protocol: stand up the setu listener (TCP loopback:7700) on
-    # BOTH targets. setu 0.3.0's transport is cross-platform — net.cyr routes to
-    # Linux BSD sockets on the host AND to agnos's kernel TCP (sock_listen #56 /
-    # sock_accept #57, loopback-delivered via the kernel lo_ring) on the sovereign
-    # kernel. Non-blocking accept, so the frame loop never stalls.
-    var setu_path = "/tmp/aethersafha-setu.sock";   # advisory under TCP (port 7700)
+    # Native display protocol. ⭐ TCP IS GONE FROM BOTH TARGETS: agnos places clients on an endowed
+    # `#97` channel end, and the Linux host now listens on **AF_UNIX / SOCK_SEQPACKET** — a local,
+    # connected, RECORD transport with the same semantics as the band, and with filesystem permissions
+    # as the access control loopback:7700 never had.
+    var setu_path = "/tmp/aethersafha-setu.sock";   # AF_UNIX rendezvous (Linux); unused on agnos
     var setu_sfd = 0 - 1;
     # ⭐⭐ BITE 7: ON agnos THE COMPOSITOR NO LONGER LISTENS. There is no socket, no port, no accept.
     # A listener is a NAMESPACE, and a namespace is the thing the channel band deletes: `tcp_listen`
@@ -272,7 +271,7 @@ fn main(): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     setu_sfd = setu_srv_listen(setu_path);
     if (setu_sfd >= 0) {
-        println("aethersafha: setu listener up (TCP loopback:7700)");
+        println("aethersafha: setu listener up (AF_UNIX SOCK_SEQPACKET)");
     }
     #endif
     # ⛔ A FAILED LISTEN USED TO PRINT NOTHING AT ALL, and that cost a burn's second run. The
@@ -561,21 +560,16 @@ fn main(): i64 {
             }
             frame = frame + 1;
         }
-        # ⚠ HISTORICAL — this note describes the agnos TCP listener, a transport RETIRED on
-        # architectural grounds 2026-08-03 (see the listener banner above). The bug and its fix
-        # were real; keep the LESSON (close the listener on every target, unconditionally) when
-        # the listener becomes a anu endpoint. Do not read it as endorsing port 7700.
-        # ⛔⛔ THE LISTENING SOCKET LEAKED ON agnos, AND IT COST THE SECOND RUN OF A BURN.
-        # This close was inside `#ifndef CYRIUS_TARGET_AGNOS`, so the one target whose compositor
-        # loop is meant to run forever — and therefore the one that actually gets quit and relaunched
-        # by hand — was the target that never released port 7700. The 2026-08-02 log shows it exactly:
-        # run 1 prints "setu listener up" and launches both clients; run 2 prints NO listener line at
-        # all, hosts nothing, and otherwise looks like a perfectly healthy desktop.
-        # ⚠ There was never a reason for the guard. `sock_close` is portable (net.cyr routes it to
-        # BSD sockets on Linux and to the agnos kernel TCP band), and the comment beside it — "TCP,
-        # no socket file to unlink" — is if anything MORE true on agnos. This reads like a leftover
-        # from the AF_UNIX era that nobody revisited when the transport became TCP on both targets.
-        if (setu_sfd >= 0) { sock_close(setu_sfd); }   # TCP — no socket file to unlink
+        # ⛔ CLOSE THE LISTENER. The lesson that produced this line predates the transport and outlives
+        # it: when this close sat inside `#ifndef CYRIUS_TARGET_AGNOS`, the one target whose loop runs
+        # forever — and therefore the one that actually gets quit and relaunched by hand — never
+        # released its endpoint. Run 1 printed "setu listener up" and hosted two clients; run 2 printed
+        # NO listener line, hosted nothing, and otherwise looked like a perfectly healthy desktop.
+        # ⚠ On AF_UNIX the socket FILE also outlives the process, which is why `setu_listen` unlinks
+        # the path before binding rather than relying on this close running — a crash skips it.
+        #ifndef CYRIUS_TARGET_AGNOS
+        if (setu_sfd >= 0) { sys_close(setu_sfd); }
+        #endif
 
         # ⭐ SAY WHAT THE RUN ACTUALLY ACHIEVED. "frame loop ok" is true of a desktop that hosted two
         # apps and of one that hosted none, which is why the burn above could not be read: both

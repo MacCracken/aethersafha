@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — the compositor stops listening (ipc bite 7)
+## [0.12.2] - 2026-08-07 — the compositor stops listening (ipc bite 7)
 
 ### Changed — clients are PLACED, not accepted
 
@@ -37,6 +37,22 @@ widened to `[32]`. [[feedback_cyrius_var_array_u64_units]]
 
 Proven: two independent clients (`present_probe` + `crab`) both present under QEMU `-smp 4` —
 `presented: 2`, external framebuffer oracle 3500 client-coloured px.
+
+### Changed — TCP is gone from this repo too (setu 0.8.4)
+
+The listener block, the frame-loop accept and the shutdown close carried the last TCP references here.
+`sock_close` is replaced by `sys_close`, and `setu_srv_listen`/`setu_srv_accept`/`setu_srv_accept_one`
+are Linux-only paths now — setu's agnos arm refuses both, so on agnos they return a negative code and
+this compositor never calls them. On the host the listener is **AF_UNIX/SOCK_SEQPACKET**, the same
+record semantics as the `#97` band.
+
+⛔ **A comment here read "ON agnos THE COMPOSITOR NO LONGER LISTENS" while sitting directly above code
+that still opened loopback:7700.** It had said so since bite 7 landed. A confident comment asserting
+the opposite of the code beneath it is worse than no comment: it is what a reader checks *instead of*
+the code. Both the comment and the code are now correct.
+
+⚠ Requires **setu >= 0.8.4** and **agnos >= 1.56.40**.
+
 
 ## [0.12.1] - 2026-08-05 — the per-pixel cost, not the pixel count
 

@@ -1,5 +1,5 @@
-commit	05147d8ba4b58030ae886a2c4a8333aa3d6e65b7	setu	https://github.com/MacCracken/setu.git	0.8.3
-commit	fd959cc82542f8484a7eb535de8f333b76561c35	sakshi	https://github.com/MacCracken/sakshi.git	2.4.7
+commit	91e91a1eebc8bb76fb890aa01521d75385c6dd51	setu	https://github.com/MacCracken/setu.git	0.8.4
+commit	55278da718743bf6082290c88ee90ed6b76d08ed	sakshi	https://github.com/MacCracken/sakshi.git	2.4.8
 d9f3b17ddbbe1bba48917c3a679807b01c39c4a1ce776efdbdfbb7a1680e86e4  lib/tagged.cyr
 b96a50f8df3b533649d09cd239578811a22097434e09d89b113ce8b7f56801db  lib/net.cyr
 8ac4c97920a8e743acd08fbfe90a5e67d572eae1d31d7cf83bf4fa014c0857e0  lib/syscalls_macos.cyr
@@ -19,7 +19,7 @@ c7b3bf5beebddc082d4fa643a7113deaf26d0fd80dd5cd70ba0e3c21671107d0  lib/fs_win.cyr
 27c9752b70e797b43d30204e5077749526144495ba7021b1272067f3236d81f9  lib/args_agnos.cyr
 17da1a84ea09620067a04004c267e1d0a2adf0470981c086aeae07ae4136ac51  lib/freelist.cyr
 ac55a4ff22d49ccf6c44893be077e1c824825aed845d82c04767f4f87c29d6da  lib/sync_macos.cyr
-8f87645631375092fe67fdaa95175f97a753f2cbbb3df75fd7fd8b5273cc8eab  lib/sakshi.cyr
+13479bd767d2d10da93aafa6afd5bf322327882e5e787697ecd9670ff41b82db  lib/sakshi.cyr
 096eabc580c807f3e378fbe56058780a28cdf95b9c70b44672bca0a71cf969f6  lib/ct.cyr
 7b045871f231519e65f28a4b7abfbae6dd8e586ce03053fd367b3a119e8303c9  lib/atomic.cyr
 a90313240f49f1884f1bc0992daf4ee8538fe707c6998d04e163f775f4f3a1b2  lib/string.cyr
@@ -61,7 +61,7 @@ e46a35925484d3afbfaaac02676f51adaab953608879158d52f1b997fb5920a8  lib/vec.cyr
 538956b325e8bffe612ff79bbda93cb1ad3078d78ecb1f0caf059deab11f1a9f  lib/sync.cyr
 724cb440922e89ff60c76eba23670eeee53b9d1f3ffdde31ebe2e2f9badda9ed  lib/slice.cyr
 1fe386009b4001573c4111d1852468db6215e8223ef637ecb85881fbe56f1153  lib/tls_native_hs12.cyr
-00e5fd6749e805a05110a39559ff041add8a03ab21888e83561527f835e5d3e4  lib/setu.cyr
+dfb0d5b70199614ff8800b80aca42c3b7c4f1ce96fe28d3488ceaf7c2026364d  lib/setu.cyr
 5c60803482e41924217c1dcd38e86d966f4ee75e9c15cba8bf698a56b8ed794d  lib/rupa.cyr
 9fd6444e8cfcf7950837e955473adc5bab6d7bf4fa2c15f8ce2578360c4100eb  lib/hashmap.cyr
 f39294af5dc32bec02ec7d2204ca82033abe4f4bafc78e9be792eb178132e244  lib/fnptr.cyr
