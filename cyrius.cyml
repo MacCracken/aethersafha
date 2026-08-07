@@ -4,7 +4,7 @@ version = "0.12.1"
 description = "aethersafha — AI-augmented AGNOS compositor (Cyrius port, from 27207 lines of Rust)"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.5.5"
+cyrius = "6.5.9"
 
 [build]
 entry = "src/main.cyr"
@@ -100,6 +100,16 @@ modules = ["dist/kavach.cyr"]
 # are `setu_*` (no collision); its stdlib needs {string,fmt,alloc,vec,str,io,
 # syscalls,assert} are already a subset of [deps].stdlib above.
 [deps.setu]
+# 0.8.0 — ⭐⭐ THE CHANNEL-BAND CUTOVER. On agnos setu no longer DIALS: `setu_connect` checks the kernel
+#         floor via `CH_CAPS`, reads `AGNOS_CHAN` out of its environment, and returns that fd. The TCP
+#         arm is DELETED on agnos (Linux keeps its own — a different target, not a fallback).
+#         ⛔ Hard floor: agnos >= 1.56.40 (`#97 chan_op`). A client built from it REFUSES on an older
+#         kernel rather than appearing to work — enforced by CH_CAPS, not documented.
+# ⚠ `args` must stay in [deps] stdlib above: the agnos arm calls `getenv`, which resolves to
+#   `_agnos_getenv` (agnos has no /proc). `dist/setu.deps` does NOT list it — that sidecar names 8
+#   leaves while setu itself needs 12 (`net`/`chrono`/`result` are missing too). Verified against a
+#   throwaway consumer built with exactly those 8: it fails on `_agnos_getenv`. Sidecar = starting
+#   point, not contract. (It is already present here for other reasons; do not remove it.)
 # ⚠ COMMENT CORRECTED 2026-08-01 — it said "Pinned to 0.5.0" over a `tag = "0.7.1"` line, and had
 # said so through two bumps. A stale pin comment is worse than none: it is what a reader checks
 # INSTEAD of the field below it. (puka and dhancha carry the same rotted comment, saying 0.3.0.)
@@ -110,5 +120,5 @@ modules = ["dist/kavach.cyr"]
 # 0.5.0 — full key events (press + release); SETU_SURF_FULL_KEYS + the per-surface make/break
 #         forwarding this compositor honours.
 git = "https://github.com/MacCracken/setu.git"
-tag = "0.7.4"
+tag = "0.8.1"
 modules = ["dist/setu.cyr"]

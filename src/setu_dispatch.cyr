@@ -33,6 +33,24 @@ fn setu_srv_dispatch_close(cfd, sfd, path): i64 {
 fn setu_srv_recv_committed(cfd, comp, out4): i64 {
     var m = setu_msg_new();
     if (setu_srv_read_msg(cfd, m) < 0) { return 0 - 6; }
+    return setu_srv_commit_from_create(m, cfd, comp, out4);
+}
+
+# The handshake from CREATE_SURFACE onward, with that first message already in hand.
+#
+# ⛔ SPLIT OUT FOR THE CHANNEL BAND (1.56.40 bite 7), AND THE REASON IS A REAL STALL. Under the retired
+# TCP transport, `accept()` only returned once a client had actually connected, so the blocking reads
+# below were always called on a socket with something coming. A MINTED CHANNEL EXISTS THE INSTANT THE
+# COMPOSITOR CREATES IT — before the client has run a single instruction — so calling this per frame
+# would hit `setu_read_blk`'s 5000 x 2 ms retry budget and stall the frame loop for up to TEN SECONDS
+# per client that has not spoken yet.
+#
+# ⭐ The fix is to POLL for the first message and only then commit: once CREATE_SURFACE has arrived the
+# client is demonstrably running and sends ATTACH + COMMIT back to back, so the remaining blocking
+# reads are satisfied promptly. That is why only the FIRST read moved — the other two are correct as
+# they are, and making all three non-blocking would mean carrying a per-client handshake state machine
+# for no gain.
+fn setu_srv_commit_from_create(m, cfd, comp, out4): i64 {
     if (setu_msg_kind(m) != SETU_CREATE_SURFACE) { return 0 - 8; }
     var win = comp_create_window(comp, 0, 0, setu_msg_arg(m, 0), setu_msg_arg(m, 1), "setu-surface");
     if (win == 0) { return 0 - 9; }
@@ -273,6 +291,27 @@ fn setu_srv_serve_accepted(cfd, comp, fb): i64 {
 # desktop). Moves the minted Window and blits the committed buffer there. The
 # CALLER owns cfd + the listen socket. Returns the surface id (>0) or a negative
 # recv code.
+# Non-blocking peer of setu_srv_serve_accepted_at, for a channel the compositor MINTED rather than
+# accepted. Returns the new window id (> 0), 0 when the client has not spoken yet (poll again next
+# frame — the common case for the first few frames after spawn), or a negative handshake error.
+# ⛔ 0 IS NOT AN ERROR AND MUST NOT BE TREATED AS ONE. A client that has not been scheduled yet is
+# indistinguishable from one that never will be, and the difference is time, not state.
+fn setu_srv_serve_polled_at(cfd, comp, fb, dstx, dsty): i64 {
+    var m = setu_msg_new();
+    var p = setu_poll_input(cfd, m);
+    if (p == 0) { return 0; }                        # nothing yet
+    if (p < 0) { return 0 - 6; }                     # peer gone / error
+    var out4 = alloc(32);
+    var nbytes = setu_srv_commit_from_create(m, cfd, comp, out4);
+    if (nbytes < 0) { return nbytes; }
+    var win = load64(out4 + 0);
+    var pix = load64(out4 + 8);
+    win_move(win, dstx, dsty);
+    win_set_pix(win, pix);
+    win_set_cfd(win, cfd);
+    return win_id(win);
+}
+
 fn setu_srv_serve_accepted_at(cfd, comp, fb, dstx, dsty): i64 {
     var out4 = alloc(32);
     var nbytes = setu_srv_recv_committed(cfd, comp, out4);

@@ -261,19 +261,31 @@ fn main(): i64 {
     # sock_accept #57, loopback-delivered via the kernel lo_ring) on the sovereign
     # kernel. Non-blocking accept, so the frame loop never stalls.
     var setu_path = "/tmp/aethersafha-setu.sock";   # advisory under TCP (port 7700)
-    var setu_sfd = setu_srv_listen(setu_path);
+    var setu_sfd = 0 - 1;
+    # ⭐⭐ BITE 7: ON agnos THE COMPOSITOR NO LONGER LISTENS. There is no socket, no port, no accept.
+    # A listener is a NAMESPACE, and a namespace is the thing the channel band deletes: `tcp_listen`
+    # gates only on duplicate-bind, so whoever bound 7700 first owned the display protocol AND every
+    # keystroke on it. Minting a channel per client and endowing it at spawn means a client cannot be
+    # impersonated by whoever gets there first, because there is nothing to get to.
+    # ⛔ REMOVED, NOT BYPASSED (ipc.md §9.6). The Linux arm keeps its listener because Linux is a
+    # different target, not a fallback.
+    #ifndef CYRIUS_TARGET_AGNOS
+    setu_sfd = setu_srv_listen(setu_path);
     if (setu_sfd >= 0) {
         println("aethersafha: setu listener up (TCP loopback:7700)");
     }
+    #endif
     # ⛔ A FAILED LISTEN USED TO PRINT NOTHING AT ALL, and that cost a burn's second run. The
     # compositor came up, drew its desktop, reported "windows: 1", and looked completely healthy
     # while being STRUCTURALLY INCAPABLE of hosting a client — there was no socket to accept on.
     # The absence of one line is not a signal anyone reads; the desktop simply looked like it had
     # no clients, which is also what a working listener with slow clients looks like.
+    #ifndef CYRIUS_TARGET_AGNOS
     if (setu_sfd < 0) {
         println("aethersafha: the display socket could not be opened — no app can connect this run");
         println_int(setu_sfd);
     }
+    #endif
     var setu_cap = 3;
     #ifndef CYRIUS_TARGET_AGNOS
     if (setu_sfd >= 0) { setu_cap = 400; }           # host: spin (render-paced) long enough to catch a client
@@ -287,13 +299,59 @@ fn main(): i64 {
     # listener banner above); the launch-then-connect-back SHAPE survives onto anu unchanged.
     # /bin/puka is the first-resident slot; the agnos smoke seeds a slim setu client
     # there until full puka builds --agnos (blocked on mabda's Linux SYS_IOCTL).
+    # ⭐⭐ BITE 7 — MINT, ENDOW, SPAWN PLACED. Each client gets a channel minted for it, one end
+    # endowed so the child is BORN holding it, and `AGNOS_CHAN=<fd>` in its environment so it knows
+    # which fd that is. The compositor keeps the other end. No dial, no accept, no race for a port.
+    #
+    # ⛔ ENDOWMENT IS A MOVE: once placed, the compositor's OWN claim on the endowed end goes inert, so
+    # it must keep the PEER end (`mint[1]`) and endow `mint[0]`. Getting that backwards hands the
+    # client the end the compositor needs and leaves both sides mute.
+    # ⛔ ORDER MATTERS: endow immediately before the spawn it is for. The arm is per-CPU and one-shot,
+    # so minting both channels first and then spawning both would place the SECOND endowment into the
+    # FIRST child and leave the second with nothing.
+    var chan_fd[4];        # compositor-side ends, one per spawned client
+    var chan_served[4];    # 1 once that client's surface has been committed
+    var chan_n = 0;
     #ifdef CYRIUS_TARGET_AGNOS
-    if (setu_sfd >= 0) {
-        # Launch TWO setu clients — the multi-window desktop. Each connects back over
-        # loopback:7700, presents its own surface bound to its own shared buffer, and
-        # animates independently; the frame loop below cascades them to distinct positions.
-        var pk1 = sys_spawn_path("/bin/puka", 9);         # #1 = present_probe (slim test-pattern client)
-        var pk2 = sys_spawn_path("/bin/crab", 9);         # #2 = crab, the sovereign file manager (dhancha app)
+    var envbuf = alloc(64);
+    var ci = 0;
+    while (ci < 2) {
+        var mint = alloc(32);
+        if (sys_chan_mint(mint) != 0) { println("aethersafha: chan_mint FAILED — this client cannot be hosted"); ci = ci + 1; }
+        else {
+            var mine = load64(mint + 8);                  # the compositor keeps the PEER end
+            var give = load64(mint);                      # the child is endowed this one
+            var afd = sys_chan_endow(give);
+            if (afd < 3) { println("aethersafha: chan_endow FAILED — spawning without a channel would be pointless"); }
+            else {
+                # "AGNOS_CHAN=<fd>\0" — the announcement. Wayland's WAYLAND_SOCKET shape.
+                var w = 0;
+                var lit = "AGNOS_CHAN=";
+                while (w < 11) { store8(envbuf + w, load8(lit + w)); w = w + 1; }
+                if (afd >= 10) { store8(envbuf + w, 48 + (afd / 10)); w = w + 1; }
+                store8(envbuf + w, 48 + (afd % 10)); w = w + 1;
+                store8(envbuf + w, 0); w = w + 1;
+                var pk = 0 - 1;
+                if (ci == 0) { pk = sys_spawn_path_env("/bin/puka", 9, envbuf, w); }
+                if (ci == 1) { pk = sys_spawn_path_env("/bin/crab", 9, envbuf, w); }
+                if (pk < 0) { println("aethersafha: spawn_path_env FAILED"); }
+                else {
+                    store64(&chan_fd + chan_n * 8, mine);
+                    store64(&chan_served + chan_n * 8, 0);
+                    chan_n = chan_n + 1;
+                    println("aethersafha: client spawned on a placed channel");
+                    println_int(afd);
+                }
+            }
+            ci = ci + 1;
+        }
+    }
+    if (chan_n == 0) { println("aethersafha: NO client could be given a channel this run"); }
+    #endif
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (0 == 1) {
+        var pk1 = sys_spawn_path("/bin/puka", 9);         # (retired TCP launch — unreachable)
+        var pk2 = sys_spawn_path("/bin/crab", 9);
         if (pk1 >= 0) { println("aethersafha: launched setu client #1"); }
         if (pk2 >= 0) { println("aethersafha: launched setu client #2 (crab)"); }
         # Same reasoning as the listener above: only the success path printed, so a client that
@@ -367,6 +425,47 @@ fn main(): i64 {
             # endorsement: the agnos side of this wire is RETIRED (architectural — see the listener
             # banner) and moves to anu. The accept/dispatch/composite logic below is transport-
             # agnostic and carries over; only the fd's provenance changes.
+            # ⭐ agnos: POLL THE MINTED CHANNELS. There is no accept — the channel existed before the
+            # client did. A client that has not been scheduled yet returns 0 from the polled serve,
+            # which is NOT an error: the difference between "has not spoken yet" and "never will" is
+            # time, not state, so it is simply retried next frame.
+            # ⛔ The blocking `setu_srv_serve_accepted_at` must NOT be used here — a minted channel is
+            # ready the instant it exists, so its 5000 x 2 ms handshake budget would stall the frame
+            # loop up to TEN SECONDS per client that has not run yet.
+            #ifdef CYRIUS_TARGET_AGNOS
+            var pi = 0;
+            while (pi < chan_n) {
+                if (load64(&chan_served + pi * 8) == 0) {
+                    var pstep = accepted % 3;
+                    var pcx = 30 + pstep * (ae_geom_w / 6);
+                    var pcy = 50 + pstep * (ae_geom_h / 6);
+                    var psid = setu_srv_serve_polled_at(load64(&chan_fd + pi * 8), comp, fb, pcx, pcy);
+                    if (psid > 0) {
+                        store64(&chan_served + pi * 8, 1);
+                        println("aethersafha: setu client presented surface");
+                        println_int(psid);
+                        comp_focus(comp, comp_count(comp) - 1);
+                        accepted = accepted + 1;
+                    }
+                    if (psid < 0) {
+                        # A handshake error is terminal for THIS client — mark it served so the loop
+                        # does not retry a dead channel every frame for the rest of the run.
+                        # ⛔ DISTINCT STRINGS, NOT println_int: three procs share this console
+                        # unserialised (spawn_path #43 does not apply an fd redirect unless one is
+                        # armed), so a bare number lands mid-line in somebody else's output and is
+                        # unreadable. That already cost one diagnosis this session.
+                        store64(&chan_served + pi * 8, 1);
+                        if (psid == 0 - 6) { println("aethersafha: placed client: channel read failed, peer gone or bad fd"); }
+                        if (psid == 0 - 8) { println("aethersafha: placed client: first frame was not create_surface"); }
+                        if (psid == 0 - 7) { println("aethersafha: placed client: could not write surface_created back"); }
+                        if (psid == 0 - 11) { println("aethersafha: placed client: second frame was not attach"); }
+                        if (psid == 0 - 13) { println("aethersafha: placed client: third frame was not commit"); }
+                        if (psid == 0 - 14) { println("aethersafha: placed client: buffer read or alloc failed"); }
+                    }
+                }
+                pi = pi + 1;
+            }
+            #endif
             if (setu_sfd >= 0) {
                 var cfd = setu_srv_accept(setu_sfd);   # non-blocking; -5 = none pending
                 if (cfd >= 0) {
