@@ -311,6 +311,7 @@ fn main(): i64 {
     # FIRST child and leave the second with nothing.
     var chan_fd[4];        # compositor-side ends, one per spawned client
     var chan_served[4];    # 1 once that client's surface has been committed
+    var chan_st[4];        # per-client handshake scratch (see setu_srv_handshake_step)
     var chan_n = 0;
     #ifdef CYRIUS_TARGET_AGNOS
     var envbuf = alloc(64);
@@ -338,6 +339,10 @@ fn main(): i64 {
                 else {
                     store64(&chan_fd + chan_n * 8, mine);
                     store64(&chan_served + chan_n * 8, 0);
+                    var stbuf = alloc(64);          # [0]=state [1]=win [2]=pix [3]=w [4]=h
+                    var zi = 0;
+                    while (zi < 8) { store64(stbuf + zi * 8, 0); zi = zi + 1; }
+                    store64(&chan_st + chan_n * 8, stbuf);
                     chan_n = chan_n + 1;
                     println("aethersafha: client spawned on a placed channel");
                     println_int(afd);
@@ -439,7 +444,7 @@ fn main(): i64 {
                     var pstep = accepted % 3;
                     var pcx = 30 + pstep * (ae_geom_w / 6);
                     var pcy = 50 + pstep * (ae_geom_h / 6);
-                    var psid = setu_srv_serve_polled_at(load64(&chan_fd + pi * 8), comp, fb, pcx, pcy);
+                    var psid = setu_srv_handshake_step(load64(&chan_st + pi * 8), load64(&chan_fd + pi * 8), comp, pcx, pcy);
                     if (psid > 0) {
                         store64(&chan_served + pi * 8, 1);
                         println("aethersafha: setu client presented surface");

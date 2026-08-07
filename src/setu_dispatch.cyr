@@ -296,6 +296,81 @@ fn setu_srv_serve_accepted(cfd, comp, fb): i64 {
 # frame — the common case for the first few frames after spawn), or a negative handshake error.
 # ⛔ 0 IS NOT AN ERROR AND MUST NOT BE TREATED AS ONE. A client that has not been scheduled yet is
 # indistinguishable from one that never will be, and the difference is time, not state.
+# ⭐⭐ THE HANDSHAKE AS A PER-CLIENT STATE MACHINE, ONE STEP PER FRAME.
+#
+# ⛔ WHY IT CANNOT BLOCK, WHICH IS THE WHOLE REASON THIS EXISTS. The three messages are INTERACTIVE:
+# the client sends CREATE_SURFACE, then waits for SURFACE_CREATED before sending ATTACH. So the
+# compositor genuinely has to wait for its peer — and on agnos it MUST NOT, because every blocking
+# wait available to ring 3 starves the peer. `setu_read_blk` retries via `sys_sleep_ms`, which holds
+# preempt disabled; the client cannot run to send ATTACH while the compositor sleeps for it.
+# ipc.md §9.4 names this exactly: "the preempt_disable; sti; hlt spin is the poison that made TCP
+# toxic — it starves the peer it is waiting on."
+#
+# ⚠ Under the retired TCP transport this was invisible: `accept()` only returned once a client had
+# connected, and the kernel's socket buffers absorbed the interleaving. A minted channel exists before
+# the client does, so the compositor now meets its peer's scheduling directly.
+#
+# State: 0 = await CREATE_SURFACE · 1 = await ATTACH · 2 = await COMMIT · 3 = done.
+# Returns the window id (> 0) on COMPLETION, 0 while still in progress, negative on a protocol error.
+# `st` is a 6-word scratch owned by the caller, one per client: [0]=state [1]=win [2]=pix [3]=w [4]=h.
+fn setu_srv_handshake_step(st, cfd, comp, dstx, dsty): i64 {
+    var m = setu_msg_new();
+    var p = setu_poll_input(cfd, m);
+    if (p == 0) { return 0; }                      # nothing this frame — NOT an error
+    if (p < 0) { return 0 - 6; }
+    var state = load64(st);
+
+    if (state == 0) {
+        if (setu_msg_kind(m) != SETU_CREATE_SURFACE) { return 0 - 8; }
+        var win = comp_create_window(comp, 0, 0, setu_msg_arg(m, 0), setu_msg_arg(m, 1), "setu-surface");
+        if (win == 0) { return 0 - 9; }
+        win_set_keymode(win, setu_msg_arg(m, 2) & SETU_SURF_FULL_KEYS);
+        var pmul = 0;
+        if ((setu_msg_arg(m, 2) & SETU_SURF_PREMULTIPLIED) != 0) { pmul = 1; }
+        win_set_premul(win, pmul);
+        if (setu_srv_write_frame(cfd, setu_surface_created(win_id(win))) < 0) { return 0 - 7; }
+        store64(st + 8, win);
+        store64(st, 1);
+        return 0;
+    }
+
+    if (state == 1) {
+        if (setu_msg_kind(m) != SETU_ATTACH) { return 0 - 11; }
+        var w2 = setu_msg_arg(m, 1);
+        var ah = setu_msg_arg(m, 2);
+        var stride = setu_msg_arg(m, 3);
+        var buf_id = setu_msg_arg(m, 5);
+        var nbytes = ah * stride;
+        if (nbytes <= 0) { return 0 - 12; }
+        if (nbytes > 16777216) { return 0 - 12; }
+        # ⛔ SHM ONLY on this path. The inline-pixel branch streamed the surface down the control
+        # connection, which a record channel cannot carry — and `setu_read_exact` correctly refuses on
+        # agnos rather than emulating a stream. A client that presents inline here is a protocol error,
+        # not something to work around.
+        if (buf_id <= 0) { return 0 - 12; }
+        var pix = alloc(nbytes);
+        if (pix == 0) { return 0 - 14; }
+        if (setu_buf_read(buf_id, pix, nbytes) < 0) { return 0 - 14; }
+        win_set_bufid(load64(st + 8), buf_id);
+        store64(st + 16, pix);
+        store64(st + 24, w2);
+        store64(st + 32, ah);
+        store64(st, 2);
+        return 0;
+    }
+
+    if (state == 2) {
+        if (setu_msg_kind(m) != SETU_COMMIT) { return 0 - 13; }
+        var win3 = load64(st + 8);
+        win_move(win3, dstx, dsty);
+        win_set_pix(win3, load64(st + 16));
+        win_set_cfd(win3, cfd);
+        store64(st, 3);
+        return win_id(win3);
+    }
+    return 0;
+}
+
 fn setu_srv_serve_polled_at(cfd, comp, fb, dstx, dsty): i64 {
     var m = setu_msg_new();
     var p = setu_poll_input(cfd, m);
