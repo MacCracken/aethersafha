@@ -82,11 +82,34 @@ fn main() {
     # ── The source painter ──────────────────────────────────────────────────
     test_group("selftest oracle — the source surface is painted in bands");
     var src = alloc(AE_ST_SURF_W * AE_ST_SURF_H * 4);
-    ae_st_fill_source(src, AE_ST_SURF_W, AE_ST_SURF_H);
+    ae_st_fill_source(src, AE_ST_SURF_W, AE_ST_SURF_H, 0);
     assert_eq(ae_st_px(src, 0, 0, AE_ST_SURF_W), AE_ST_S0, "source top-left is band 0");
     assert_eq(ae_st_px(src, 63, 15, AE_ST_SURF_W), AE_ST_S0, "source band 0 spans the full width");
     assert_eq(ae_st_px(src, 0, 16, AE_ST_SURF_W), AE_ST_S1, "source row 16 begins band 1");
     assert_eq(ae_st_px(src, 63, 63, AE_ST_SURF_W), AE_ST_S3, "source bottom-right is band 3");
+
+    # ── `AE-6`: the BLEND arm's source, and why the SAME band expectations hold ──────────────────
+    # ⛔ The four sentinels carry byte 3 = 0, which is right for `#87` (an opaque copy that ignores it)
+    # and WRONG for `#92` op 0x01, whose shader is `out = src + dst*(1 - src_a)`: at a == 0 that is
+    # `out = src + dst`, an additive over-bright ghost. The blend arm therefore paints alpha **255**,
+    # where premultiplied == straight and the shader collapses to `out = src + dst*0 = src`.
+    # ⇒ Every band expectation is reusable, so the arm compares `#92` against `#87`'s own answer.
+    test_group("selftest oracle — AE-6: an alpha-255 source paints the same bands");
+    var psrc = alloc(AE_ST_SURF_W * AE_ST_SURF_H * 4);
+    ae_st_fill_source(psrc, AE_ST_SURF_W, AE_ST_SURF_H, 255);
+    assert_eq(ae_st_px(psrc, 0, 0, AE_ST_SURF_W), AE_ST_S0, "premul source top-left is still band 0");
+    assert_eq(ae_st_px(psrc, 0, 16, AE_ST_SURF_W), AE_ST_S1, "premul source row 16 still begins band 1");
+    assert_eq(ae_st_px(psrc, 63, 63, AE_ST_SURF_W), AE_ST_S3, "premul source bottom-right is still band 3");
+    # The alpha really is in byte 3 — read the RAW word, not the masked accessor.
+    assert_eq((load32(psrc) >> 24) & 255, 255, "the blend arm's source carries alpha 255");
+    assert_eq((load32(src) >> 24) & 255, 0, "the opaque arm's source carries alpha 0");
+    # ⭐ AND THE MASK IS WHAT MAKES ONE ORACLE SERVE BOTH. `ae_st_px` drops byte 3, so a readback whose
+    # alpha is 0xFF (what the shader writes) still compares equal to a sentinel whose alpha is 0x00.
+    # ⛔ Negative control: the mask must not be so wide that it stops discriminating COLOUR.
+    assert_eq(ae_st_px(psrc, 0, 0, AE_ST_SURF_W), ae_st_px(src, 0, 0, AE_ST_SURF_W),
+    "alpha 255 and alpha 0 sources compare EQUAL through the masked accessor");
+    assert_neq(ae_st_px(psrc, 0, 0, AE_ST_SURF_W), ae_st_px(psrc, 0, 16, AE_ST_SURF_W),
+    "...but two different BANDS still compare unequal — the mask drops alpha, not colour");
 
     # ── A CORRECT composite passes ──────────────────────────────────────────
     test_group("selftest oracle — a correctly placed surface passes every check");

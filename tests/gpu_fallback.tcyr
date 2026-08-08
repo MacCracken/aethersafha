@@ -125,13 +125,24 @@ fn main() {
     win_move(wedge, 0 - 1, 0);
     assert_eq(ae_gpu_window_admissible(wedge, 400, 400), 0, "negative x: refused");
     win_move(wedge, 0, 0);
-    # A premultiplied surface with no shader path must be refused, not copied opaquely.
+    # ⭐ A PREMULTIPLIED SURFACE IS ADMISSIBLE EITHER WAY — CHANGED, and the old expectation was the bug.
+    # This used to assert that a premultiplied window with no shader envelope is REFUSED. Refusing it here
+    # fails the whole frame to the CPU, so one client asking for a blend cost EVERY window its hardware
+    # compositing. Which op composites a surface is a per-window routing question, answered in
+    # ae_gpu_present_frame (`#92` when the envelope exists, `#87` otherwise) — and at the alpha 255 real
+    # clients produce, that fallback is byte-exact rather than approximate.
     win_set_premul(wedge, 1);
     ae_gpu_blend = 0;
-    assert_eq(ae_gpu_window_admissible(wedge, 400, 400), 0, "premultiplied, no shader path: refused");
+    assert_eq(ae_gpu_window_admissible(wedge, 400, 400), 1,
+    "premultiplied, no shader envelope: ADMITTED (routing falls back to #87, the frame is not lost)");
     ae_gpu_blend = 1;
     assert_eq(ae_gpu_window_admissible(wedge, 400, 400), 1, "premultiplied, shader available: admitted");
     ae_gpu_blend = 0;
+    # ⚠ Geometry still refuses regardless of premul — admissibility did not become a no-op.
+    win_move(wedge, 0 - 1, 0);
+    assert_eq(ae_gpu_window_admissible(wedge, 400, 400), 0, "premultiplied AND off-screen: still refused");
+    win_move(wedge, 0, 0);
+    win_set_premul(wedge, 0);
 
     # ── Case 3 — a bufid == 0 window (a one-shot static present) ────────────────
     # Skipped by gpu.cyr's blit loop AND, before this fix, by render.cyr's CPU path — so

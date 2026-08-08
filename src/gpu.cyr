@@ -36,7 +36,11 @@
 # --- Probe state. Probed ONCE: gpu_caps is cheap but not free, and the answer cannot change mid-run. ---
 var ae_gpu_mode   = 0;    # 1 = hardware compositing available and armed
 var ae_gpu_probed = 0;
-var ae_gpu_blend  = 0;    # 1 = gpu_shader_op#92 is usable (caps bit3) — gates the PREMULTIPLIED path only
+var ae_gpu_blend  = 0;    # 1 = gpu_shader_op#92 is usable (caps bit3) — selects the PREMULTIPLIED route
+# First-occurrence latches, so the log states WHICH kernel op composited client surfaces without
+# printing per frame. ⛔ Both are printed, because "no line" must not be the signal for either case.
+var ae_gpu_blend_seen = 0;
+var ae_gpu_fallback_seen = 0;
 
 # gpu_caps#89 flag bits (kernel: syscall.cyr gpu_caps_sys).
 var AE_GPU_CAP_PRESENT  = 1;    # bit0 — a GPU is bound
@@ -231,11 +235,13 @@ fn ae_gpu_window_admissible(win, fw, fh): i64 {
     if (h < 1) { return 0; }
     if (dx + w > fw) { return 0; }
     if (dy + h > fh) { return 0; }
-    # A premultiplied surface needs the shader path; `#87` is an opaque copy that ignores byte 3
-    # and would paint a half-transparent window at full strength.
-    if (win_premul(win) == 1) {
-        if (ae_gpu_blend == 0) { return 0; }
-    }
+    # ⭐ A PREMULTIPLIED SURFACE IS ALWAYS ADMISSIBLE. Whether this boot can run `#92` is a per-window
+    # ROUTING question, answered in ae_gpu_present_frame — not a reason to throw the WHOLE FRAME at the
+    # CPU. Refusing here cost every window its hardware compositing because one client asked for a blend,
+    # which is a far worse outcome than compositing that one window opaquely.
+    # ⚠ The old refusal reasoned that `#87` "would paint a half-transparent window at full strength". True
+    # only for a surface with real translucency; for the alpha-255 surfaces clients actually produce today
+    # `#87` and `#92` are byte-identical, so the fallback is exact rather than approximate.
     return 1;
 }
 
@@ -392,11 +398,29 @@ fn ae_gpu_present_frame(comp, fb): i64 {
             # plan. So demote: the next frame runs entirely on the CPU and the desktop keeps working.
             # Without this the compositor retries a refusing GPU every frame forever while
             # render_window keeps skipping its composite, and the screen stays blank.
-            if (win_premul(win) == 1) {
+            # ⭐ THE ROUTING DECISION, PER WINDOW. A premultiplied surface goes to the shader
+            # (`#92` op 0x01, a real `out = src + dst*(1 - src_a)`); everything else takes the opaque
+            # copy (`#87`). ⚠ And a premultiplied surface on a boot with NO shader envelope falls back to
+            # `#87` here rather than costing the frame — see ae_gpu_window_admissible. That fallback is
+            # exact for the alpha-255 surfaces clients produce today, and it means the desktop keeps
+            # hardware compositing on hardware that cannot blend instead of losing it entirely.
+            var use_blend = 0;
+            if (win_premul(win) == 1) { if (ae_gpu_blend == 1) { use_blend = 1; } }
+            if (use_blend == 1) {
                 if (ae_gpu_blend_rect(bid, wh, dstxy) != 0) { ae_gpu_demote(); return 0; }
+                if (ae_gpu_blend_seen == 0) {
+                    ae_gpu_blend_seen = 1;
+                    println("aethersafha: compositing a client surface with #92 op 0x01 (shader blend)");
+                }
             }
-            if (win_premul(win) == 0) {
+            if (use_blend == 0) {
                 if (sys_gpu_blit_shm(bid, wh, dstxy) != 0) { ae_gpu_demote(); return 0; }
+                if (win_premul(win) == 1) {
+                    if (ae_gpu_fallback_seen == 0) {
+                        ae_gpu_fallback_seen = 1;
+                        println("aethersafha: premultiplied surface but no shader envelope -- using #87");
+                    }
+                }
             }
         }
         i = i + 1;

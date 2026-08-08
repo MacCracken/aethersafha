@@ -42,9 +42,14 @@
 # solid fill would pass under a shifted, short, row-reversed or wrong-stride copy; four bands name
 # which one went wrong. (gpucopy learned this the same way — see its burn arc.)
 #
-# ⚠ Byte 3 is 0 in all four. `#87` is an opaque copy that ignores byte 3, and the kernel's back
-# buffer is read back as XRGB — so a sentinel with a high byte set would compare unequal for a
-# reason that has nothing to do with whether the blit worked.
+# ⚠ Byte 3 is 0 in all four, and EVERY COMPARISON MASKS IT (`ae_st_px` returns the low 24 bits).
+# `#87` is an opaque copy that ignores byte 3, and the kernel's back buffer is read back as XRGB — so a
+# sentinel with a high byte set would compare unequal for a reason that has nothing to do with whether the
+# blit worked.
+# ⭐ THE MASK IS WHAT LETS ONE ORACLE SERVE BOTH ARMS. The `#92` blend arm must feed an ALPHA-255 source
+# (see `ae_st_fill_source`), and the shader writes `out_a = 255 + dst_a*(1-1) = 255`, so its readback
+# carries byte 3 = 0xFF where the opaque arm carries 0x00. Masking is not a weakening: the four sentinels
+# are distinct in their low 24 bits, so every spatial discrimination the bands provide is intact.
 enum AeStSentinel {
     AE_ST_S0 = 0x00C0FFEE;
     AE_ST_S1 = 0x00BADA55;
@@ -100,11 +105,22 @@ fn ae_st_band_value(row): i64 {
     return AE_ST_S3;
 }
 
-# Paint the 64x64 banded source into `buf` (a userland byte buffer, w*h*4 bytes).
-fn ae_st_fill_source(buf, w, h): i64 {
+# Paint the 64x64 banded source into `buf` (a userland byte buffer, w*h*4 bytes), with `alpha` in byte 3.
+#
+# ⛔⛔ THE ALPHA IS THE WHOLE DIFFERENCE BETWEEN THE TWO ARMS, AND GETTING IT WRONG PRODUCES A RED THAT
+# LIES. The sentinels are `0x00C0FFEE`-shaped: byte 3 = 0. That is correct for `#87`, an opaque copy that
+# ignores it. It is WRONG for `#92` op 0x01, whose kernel shader is `out = src + dst * (1 - src_a)`:
+# at a == 0 that is `out = src + dst`, an ADDITIVE OVER-BRIGHT GHOST, not a vanished window. The bands
+# would come back wrong and the obvious reading — "`#92` is broken on this box" — would be false.
+# ⇒ The blend arm feeds **alpha 255**, where premultiplied and straight alpha are identical bytes and the
+# blend collapses to `out = src + dst*0 = src`. So the SAME band expectations hold for both arms, and the
+# arm is comparing the shader against the copy rather than against a hand-computed number.
+# ⚠ This is the same argument crab's premultiplied surface rests on (`crab/tests/crab.tcyr` gates it per
+# pixel), which is deliberate: one claim, proven in two places.
+fn ae_st_fill_source(buf, w, h, alpha): i64 {
     var y = 0;
     while (y < h) {
-        var v = ae_st_band_value(y);
+        var v = (ae_st_band_value(y) & 0xFFFFFF) | ((alpha & 255) << 24);
         var x = 0;
         while (x < w) {
             store32(buf + (y * w + x) * 4, v);
@@ -115,9 +131,11 @@ fn ae_st_fill_source(buf, w, h): i64 {
     return 0;
 }
 
-# Read one pixel out of a tightly-packed XRGB buffer.
+# Read one pixel out of a tightly-packed XRGB buffer, ALPHA MASKED OFF (low 24 bits).
+# ⛔ The mask is load-bearing for the `#92` arm — see the sentinel block above. Do not widen it back to
+# 0xFFFFFFFF: the blend arm's readback has byte 3 = 0xFF and every band would compare unequal.
 fn ae_st_px(buf, x, y, w): i64 {
-    return load32(buf + (y * w + x) * 4) & 0xFFFFFFFF;
+    return load32(buf + (y * w + x) * 4) & 0xFFFFFF;
 }
 
 # Verify the four bands at capture offset (ox,oy). -> 0 all correct, else the 1-based band that
@@ -215,6 +233,15 @@ fn ae_st_scan_margin(cap, capw, caph, ox, oy, bw, bh): i64 {
 #   75  the far negative control found a sentinel 300px away: the surface leaked across the buffer.
 #   76  a sentinel was ALREADY in the capture buffer before the frame ran. The instrument is
 #       contaminated and no later comparison from this run means anything.
+# ⭐ IT TESTS THE PRODUCTION PATH, WHICH IS NOW THE SHADER BLEND. The window is premultiplied exactly as
+# every real client's surface is, so `#92` op 0x01 composites it — and on a boot with no shader envelope the
+# compositor's own per-window fallback takes `#87` instead, which is what the desktop would do too. Either
+# way the verdict is the picture. The log line from `ae_gpu_present_frame` names which op ran.
+#
+# ⭐ AND THE BAND EXPECTATIONS ARE UNCHANGED BY THE BLEND, which is what makes this a differential test of
+# the shader against the copy rather than a comparison with a hand-computed number: the source is
+# ALPHA 255, where premultiplied and straight alpha are the same bytes and the shader collapses to
+# `out = src + dst*0 = src`.
 fn ae_selftest(): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     # ⚠ Not "unsupported" — the same honest 96 a GPU-less agnos box answers. This test's subject is
@@ -250,6 +277,11 @@ fn ae_selftest(): i64 {
         return 96;
     }
     println("aethersafha selftest: graphics hardware is present and armed");
+    # ⚠ SAY WHICH OP THIS BOOT WILL USE, both ways. The envelope (caps bit3, mirroring `#92`'s own
+    # `gpu_matmul_ok == 1` gate) decides whether the shader or the `#87` fallback composites the frame, and
+    # the picture is correct either way — so without this line a pass would not say WHAT passed.
+    if (ae_gpu_blend == 1) { println("aethersafha selftest: shader envelope present -- #92 op 0x01 will composite"); }
+    if (ae_gpu_blend != 1) { println("aethersafha selftest: no shader envelope -- the #87 fallback will composite"); }
 
     # The client's surface must live in a GPU-VISIBLE slot. #86 is the peer of #71 that the engines
     # can actually reach; a #71 slot is system RAM and the kernel rejects it at every GPU entry
@@ -270,7 +302,8 @@ fn ae_selftest(): i64 {
         return 93;
     }
 
-    ae_st_fill_source(&ae_st_src, AE_ST_SURF_W, AE_ST_SURF_H);
+    # Alpha 255: trivially premultiplied, so the shader is a pure copy and the bands are reusable.
+    ae_st_fill_source(&ae_st_src, AE_ST_SURF_W, AE_ST_SURF_H, 255);
     if (sys_shm_write(sid, &ae_st_src, sbytes) != 0) {
         sys_shm_free(sid);
         sys_shm_free(cid);
@@ -300,11 +333,9 @@ fn ae_selftest(): i64 {
     var win = comp_create_window(comp, AE_ST_WIN_X, AE_ST_WIN_Y,
     AE_ST_SURF_W, AE_ST_SURF_H, "selftest");
     win_set_bufid(win, sid);
-    # Opaque, so the frame takes `#87` rather than the `#92` shader path. Proving the plain
-    # hardware blit first is the right order: `#92` needs the shader envelope proven on this boot
-    # (caps bit3), so folding both into one verdict would let a missing envelope read as a broken
-    # blit.
-    win_set_premul(win, 0);
+    # Premultiplied, like every real client surface — so this frame goes through `#92` op 0x01 on any box
+    # with a shader envelope, and through the compositor's per-window `#87` fallback on any box without one.
+    win_set_premul(win, 1);
 
     var bx = AE_ST_WIN_X - AE_ST_MARGIN;
     var by = AE_ST_WIN_Y + TITLEBAR_H - AE_ST_MARGIN;

@@ -4,6 +4,50 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased] — `AE-6`: the compositor composites on the SHADER, and one client can no longer cost the frame
+
+⭐⭐ **Premultiplied client surfaces are now composited with `gpu_shader_op #92` op 0x01** — a real
+per-pixel `out = src + dst * (1 - src_a)` on the compute units, the one thing `#87`'s ALU-less byte mover
+structurally cannot do. The path has been complete in this repo and in the kernel for weeks with no client
+requesting it; crab now does, so it runs.
+
+### Fixed — a premultiplied window no longer demotes the WHOLE FRAME to the CPU
+
+⛔ **`ae_gpu_window_admissible` REFUSED a premultiplied window when GPU caps bit3 was clear, and a single
+refused window fails the entire frame to software.** So one client asking for a blend cost **every** window
+its hardware compositing — on any box whose shader envelope is absent. That is a far worse outcome than
+compositing that one surface opaquely.
+
+Which op composites a surface is a **per-window routing question**, and it is answered where the routing
+happens (`ae_gpu_present_frame`): `#92` when the envelope exists, `#87` otherwise. ⚠ The old refusal reasoned
+that `#87` "would paint a half-transparent window at full strength" — true only for real translucency; for
+the alpha-255 surfaces clients produce today the fallback is **byte-exact**, not approximate.
+
+The frame log now names which op ran (`compositing a client surface with #92 op 0x01`, or
+`premultiplied surface but no shader envelope -- using #87`), first occurrence only, both cases — so
+absence of a line is not the signal for either.
+
+### Changed — `--selftest` exercises the production path, and its oracle now survives an alpha byte
+
+The selftest window is premultiplied like every real client surface, so the arm tests what the desktop
+actually does. Its source is painted **alpha 255**, where premultiplied and straight alpha are the same bytes
+and the shader collapses to `out = src + dst*0 = src` — so **every band expectation is reusable unchanged**
+and the check is a differential test of the shader against the copy rather than against a hand-computed
+number.
+
+⛔ **The sentinels were the trap, and this is why it was not a one-line change.** `AE_ST_S0..S3` carry byte
+3 = **0** — correct for `#87`, which ignores it. Under `#92`, `a == 0` gives `out = src + dst`: an
+**additive over-bright ghost**, not a vanished window. Flipping `win_set_premul` alone would have failed
+every band, and the obvious reading — *"`#92` is broken on this box"* — would have been false.
+
+`ae_st_px` now masks byte 3 (low 24 bits), which is load-bearing rather than lax: the shader writes
+`out_a = 255`, so the readback carries `0xFF` where an opaque copy carries `0x00`. The four sentinels stay
+distinct in 24 bits, so every spatial discrimination survives — and `tests/selftest.tcyr` asserts both
+halves: two sources differing only in alpha compare **equal** through the accessor, while two different
+**bands** still compare **unequal**.
+
+**36/36** in `tests/selftest.tcyr`, 21 suites green, both targets build.
+
 ## [0.12.3] - 2026-08-07 — `AE-0a`: the damage band drives the frame, and TAB cycles focus (it never did)
 
 ### Added — `AE-0a` damage tracking: the clear and the `#39` chrome blit are band-limited
