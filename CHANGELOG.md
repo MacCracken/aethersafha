@@ -4,7 +4,59 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — `AE-6`: the compositor composites on the SHADER, and one client can no longer cost the frame
+## [Unreleased] — `AE-8`: chrome text renders on the shader cores, and `AE-6`: so do premultiplied surfaces
+
+### Added — `AE-8`: glyphs off the CPU, via `#92` op 0x03 GLYPH_1BPP
+
+⭐⭐ **Titlebar and panel text was the last chrome layer drawn a pixel at a time.** `draw_char` calls
+`bhumi_fb_set` per lit pixel — a function call, four bounds compares and seven framebuffer-header `load64`s
+to store four bytes, the same overhead that made `fill_rect` cost 12.72 ns/px before it walked rows. And
+`AE-T` made glyphs the desktop's hot content by putting a terminal on it.
+
+⭐ **The format already matched, which is why this is small.** `#92` op 0x03 takes a 1bpp mask and paints
+`color` where a bit is set, leaving the destination untouched — text, exactly. kashi's VGA 8x16 font is one
+byte per row with `bit (7 - col)` leftmost, and the kernel's shader reads **MSB-first**. So
+`ae_text_pack_1bpp` copies bits at an x-offset rather than converting a format.
+
+**Render enqueues, present drains.** Chrome reaches the back buffer through the `#39` DEFER blit inside
+`ae_gpu_present_frame`, which runs *after* render — so a glyph op issued during render would be erased by
+that blit. `draw_text` queues the run when `ae_gpu_frame_ok == 1` and `ae_gpu_emit_text()` emits it after
+the chrome and the client surfaces but before the flip. ⚠ The queue lives in render.cyr for the same reason
+`ae_frame_dmg` does: a cyrius *variable* forward-reference does not resolve and `tests/render.tcyr`
+compiles that module without gpu.cyr. It is reset in `rend_frame_damage`, next to the damage roll, so no
+caller can forget.
+
+⛔ **A refusal falls back to the CPU, and is counted.** Queue full, pool full, or a run longer than the
+packer's cap → `draw_text` draws it per-pixel as before, so text is never lost; `ae_text_dropped_get()`
+records it because a silent drop is a lie. Same for the slot: if `#86` cannot serve the 1bpp staging slot,
+the compositor says so once and leaves titles on the CPU permanently rather than retrying every frame.
+
+⛔ **One slot, allocated once, reused every frame.** `#86` slots are scarce — 16 system-wide, and
+`shm_create` rounds every request up to a 2 MB page — so per-run or per-frame allocation would exhaust the
+table in seconds. ⚠ And a glyph failure does **not** demote the frame: the chrome, window bodies and client
+surfaces are already correct in the back buffer by then, so losing a whole desktop over a caption would be
+the wrong trade.
+
+#### Verified on the host, bit-exactly, with no GPU
+
+`tests/render.tcyr` packs a string, expands the mask **the way the kernel's shader does**, and compares it
+pixel-for-pixel against `draw_text`'s own output on an identical framebuffer: **0 differing pixels.**
+
+⛔ **The negative control is the mistake the kernel names in its own source: reading the mask LSB-first**,
+which mirrors every glyph horizontally. A mirrored glyph is still a glyph-shaped blob to a pixel count, so
+only an exact comparison against the reference renderer finds it — and the control asserts that reading
+LSB-first *fails*. Plus the queue's routing, capacity and refusal paths. **99/99** (was 80).
+
+⛔ **The first run of that test was VACUOUS and its own guard caught it.** Without `kashi_font_init()` every
+`kashi_glyph_row` answers 0, so the reference and the mask both came out blank and compared EQUAL. The
+`lit > 100` assert — "the reference actually drew glyphs" — is what turned a green into a red.
+
+⚠ **QEMU cannot exercise the GPU path** (no AMD device ⇒ `ae_gpu_frame_ok` is 0 ⇒ `draw_text` takes the CPU
+branch), so what the desktop run verifies is that the **fallback is intact**: framebuffer counters identical
+to the pre-`AE-8` desktop, terminal gate still PASS. That is the half that could have broken, since
+`draw_text` gained a branch. The shader path runs on iron.
+
+### Added — `AE-6`: the compositor composites premultiplied surfaces on the SHADER
 
 ⭐⭐ **Premultiplied client surfaces are now composited with `gpu_shader_op #92` op 0x01** — a real
 per-pixel `out = src + dst * (1 - src_a)` on the compute units, the one thing `#87`'s ALU-less byte mover

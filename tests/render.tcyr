@@ -177,6 +177,147 @@ fn main() {
     assert_eq(bhumi_fb_get(gfb, 80, 100), GBG, "after the move: the VACATED region is background, not a ghost");
     assert(bhumi_fb_get(gfb, 80, 260) != GBG, "after the move: and the window is drawn at its new position");
 
+    # ⭐⭐ `AE-8` — THE PACKED 1bpp BITMAP MUST BE THE SAME GLYPHS THE CPU DRAWS.
+    # This is the whole local verification of `#92` op 0x03, and it needs no GPU: expand the packed mask
+    # the way the kernel's shader does (paint `color` where a bit is set, leave the rest) and compare it
+    # pixel-for-pixel against `draw_text`'s own output on an identical framebuffer.
+    # ⛔ IT CATCHES THE ONE MISTAKE THAT CANNOT BE EYEBALLED FROM CODE: the kernel reads the mask
+    # **MSB-first**, and its own source names LSB-first as the error it was written to avoid — which
+    # mirrors every glyph horizontally. A mirrored 'H' is still an 'H'-shaped blob in a pixel count, so
+    # only an exact comparison against the reference renderer finds it.
+    test_group("render — AE-8: the packed 1bpp mask equals what draw_text draws");
+    # ⛔ THE GLYPH TABLES MUST BE LIVE. Without kashi_font_init() every `kashi_glyph_row` answers 0, so
+    # BOTH the reference and the packed mask come out blank and compare EQUAL — a vacuous pass. The
+    # `lit > 100` assert below exists to catch exactly that, and it did on the first run.
+    kashi_font_init();
+    var tw = 200;
+    var th = 40;
+    var fb_cpu = bhumi_fb_new(tw, th);
+    var fb_gpu = bhumi_fb_new(tw, th);
+    bhumi_fb_clear(fb_cpu, 0x00000000);
+    bhumi_fb_clear(fb_gpu, 0x00000000);
+    var msg = "Hg1|_ WM";                       # ascenders, descenders, a bar, an underscore, a space
+    var mlen = strlen(msg);
+    var TCOL = 0x00D7D7DF;
+
+    # Reference: the per-pixel path, unchanged.
+    # ⚠ ae_gpu_frame_ok must be 0 here or draw_text would ENQUEUE instead of drawing — the very routing
+    # this test exists to validate would hollow out its own reference.
+    ae_gpu_frame_ok = 0;
+    draw_text(fb_cpu, msg, 5, 8, TCOL);
+
+    # Under test: pack, then expand exactly as `gpu_glyph_surface` does.
+    var stride = ae_text_stride(mlen);
+    var mask = alloc(ae_text_bytes(mlen));
+    var pw = ae_text_pack_1bpp(mask, msg, mlen);
+    assert_eq(pw, mlen * FONT_ADV, "the packed width is one advance per character");
+    assert_eq(stride, (pw + 7) / 8, "the row stride is the kernel's (w + 7) / 8");
+    var gy = 0;
+    while (gy < FONT_H) {
+        var gx = 0;
+        while (gx < pw) {
+            var byi = gy * stride + gx / 8;
+            var bit = gx - (gx / 8) * 8;
+            if ((load8(mask + byi) & (1 << (7 - bit))) != 0) {
+                bhumi_fb_set(fb_gpu, 5 + gx, 8 + gy, TCOL);
+            }
+            gx = gx + 1;
+        }
+        gy = gy + 1;
+    }
+
+    var diff = 0;
+    var lit = 0;
+    var py = 0;
+    while (py < th) {
+        var px = 0;
+        while (px < tw) {
+            var a = bhumi_fb_get(fb_cpu, px, py);
+            var b = bhumi_fb_get(fb_gpu, px, py);
+            if (a != b) { diff = diff + 1; }
+            if (a == TCOL) { lit = lit + 1; }
+            px = px + 1;
+        }
+        py = py + 1;
+    }
+    assert(lit > 100, "the reference actually drew glyphs (not comparing two blank buffers)");
+    assert_eq(diff, 0, "the packed 1bpp mask expands to the EXACT pixels draw_text produces");
+
+    # ⛔ NEGATIVE CONTROL: read the same mask LSB-first — the mistake the kernel warns about — and the
+    # comparison must FAIL. Without this, a checker that passes two blank buffers looks identical.
+    bhumi_fb_clear(fb_gpu, 0x00000000);
+    gy = 0;
+    while (gy < FONT_H) {
+        var lx = 0;
+        while (lx < pw) {
+            var lbyi = gy * stride + lx / 8;
+            var lbit = lx - (lx / 8) * 8;
+            if ((load8(mask + lbyi) & (1 << lbit)) != 0) {        # LSB-first: mirrors each byte
+                bhumi_fb_set(fb_gpu, 5 + lx, 8 + gy, TCOL);
+            }
+            lx = lx + 1;
+        }
+        gy = gy + 1;
+    }
+    var mdiff = 0;
+    py = 0;
+    while (py < th) {
+        var mx = 0;
+        while (mx < tw) {
+            if (bhumi_fb_get(fb_cpu, mx, py) != bhumi_fb_get(fb_gpu, mx, py)) { mdiff = mdiff + 1; }
+            mx = mx + 1;
+        }
+        py = py + 1;
+    }
+    assert(mdiff > 0, "reading the mask LSB-first MIRRORS the glyphs and is CAUGHT");
+
+    # ---- the queue: routing, capacity, and the CPU fallback ----------------------------------------
+    test_group("render — AE-8: the text queue routes and refuses honestly");
+    ae_text_reset();
+    assert_eq(ae_text_count(), 0, "reset empties the queue");
+    assert_eq(ae_text_enqueue("title", 10, 20, 0x00FF0000), 1, "a run is accepted");
+    assert_eq(ae_text_count(), 1, "and counted");
+    assert_eq(ae_text_run_x(0), 10, "x is carried");
+    assert_eq(ae_text_run_y(0), 20, "y is carried");
+    assert_eq(ae_text_run_col(0), 0x00FF0000, "colour is carried");
+    assert_eq(ae_text_run_len(0), 5, "length is the string length");
+    assert_eq(load8(ae_text_run_ptr(0)), 0x74, "the string is COPIED into the pool, not aliased");
+    # An empty string is queued as a no-op rather than refused: there is nothing to fall back TO, and
+    # returning 0 would make the caller draw nothing on the CPU either — same result, more work.
+    assert_eq(ae_text_enqueue("", 0, 0, 0), 1, "an empty run is a no-op, not a refusal");
+    assert_eq(ae_text_count(), 1, "and does not occupy a slot");
+    # ⛔ OVER-LONG AND OVER-FULL MUST REFUSE, so draw_text falls back to the CPU and the text still shows.
+    var d0 = ae_text_dropped_get();
+    var long = alloc(AE_TEXT_CHARS + 8);
+    var li = 0;
+    while (li < AE_TEXT_CHARS + 2) { store8(long + li, 0x41); li = li + 1; }
+    store8(long + AE_TEXT_CHARS + 2, 0);
+    assert_eq(ae_text_enqueue(long, 0, 0, 0), 0, "a run longer than the packer's cap is REFUSED");
+    assert_eq(ae_text_dropped_get(), d0 + 1, "...and counted, because a silent drop is a lie");
+    ae_text_reset();
+    var qi = 0;
+    while (qi < AE_TEXT_MAX) { ae_text_enqueue("x", 0, 0, 0); qi = qi + 1; }
+    assert_eq(ae_text_count(), AE_TEXT_MAX, "the queue fills to exactly AE_TEXT_MAX");
+    assert_eq(ae_text_enqueue("x", 0, 0, 0), 0, "and then refuses rather than overrunning");
+    ae_text_reset();
+
+    # ⛔ THE ONE-FRAME KILL SWITCH. draw_text enqueues BEFORE anyone knows the op will succeed, so a
+    # refusing shader would mean captions absent on EVERY frame. gpu.cyr clears this flag on the first
+    # refusal and draw_text must then take the CPU path again.
+    ae_gpu_frame_ok = 1;
+    assert_eq(ae_text_gpu_ok_get(), 1, "the GPU glyph path starts trusted");
+    ae_text_reset();
+    draw_text(fb_cpu, "queued", 0, 0, TCOL);
+    assert_eq(ae_text_count(), 1, "on a GPU frame the run is QUEUED, not drawn");
+    ae_text_gpu_disable();
+    ae_text_reset();
+    draw_text(fb_cpu, "drawn", 0, 0, TCOL);
+    assert_eq(ae_text_count(), 0, "after a refusal draw_text goes back to the CPU path");
+    assert_eq(ae_text_gpu_ok_get(), 0, "...and stays disabled for the rest of the run");
+    ae_text_gpu_ok = 1;
+    ae_gpu_frame_ok = 0;
+    ae_text_reset();
+
     test_group("render — decoration hit-test");
     var win = win_new(1, 100, 100, 400, 300, "T");
     assert_eq(deco_hit(win, 50, 50), Deco.DECO_NONE, "outside window");

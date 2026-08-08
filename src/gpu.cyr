@@ -309,6 +309,114 @@ fn ae_gpu_blend_rect(bid, wh, dstxy): i64 {
     #endif
 }
 
+# ============================================================================================
+# ⭐⭐ `AE-8` — GLYPHS ON THE SHADER CORES. `#92` op 0x03 GLYPH_1BPP.
+# ============================================================================================
+# The last chrome layer still drawn a pixel at a time. `draw_char` calls `bhumi_fb_set` per lit pixel —
+# a function call, four bounds compares and seven header `load64`s to store four bytes — and `AE-T` made
+# glyphs the desktop's hot content by putting a terminal on it.
+#
+# ⭐ THE FORMAT ALREADY MATCHES, WHICH IS WHY THIS IS SMALL. `#92` op 0x03 takes a 1bpp mask and paints
+# `color` where a bit is set, leaving the destination untouched elsewhere — text, exactly. kashi's VGA 8x16
+# font is one byte per row with `bit (7 - col)` leftmost, and the kernel's shader reads **MSB-first** (its
+# source names LSB-first as the mistake it was written to avoid). So `ae_text_pack_1bpp` copies bits at an
+# x-offset rather than converting a format.
+#
+# ⛔ ONE SLOT, ALLOCATED ONCE, REUSED EVERY FRAME. `#86 shm_create_gpu` slots are scarce (16 in the whole
+# system, and `shm_create` rounds every request up to a 2 MB page), so allocating per run — or per frame —
+# would exhaust the table in seconds. The slot is sized for the widest run the queue allows.
+var ae_gpu_glyph_slot = 0;      # GPU-visible 1bpp staging slot (0 = not yet allocated)
+var ae_gpu_glyph_buf = 0;       # userland packing buffer, allocated with it
+var ae_gpu_text_seen = 0;       # first-occurrence log latch
+var ae_gpu_text_fail = 0;       # 1 = the slot could not be had; stop retrying every frame
+
+# Issue one GLYPH_1BPP record. Returns 0 on success.
+#
+# ⚠ FIELD LAYOUT IS `gpo_field_mask(0x03) = 0x023B` — dwords 0,1,3,4,5,9: op(+0) flags(+4) mask_id(+12)
+# wh(+16) dstxy(+20) color0(+36). ⛔ EVERY OTHER DWORD MUST BE ZERO — the kernel REJECTS a non-zero
+# reserved field rather than ignoring it, which is what keeps today's unused dwords safe to define later.
+fn ae_gpu_glyph_rect(mask_id, wh, dstxy, color): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var d[64];                                  # function-local => 64 BYTES = exactly one op record
+    var z = 0;
+    while (z < 16) { store32(&d + z * 4, 0); z = z + 1; }
+    store32(&d + 0, 3);                         # op = GPU_OP_GLYPH_1BPP (0x03)
+    store32(&d + 12, mask_id);                  # mask_id — the GPU-visible 1bpp slot (#86)
+    store32(&d + 16, wh);                       # (h << 16) | w
+    store32(&d + 20, dstxy);                    # (dy << 16) | dx
+    store32(&d + 36, color);                    # color0 — painted where a mask bit is set
+    return syscall(92, &d, 64);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
+}
+
+# Drain the frame's text runs onto the GPU. Returns the number emitted.
+#
+# ⛔ MUST RUN AFTER THE `#39` CHROME BLIT AND BEFORE `#84 present`. The blit copies the whole userland
+# framebuffer over the back buffer, so a glyph issued before it is erased; the flip ends the frame, so one
+# issued after it lands on the buffer nobody is showing.
+#
+# ⚠ A FAILURE HERE IS NOT WORTH DEMOTING THE FRAME. The chrome, the window bodies and the client surfaces
+# are already correct in the back buffer at this point — losing the frame over a titlebar caption would
+# trade a whole desktop for a string. On refusal the text is simply absent for that frame and the run is
+# counted, which is visible without being fatal.
+fn ae_gpu_emit_text(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var n = ae_text_count();
+    if (n == 0) { return 0; }
+    if (ae_gpu_text_fail == 1) { return 0; }
+    # Widest run the queue admits, so the slot never has to grow.
+    var cap = ae_text_bytes(AE_TEXT_CHARS);
+    if (ae_gpu_glyph_slot == 0) {
+        var sl = sys_shm_create_gpu(cap);
+        if (sl < 1) {
+            ae_gpu_text_fail = 1;
+            println("aethersafha: no graphics-visible slot for glyphs -- titles stay on the CPU");
+            return 0;
+        }
+        ae_gpu_glyph_slot = sl;
+        ae_gpu_glyph_buf = alloc(cap);
+        if (ae_gpu_glyph_buf == 0) { ae_gpu_text_fail = 1; return 0; }
+    }
+    var emitted = 0;
+    var i = 0;
+    while (i < n) {
+        var len = ae_text_run_len(i);
+        var w = ae_text_pack_1bpp(ae_gpu_glyph_buf, ae_text_run_ptr(i), len);
+        if (sys_shm_write(ae_gpu_glyph_slot, ae_gpu_glyph_buf, ae_text_bytes(len)) == 0) {
+            var wh = (FONT_H << 16) | w;
+            var dstxy = (ae_text_run_y(i) << 16) | ae_text_run_x(i);
+            if (ae_gpu_glyph_rect(ae_gpu_glyph_slot, wh, dstxy, ae_text_run_col(i)) == 0) {
+                emitted = emitted + 1;
+            }
+            else {
+                # ⛔ ONE REFUSAL RETIRES THE PATH FOR THE REST OF THE RUN. The run was enqueued instead of
+                # drawn, so this frame's caption is already lost — but `draw_text` consults this flag, so
+                # every LATER frame goes back to the per-pixel path and the desktop keeps its titles.
+                # Silently retrying a refusing op every frame would mean permanently missing text with no
+                # line in the log to explain it.
+                ae_text_gpu_disable();
+                println("aethersafha: #92 op 0x03 refused a glyph run -- chrome text returns to the CPU");
+                return emitted;
+            }
+        }
+        i = i + 1;
+    }
+    if (emitted > 0) {
+        if (ae_gpu_text_seen == 0) {
+            ae_gpu_text_seen = 1;
+            println("aethersafha: chrome text is on the shader cores (#92 op 0x03 GLYPH_1BPP)");
+        }
+    }
+    return emitted;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+}
+
 # ae_gpu_present_frame — composite and flip one frame on the GPU.
 # Returns 1 if the frame was presented on the GPU, 0 if the caller must fall back to the CPU present.
 #
@@ -425,6 +533,10 @@ fn ae_gpu_present_frame(comp, fb): i64 {
         }
         i = i + 1;
     }
+
+    # 2c. `AE-8` — the frame's chrome text, on the shader cores. AFTER the chrome blit (which would erase
+    #     it) and the client surfaces (so a title cannot be hidden under a window), BEFORE the flip.
+    ae_gpu_emit_text();
 
     # 2b. Pre-flip capture, if the selftest armed one. See the ae_gpu_cap_* block above for why this
     #     is here and not in a probe of its own, and why it cannot be moved below the present.

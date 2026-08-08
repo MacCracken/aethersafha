@@ -501,6 +501,10 @@ fn rend_frame_damage(comp, fb, bg): i64 {
     # to remember. One that forgot would silently union against a stale band, which is conservative
     # (still correct, just slower) and therefore invisible. Same reasoning as the line discipline
     # clearing its own pending buffer inside ld_feed.
+    # ⭐ `AE-8`: clear last frame's text runs here, for the same reason the damage roll lives here —
+    # one place, once per frame, so no caller can forget. A queue that survived a frame would re-emit
+    # every title on top of the next one.
+    ae_text_reset();
     if (ae_prev_dmg == 0) { ae_prev_dmg = rend_dmg_new(); }
     rend_dmg_copy(ae_prev_dmg, ae_frame_dmg);
     if (ae_frame_dmg != 0) { rend_dmg_clear(ae_frame_dmg); }
@@ -562,6 +566,123 @@ enum FontK {
     FONT_ADV = 9;   # 8px glyph + 1px spacing
 }
 
+# ============================================================================================
+# ⭐⭐ `AE-8` — GLYPHS OFF THE CPU. The text-run queue and the 1bpp packer.
+# ============================================================================================
+# `draw_char` sets ONE PIXEL PER CALL through `bhumi_fb_set`, which is the same per-pixel overhead that
+# made `fill_rect` cost 12.72 ns/px before it was rewritten to walk rows — four bounds compares and seven
+# `load64`s of the framebuffer header to store four bytes. Text is the last chrome layer still paying it,
+# and a terminal made glyphs the desktop's hot content.
+#
+# agnos `#92` op 0x03 GLYPH_1BPP does exactly this in one dispatch: a 1bpp mask, colour where a bit is
+# set, destination untouched elsewhere. ⭐ kashi's VGA 8x16 font is ALREADY that format — one byte per
+# row, `bit (7 - col)` leftmost — and the kernel's shader reads **MSB-first** (its own comment names
+# LSB-first as the mistake it was written to avoid). So the packer below is a bit-copy, not a conversion.
+#
+# ⛔ WHY A QUEUE AND NOT A DIRECT CALL. Chrome is drawn into the USERLAND framebuffer and reaches the back
+# buffer via the `#39` DEFER blit inside `ae_gpu_present_frame` — which runs AFTER render. A glyph op
+# issued during render would be overwritten by that blit. So render ENQUEUES and present DRAINS, after the
+# chrome lands. ⚠ The queue lives here rather than in gpu.cyr for the same reason `ae_frame_dmg` does: a
+# cyrius VARIABLE forward-reference does not resolve, and `tests/render.tcyr` compiles this module without
+# gpu.cyr. The syscall stays on the far side of that line.
+enum AeText {
+    AE_TEXT_MAX   = 48;    # runs per frame
+    AE_TEXT_CHARS = 64;    # chars per run — the widest titlebar/panel string the chrome produces
+}
+var ae_text_n = 0;
+var ae_text_x[48];
+var ae_text_y[48];
+var ae_text_col[48];
+var ae_text_off[48];
+var ae_text_len[48];
+# ⛔ MODULE-SCOPE `var X[N]` IS N x u64. The pool must hold AE_TEXT_MAX * AE_TEXT_CHARS = 3072 bytes,
+# so [384] (3072 B). Sizing this by the function-local byte rule would overrun into the next global.
+var ae_text_pool[384];
+var ae_text_used = 0;
+# ⚠ COUNTED, NOT SILENT. A queue that quietly drops a run renders a window with no title and nothing says
+# why. The caller falls back to the CPU path on a refusal, so a drop is a performance fact, not a visual
+# one — but an uncounted one would be invisible if that ever stopped being true.
+var ae_text_dropped = 0;
+# ⛔ 1 = the GPU glyph path is still trusted. THIS IS THE ONE-FRAME KILL SWITCH, and it exists because the
+# enqueue happens BEFORE anyone knows the op will succeed: `draw_text` hands a run to the queue and does not
+# draw it, so if the emit then fails the text is simply ABSENT — silent missing titles, on every frame,
+# forever. Cleared by gpu.cyr the first time an op is refused, which sends every later frame back to the
+# per-pixel path. A shader that cannot glyph therefore costs ONE frame of captions, not the whole session.
+var ae_text_gpu_ok = 1;
+fn ae_text_gpu_ok_get(): i64 { return ae_text_gpu_ok; }
+fn ae_text_gpu_disable(): i64 { ae_text_gpu_ok = 0; return 0; }
+
+fn ae_text_reset(): i64 { ae_text_n = 0; ae_text_used = 0; return 0; }
+fn ae_text_count(): i64 { return ae_text_n; }
+fn ae_text_run_x(i): i64 { return load64(&ae_text_x + i * 8); }
+fn ae_text_run_y(i): i64 { return load64(&ae_text_y + i * 8); }
+fn ae_text_run_col(i): i64 { return load64(&ae_text_col + i * 8); }
+fn ae_text_run_len(i): i64 { return load64(&ae_text_len + i * 8); }
+fn ae_text_run_ptr(i): i64 { return &ae_text_pool + load64(&ae_text_off + i * 8); }
+fn ae_text_dropped_get(): i64 { return ae_text_dropped; }
+
+# Queue one text run. Returns 1 if queued (the caller must NOT also draw it), 0 if refused.
+fn ae_text_enqueue(s, x, y, color): i64 {
+    if (ae_text_n >= AE_TEXT_MAX) { ae_text_dropped = ae_text_dropped + 1; return 0; }
+    var n = 0;
+    while (load8(s + n) != 0) { n = n + 1; }
+    if (n == 0) { return 1; }                       # nothing to draw, and nothing to fall back to
+    if (n > AE_TEXT_CHARS) { ae_text_dropped = ae_text_dropped + 1; return 0; }
+    if (ae_text_used + n > AE_TEXT_MAX * AE_TEXT_CHARS) { ae_text_dropped = ae_text_dropped + 1; return 0; }
+    var i = 0;
+    while (i < n) { store8(&ae_text_pool + ae_text_used + i, load8(s + i)); i = i + 1; }
+    store64(&ae_text_x + ae_text_n * 8, x);
+    store64(&ae_text_y + ae_text_n * 8, y);
+    store64(&ae_text_col + ae_text_n * 8, color);
+    store64(&ae_text_off + ae_text_n * 8, ae_text_used);
+    store64(&ae_text_len + ae_text_n * 8, n);
+    ae_text_used = ae_text_used + n;
+    ae_text_n = ae_text_n + 1;
+    return 1;
+}
+
+# Row stride in bytes of the 1bpp bitmap a run of `len` characters packs into. `#92` op 0x03 requires
+# byte-aligned rows: `(w + 7) / 8`.
+fn ae_text_stride(len): i64 { return ((len * FONT_ADV) + 7) / 8; }
+fn ae_text_width(len): i64 { return len * FONT_ADV; }
+fn ae_text_bytes(len): i64 { return ae_text_stride(len) * FONT_H; }
+
+# Pack `len` characters into a 1bpp MSB-first bitmap at `dst`. -> the bitmap width in pixels.
+#
+# ⛔ MSB-FIRST, AND THIS IS THE ONE DETAIL THAT CANNOT BE GUESSED. The kernel's glyph shader reads bit 7 of
+# a byte as the LEFTMOST pixel, and its own source comment says the mistake it was written to avoid is
+# reading LSB-first — which mirrors every glyph horizontally. kashi hands out rows in the same convention
+# (`bit (7 - col)`), so this is a bit-for-bit copy at a horizontal offset, not a format conversion.
+# ⚠ Pure — no syscalls, no framebuffer — so `tests/render.tcyr` can verify the bit layout on any machine
+# instead of on the operator's only box.
+fn ae_text_pack_1bpp(dst, s, len): i64 {
+    var stride = ae_text_stride(len);
+    var total = stride * FONT_H;
+    var z = 0;
+    while (z < total) { store8(dst + z, 0); z = z + 1; }
+    var i = 0;
+    while (i < len) {
+        var ch = load8(s + i);
+        var row = 0;
+        while (row < FONT_H) {
+            var bits = kashi_glyph_row(KASHI_FONT_VGA_8X16, ch, row);
+            var c = 0;
+            while (c < FONT_W) {
+                if ((bits & (1 << (7 - c))) != 0) {
+                    var px = i * FONT_ADV + c;
+                    var byi = row * stride + px / 8;
+                    var bit = px - (px / 8) * 8;
+                    store8(dst + byi, load8(dst + byi) | (1 << (7 - bit)));
+                }
+                c = c + 1;
+            }
+            row = row + 1;
+        }
+        i = i + 1;
+    }
+    return ae_text_width(len);
+}
+
 # draw_char(fb, ch, x, y, color): blit one kashi VGA 8x16 glyph. Each row is a
 # byte; bit (7 - col) = leftmost-first pixel. Requires kashi_font_init() first.
 fn draw_char(fb, ch, x, y, color): i64 {
@@ -582,6 +703,19 @@ fn draw_char(fb, ch, x, y, color): i64 {
 
 # draw_text(fb, s, x, y, color): render a NUL-terminated cstring. -> width in px.
 fn draw_text(fb, s, x, y, color): i64 {
+    # ⭐ `AE-8`: on a GPU frame the glyphs go to `#92` op 0x03 instead of through `bhumi_fb_set` per pixel.
+    # ⛔ Only when `ae_gpu_frame_ok == 1` — that flag means `ae_gpu_present_frame` WILL run and drain the
+    # queue. Enqueuing on a CPU frame would silently drop the text, because nothing would ever emit it.
+    # ⚠ A refused enqueue (queue or pool full) falls through to the CPU path below, so text is never lost.
+    if (ae_gpu_frame_ok == 1) {
+        if (ae_text_gpu_ok == 1) {
+        if (ae_text_enqueue(s, x, y, color) == 1) {
+            var n = 0;
+            while (load8(s + n) != 0) { n = n + 1; }
+            return ae_text_width(n);
+        }
+        }
+    }
     var cx = x;
     var i = 0;
     while (1) {
