@@ -4,7 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — `#89` caps in full (and the batch recovery it obliges), a keyboard window MOVER that this time is REACHABLE, and `AE-9`
+## [0.12.4] - 2026-08-08 — the desktop's last CPU work moves to the GPU, and window management starts working
+
+⭐⭐⭐ **Iron-validated across four flashes of AGNOS 1.56.41** (a byte-identical kernel every time, so this
+userland was the only variable). `AE-6` / `AE-8` / `AE-9` put every layer of the frame on the GPU and the
+`#39` blit is no longer issued; `#89` is read in full and its BATCHED contract is confirmed on silicon;
+**`AE-0a`'s damage band finally met a window that moves** — the arc's oldest untested claim — and then the
+close path it exposed was fixed. Sections below, newest work first.
 
 ### Fixed — `#92`'s BATCHED failure mode demanded a recovery this compositor never performed
 
@@ -206,7 +212,7 @@ reasons; the content one stands on its own.
 different frame architecture from the one `AE-9` just finished. Recorded in the falsified list rather than
 implemented, because implementing it would add a path that saves nothing and can silently copy stale pixels.
 
-## Previously in this cycle — `AE-9`: the chrome fills move to the GPU and the `#39` blit is GONE
+### Also in 0.12.4 — `AE-9`: the chrome fills move to the GPU and the `#39` blit is GONE
 
 ### Added — `AE-9`: `#88 gpu_fill_rect` for the clear and every chrome rect
 
@@ -256,7 +262,7 @@ counting, the CPU fallback still drawing, and the latch retiring the path.
 ⚠ **QEMU proves the FALLBACK, not the GPU path** (no AMD device ⇒ `ae_gpu_frame_ok` is 0). Desktop counters
 byte-identical to pre-`AE-9`: dim-green 900514, red bar 972, non-black 3975361, terminal gate PASS twice.
 
-## Previously in this cycle — `AE-8`: chrome text on the shader cores, and `AE-6`: premultiplied surfaces
+### Also in 0.12.4 — `AE-8`: chrome text on the shader cores, and `AE-6`: premultiplied surfaces
 
 ### Added — `AE-8`: glyphs off the CPU, via `#92` op 0x03 GLYPH_1BPP
 
