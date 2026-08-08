@@ -84,6 +84,35 @@ fn fill_rect(fb, x, y, w, h, color): i64 {
     return 0;
 }
 
+# rend_clear_band: fill rows [y, y+h) across the FULL width with `color`.
+#
+# ⭐ A FULL-WIDTH BAND IS ONE FLAT RUN, SO WALK IT AS ONE. Measured at 2560x1440 on the host: the band
+# via `fill_rect` cost **1.347 ns/px** against `bhumi_fb_clear`'s **1.093 ns/px** for byte-identical
+# stores — 23% more, entirely per-ROW overhead (recomputing a base, a span and a loop bound 780 times)
+# for rows that are already contiguous when `pitch == width * bpp`. That is the same finding as the
+# per-pixel fix one level up, and it matters here because this runs every frame on the biggest span.
+# ⚠ Falls back to `fill_rect` when the framebuffer has a PADDED pitch, where the rows genuinely are not
+# contiguous. Correct either way; only the constant changes.
+fn rend_clear_band(fb, y, h, color): i64 {
+    var fh = bhumi_fb_height(fb);
+    var y0 = y;
+    var y1 = y + h;
+    if (y0 < 0) { y0 = 0; }
+    if (y1 > fh) { y1 = fh; }
+    if (y1 <= y0) { return 0; }
+    var fw = bhumi_fb_width(fb);
+    var pitch = bhumi_fb_pitch(fb);
+    var bpp = bhumi_fb_bpp(fb);
+    if (pitch != fw * bpp) { return fill_rect(fb, 0, y0, fw, y1 - y0, color); }
+    var p = bhumi_fb_pixels(fb) + y0 * pitch;
+    var e = bhumi_fb_pixels(fb) + y1 * pitch;
+    while (p < e) {
+        store32(p, color);
+        p = p + 4;
+    }
+    return 0;
+}
+
 # blit_rect: copy an sw x sh XRGB8888 source at `src` to (dx,dy), clipped to the framebuffer.
 #
 # ⭐ The row-walking peer of fill_rect, for the client-surface copy. Same finding, same fix: the
@@ -169,6 +198,40 @@ fn rend_blend(dst, src, a): i64 {
 var ae_frame_dmg = 0;              # the per-frame damage tracker (allocated at startup)
 var ae_dmg_primed = 0;             # 0 until the first frame has done a FULL clear
 
+# ⭐⭐ `AE-0a` — THE DAMAGE BAND, AND WHY IT IS `union(cur, prev)` AND FULL-WIDTH.
+#
+# Two constraints decide this shape, and both are in the kernel rather than here:
+#
+# 1. ⛔ `#84 present` FLIPS THE RENDER TARGET on every present (agnos `kernel/core/gpu.cyr`:
+#    `if (gpu_bb_back == 0) { gpu_bb_back = 1; } else { gpu_bb_back = 0; }`), and `#39` renders into
+#    whichever buffer that predicate selects. So a band-limited blit updates buffer A this frame and B
+#    the next, and A's rows OUTSIDE this frame's band still hold what was there TWO frames ago.
+#    ⇒ The band written each frame must cover everything that changed in THIS frame **or the last**:
+#    `union(cur, prev)`. Anything narrower leaves a trailing ghost at a two-frame lag in exactly the
+#    rows a window vacated — which reads as "the framebuffer is stale", not "the damage model is
+#    wrong", and that misreading is why this bite stalled twice.
+#    ⭐ The first two frames come out full-screen for free: frame 1 is primed full, so frame 2's union
+#    still contains it — which is exactly what is needed to initialise BOTH buffers.
+#
+# 2. ⛔ FULL-WIDTH ROWS ONLY. `#39 blit` takes its source **tightly packed, w*4 bytes per row, with no
+#    stride parameter**, so an arbitrary damage RECT's rows are not contiguous and cannot be handed to
+#    it at all. A full-width band IS contiguous (the userland fb has pitch == width*4), so the band is
+#    expressed as rows `[y, y+h)` and the x extent is discarded. True rect damage needs a stride on
+#    `#39` — a kernel ABI change, and not this bite.
+#
+# ⚠ ONE BAND FOR BOTH CONSUMERS, deliberately. The clear only strictly needs `cur` (the userland fb
+# persists across frames and is never flipped), but a second, narrower band would be a second
+# invariant to keep in step with the first — and for a desktop with any live client the two are the
+# same rows anyway, because a bufid window's CONTENT is damaged every frame.
+var ae_prev_dmg = 0;               # the PREVIOUS frame's damage — the other half of the union
+var ae_band_valid = 0;             # 1 = ae_band_y/h describe this frame's band; 0 = fall back to full
+var ae_band_y = 0;
+var ae_band_h = 0;
+# ⚠ THE BACKGROUND COLOUR IS PART OF THE DAMAGE INPUT. A theme switch changes every un-damaged pixel
+# without moving a single window, so a band-limited clear would leave the old colour everywhere outside
+# the band — a stale desktop that no window rect can explain. -1 = no frame has been cleared yet.
+var ae_last_bg = 0 - 1;
+
 # ⭐ THE FRAME PLAN — the single place "is this a GPU frame?" is decided.
 # Written once per frame by ae_gpu_frame_plan (gpu.cyr) BEFORE anything is rendered; read by
 # render_window below and by ae_gpu_present_frame. ⛔ Nothing else may set these, and nothing may
@@ -219,6 +282,77 @@ fn rend_dmg_y(d) { return load64(d + D_Y0); }
 fn rend_dmg_w(d) { return load64(d + D_X1) - load64(d + D_X0); }
 fn rend_dmg_h(d) { return load64(d + D_Y1) - load64(d + D_Y0); }
 fn rend_dmg_clear(d) { store64(d + D_VALID, 0); return 0; }
+
+# ⛔ THE BAND IS READ THROUGH FUNCTIONS, NEVER AS A VARIABLE, AND THAT IS NOT STYLE.
+# A cyrius FUNCTION forward-reference resolves; a VARIABLE forward-reference does NOT. desktop.cyr and
+# gpu.cyr both consume the band, and `tests/desktop.tcyr` compiles desktop.cyr in a unit that never
+# reaches render.cyr at all — so reading `ae_band_valid` directly there compiled fine under
+# `cyrius build src/main.cyr` and failed the moment `cyrius test` ran. That is the same trap already
+# recorded above for `ae_frame_dmg`, sprung again by a new consumer. Accessors make it impossible.
+fn rend_band_valid(): i64 { return ae_band_valid; }
+fn rend_band_y(): i64     { return ae_band_y; }
+fn rend_band_h(): i64     { return ae_band_h; }
+
+# Copy one tracker over another (used to roll cur -> prev at the top of each frame).
+fn rend_dmg_copy(dst, src): i64 {
+    if (dst == 0) { return 0; }
+    if (src == 0) { return 0; }
+    store64(dst + D_VALID, load64(src + D_VALID));
+    store64(dst + D_X0, load64(src + D_X0));
+    store64(dst + D_Y0, load64(src + D_Y0));
+    store64(dst + D_X1, load64(src + D_X1));
+    store64(dst + D_Y1, load64(src + D_Y1));
+    return 0;
+}
+
+# rend_band_compute(fh, bg): fold cur and prev into this frame's full-width row band.
+#
+# Sets ae_band_valid / ae_band_y / ae_band_h. `ae_band_valid == 0` means "no band — do the whole
+# screen", which is the honest answer whenever a tracker is missing (tests allocate neither) or the
+# background changed. ⚠ A VALID band of height 0 is a real and correct result: nothing changed in two
+# frames, so both buffers already hold the right pixels and there is nothing to write.
+fn rend_band_compute(fh, bg): i64 {
+    ae_band_valid = 0;
+    ae_band_y = 0;
+    ae_band_h = 0;
+    if (ae_frame_dmg == 0) { return 0; }
+    if (ae_prev_dmg == 0) { return 0; }
+    # A background change damages every pixel, so refuse to band this frame at all.
+    if (bg != ae_last_bg) { ae_last_bg = bg; return 0; }
+    var y0 = fh;
+    var y1 = 0;
+    if (rend_dmg_valid(ae_frame_dmg) == 1) {
+        if (rend_dmg_y(ae_frame_dmg) < y0) { y0 = rend_dmg_y(ae_frame_dmg); }
+        if (rend_dmg_y(ae_frame_dmg) + rend_dmg_h(ae_frame_dmg) > y1) {
+            y1 = rend_dmg_y(ae_frame_dmg) + rend_dmg_h(ae_frame_dmg);
+        }
+    }
+    if (rend_dmg_valid(ae_prev_dmg) == 1) {
+        if (rend_dmg_y(ae_prev_dmg) < y0) { y0 = rend_dmg_y(ae_prev_dmg); }
+        if (rend_dmg_y(ae_prev_dmg) + rend_dmg_h(ae_prev_dmg) > y1) {
+            y1 = rend_dmg_y(ae_prev_dmg) + rend_dmg_h(ae_prev_dmg);
+        }
+    }
+    # Neither tracker was valid — nothing changed in two frames.
+    if (y1 <= y0) {
+        ae_band_valid = 1;
+        ae_band_y = 0;
+        ae_band_h = 0;
+        return 0;
+    }
+    if (y0 < 0) { y0 = 0; }
+    if (y1 > fh) { y1 = fh; }
+    if (y1 <= y0) {
+        ae_band_valid = 1;
+        ae_band_y = 0;
+        ae_band_h = 0;
+        return 0;
+    }
+    ae_band_valid = 1;
+    ae_band_y = y0;
+    ae_band_h = y1 - y0;
+    return 0;
+}
 
 # Titlebar button x-positions (right-aligned: close, then maximize, then minimize).
 fn deco_close_x(win) { return win_x(win) + win_w(win) - BTN_MARGIN - BTN_W; }
@@ -340,7 +474,7 @@ fn render_window(fb, win, focused): i64 {
 # via theme_bridge) versus `rupa_theme_bg`. rupa is the arc's shared token lib and the one the
 # window chrome, dhancha, crab and jalwa all read, so rupa wins and the desktop background now
 # matches the windows drawn on it.
-fn rend_frame_damage(comp, fb): i64 {
+fn rend_frame_damage(comp, fb, bg): i64 {
     # ============================================================================================
     # ⭐ THE DAMAGE MODEL. Computed every frame; NOT yet driving the blit — see gpu.cyr for why
     # (the #84 buffer flip makes a single-frame band two-frames-stale on the other buffer).
@@ -362,6 +496,13 @@ fn rend_frame_damage(comp, fb): i64 {
     var wv = comp_windows(comp);
     var wn = vec_len(wv);
     var wi = 0;
+    # ⛔ THE ROLL HAPPENS HERE, NOT AT A CALL SITE. `prev` must become last frame's `cur` exactly once
+    # per frame, and doing it in the caller means every caller — the frame loop AND the selftest — has
+    # to remember. One that forgot would silently union against a stale band, which is conservative
+    # (still correct, just slower) and therefore invisible. Same reasoning as the line discipline
+    # clearing its own pending buffer inside ld_feed.
+    if (ae_prev_dmg == 0) { ae_prev_dmg = rend_dmg_new(); }
+    rend_dmg_copy(ae_prev_dmg, ae_frame_dmg);
     if (ae_frame_dmg != 0) { rend_dmg_clear(ae_frame_dmg); }
     while (wi < wn) {
         var w0 = vec_get(wv, wi);
@@ -403,6 +544,10 @@ fn rend_frame_damage(comp, fb): i64 {
         ae_dmg_primed = 1;
         if (ae_frame_dmg != 0) { rend_dmg_add(ae_frame_dmg, 0, 0, fw, fh); }
     }
+
+    # ⭐ AND NOW IT DRIVES SOMETHING. Fold cur and prev into the full-width band the clear and the
+    # `#39` chrome blit both consume. Computed last, so it sees every rect added above.
+    rend_band_compute(fh, bg);
     return 0;
 }
 

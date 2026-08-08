@@ -103,10 +103,24 @@ fn desk_bg_color(d): i64 {
 # and theme_bridge is still its home — it is simply no longer what paints the desktop.
 fn render_desktop(d, fb): i64 {
     var comp = desk_comp(d);
+    var bg = ae_bhumi(rupa_theme_bg(rupa_theme_active()));
     # ⛔ BEFORE the clear. Damage is computed from each window's PREVIOUS rect, and the stamp that
-    # overwrites it happens at the END of this function.
-    rend_frame_damage(comp, fb);
-    bhumi_fb_clear(fb, ae_bhumi(rupa_theme_bg(rupa_theme_active())));
+    # overwrites it happens at the END of this function. The background goes in because a theme switch
+    # damages every pixel without moving a window (see rend_band_compute).
+    rend_frame_damage(comp, fb, bg);
+    # ⭐⭐ `AE-0a`: CLEAR THE BAND, NOT THE SCREEN. This was the single biggest cost in the frame —
+    # measured 3.83 ms of a 6.40 ms GPU frame, **60%**, at 2560x1440. It is already an optimal scalar
+    # store loop at 1.03 ns/px, so the only thing left to remove was the pixel COUNT.
+    # ⚠ `rend_clear_band` walks the band as ONE flat run, because a full-width band is contiguous when
+    # the pitch is unpadded — going through `fill_rect` instead cost 23% more per pixel in pure per-row
+    # overhead (measured: 1.347 vs 1.093 ns/px at 2560x1440).
+    # ⛔ NO BAND MEANS THE WHOLE SCREEN, and that fallback is load-bearing rather than defensive: it is
+    # what runs when the trackers were never allocated (every unit test), and on the frame after a theme
+    # switch. A band of height 0 is different and correct — nothing changed in two frames.
+    if (rend_band_valid() == 1) {
+        if (rend_band_h() > 0) { rend_clear_band(fb, rend_band_y(), rend_band_h(), bg); }
+    }
+    if (rend_band_valid() == 0) { bhumi_fb_clear(fb, bg); }
     var v = comp_windows(comp);
     var n = vec_len(v);
     var i = 0;

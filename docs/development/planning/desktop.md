@@ -16,8 +16,12 @@ type: planning
 > *shipped-at-1.56.17* in agnos. Compositor rungs in this file carry the `AE-` prefix; kernel band
 > numbers keep their `#NN` syscall form.
 
-**Last refresh** 2026-08-05 — the boot-console half closed on iron (agnos 1.56.36/37/38, all burned PASS); the local-IPC band named,
-numbered and unblocked; agnos 1.56.39 landed three of the kernel items below.
+**Last refresh** 2026-08-07 — ⭐⭐⭐ **BURNED AND PASSED on archaemenid (AGNOS 1.56.41, `smp: cpus online: 4`).** The `#97` channel band runs
+the desktop on real silicon: two clients minted/endowed/spawned already connected, no listener, 278 frames, clean Esc. **`AE-T2` is
+iron-proven** — a live agnsh answered in a composited window, `h-e-l-p-Enter` = 5 keys with none lost. `AE-0a` showed no ghosting.
+⇒ [`iron-nuc-zen-log.md#tracker-15641-desktop-band`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/iron-nuc-zen-log.md#tracker-15641-desktop-band).
+⚠ That burn also found the **ONLCR** gap; the fix was **re-flashed and confirmed on iron the same day** — the terminal now wraps correctly.
+Earlier: the boot-console half closed on iron (1.56.36/37/38); 1.56.39 landed three kernel items.
 
 ---
 
@@ -65,6 +69,26 @@ quadrant). The GPU composite path is iron-proven only from the 1.56.34 `--selfte
 transport it rode is still **retired** as a wrong premise; it working here is consistent with that
 ruling, not a reprieve from it.
 → [`agnosticos/.../iron-nuc-zen-log.md#tracker-15635-desktop-smp`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/iron-nuc-zen-log.md#tracker-15635-desktop-smp)
+
+### ⭐⭐⭐ Proven on IRON — 2026-08-07 — the CHANNEL BAND and a SHELL YOU CAN TYPE INTO
+
+**AGNOS 1.56.41 bare on archaemenid, `smp: cpus online: 4`.** Card + full falsification table:
+[`iron-nuc-zen-log.md#tracker-15641-desktop-band`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/iron-nuc-zen-log.md#tracker-15641-desktop-band).
+
+- ⭐⭐ **The `#97` band carries the desktop on hardware.** `client spawned on a placed channel` ×2 (fds 5
+  and 7), both `setu client presented surface`, **no listener anywhere**. 278 frames, 2 apps, clean Esc at
+  frame 277, `frame loop ok`. ⭐ The retired TCP path's 2026-08-03 numbers were *also* 278 frames and 2
+  clients — the band reproduced them exactly, on the same box, with the transport deleted.
+- ⭐⭐ **`AE-T2` — the shell answered.** The full input ladder printed in order, then `puka: key received`
+  **×5** (`h-e-l-p-Enter`) and `puka: line sent to the shell`; the panel shows agnsh's help with a live
+  `[ASSIST] >` prompt.
+- ⭐ **The key-sampling defect does NOT reproduce on iron.** QEMU lost 5 of 9 keys at a ~100 ms hold (the
+  xHCI HID ring is drained once per compositor frame); on iron **19 of 19** arrived at human typing speed.
+  A 6.40 ms GPU frame polls fast enough. ⚠ Still real for any slow frame.
+- ✅ **`AE-0a` — no ghosting** across 278 frames, on the only substrate that could show one. ⚠ An absence,
+  observed once, by eye, with **static** windows; a moving window is the ghosting case and `AE-7` blocks it.
+- ⛔ **And it found a bug two QEMU gates could not see** — the missing ONLCR, §4. Fixed and **re-flashed the
+  same day: the terminal wraps correctly on the panel.** ⇒ `AE-T2` is iron-proven in both directions.
 
 ### Proven in QEMU — 2026-08-02, **all at `-smp 1`**
 
@@ -127,17 +151,23 @@ agnos at `-smp 4` both launch paths reach 2/2 exit 95 while the `desktop`-mode f
 
 ⚠ **What this does NOT fix:** the clear, now **60% of a GPU frame**. That is `AE-0a`'s job.
 
-### Build state — measured 2026-08-05
+### Build state — measured 2026-08-07
 
-Versions: **agnos 1.56.39** (open) · **aethersafha 0.12.1** · **setu 0.7.3** (kernel floor
-agnos ≥ 1.56.34) · **crab 0.4.4** · **bhumi 1.1.3** · **puka 0.6.7** · **mishran 0.5.3**.
+Versions: **agnos 1.56.41** (open, empty) · **aethersafha 0.12.2** · **setu 0.8.4** (kernel floor
+agnos ≥ 1.56.40, **enforced by `CH_CAPS`, not documented** — a client built from it refuses on an older
+kernel rather than appearing to work) · **crab 0.4.5** · **bhumi 1.1.3** · **puka 0.6.9** · **mishran 0.5.4**.
 
 | Binary | `--agnos` | Size |
 |---|---|---|
-| `aethersafha` (`src/main.cyr`) | ✅ | 16,120,664 B (was 15,592,080 B at 0.12.0; the full sigil link dominates — [[reference_sigil_link_explains_binary_bloat]], expected, not a regression) |
-| `crab` (`crab/src/main.cyr`) | ✅ | 327,064 B |
-| `present_probe` (`setu/programs/present_probe.cyr`, staged as `/bin/puka`) | ✅ | 101,736 B |
-| **real `puka`** | ⛔ **BLOCKED** | 1,504,576 B *once `[deps.mabda]` is removed* |
+| `aethersafha` (`src/main.cyr`) | ✅ | 16,133,912 B (15,592,080 B at 0.12.0; the full sigil link dominates — [[reference_sigil_link_explains_binary_bloat]], expected, not a regression) |
+| `crab` (`crab/src/main.cyr`) | ✅ | 348,064 B |
+| `present_probe` (`setu/programs/present_probe.cyr`, staged as `/bin/puka` in the **shared** rootfs) | ✅ | 110,312 B |
+| **real `puka`** — ⭐ **NO LONGER BLOCKED** | ✅ | 1,532,320 B. `[deps.mabda]` was dropped at **puka 0.6.8** (D3's interim), and that is what unblocked the target |
+
+⚠ **Read sizes off the UNDERSCORE artifacts.** `build/<name>_agnos` is what `cyrius build --agnos` writes and
+what burn-prep flashes. The hyphen-named `build/<name>-agnos` files are stale July artifacts that some smokes
+still consume — `aethersafha-agnos` 15,435,960 B (07-23), `crab-agnos` 310,104 B (07-10),
+`present_probe-agnos` 80,784 B (07-09). Quoting one of those quotes a build from before the band existed.
 
 ---
 
@@ -149,14 +179,17 @@ on the substrate that can actually see it.
 | Rung | What it is | Status |
 |---|---|---|
 | `AE-0` | Frame loop, chrome, shell panel, window decoration, focus | shipped; iron-rendered |
-| `AE-0a` | Damage tracking (`#85` frame damage → damage-limited `#39` blit) | ⛔ **still dead — and now the single biggest frame cost.** After the row-walking fix below, the full-screen clear is **3.83 ms of a 6.40 ms GPU frame (60%)**. It wants the damage model, not a faster loop. Still blocked on the same thing:  `render_frame` had zero callers and was merged into `render_desktop` (0.11.0). Re-enabling needs `union(cur, prev)` first — `#84 present` FLIPS the render target, so a single-frame damage band leaves the other buffer two frames stale, which reads as "stale framebuffer", not "wrong damage model" |
+| `AE-0a` | Damage tracking (damage → banded clear + damage-limited `#39` blit) | ⭐ **LANDED 2026-08-07 (QEMU), UNRELEASED.** The band is `union(cur, prev)` — forced by `#84 present` flipping the render target, so anything narrower leaves the *other* buffer two frames stale in the rows a window vacated. Full-width rows only: `#39` has **no stride parameter**, so an arbitrary rect's rows are not contiguous and cannot be passed at all (a real rect needs a `#39` ABI change). Measured on the host: clear **3.937 → 2.460 ms, 1.60x**, and a new flat `rend_clear_band` because going through `fill_rect` cost 23% in per-row overhead (1.347 vs 1.093 ns/px). ⚠ The win is bounded by geometry — two 1280x720 windows cover 780 of 1440 rows, so 46% is the ceiling at that layout; the clear falls from 60% to ~48% of the frame. 80/80 in `render.tcyr` incl. a pixel-level ghost test, **both directions mutation-tested** (the first ghost test was vacuous — it moved the window inside the priming window, where the band is full regardless). On agnos the framebuffer is **pixel-count identical** to the pre-change run. ⭐ **IRON, 2026-08-07: no ghosting across 278 frames** with the band driving both the clear and the `#39` blit — the first and only substrate that could show one. ⚠ **Weakest of the three results and not to be overstated**: an absence, observed once, by eye, with STATIC windows (so the band stayed narrow and stable). A *moving* window is the ghosting case, and `AE-7` is still blocked so nothing could move one |
 | `AE-1` | ~~setu listener + accept~~ → **mint / endow / spawn-placed** on the `#97` channel band | ⭐ **REPLACED 2026-08-07 (ipc bite 7).** `setu_srv_listen` and the accept block are **deleted**, not bypassed: the compositor mints a channel per client, endows one end (`CH_ENDOW` returns the child's fd), announces it as `AGNOS_CHAN` in the `#43` env blob, and spawns the client already connected. Nothing dials. QEMU `-smp 4`: `placed: 2`, `presented: 2`, framebuffer-confirmed. The prior TCP listener was iron-proven 2026-08-03 (2/2 on the panel) — that rung is history, not the current mechanism |
 | `AE-2` | GPU composite of a client surface (`#86`→`#87`→`#84`) | **iron-proven** for one opaque surface |
 | `AE-3` | Frame plan before render (`ae_gpu_frame_plan` publishes `ae_gpu_frame_ok`; both GPU and CPU sides read it; `ae_gpu_demote()` degrades a refusing GPU) | shipped 0.11.0 — all-or-nothing is **forced by z-order**, not chosen |
 | `AE-4` | Geometry from the kernel (`bhumi_output_query` / `#38 fbinfo`) | shipped, **iron-confirmed** 800×600 |
-| `AE-5` | Two concurrent real clients | ⭐ **IRON-PROVEN 2026-08-03 at 4 CPUs** (over TCP; **re-proven over the channel band in QEMU `-smp 4` on 2026-08-07** — iron re-burn on the band still owed) — `present_probe` + `crab` both composited as windows on archaemenid's panel, 278 frames, clean Esc quit. Also QEMU at `-smp 1/4/8/16` |
+| `AE-5` | Two concurrent real clients | ⭐ **IRON-PROVEN 2026-08-03 at 4 CPUs** (over TCP; **re-proven over the channel band in QEMU, then BURNED on the band 2026-08-07** — 278 frames, 2 clients placed, `cpus online: 4`; the iron re-burn is DONE and the band owes nothing) — `present_probe` + `crab` both composited as windows on archaemenid's panel, 278 frames, clean Esc quit. Also QEMU at `-smp 1/4/8/16` |
 | `AE-6` | Premultiplied blend (`#92` op 0x01) with a real consumer | unexercised on iron; crab is the natural first candidate (alpha-255 clean throughout) |
+| `AE-T` | ⭐ **A TERMINAL — puka hosts a live agnsh in a composited window** | ⭐ **DONE 2026-08-07 (QEMU).** puka 0.6.9 opens a setu window, mints a PTY on the `#97` band, spawns `/bin/agnsh` and renders it. Oracle: **4991 px of exact RGB (192,192,192)** (puka's `fb_def_fg`) on the panel — negative control **0** without puka. `agnos/scripts/harness/puka-terminal-test.py`. ⛔ QEMU only, never burned |
+| `AE-T2` | Terminal INPUT — keystrokes reach the hosted shell | ⭐ **DONE 2026-08-07 (QEMU).** The hypothesis was right about the LAYER and wrong about the mechanism, and the answer was **one byte**: Enter encodes to **CR (13)** (`puka/src/input/evdev.cyr:74`, correctly — a terminal sends CR) and agnoshi's `read_line` terminates on **LF (10)** and nothing else (`agnsh.cyr:366`), so no line could ever complete. ⛔ Single-byte records were never the problem — `agnsh.cyr:363-375` accumulates across reads correctly. What was missing was CR→LF **and echo**, i.e. decomposition item **(iii)**, now `puka/src/line_discipline.cyr` (cooked: erase edits the line the child will get, so the screen cannot lie about what will run). Measured, repeatable and byte-identical across runs: **9 of 9 keys delivered**, echo **4991 → 5176** glyph px, **the shell answered 5176 → 6032**. 49/49 host asserts incl. a negative control that re-derives the CR bug from the production encoder. ⭐⭐ **IRON-PROVEN 2026-08-07** — `h-e-l-p-Enter` = 5 keys, none lost, then `line sent to the shell`, and agnsh's help rendered on the panel with a live prompt. ⚠ That burn also exposed the **missing ONLCR** (the output half): the child's bare LF moved down without returning the carriage, so the answer rendered as a staircase. Fixed and gated (correct = 6 text rows, staircase = 8), and the fix was **RE-FLASHED AND CONFIRMED ON IRON** — the kernel was byte-identical between the two flashes, so `/bin/puka` was the only variable. ⇒ the discipline is complete and hardware-validated in **both** directions: ICRNL + echo + erase + ONLCR |
 | `AE-7` | Pointer input | ⛔ **not possible today** — agnos xhci matches only HID boot **keyboard**, protocol 0x01 |
+| `AE-F` | Focus cycling (TAB) | ⭐ **FIXED 2026-08-07, UNRELEASED — and now PROVEN by `AE-T2`.** There was **no TAB handler at all**, while a comment in the frame loop asserted "a TAB in the input loop above" — so focus could never move and every key went to whichever client was added LAST, forever. A second client could not be typed into. Caught because puka's terminal received zero keys on a run where forwarding was working correctly — to the other window. The harness now types `tab` first and reaches the terminal, with `focus cycled by TAB` in the log; TAB is **consumed, not forwarded**, which is why the delivery count expects 9 and not 10 |
 | `AE-8` | Glyphs off the CPU (`#92` op 0x03 GLYPH_1BPP) | unconsumed |
 | `AE-9` | Batched `#92` (64 records/submission), `#88 gpu_fill_rect`, `#89` bytes +4..+31, `#91` GPU window-move | unconsumed |
 
@@ -168,43 +201,65 @@ zero-kernel-change.
 
 ## 3. The client path — crab and puka
 
-The desktop's agnos arm `spawn_path #43`s `/bin/puka` then `/bin/crab` when its setu listener is up
-(`src/main.cyr:282-283`). **The pair is deliberately an instrument**: both present ⇒ client path and
-crab both work; probe only ⇒ setu and two-proc are fine and crab is the variable; neither ⇒ the client
-path itself. Staging only crab would conflate all three.
+⭐ **Rewritten 2026-08-07: the compositor does not wait for a listener, because there is no listener.**
+Per client the agnos arm mints a channel (`sys_chan_mint`), keeps the **peer** end and endows the other
+(`sys_chan_endow`), writes `AGNOS_CHAN=<fd>` into the `#43` env blob, and `sys_spawn_path_env`s
+`/bin/puka` then `/bin/crab` — each **born holding a connected end** (`src/main.cyr:321-361`). No port,
+no dial, no accept, no window in which a client can connect to something that is not the compositor.
+
+Two invariants at that call site, each of which produced a silent, plausible failure when violated:
+- ⛔ **Endowment is a MOVE.** Once placed, the compositor's own claim on the endowed end goes inert, so it
+  must keep `mint[1]` and endow `mint[0]`. Backwards hands the client the end the compositor needs and
+  leaves **both sides mute**.
+- ⛔ **Endow immediately before the spawn it is for.** The arm is per-CPU and one-shot, so minting both
+  channels and then spawning both places the *second* endowment into the *first* child.
+
+**The pair is still deliberately an instrument**: both present ⇒ client path and crab both work; probe
+only ⇒ setu and two-proc are fine and crab is the variable; neither ⇒ the client path itself. Staging
+only crab would conflate all three.
 
 ### crab — real, and working
 
 The dhancha file manager (sadish raster + rekha text), dual-pane, alpha-255 clean throughout. Builds
 `--agnos`, connects, presents. Nothing blocks it.
 
-### puka — ⛔ the staged `/bin/puka` is NOT puka
+### puka — ⭐ real, and it hosts a shell. Both blockers are dead.
 
-`agnos/scripts/burn/stage-tools.sh:319` stages **setu's `present_probe`** under the name `puka`. The
-name is what the compositor spawns, so the slot keeps it. Two separate problems sit behind it:
+**Both of the problems this section used to lead with are FALSIFIED, and are recorded here in the past
+tense only so they are not re-derived:**
 
-**(a) It does not build.** `cyrius build --agnos src/main.cyr` in `puka/` dies at
-`lib/mabda.cyr:4170: undefined variable 'SYS_IOCTL'`. `cyrius build` **prepends every `[deps.*]`
-module**, and mabda (3.2.11 pinned / 4.0.8 on disk) has **zero** `CYRIUS_TARGET_AGNOS` guards in its
-own `src/` — its native DRM/KMS and nouveau backends are built on `syscall(SYS_IOCTL, …)`. A Linux-only
-backend nothing on agnos calls still fails the whole consumer. Same class as the kavach 3.9.3 breakage.
-Measured: removing `[deps.mabda]` makes the **whole** puka codebase build `--agnos` at 1,504,576 B.
+- ⛔ ~~**(a) It does not build.**~~ **DEAD at puka 0.6.8.** The failure was real —
+  `cyrius build --agnos src/main.cyr` died at `lib/mabda.cyr:4170: undefined variable 'SYS_IOCTL'`,
+  because `cyrius build` **prepends every `[deps.*]` module** and mabda (3.2.11 pinned / 4.0.8 on disk)
+  has **zero** `CYRIUS_TARGET_AGNOS` guards in its own `src/`; its native DRM/KMS and nouveau backends are
+  built on `syscall(SYS_IOCTL, …)`, so a Linux-only backend nothing on agnos calls failed the whole
+  consumer (same class as the kavach 3.9.3 breakage). **`[deps.mabda]` is simply not declared any more** —
+  `puka/cyrius.cyml:36-38` says so in a comment at the point where a reader would otherwise re-add it. The
+  whole codebase builds `--agnos` at **1,532,320 B**. The root-cause shim is still the right fix and is
+  still unscheduled: **§5 D3**.
+- ⛔ ~~**(b) There is no PTY on agnos, so there is nothing for a terminal to host.**~~ **DEAD at agnos
+  1.56.40.** It was true — `pty|ptmx|devpts|termios|TIOC` across `agnos/kernel/` returned zero hits — and
+  it stayed true right up to the `#97` band, which is exactly what D2 predicted: **the PTY and the socket
+  were the same missing primitive seen twice.** A PTY is (i) a bidirectional local channel, (ii) a way to
+  hand one end to a child at spawn, (iii) a line discipline. The band shipped (i) and (ii); puka 0.6.9
+  mints a PTY on it, spawns `/bin/agnsh`, and renders it. ⚠ **(iii) is the open thread — see `AE-T2`.**
 
-**(b) ⛔⛔ There is no PTY on agnos, so there is nothing for a terminal to host.**
-`pty|ptmx|devpts|termios|TIOC` across `agnos/kernel/` returns **zero hits**. And nothing in puka is a
-resident agnos client today:
+**Still true, and it trips people:** `agnos/scripts/burn/stage-tools.sh:342` stages **setu's
+`present_probe`** under the name `puka` in the **shared** rootfs — the name is what the compositor spawns,
+so the slot keeps it. `agnos/scripts/harness/puka-terminal-test.py:93-107` overrides that slot with the
+real terminal **in its own seed only**, deliberately: `aethersafha-clients-test.py`'s oracle counts
+present_probe's own colours, so replacing it globally would break the other harness's gate.
 
-| Candidate entry | Why it is not the answer |
-|---|---|
-| `src/main.cyr` | a **42-line headless stdout demo** — staging it is a *regression* against the present_probe stand-in |
-| `programs/puka_setu_probe.cyr` | builds `--agnos` and presents, then `win_close()`s and exits — functionally a duplicate of `present_probe` |
-| `programs/puka_setu_term.cyr` | has the resident loop, but fails `--agnos` on `pty_master` and, even fixed, exits at `pty_open() < 0` |
+⚠ **`src/main.cyr` is the real entry now** (155 lines, the terminal — it was the 42-line headless stdout
+demo this section used to warn about) and it is what the harness builds:
+`cyrius build --agnos src/main.cyr build/puka_agnos`. The older `programs/puka_setu_probe.cyr` /
+`puka_setu_term.cyr` are not the answer and are not the path under test.
 
-⚠ `programs/puka_setu_term.cyr:29` also declares a literal `enum PstLoop { SYS_POLL = 7; }` — **agnos
-syscall 7 is `open(name, namelen, flags)`**, so `syscall(7, &pfds, 1, 200)` would attempt to open a
-1-byte path out of a pollfd struct.
-
-**This is a decision, not a bug fix** — see §5.
+⚠ **The `SYS_POLL = 7` hazard is real and now sits in THREE files**, not one:
+`programs/puka_setu_term.cyr:29`, `programs/puka_term.cyr:27`, `programs/gpu_win_probe.cyr:24` each declare
+a literal `SYS_POLL = 7`. **agnos syscall 7 is `open(name, namelen, flags)`**, so `syscall(7, &pfds, …)`
+would attempt to open a 1-byte path out of a pollfd struct. None of the three is built `--agnos` today —
+which is the only reason it has not fired.
 
 ---
 
@@ -259,6 +314,38 @@ syscall 7 is `open(name, namelen, flags)`**, so `syscall(7, &pfds, 1, 200)` woul
   reported only on success, so a compositor structurally incapable of hosting an app announced that by
   staying quiet — which is also exactly what a working listener with slow clients looks like. Anything
   worth printing on success is worth printing on failure, or the log cannot be read backwards.
+- ⛔⛔ **"THE TERMINAL DOESN'T RESPECT WINDOW WRAPPING" IS WRONG — IT WAS A MISSING ONLCR (2026-08-07).**
+  The iron burn rendered agnsh's `help` as a **staircase**: each line beginning where the previous ended,
+  then breaking mid-word at the right edge. It is **not a wrapping bug and not a width bug**, and the width
+  hypothesis was eliminated by MEASUREMENT before anything was changed — agnsh's longest help line is
+  **77 of 80 columns**, so nothing on that screen should have wrapped. The real chain: agnsh emits a bare
+  **LF** like every agnos program, because the agnos kernel console makes LF mean newline **and** carriage
+  return (`agnos/kernel/arch/x86_64/fb_console.cyr:1051-1053`); puka's engine is a **correct VT100** where
+  LF only moves down. ⇒ Line 2 started at column 53 and overflowed. Every fragment in that photo is
+  arithmetic. Fixed where every Unix tty fixes it — **ONLCR in the line discipline's OUTPUT half**
+  (`puka/src/line_discipline.cyr`, `ld_out_feed`). ⛔ **Do NOT fix it in the shell**: every agnos program
+  emits bare LF for the same correct reason, so patching agnsh breaks owl/kriya/iam in a window and adds
+  stray CRs to their console output.
+  ⛔⛔ **AND THE INSTRUMENT LESSON: A PIXEL COUNT CANNOT SEE A LAYOUT DEFECT.**
+  `puka-terminal-test.py` passed that build **before and after** the fix with byte-identical counts
+  (4991 → 5176 → 6032), because a staircase draws **exactly the same characters** and only moves them. The
+  gate was blind by construction; the operator's eye was the only oracle. It now counts occupied **text
+  rows**, calibrated on both arms of one build: **correct 6 · staircase 8 · ceiling 7** — and the re-flash
+  confirmed the panel shows what the 6-row arm predicted. ⭐ Those numbers transferred to hardware because
+  they were derived from the MUTANT, not from a passing run.
+- ⛔⛔ **"KEYSTROKES ARE BEING DROPPED" IS WRONG — THEY ARE NEVER SAMPLED (2026-08-07).** A key that goes
+  missing on this desktop has not been dropped by the compositor, by setu, or by the client. **A USB HID
+  keyboard reports STATE ON POLL and does not queue events**; agnos drains the xHCI HID ring only inside
+  `kbscan #42`'s bounded `sti` window (`agnos/kernel/core/syscall.cyr:8746-8757`), and the compositor calls
+  that **once per frame**. A key whose press and release both complete within one frame therefore never
+  existed as far as the system is concerned. Measured on the QEMU CPU composite path (no AMD PCI device ⇒
+  every GPU branch dead) at QEMU's ~100 ms default `sendkey` hold: **0 of 9 · 4 of 9 · 4 of 9** keys
+  delivered; at a 500 ms hold **9 of 9**, twice, byte-identical. ⚠ **The 4-of-9 runs still completed a line
+  and got an answer**, which is exactly what made this read as a line-discipline failure for two runs.
+  ⭐ Two consequences worth keeping: **a human holds a key ~100 ms**, so this is a real usability defect and
+  not a harness artifact — the levers are `AE-0a` (a cheaper frame) and IRQ-buffered HID reports, both
+  system work; and **iron may not show it at all**, because the GPU frame is 6.40 ms against QEMU's CPU
+  path, so the iron burn must count delivered keys rather than assume this reproduces.
 - ⛔ **DO NOT ADD A CONNECT RETRY LOOP.** Tried; strictly worse. `sock_connect #47` holds preempt
   disabled for the whole attempt, so a retrying client **starves the compositor it is waiting for** —
   200 tries stretched a 30 s budget to **72 s** with still zero connections. A `sched_yield` between
@@ -379,7 +466,7 @@ so no userland change can honestly fix it; the comments were corrected in 0.7.3 
 1.56.35 kernel item. Measured state: the desktop runs ~10 ms/frame in QEMU, so this is a latent hazard,
 not an observed stall — **measure before designing.**
 
-### D2 — what `/bin/puka` should BE — ✅ **DECIDED 2026-08-02: puka gets its own PTY, of sorts**
+### D2 — what `/bin/puka` should BE — ✅ **DECIDED 2026-08-02, and ⭐ DELIVERED 2026-08-07 (QEMU): puka gets its own PTY, of sorts**
 
 Operator call: *"puka would yes need its own pty of sorts."* So the answer is not to work around the
 missing PTY forever — puka is a terminal, and a terminal without a controlling channel is a picture of
@@ -401,16 +488,20 @@ terminal-specific. So:
   one-shot and `execwait #37`-only, but it is the existing sovereign idiom for "point a child's stdio
   somewhere else", and the `#43` arm is already a named kernel item.
 
-**Sequencing — the interim stays honest.** Until the channel exists, `/bin/puka` should become a
-**resident puka surface**: a new `programs/puka_setu_agnos.cyr` = the probe's no-PTY body plus the agnos
-resident frame loop already written down twice (`setu/programs/present_probe.cyr`'s agnos arm and
-`crab/src/main.cyr:176-210`): `while (...) { setu_client_poll_input(...); setu_buf_write(...);
-sys_sched_yield(); }` — **no `win_close`**. That puts puka's *real* cell grid, font raster and VT
-rendering on the desktop as a live window, which is genuinely puka and is honest about not being a
-shell yet. It is a rung, not a substitute for the PTY.
+⭐⭐ **SUPERSEDED BY DELIVERY — the interim was never needed.** This section used to route through a
+`programs/puka_setu_agnos.cyr` "resident puka surface" (the probe's no-PTY body plus a resident frame
+loop, honest about not being a shell yet) *because the channel did not exist*. The channel landed first,
+so puka went straight to the real thing: **`src/main.cyr` opens a setu window, mints a PTY on the `#97`
+band, spawns `/bin/agnsh`, and renders it** — `AE-T`, proven by 4991 px of exact RGB(192,192,192) on the
+panel against a measured 0-px control. The rung was skipped, not failed.
 
-⛔ **Rejected: keep the `present_probe` stand-in.** It proves nothing new, and the stand-in's name
-already misleads every reader of `stage-tools.sh` into thinking puka runs on agnos.
+⛔ **Rejected then and still rejected: keep the `present_probe` stand-in as the answer.** It proves nothing
+new. ⚠ It does still *occupy the slot in the shared rootfs* — see §3 for why that is deliberate and which
+harness depends on it.
+
+⚠ **The line discipline — decomposition item (iii) — is what is left**, and it is `AE-T2`: keystrokes reach
+agnsh's stdin and the shell does not answer. D2 predicted exactly this split, so the remaining work is
+where the design said it would be, not a surprise.
 
 ⚠ Whichever is chosen, if a real puka ever replaces the probe as `/bin/puka`, **three coupled edits
 land in one change**: `agnos/scripts/burn/stage-tools.sh:319-320` (the duplicate-rootfs-name guard

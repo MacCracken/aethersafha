@@ -53,6 +53,17 @@ var ae_probe_t0 = 0;
 var ae_probe_next_report = 0;
 # 1 = at least one spawn_path refused, so a "no client connected" verdict has a known cause.
 var ae_spawn_failed = 0;
+# ⭐ THE INPUT LADDER — first-occurrence latches, one per rung. Kept PERMANENTLY, because the input path
+# has been mysterious twice: once when TAB had no handler at all, and once when keystrokes vanished before
+# reaching a client and there was no way to tell WHERE without rebuilding. Each rung prints ONCE, as a
+# distinct string rather than a number, because three procs share this console unserialised and a bare int
+# lands mid-line in another proc's output. ⛔ Absence of a line is now a signal: the LAST rung printed
+# names the layer that failed. [[feedback_instrument_discipline]]
+var ae_inp_poll = 0;
+var ae_inp_denied = 0;
+var ae_inp_down = 0;
+var ae_inp_tab = 0;
+var ae_inp_fwd = 0;
 enum AeProbe {
     # ⛔ THE BUDGET IS WALL TIME, NOT FRAMES, and the first version got this wrong. What a spawned
     # client needs in order to load from ext2, start, and complete a loopback TCP connect is SECONDS
@@ -390,10 +401,28 @@ fn main(): i64 {
         while ((running == 1) && (frame < setu_cap)) {    # host: bounded so the dev build terminates
             #endif
             var n = bhumi_backend_poll(be, &events, AE_MAXEV, now);
+            if (n == BHUMI_SEAT_DENIED) {
+                if (ae_inp_denied == 0) {
+                    ae_inp_denied = 1;
+                    println("aethersafha: input poll answered SEAT_DENIED");
+                }
+            }
+            if (n > 0) {
+                if (ae_inp_poll == 0) {
+                    ae_inp_poll = 1;
+                    println("aethersafha: input poll delivered its first event");
+                }
+            }
             if (n != BHUMI_SEAT_DENIED) {
                 var i = 0;
                 while (i < n) {
                     var ev = load64(&events + i * 8);
+                    if (bhumi_key_pressed(ev) == 1) {
+                        if (ae_inp_down == 0) {
+                            ae_inp_down = 1;
+                            println("aethersafha: first key-down seen");
+                        }
+                    }
                     # ⭐ NAME THE KEY THAT QUIT, because on the 2026-08-02 burn the desktop
                     # rendered and then exited immediately and nothing said why. IA_QUIT has exactly
                     # one source (HID_ESC), so either an Esc really arrived or the Set-1 decode
@@ -430,6 +459,11 @@ fn main(): i64 {
                     if (bhumi_key_pressed(ev) == 1) {
                         if (bhumi_key_usage(ev) == 0x2B) {          # HID usage 0x2B = Tab
                             var n_win = comp_count(comp);
+                            if (ae_inp_tab == 0) {
+                                ae_inp_tab = 1;
+                                println("aethersafha: a TAB reached the compositor");
+                            }
+                            if (n_win < 2) { println("aethersafha: TAB ignored -- fewer than two windows"); }
                             if (n_win > 1) {
                                 var nf = comp_focused(comp) + 1;
                                 if (nf >= n_win) { nf = 0; }
@@ -439,7 +473,15 @@ fn main(): i64 {
                             kdone = 1;
                         }
                     }
-                    if (kdone == 0) { setu_srv_forward_key(comp, ev); }   # key-DOWN -> focused client
+                    if (kdone == 0) {
+                        var fk = setu_srv_forward_key(comp, ev);   # key-DOWN -> focused client
+                        if (ae_inp_fwd == 0) {
+                            if (fk > 0) {
+                                ae_inp_fwd = 1;
+                                println("aethersafha: forwarded a key to the focused client");
+                            }
+                        }
+                    }
                     i = i + 1;
                 }
             }

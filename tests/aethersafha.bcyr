@@ -32,6 +32,22 @@ fn bench_clear(fb): i64 {
     return 0;
 }
 
+# ⭐⭐ `AE-0a`: the SAME clear, limited to the damage band — what render_desktop does now.
+#
+# ⛔ THE BAND IS DERIVED FROM THE WINDOWS THIS BENCH ACTUALLY DRAWS, not chosen to look good. The two
+# windows below sit at y=40 and y=100 with height `h`, so the union of their rows is `[40, 100+h)` —
+# which is exactly what `rend_band_compute` folds out of `union(cur, prev)` for a two-window desktop
+# whose live client re-damages its own content every frame. Passing a hand-picked thin band would
+# measure a number the compositor never produces.
+fn bench_clear_band(fb, h): i64 {
+    var y0 = 40;
+    var y1 = 100 + h;
+    var fh = bhumi_fb_height(fb);
+    if (y1 > fh) { y1 = fh; }
+    rend_clear_band(fb, y0, y1 - y0, 0x00101018);
+    return 0;
+}
+
 # The chrome a two-window desktop paints every frame. Mirrors render_window's fill_rect calls
 # (src/render.cyr:181-197) without pulling in the compositor object graph.
 fn bench_chrome(fb, w, h): i64 {
@@ -77,6 +93,13 @@ fn bench_geometry(label, fw, fh, ww, wh): i64 {
     while (i < 20) { bench_clear(fb); i = i + 1; }
     bench_batch_stop(bc, 20);
     bench_report(bc);
+
+    var bb = bench_new("clear (AE-0a damage band)");
+    bench_batch_start(bb);
+    i = 0;
+    while (i < 20) { bench_clear_band(fb, wh); i = i + 1; }
+    bench_batch_stop(bb, 20);
+    bench_report(bb);
 
     var bh = bench_new("chrome, 2 windows");
     bench_batch_start(bh);

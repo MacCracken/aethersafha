@@ -4,6 +4,120 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased] — `AE-0a`: the damage band drives the frame, and TAB cycles focus (it never did)
+
+### Added — `AE-0a` damage tracking: the clear and the `#39` chrome blit are band-limited
+
+⭐⭐ **The damage model has been computed every frame since 0.11.0 and drove NOTHING.** It now drives the
+two things that cost the most: the full-screen clear, measured at **3.83 ms of a 6.40 ms GPU frame (60%)**,
+and the deferred `#39` chrome blit.
+
+⛔ **The band is `union(cur, prev)`, and that is forced by the kernel, not chosen.** `#84 present` flips the
+render target on every present (`agnos/kernel/core/gpu.cyr`), and `#39` writes whichever buffer that same
+predicate selects — so a band-limited blit updates buffer A this frame and B the next, leaving A's rows
+outside this frame's band holding what was there **two frames ago**. Writing the union of this frame's and
+last frame's damage covers exactly the set the target buffer can be missing. ⚠ Getting it wrong shows as a
+trailing ghost at a two-frame lag in the rows a window vacated, which reads as *"the framebuffer is
+stale"* rather than *"the damage model is wrong"* — the misreading that stalled this bite twice.
+
+⭐ **The first two frames come out full-screen for free**: frame 1 is primed full, so frame 2's union still
+contains it — which is precisely what is needed to initialise *both* buffers.
+
+⛔ **Full-width rows only.** `#39` takes its source tightly packed at `w*4` bytes per row with **no stride
+parameter**, so an arbitrary damage rect's rows are not contiguous and cannot be handed to it at all. A
+full-width band is contiguous, so the band carries rows `[y, y+h)` and the x extent is discarded. True rect
+damage needs a stride on `#39` — a kernel ABI change, not this bite. The packing is **asserted, not
+assumed**: a padded pitch falls back to the full frame, because a skewed image is far worse than a slow one.
+
+**New `rend_clear_band` walks the band as ONE flat run.** Going through `fill_rect` cost **1.347 ns/px**
+against `bhumi_fb_clear`'s **1.093 ns/px** for byte-identical stores — 23% of pure per-row overhead
+(recomputing a base, a span and a bound 780 times) for rows that are already contiguous. Same finding as
+the 0.12.1 per-pixel fix, one level up.
+
+Two invariants are held by construction rather than by convention: **the roll happens inside
+`rend_frame_damage`**, so no caller can forget to make this frame's damage next frame's `prev`; and **the
+band is read through `rend_band_valid/y/h()` functions, never as a variable** — a cyrius *function*
+forward-reference resolves and a *variable* one does not, so reading `ae_band_valid` from desktop.cyr
+compiled fine under `cyrius build src/main.cyr` and broke `tests/desktop.tcyr`, which compiles that module
+in a unit render.cyr never enters. That is the trap already recorded for `ae_frame_dmg`, sprung by a new
+consumer.
+
+⚠ **A background change refuses the band entirely** and forces a full clear: a theme switch damages every
+pixel without moving a single window, and a band-limited clear would leave the old colour everywhere
+outside it.
+
+#### Measured — `tests/aethersafha.bcyr`, host, two-window desktop
+
+| at 2560x1440 | before | after | |
+|---|---|---|---|
+| clear | 3.937 ms (whole screen) | **2.460 ms** (band) | **1.60x** |
+
+⚠ **The win is bounded by geometry and this must not be overstated.** Two 1280x720 windows cover **780 of
+1440 rows**, so 46% of the clear is the most any band can remove at that layout; the band pays off more as
+windows get smaller or more static, and pays nothing when one window spans the screen. In frame terms the
+clear drops from **60% to ~48%** of the GPU frame.
+
+**Correctness: 80/80 in `tests/render.tcyr`** (was 56) — union folds in both orders, screen clamping at
+both edges, the theme-switch refusal and its one-frame scope, the missing-tracker full-screen fallback, the
+idle case (a valid band of height **0**, which is a result and not a failure), the roll, and a **pixel-level
+ghost test** that moves a window and asserts the vacated region reads background.
+
+⛔ **Both mutation-tested, and the first version of the ghost test was VACUOUS.** It moved the window on
+frame 2 and passed against a mutant that dropped the old rect from the fold entirely — because frame 1
+primes damage full, so frame 2's band is full no matter what the fold does. It now settles for two frames
+first, and asserts the idle band is empty on the way. Mutant A (old rect dropped) fails the ghost assert
+and the OLD-top assert; mutant B (prev dropped from the union) fails four union asserts.
+
+**On agnos at `AE_CLIENTS_MODE=desktop`, the framebuffer is pixel-count IDENTICAL to the pre-change run** —
+dim-green 900514, red bar 972, non-black 3975362, glyphs 4991 → 5176 → 6032. The same picture, fewer stores.
+
+⚠ **What is still unexercised: the banded `#39` blit itself.** QEMU has no AMD PCI device, so
+`ae_gpu_frame_plan` refuses every frame and the CPU present path runs full-frame — the banded *clear* is
+proven there, the banded *blit* is not, on any substrate. ⛔ And the `--selftest` cannot prove it either:
+its two frames are both inside the priming window, so both blit full-frame by design. **It needs ≥3 frames
+with a settled window, i.e. the desktop run on iron.**
+
+### Changed — TAB cycles focus (it never did)
+
+⛔ **THERE WAS NO TAB HANDLER, WHILE THE FRAME LOOP CLAIMED THERE WAS.** A comment on the
+focus-change detector read *"a TAB in the input loop above"* — and no such code existed. The
+consequence is not cosmetic: `comp_focus` was only ever called when a client was ADDED, so focus
+settled on whichever client came last and **could never move again**. Every forwarded key went to that
+one window for the life of the session, and a second client could not be typed into at all.
+
+⭐ **Found by a client that was working.** puka's terminal received **zero** key events on a run where
+the compositor was forwarding correctly — to crab, the other window. "Nothing arrives" and "everything
+arrives somewhere else" look identical from inside the client.
+
+TAB (HID usage `0x2B`) on key-down now advances focus and is **consumed, not forwarded** — a focus key
+that also reached the client would type a literal tab into the window you just switched away from.
+
+⚠ No-op with fewer than two windows, so a single-client desktop behaves exactly as before.
+
+### Added — a PERMANENT input ladder, because this path has gone dark twice
+
+⛔ **The input path had no instrumentation at all, and that cost two runs of pure confusion.** With TAB
+fixed, a run still delivered zero keystrokes to the client and there was no way to tell whether the poll
+returned nothing, the seat was denied, TAB never arrived, focus refused to move, or the forward failed —
+every one of those looks identical from outside, and the first four leave no trace whatsoever.
+
+Five first-occurrence latches now print once each, so **the last rung printed names the layer that
+failed**: `input poll answered SEAT_DENIED` · `input poll delivered its first event` · `first key-down
+seen` · `a TAB reached the compositor` · `TAB ignored -- fewer than two windows` · `forwarded a key to the
+focused client`. Distinct strings, never a bare integer — three procs share this console unserialised and a
+number lands mid-line inside another proc's output.
+
+⭐ This immediately paid for itself. The full ladder printing in order, followed by puka's own markers,
+is what turned *"keystrokes vanish somewhere"* into a measured statement: the keys that arrive are handled
+correctly at every stage, and the ones that go missing are **never sampled** — a USB HID keyboard reports
+state on poll and agnos drains the xHCI ring only inside `kbscan #42`'s bounded `sti` window, which the
+compositor calls once per frame. ⚠ **A key pressed and released inside one frame does not exist.** Measured
+on the QEMU CPU path: 0/9, 4/9, 4/9 keys delivered at a ~100 ms hold; 9/9 at 500 ms. The real fix is a
+faster frame (`AE-0a`) or IRQ-buffered HID reports; nothing here works around it.
+
+`setu_srv_forward_key`'s return value is now read rather than discarded, which is what makes the last rung
+truthful (it returns 0 when the focused window has no client fd).
+
 ## [0.12.2] - 2026-08-07 — the compositor stops listening (ipc bite 7)
 
 ### Changed — clients are PLACED, not accepted

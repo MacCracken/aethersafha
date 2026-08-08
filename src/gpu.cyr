@@ -329,27 +329,46 @@ fn ae_gpu_present_frame(comp, fb): i64 {
     # plan is stale: present on the CPU this frame and re-plan next.
     if (vec_len(comp_windows(comp)) != ae_gpu_plan_n) { return 0; }
 
-    # 1. Chrome layer -> back buffer, DEFERRED.
+    # 1. Chrome layer -> back buffer, DEFERRED — ⭐⭐ NOW DAMAGE-LIMITED (`AE-0a`).
     #
-    # ⛔ FULL FRAME, DELIBERATELY, AND THE DAMAGE BAND MUST NOT BE SWITCHED ON HERE.
-    # The damage tracker IS now computed every frame (render_desktop), and wiring it into this
-    # blit is a one-line change that looks obviously correct. It is not, and the reason is in the
-    # kernel, not here: `#84 present` FLIPS THE RENDER TARGET on every present (agnos
-    # kernel/core/gpu.cyr — `if (gpu_bb_back == 0) { gpu_bb_back = 1; } else { gpu_bb_back = 0; }`),
-    # and `#39` renders into whichever buffer that same predicate selects. So a band-limited blit
-    # updates buffer A this frame and buffer B the next, and the rows OUTSIDE this frame's band in
-    # A still hold what was there TWO frames ago. This file unions only the current frame's rects
-    # and accumulates nothing across the flip.
-    # ⚠ The symptom is a trailing ghost at a two-frame lag in exactly the rows a window vacated —
-    # which reads as "the framebuffer is stale", not as "the damage model is wrong", and on a
-    # single dev box that misreading costs burns. Enabling the band requires carrying the PREVIOUS
-    # frame's damage and blitting `union(cur, prev)`. That is its own bite.
+    # ⛔ THE BAND IS `union(cur, prev)`, AND THAT IS FORCED BY THE FLIP, NOT A CHOICE.
+    # `#84 present` FLIPS THE RENDER TARGET on every present (agnos kernel/core/gpu.cyr —
+    # `if (gpu_bb_back == 0) { gpu_bb_back = 1; } else { gpu_bb_back = 0; }`), and `#39` renders into
+    # whichever buffer that same predicate selects. So a band-limited blit updates buffer A this frame
+    # and buffer B the next: A's rows outside this frame's band hold what was there TWO frames ago.
+    # Writing `union(cur, prev)` covers everything that changed in either of the last two frames, which
+    # is exactly the set A can be missing. `rend_band_compute` (render.cyr) owns that fold; the reason
+    # it must not be re-derived here is the same reason the frame plan is computed once and read twice.
+    # ⚠ Getting it wrong shows as a trailing ghost at a two-frame lag in the rows a window vacated —
+    # which reads as "the framebuffer is stale", not "the damage model is wrong". That misreading is why
+    # this sat unshipped through two cuts.
     #
-    # ⛔ FULL-WIDTH BANDS ONLY WHEN IT DOES LAND. `#39 blit` takes its source tightly packed,
-    # w*4 bytes per row, with no stride parameter — an arbitrary damage RECT's rows are not
-    # contiguous in the framebuffer and cannot be handed to it. True rect damage needs a stride on
-    # `#39`, which is a kernel ABI change.
-    if (sys_blit(px, fw, fh, AE_BLIT_DEFER) != 0) { ae_gpu_demote(); return 0; }
+    # ⛔ FULL-WIDTH ROWS ONLY, AND THE PACKING IS ASSERTED RATHER THAN ASSUMED. `#39` takes its source
+    # tightly packed at w*4 bytes per row with **no stride parameter**, so the band's source pointer is
+    # only valid if the userland fb has `pitch == fw * 4` and `bpp == 4`. bhumi guarantees it today
+    # (`bhumi_fb_clear` walks `size` in 4s on exactly that basis) — but a future backend with a padded
+    # pitch would silently blit skewed rows, so this checks and falls back to the full frame instead.
+    # A skewed image is a much worse failure than a slower one.
+    var band_y = 0;
+    var band_h = fh;
+    if (rend_band_valid() == 1) {
+        if (bhumi_fb_bpp(fb) == 4) {
+            if (bhumi_fb_pitch(fb) == fw * 4) {
+                band_y = rend_band_y();
+                band_h = rend_band_h();
+            }
+        }
+    }
+    # ⚠ A ZERO-HEIGHT BAND IS A RESULT, NOT AN ERROR: nothing changed in two frames, so the buffer about
+    # to be flipped to already holds the right pixels and there is nothing to copy. Skip the blit and
+    # still present — the flip is what puts the finished frame on screen.
+    if (band_h > 0) {
+        var bsrc = px + band_y * fw * 4;
+        # a4 carries BOTH the destination origin — (dst_y<<16)|dst_x, per `#39`'s ABI — and the
+        # DEFER_PRESENT flag at bit 40, so the accumulate-then-flip-once shape is unchanged.
+        var bxy = (band_y << 16) | 0;
+        if (sys_blit(bsrc, fw, band_h, bxy | AE_BLIT_DEFER) != 0) { ae_gpu_demote(); return 0; }
+    }
 
     # 2. Each client surface -> back buffer, in the SAME bottom-to-top order render_frame paints, so
     #    overlapping windows stack identically to the CPU path.

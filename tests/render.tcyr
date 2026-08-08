@@ -6,7 +6,20 @@ include "lib/bhumi.cyr"
 include "src/geom.cyr"
 include "src/window.cyr"
 include "src/compositor.cyr"
+include "src/theme.cyr"        # ae_bhumi — render_window packs its colours through it
 include "src/render.cyr"
+
+# One frame for the ghost test, in render_desktop's exact order: damage, banded clear, draw, stamp.
+fn ghost_frame(comp, fb, win, bg): i64 {
+    rend_frame_damage(comp, fb, bg);
+    if (rend_band_valid() == 1) {
+        if (rend_band_h() > 0) { rend_clear_band(fb, rend_band_y(), rend_band_h(), bg); }
+    }
+    if (rend_band_valid() == 0) { bhumi_fb_clear(fb, bg); }
+    render_window(fb, win, 1);
+    win_stamp_prev(win);
+    return 0;
+}
 
 fn main() {
     alloc_init();
@@ -31,6 +44,138 @@ fn main() {
     assert_eq(rend_dmg_h(d), 25, "damage bottom edge held");
     rend_dmg_clear(d);
     assert_eq(rend_dmg_valid(d), 0, "clear resets validity");
+
+    # ⭐⭐ AE-0a — THE DAMAGE BAND. Drives the clear AND the `#39` chrome blit, so a wrong band is
+    # either a stale desktop or a 60%-of-frame cost that never went away. `rend_band_compute` reads the
+    # two module trackers, so these set them directly.
+    test_group("render — AE-0a damage band: union(cur, prev)");
+    ae_frame_dmg = rend_dmg_new();
+    ae_prev_dmg = rend_dmg_new();
+    ae_last_bg = 0x121218;                       # pretend a frame already cleared to this
+
+    # A band with neither tracker valid: nothing changed in two frames. VALID with height 0 — a real
+    # result, not a failure. ⛔ Conflating it with "no band" would clear the whole screen every idle frame.
+    rend_dmg_clear(ae_frame_dmg);
+    rend_dmg_clear(ae_prev_dmg);
+    rend_band_compute(1440, 0x121218);
+    assert_eq(rend_band_valid(), 1, "idle: a band IS computed");
+    assert_eq(rend_band_h(), 0, "idle: height 0 — both buffers already correct, nothing to write");
+
+    # cur alone.
+    rend_dmg_add(ae_frame_dmg, 0, 100, 800, 200);            # rows 100..300
+    rend_band_compute(1440, 0x121218);
+    assert_eq(rend_band_valid(), 1, "cur only: valid");
+    assert_eq(rend_band_y(), 100, "cur only: band starts at cur's top");
+    assert_eq(rend_band_h(), 200, "cur only: band is cur's height");
+
+    # ⭐ THE NEGATIVE CONTROL FOR THE WHOLE BITE. prev is DISJOINT from cur and BELOW it. `#84 present`
+    # flips the render target, so the buffer being written this frame is missing prev's rows too — a
+    # band of cur alone would leave them holding two-frames-ago pixels, which is the trailing ghost this
+    # union exists to prevent. If someone "simplifies" the fold to cur, THIS assert fails and says why.
+    rend_dmg_add(ae_prev_dmg, 0, 900, 800, 100);             # rows 900..1000
+    rend_band_compute(1440, 0x121218);
+    assert_eq(rend_band_y(), 100, "union: top comes from cur");
+    assert_eq(rend_band_h(), 900, "union: bottom comes from PREV (1000-100) — not cur's 200");
+
+    # Order does not matter: prev above cur folds the same way.
+    rend_dmg_clear(ae_frame_dmg);
+    rend_dmg_clear(ae_prev_dmg);
+    rend_dmg_add(ae_frame_dmg, 0, 500, 800, 100);            # cur rows 500..600
+    rend_dmg_add(ae_prev_dmg, 0, 50, 800, 100);              # prev rows  50..150
+    rend_band_compute(1440, 0x121218);
+    assert_eq(rend_band_y(), 50, "union: top comes from prev when prev is higher");
+    assert_eq(rend_band_h(), 550, "union: bottom from cur (600-50)");
+
+    # Clamped to the screen, both edges. An off-screen window rect must not produce a source pointer
+    # or a destination row outside the framebuffer — `#39` clips, but the band's own src offset does not.
+    rend_dmg_clear(ae_frame_dmg);
+    rend_dmg_clear(ae_prev_dmg);
+    rend_dmg_add(ae_frame_dmg, 0, 0 - 200, 800, 300);        # rows -200..100
+    rend_dmg_add(ae_prev_dmg, 0, 1400, 800, 500);            # rows 1400..1900
+    rend_band_compute(1440, 0x121218);
+    assert_eq(rend_band_y(), 0, "clamped: negative top pinned to 0");
+    assert_eq(rend_band_h(), 1440, "clamped: bottom pinned to the screen height");
+
+    # ⛔ A BACKGROUND CHANGE DAMAGES EVERY PIXEL WITHOUT MOVING A WINDOW. The band must refuse, so the
+    # caller does a full clear — otherwise the old colour survives everywhere outside the band and reads
+    # as a stale desktop that no window rect can explain.
+    rend_dmg_clear(ae_frame_dmg);
+    rend_dmg_clear(ae_prev_dmg);
+    rend_dmg_add(ae_frame_dmg, 0, 100, 800, 50);
+    rend_band_compute(1440, 0x334455);
+    assert_eq(rend_band_valid(), 0, "theme switch: NO band — the whole screen must be cleared");
+    # ...and only for that one frame: the new colour is recorded, so the next frame bands again.
+    rend_band_compute(1440, 0x334455);
+    assert_eq(rend_band_valid(), 1, "the frame AFTER a theme switch bands normally again");
+
+    # ⛔ A MISSING TRACKER MEANS FULL SCREEN, NOT AN EMPTY BAND. Every unit suite runs with these unset,
+    # and an empty band there would silently stop clearing anything at all.
+    var save_cur = ae_frame_dmg;
+    ae_frame_dmg = 0;
+    rend_band_compute(1440, 0x334455);
+    assert_eq(rend_band_valid(), 0, "no tracker: no band, so the caller clears everything");
+    ae_frame_dmg = save_cur;
+
+    # The roll: rend_dmg_copy is what makes THIS frame's cur become next frame's prev.
+    rend_dmg_clear(ae_prev_dmg);
+    rend_dmg_clear(ae_frame_dmg);
+    rend_dmg_add(ae_frame_dmg, 0, 700, 800, 40);
+    rend_dmg_copy(ae_prev_dmg, ae_frame_dmg);
+    assert_eq(rend_dmg_valid(ae_prev_dmg), 1, "roll: prev takes cur's validity");
+    assert_eq(rend_dmg_y(ae_prev_dmg), 700, "roll: prev takes cur's top");
+    assert_eq(rend_dmg_h(ae_prev_dmg), 40, "roll: prev takes cur's height");
+
+    # ⭐⭐ THE FAILURE MODE THE BAND CAN INTRODUCE, ASSERTED ON PIXELS: a window that MOVES must not
+    # leave its old self behind. Nothing else tests this — the QEMU desktop's windows are static and its
+    # present is full-frame (no GPU there), so a wrong band looks perfect on every substrate short of
+    # iron, where the symptom reads as "the framebuffer is stale" rather than "the damage model is wrong".
+    #
+    # ⛔⛔ THE MOVE MUST HAPPEN ON FRAME 4, NOT FRAME 2, AND THIS COST A VACUOUS TEST.
+    # The first version moved the window on frame 2 and PASSED against a mutant that dropped the old rect
+    # from the fold entirely. Reason: frame 1 primes damage to the FULL SCREEN, so frame 2's band is
+    # `union(cur, prev=full)` = full — it covers the vacated rows no matter what the fold does. Two
+    # settling frames are needed to drain `prev` back to empty before a move can prove anything.
+    # ⚠ Mutation-tested in both directions now: dropping the old rect FAILS the ghost assert, and
+    # dropping prev from the union FAILS the union asserts above.
+    #
+    # ⚠ MIRRORS `render_desktop`'s ORDER (src/desktop.cyr) — damage, banded clear, draw, stamp — via
+    # `ghost_frame` below, calling the real `rend_frame_damage` / `rend_clear_band` / `render_window`.
+    test_group("render — AE-0a: a moved window leaves NO ghost");
+    # ⚠ 400 TALL SO THE MOVED WINDOW FITS. At 300 the window at y=200 (+100 body +30 titlebar = 330)
+    # runs off the bottom, the band clamps to 300, and the "reaches its new bottom" assert fails on the
+    # TEST's geometry rather than on the code — which is how it failed first time round.
+    var gfb = bhumi_fb_new(400, 400);
+    var gcomp = comp_new();
+    var gwin = comp_create_window(gcomp, 40, 40, 120, 100, "G");
+    var GBG = 0x00101018;
+    ae_dmg_primed = 0;                        # frame 1 must prime full, as it does at startup
+    ae_last_bg = 0 - 1;
+    rend_dmg_clear(ae_frame_dmg);
+    rend_dmg_clear(ae_prev_dmg);
+
+    ghost_frame(gcomp, gfb, gwin, GBG);       # frame 1 — primed full
+    assert(bhumi_fb_get(gfb, 80, 100) != GBG, "frame 1: the window is actually on screen");
+    ghost_frame(gcomp, gfb, gwin, GBG);       # frame 2 — band still full (prev = frame 1)
+    ghost_frame(gcomp, gfb, gwin, GBG);       # frame 3 — settled: nothing changed in two frames
+    assert_eq(rend_band_h(), 0, "settled: an idle desktop writes NOTHING — the band is empty");
+
+    # ---- frame 4: move it far down. Its old rows must come back to the background. ----
+    win_move(gwin, 40, 200);
+    rend_frame_damage(gcomp, gfb, GBG);
+    assert_eq(rend_band_valid(), 1, "after the move: a band was computed");
+    assert(rend_band_y() <= 40, "after the move: the band reaches the window's OLD top");
+    assert(rend_band_y() + rend_band_h() >= 200 + 100 + 30,
+           "after the move: ...and its NEW bottom + titlebar");
+    if (rend_band_valid() == 1) {
+        if (rend_band_h() > 0) { rend_clear_band(gfb, rend_band_y(), rend_band_h(), GBG); }
+    }
+    if (rend_band_valid() == 0) { bhumi_fb_clear(gfb, GBG); }
+    render_window(gfb, gwin, 1);
+    win_stamp_prev(gwin);
+    # ⛔ THE GHOST ASSERT. (80,100) was inside the window on frames 1-3 and is outside it now, so it must
+    # read the background. If the band ever narrows to the new rect alone, this pixel still holds chrome.
+    assert_eq(bhumi_fb_get(gfb, 80, 100), GBG, "after the move: the VACATED region is background, not a ghost");
+    assert(bhumi_fb_get(gfb, 80, 260) != GBG, "after the move: and the window is drawn at its new position");
 
     test_group("render — decoration hit-test");
     var win = win_new(1, 100, 100, 400, 300, "T");
