@@ -18,22 +18,99 @@ fn main() {
     assert_eq(input_map(bhumi_key_event(0, 0x3D)), InputAction.IA_NONE, "key release → none");
     assert_eq(input_map(bhumi_key_event(1, 0x04)), InputAction.IA_NONE, "unmapped key → none");
 
+    # ⭐⭐ THE WINDOW MOVER'S MAPPING. This group exists because the first mover was written as an
+    # inline block in main.cyr's frame loop, where nothing could reach it — it was nested inside the
+    # TAB branch, so its `usage >= 0x3A` guard sat inside `usage == 0x2B` and was unsatisfiable. It
+    # compiled, it shipped, it flew to hardware, and the only symptom was one missing log line.
+    # ⇒ The mapping lives in `input_map` now specifically so these seven lines can fail.
+    test_group("input — F7-F10 map to the window mover");
+    assert_eq(input_map(bhumi_key_event(1, 0x40)), InputAction.IA_MOVE_LEFT,  "F7 → move left");
+    assert_eq(input_map(bhumi_key_event(1, 0x41)), InputAction.IA_MOVE_RIGHT, "F8 → move right");
+    assert_eq(input_map(bhumi_key_event(1, 0x42)), InputAction.IA_MOVE_UP,    "F9 → move up");
+    assert_eq(input_map(bhumi_key_event(1, 0x43)), InputAction.IA_MOVE_DOWN,  "F10 → move down");
+    assert_eq(input_map(bhumi_key_event(0, 0x40)), InputAction.IA_NONE, "F7 RELEASE moves nothing");
+    # ⛔ THE COLLISION GUARD. F4 was bound to the mover once and it is ALSO IA_CLOSE_FOCUSED, so
+    # "move the focused window down" and "destroy the focused window" were the same keystroke. If a
+    # future edit re-binds F4-F6 to directions, this line is what says no.
+    assert_eq(input_map(bhumi_key_event(1, 0x3D)), InputAction.IA_CLOSE_FOCUSED, "F4 is STILL close, not a move");
+    assert_eq(input_map(bhumi_key_event(1, 0x3E)), InputAction.IA_MAXIMIZE_FOCUSED, "F5 is STILL maximize, not a move");
+    assert_eq(input_action_is_move(InputAction.IA_MOVE_LEFT), 1, "is_move: left");
+    assert_eq(input_action_is_move(InputAction.IA_MOVE_DOWN), 1, "is_move: down");
+    assert_eq(input_action_is_move(InputAction.IA_NONE), 0, "is_move: none is not a move");
+    assert_eq(input_action_is_move(InputAction.IA_FOCUS_NEXT), 0, "is_move: focus is not a move");
+    assert_eq(input_action_is_move(InputAction.IA_MINIMIZE_FOCUSED), 0, "is_move: minimize is not a move");
+
     test_group("input — apply to compositor focus + window state");
     var c = comp_new();
     comp_create_window(c, 0, 0, 100, 100, "A");
     comp_create_window(c, 0, 0, 100, 100, "B");
     comp_create_window(c, 0, 0, 100, 100, "C");
     assert_eq(comp_focused(c), 2, "focus follows newest window");
-    input_apply(c, InputAction.IA_FOCUS_NEXT);
+    input_apply(c, InputAction.IA_FOCUS_NEXT, 800, 600);
     assert_eq(comp_focused(c), 0, "focus-next wraps to first");
-    input_apply(c, InputAction.IA_MAXIMIZE_FOCUSED);
+    input_apply(c, InputAction.IA_MAXIMIZE_FOCUSED, 800, 600);
     assert_eq(win_state(comp_focused_window(c)), WinState.WS_MAXIMIZED, "maximize focused");
-    input_apply(c, InputAction.IA_MAXIMIZE_FOCUSED);
+    input_apply(c, InputAction.IA_MAXIMIZE_FOCUSED, 800, 600);
     assert_eq(win_state(comp_focused_window(c)), WinState.WS_NORMAL, "maximize toggles back");
-    input_apply(c, InputAction.IA_MINIMIZE_FOCUSED);
+    input_apply(c, InputAction.IA_MINIMIZE_FOCUSED, 800, 600);
     assert_eq(win_state(comp_focused_window(c)), WinState.WS_MINIMIZED, "minimize focused");
-    input_apply(c, InputAction.IA_CLOSE_FOCUSED);
+    input_apply(c, InputAction.IA_CLOSE_FOCUSED, 800, 600);
     assert_eq(comp_count(c), 2, "close focused removes a window");
+
+    # ⭐ THE MOVE ITSELF — position arithmetic, and the clamp that keeps the GPU path reachable.
+    # ⚠ Bounds here are the USABLE extent (the caller reduces height by reserved chrome), so 800x600
+    # means a window may occupy x in [0, 800-w] and y in [0, 600-h].
+    test_group("input — the move slides the window and clamps it");
+    var m = comp_new();
+    comp_create_window(m, 200, 200, 100, 100, "M");
+    var mw = comp_focused_window(m);
+    assert_eq(input_apply(m, InputAction.IA_MOVE_LEFT, 800, 600), 1, "a real move reports 1");
+    assert_eq(win_x(mw), 160, "left moves by one AE_MOVE_STEP");
+    assert_eq(win_y(mw), 200, "left does not touch y");
+    input_apply(m, InputAction.IA_MOVE_UP, 800, 600);
+    assert_eq(win_y(mw), 160, "up moves by one step");
+    assert_eq(win_x(mw), 160, "up does not touch x");
+    input_apply(m, InputAction.IA_MOVE_RIGHT, 800, 600);
+    input_apply(m, InputAction.IA_MOVE_RIGHT, 800, 600);
+    assert_eq(win_x(mw), 240, "two rights are two steps");
+    input_apply(m, InputAction.IA_MOVE_DOWN, 800, 600);
+    assert_eq(win_y(mw), 200, "down moves by one step");
+
+    # ⛔ THE EDGE CLAMP IS THE POINT, NOT A NICETY. `#88`/`#87` REJECT an out-of-range rect instead of
+    # clipping it, so a window pushed past an edge does not look wrong — it drops the entire frame off
+    # the GPU. Each of these asserts the coordinate AND the "did not move" return value, because a
+    # clamp that silently keeps returning 1 would make the caller's marker lie.
+    win_move(mw, 20, 20);
+    assert_eq(input_apply(m, InputAction.IA_MOVE_LEFT, 800, 600), 1, "a partial step still moves");
+    assert_eq(win_x(mw), 0, "left clamps at the origin, not past it");
+    assert_eq(input_apply(m, InputAction.IA_MOVE_LEFT, 800, 600), 0, "already at the left edge: no move");
+    assert_eq(win_x(mw), 0, "and it stays at 0");
+    win_move(mw, 0, 20);
+    input_apply(m, InputAction.IA_MOVE_UP, 800, 600);
+    assert_eq(win_y(mw), 0, "up clamps at the origin");
+    win_move(mw, 690, 480);
+    input_apply(m, InputAction.IA_MOVE_RIGHT, 800, 600);
+    assert_eq(win_x(mw), 700, "right clamps so the window ends exactly at the bound");
+    assert_eq(input_apply(m, InputAction.IA_MOVE_RIGHT, 800, 600), 0, "at the right edge: no move");
+    input_apply(m, InputAction.IA_MOVE_DOWN, 800, 600);
+    assert_eq(win_y(mw), 500, "down clamps so the window ends exactly at the bound");
+    assert_eq(input_apply(m, InputAction.IA_MOVE_DOWN, 800, 600), 0, "at the bottom edge: no move");
+
+    # ⛔ THE OVERSIZED WINDOW, which is the case that produces a NEGATIVE coordinate if the clamp is
+    # written in the obvious order. A window wider than the bound makes the low clamp and the high
+    # clamp disagree, the high one wins, and x goes negative — exactly the out-of-range rect the GPU
+    # refuses. Deleting the re-clamp in `input_move` must fail here.
+    var big = comp_new();
+    comp_create_window(big, 0, 0, 900, 700, "BIG");
+    var bw = comp_focused_window(big);
+    input_apply(big, InputAction.IA_MOVE_RIGHT, 800, 600);
+    assert_eq(win_x(bw), 0, "a window wider than the screen pins at x=0, never negative");
+    input_apply(big, InputAction.IA_MOVE_DOWN, 800, 600);
+    assert_eq(win_y(bw), 0, "a window taller than the screen pins at y=0, never negative");
+
+    # An empty compositor: the move must be a no-op, not a null dereference.
+    var none = comp_new();
+    assert_eq(input_apply(none, InputAction.IA_MOVE_LEFT, 800, 600), 0, "no focused window: move is a no-op");
 
     return assert_summary();
 }

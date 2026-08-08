@@ -65,9 +65,18 @@ var ae_inp_down = 0;
 var ae_inp_tab = 0;
 var ae_inp_fwd = 0;
 var ae_inp_move = 0;
-# Pixels per F1-F4 press. Large enough that one tap visibly moves the window (so the operator can see the
-# damage model work) and small enough that a few taps do not slam it into an edge.
-var AE_MOVE_STEP = 40;
+# ⭐ How many key usages have been named in the log so far. NOT a latch like the rungs above — a
+# bounded COUNTER, because the question it answers ("which usages actually arrived?") needs the
+# identity of several keys, not the fact that one arrived. Bound and rationale at the print site.
+# ⚠ The 2026-08-08 burn is the reason this exists: it could not distinguish a key that was never
+# pressed from one that arrived and was dropped, so the burn was unrepeatable-into-an-answer.
+var ae_inp_traced = 0;
+# ⚠ `AE_MOVE_STEP` USED TO BE DECLARED HERE and is now in src/input.cyr, which owns the mover. It has
+# to be: this file's globals are declared AFTER its `include "src/input.cyr"` line, and Cyrius does
+# not resolve forward references to VARIABLES (only to functions). A step declared here was therefore
+# unreadable from input.cyr — and the only code that did read it was the mover that turned out to be
+# unreachable, so nothing ever failed to compile. [[feedback_cyrius_var_array_u64_units]] is the
+# sibling trap: in Cyrius, WHERE a declaration sits changes what it means.
 enum AeProbe {
     # ⛔ THE BUDGET IS WALL TIME, NOT FRAMES, and the first version got this wrong. What a spawned
     # client needs in order to load from ext2, start, and complete a loopback TCP connect is SECONDS
@@ -434,7 +443,14 @@ fn main(): i64 {
                     # separates them on the next boot instead of costing a burn to guess.
                     # ⚠ kbscan#42 is a RAW drain: the compositor sees every scancode buffered since
                     # boot, including everything typed at the agnsh prompt to launch it.
-                    if (input_handle(comp, ev) == InputAction.IA_QUIT) {
+                    # ⛔ CAPTURE THE ACTION. Throwing it away and only testing it for IA_QUIT is what
+                    # let TAB cycle focus twice and let F4/F5/F6 be applied here AND forwarded to the
+                    # client. `act` now drives both the quit test and the consume below.
+                    # ⚠ The usable height is `ae_geom_h - TITLEBAR_H`: a window's chrome sits ABOVE
+                    # its content rect, so the bottom clamp has to reserve it or the titlebar of a
+                    # window pushed to the floor lands off-screen and the GPU refuses the rect.
+                    var act = input_handle(comp, ev, ae_geom_w, ae_geom_h - TITLEBAR_H);
+                    if (act == InputAction.IA_QUIT) {
                         # ⛔ A PROBE RUN IGNORES THE QUIT KEY. --clients exists to answer a question
                         # deterministically, and the previous build let a single Esc at frame 191 end
                         # it 30 seconds early while still reporting the "nothing ever connected" code.
@@ -451,80 +467,64 @@ fn main(): i64 {
                             println_int(frame);
                         }
                     }
-                    # ⭐ TAB CYCLES FOCUS — and until now it did NOT, while a comment further down
-                    # ("a TAB in the input loop above") asserted that it did. A desktop whose focus
-                    # can never move is not one: every key went to whichever client was added LAST,
-                    # forever, and a second client could not be typed into at all. Caught when puka's
-                    # terminal received zero key events on a run where the compositor was forwarding
-                    # correctly — to the other window.
-                    # ⛔ TAB IS CONSUMED, NOT FORWARDED. A focus key that also reaches the client
-                    # would type a literal tab into the window you just switched away from.
+                    # ⭐ THE COMPOSITOR'S OWN KEYS ARE CLAIMED HERE, and `input_handle` above has
+                    # already APPLIED whichever one this is. This block only reports and consumes.
+                    #
+                    # ⛔ IT USED TO RE-DO THE WORK. A TAB was applied by `input_apply`
+                    # (`IA_FOCUS_NEXT` → `comp_focus`) and then this block called `comp_focus` AGAIN,
+                    # so one TAB press advanced focus by TWO. With three windows that reads as
+                    # cycling backwards, and the 2026-08-08 burn's four "focus cycled by TAB" lines
+                    # are four DOUBLE hops. Nothing logged it because both hops are legal.
+                    # ⛔ AND THE MOVER USED TO LIVE INSIDE THE `usage == 0x2B` BRANCH — a guard of
+                    # `usage >= 0x3A` nested inside `usage == 0x2B` is a contradiction, so the whole
+                    # F1-F4 mover was DEAD CODE that no input could reach. It shipped, it burned, and
+                    # the only symptom was one absent log line. ⇒ The mapping now lives in
+                    # `input_map` where a unit test can reach it; this loop can no longer hide it.
+                    # ⚠ CLAIMED KEYS ARE CONSUMED, NOT FORWARDED. A focus key that also reached the
+                    # client would type a literal tab into the window you just switched away from,
+                    # and a move key would scroll a file list while its window slid out from under it.
                     var kdone = 0;
                     if (bhumi_key_pressed(ev) == 1) {
-                        if (bhumi_key_usage(ev) == 0x2B) {          # HID usage 0x2B = Tab
-                            var n_win = comp_count(comp);
+                        if (act != InputAction.IA_NONE) { kdone = 1; }
+                        if (act == InputAction.IA_FOCUS_NEXT) {
                             if (ae_inp_tab == 0) {
                                 ae_inp_tab = 1;
                                 println("aethersafha: a TAB reached the compositor");
                             }
-                        # ⭐⭐ MOVE THE FOCUSED WINDOW WITH F1-F4, and this is the unlock for two things that
-                        # have been listed as untestable-without-a-pointer.
-                        #
-                        # ⛔ WHY F-KEYS AND NOT A MODIFIER COMBO. `bhumi_key_usage(ev)` is `ev & 0xFF` and
-                        # `bhumi_key_pressed(ev)` is one bit — **no modifier state reaches the compositor at
-                        # all**, which is the same gap that stops the terminal from seeing Shift. So a combo
-                        # is not detectable here, and a bare key it must be.
-                        # ⛔ WHY NOT ARROWS. crab navigates with Left/Right/Up/Down (and h/j/k/l), so
-                        # consuming arrows would break the file manager's whole interaction. puka maps F1-F12
-                        # to CSI sequences but nothing downstream acts on them, so F1-F4 cost no client
-                        # anything. HID usages: F1 0x3A, F2 0x3B, F3 0x3C, F4 0x3D.
-                        # ⭐ AND IT FINALLY EXERCISES `AE-0a`'s ONE UNTESTED CASE. The damage model's whole
-                        # reason for `union(cur, prev)` is a window that MOVES leaving its old pixels behind,
-                        # and this arc has recorded three times that nothing could move one without `AE-7`
-                        # pointer input. A keyboard mover is not a workaround for the pointer — it is the
-                        # missing stimulus for a model that was shipped on unexercised reasoning.
-                        # ⚠ CONSUMED, NOT FORWARDED, exactly like TAB: a move key that also reached the
-                        # client would scroll a file list while the window slid out from under it.
-                        if (bhumi_key_usage(ev) >= 0x3A) {
-                            if (bhumi_key_usage(ev) <= 0x3D) {
-                                var mw = comp_focused_window(comp);
-                                if (mw != 0) {
-                                    var mdx = 0;
-                                    var mdy = 0;
-                                    if (bhumi_key_usage(ev) == 0x3A) { mdx = 0 - AE_MOVE_STEP; }
-                                    if (bhumi_key_usage(ev) == 0x3B) { mdx = AE_MOVE_STEP; }
-                                    if (bhumi_key_usage(ev) == 0x3C) { mdy = 0 - AE_MOVE_STEP; }
-                                    if (bhumi_key_usage(ev) == 0x3D) { mdy = AE_MOVE_STEP; }
-                                    # ⛔ CLAMP INTO THE SCREEN. `#88`/`#87` REJECT an out-of-range rect
-                                    # rather than clipping, and `ae_gpu_window_admissible` refuses a window
-                                    # past an edge — which would drop the whole frame to the CPU. A mover
-                                    # that can push a window off-screen would therefore turn a keypress into
-                                    # a silent loss of hardware compositing.
-                                    var nx = win_x(mw) + mdx;
-                                    var ny = win_y(mw) + mdy;
-                                    if (nx < 0) { nx = 0; }
-                                    if (ny < 0) { ny = 0; }
-                                    if (nx + win_w(mw) > ae_geom_w) { nx = ae_geom_w - win_w(mw); }
-                                    if (ny + win_h(mw) + TITLEBAR_H > ae_geom_h) {
-                                        ny = ae_geom_h - win_h(mw) - TITLEBAR_H;
-                                    }
-                                    win_move(mw, nx, ny);
-                                    if (ae_inp_move == 0) {
-                                        ae_inp_move = 1;
-                                        println("aethersafha: F1-F4 moved the focused window");
-                                    }
-                                }
-                                kdone = 1;
+                            # ⚠ REPORT WHAT `input_apply` DID, do not re-decide it. `IA_FOCUS_NEXT`
+                            # is a no-op for a single window (it wraps 0 → 0), so the count is the
+                            # honest way to say whether focus could have moved at all.
+                            var n_win = comp_count(comp);
+                            if (n_win < 2) { println("aethersafha: TAB ignored -- fewer than two windows"); }
+                            if (n_win > 1) { println("aethersafha: focus cycled by TAB"); }
+                        }
+                        # ⭐⭐ THE WINDOW MOVER — F7/F8/F9/F10 slide the focused window left/right/up/down,
+                        # and this is the stimulus `AE-0a` was written for and has never once had. The
+                        # damage band unions the current rect with the PREVIOUS one precisely because a
+                        # window that moves leaves its old pixels behind otherwise, and five flashes
+                        # carried that reasoning with nothing on the system able to move a window.
+                        # ⛔ NOT F1-F4: F4 is `IA_CLOSE_FOCUSED` in input.cyr, so "move down" and
+                        # "destroy the window" would be one keystroke. See the note on `HidUsage`.
+                        if (input_action_is_move(act) == 1) {
+                            if (ae_inp_move == 0) {
+                                ae_inp_move = 1;
+                                println("aethersafha: F7-F10 moved the focused window");
                             }
                         }
-                            if (n_win < 2) { println("aethersafha: TAB ignored -- fewer than two windows"); }
-                            if (n_win > 1) {
-                                var nf = comp_focused(comp) + 1;
-                                if (nf >= n_win) { nf = 0; }
-                                comp_focus(comp, nf);
-                                println("aethersafha: focus cycled by TAB");
-                            }
-                            kdone = 1;
+                        # ⭐ NAME EVERY USAGE THE COMPOSITOR SEES, bounded. This is the instrument the
+                        # 2026-08-08 burn did not have: it printed every other line of that boot and
+                        # not the mover's, and from the log alone "the keys were never pressed" and
+                        # "they arrived and were dropped" were INDISTINGUISHABLE. A burn that cannot
+                        # say which usages arrived cannot be re-run into an answer.
+                        # ⚠ BOUNDED AT 12, and the bound is the whole reason this is safe to ship
+                        # always-on: that boot ran 457 frames and delivered keys to two clients, so an
+                        # unbounded per-key trace would bury the log it is meant to clarify. Twelve is
+                        # enough to cover a deliberate probe (a focus key plus a run of direction keys)
+                        # and small enough to be invisible during ordinary typing.
+                        if (ae_inp_traced < 12) {
+                            ae_inp_traced = ae_inp_traced + 1;
+                            println("aethersafha: key usage seen:");
+                            println_int(bhumi_key_usage(ev));
                         }
                     }
                     if (kdone == 0) {

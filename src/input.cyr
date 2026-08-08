@@ -13,16 +13,39 @@ enum InputAction {
     IA_CLOSE_FOCUSED    = 3;
     IA_MAXIMIZE_FOCUSED = 4;
     IA_MINIMIZE_FOCUSED = 5;
+    IA_MOVE_LEFT        = 6;
+    IA_MOVE_RIGHT       = 7;
+    IA_MOVE_UP          = 8;
+    IA_MOVE_DOWN        = 9;
 }
 
 # USB HID usage IDs (Keyboard/Keypad page 0x07) — see lib/bhumi.cyr
+#
+# ⛔ F1-F3 ARE FREE BUT F4 IS NOT, AND THAT COST A BURN. The 2026-08-08 flash carried a window mover
+# bound to F1-F4, and F4 was ALREADY `IA_CLOSE_FOCUSED` right here — so "move the focused window
+# down" and "destroy the focused window" were the same keystroke. Whichever ran, the other was a bug.
+# ⇒ The mover uses F7-F10, the contiguous block immediately below the three window-management keys
+# this enum already claims. `_bhumi_set1_to_hid` (lib/bhumi.cyr:699) decodes Set-1 0x3B-0x44 to HID
+# 0x3A-0x43 as one range, so F7-F10 arrive exactly as reliably as F1-F4 did — the choice costs
+# nothing at the seam. ⚠ Before binding another function key, read this enum first.
 enum HidUsage {
     HID_ESC = 0x29;
     HID_TAB = 0x2B;
     HID_F4  = 0x3D;   # close focused window
     HID_F5  = 0x3E;   # toggle maximize
     HID_F6  = 0x3F;   # minimize
+    HID_F7  = 0x40;   # move focused window left
+    HID_F8  = 0x41;   # move focused window right
+    HID_F9  = 0x42;   # move focused window up
+    HID_F10 = 0x43;   # move focused window down
 }
+
+# How far one move keystroke slides a window, in pixels.
+# ⚠ LIVES HERE, NOT IN main.cyr. Cyrius resolves forward references to FUNCTIONS but not to
+# VARIABLES, and main.cyr's globals are declared after its `include "src/input.cyr"` line — so a
+# module-global step defined in main.cyr is invisible to this file. It was, and the mover read it
+# only from code that turned out to be unreachable, which hid the ordering problem.
+var AE_MOVE_STEP = 40;
 
 # input_map(ev): pure key→action mapping for a pressed key (IA_NONE otherwise).
 fn input_map(ev): i64 {
@@ -33,12 +56,63 @@ fn input_map(ev): i64 {
     if (u == HidUsage.HID_F4)  { return InputAction.IA_CLOSE_FOCUSED; }
     if (u == HidUsage.HID_F5)  { return InputAction.IA_MAXIMIZE_FOCUSED; }
     if (u == HidUsage.HID_F6)  { return InputAction.IA_MINIMIZE_FOCUSED; }
+    if (u == HidUsage.HID_F7)  { return InputAction.IA_MOVE_LEFT; }
+    if (u == HidUsage.HID_F8)  { return InputAction.IA_MOVE_RIGHT; }
+    if (u == HidUsage.HID_F9)  { return InputAction.IA_MOVE_UP; }
+    if (u == HidUsage.HID_F10) { return InputAction.IA_MOVE_DOWN; }
     return InputAction.IA_NONE;
 }
 
-# input_apply(comp, action): apply a window-management action to the compositor.
-# Focus-next cycles the z-order; the rest act on the focused window.
-fn input_apply(comp, action): i64 {
+# input_action_is_move(action): does this action slide the focused window?
+# Exists so the main loop can recognise the group without repeating the four comparisons — and so
+# adding a fifth direction later cannot leave one call site behind.
+fn input_action_is_move(action): i64 {
+    if (action < InputAction.IA_MOVE_LEFT) { return 0; }
+    if (action > InputAction.IA_MOVE_DOWN) { return 0; }
+    return 1;
+}
+
+# input_move(win, dx, dy, bound_w, bound_h): slide `win` and clamp it inside the bounds.
+# Returns 1 if the window's position actually changed, 0 if the clamp held it where it was.
+#
+# ⛔ THE CLAMP IS NOT COSMETIC. `#88 gpu_fill_rect` and `#87 gpu_blit_shm` REJECT an out-of-range
+# rect rather than clipping it, and `ae_gpu_window_admissible` refuses a window that crosses an edge
+# — so a mover able to push a window off-screen would turn one keystroke into a silent loss of
+# hardware compositing for the whole frame. The clamp is what keeps the GPU path reachable.
+#
+# ⚠ BOUNDS ARE PASSED IN, NOT READ FROM A GLOBAL. The screen geometry lives in main.cyr
+# (`ae_geom_w` / `ae_geom_h`) which is included AFTER this file, and `TITLEBAR_H` lives in
+# render.cyr which the input unit test does not include. Taking both as parameters is what makes
+# this function testable at all — and an untestable mover is exactly how the first one shipped dead.
+# ⇒ The caller passes the *usable* height, i.e. already reduced by any reserved chrome.
+fn input_move(win, dx, dy, bound_w, bound_h): i64 {
+    var ox = win_x(win);
+    var oy = win_y(win);
+    var nx = ox + dx;
+    var ny = oy + dy;
+    if (nx < 0) { nx = 0; }
+    if (ny < 0) { ny = 0; }
+    if (nx + win_w(win) > bound_w) { nx = bound_w - win_w(win); }
+    if (ny + win_h(win) > bound_h) { ny = bound_h - win_h(win); }
+    # ⚠ RE-CLAMP LOW. A window WIDER or TALLER than the bound makes the two clamps above disagree,
+    # and the high clamp wins with a NEGATIVE coordinate — which is precisely the out-of-range rect
+    # the GPU refuses. Pin it at the origin instead; an oversized window shows its top-left corner,
+    # which is at least a picture.
+    if (nx < 0) { nx = 0; }
+    if (ny < 0) { ny = 0; }
+    win_move(win, nx, ny);
+    if (nx != ox) { return 1; }
+    if (ny != oy) { return 1; }
+    return 0;
+}
+
+# input_apply(comp, action, bound_w, bound_h): apply a window-management action to the compositor.
+# Focus-next cycles the z-order; the rest act on the focused window. Returns 1 when a move actually
+# changed a window's position, 0 otherwise.
+#
+# ⚠ `bound_w` / `bound_h` are the usable screen extent for a moved window (height already reduced by
+# reserved chrome). They are only consulted by the move actions; every other action ignores them.
+fn input_apply(comp, action, bound_w, bound_h): i64 {
     if (action == InputAction.IA_FOCUS_NEXT) {
         var n = comp_count(comp);
         if (n > 0) {
@@ -66,13 +140,23 @@ fn input_apply(comp, action): i64 {
         win_set_state(win, WinState.WS_MINIMIZED);
         return 0;
     }
+    if (action == InputAction.IA_MOVE_LEFT)  { return input_move(win, 0 - AE_MOVE_STEP, 0, bound_w, bound_h); }
+    if (action == InputAction.IA_MOVE_RIGHT) { return input_move(win, AE_MOVE_STEP, 0, bound_w, bound_h); }
+    if (action == InputAction.IA_MOVE_UP)    { return input_move(win, 0, 0 - AE_MOVE_STEP, bound_w, bound_h); }
+    if (action == InputAction.IA_MOVE_DOWN)  { return input_move(win, 0, AE_MOVE_STEP, bound_w, bound_h); }
     return 0;
 }
 
-# input_handle(comp, ev): map + apply one event; returns the action so the main
-# loop can observe IA_QUIT.
-fn input_handle(comp, ev): i64 {
+# input_handle(comp, ev, bound_w, bound_h): map + apply one event; returns the action so the main
+# loop can observe IA_QUIT — and, just as importantly, so it can tell that the key was CLAIMED.
+#
+# ⛔ EVERY NON-`IA_NONE` ACTION IS A CONSUMED KEY. Before 2026-08-08 the main loop threw this return
+# value away except for the quit test, so F4/F5/F6 were applied here AND then forwarded to the
+# focused client — one keypress closing a window and typing into it. Worse, TAB was applied here
+# (`IA_FOCUS_NEXT`) and then cycled focus a SECOND time in the loop's own TAB branch, so a single
+# TAB advanced focus by two. Both were invisible on iron because nothing logs a double action.
+fn input_handle(comp, ev, bound_w, bound_h): i64 {
     var action = input_map(ev);
-    input_apply(comp, action);
+    input_apply(comp, action, bound_w, bound_h);
     return action;
 }

@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — `#89` caps in full (and the batch recovery it obliges), a keyboard window MOVER, and `AE-9`
+## [Unreleased] — `#89` caps in full (and the batch recovery it obliges), a keyboard window MOVER that this time is REACHABLE, and `AE-9`
 
 ### Fixed — `#92`'s BATCHED failure mode demanded a recovery this compositor never performed
 
@@ -37,24 +37,82 @@ invisible gutter, which is the mistake this repo already made once with `#38 fbi
 for "will `#87`/`#88` ACCEPT this rect", because those check against the back buffer and reject rather than
 clip. Two questions, two numbers.
 
-### Added — F1-F4 move the focused window, which unblocks `AE-0a`'s one untested case
+### Added — F7-F10 move the focused window, which finally exercises `AE-0a`'s one untested case
 
 ⭐⭐ **The damage model's whole reason for `union(cur, prev)` is a window that MOVES leaving its old pixels
 behind — and this arc recorded three times that nothing could move one without `AE-7` pointer input.** So the
-band shipped, and burned, on reasoning that had never been exercised. F1-F4 nudge the focused window 40 px,
-consumed and not forwarded (a move key that also reached the client would scroll a file list while the window
-slid out from under it). That is not a workaround for the pointer; it is the **missing stimulus** for a model
-that was already in production.
+band shipped, and burned five times, on reasoning that had never been exercised. F7-F10 nudge the focused
+window 40 px. That is not a workaround for the pointer; it is the **missing stimulus** for a model that was
+already in production.
+
+⭐ **Proven end to end in QEMU on `qemu-xhci` + `usb-kbd` — the same USB HID producer archaemenid uses.**
+Eleven injected keys produced eleven usage traces in exactly the right order (`43, 64,64,64, 65,65, 66,66,
+67,67,67`), the window moved **40 px left and 40 px down** (the exact net of the sequence), and its old
+position came back **clean — no ghost**. ⚠ On the **CPU blit path**: QEMU has no amdgpu, so the GPU probe
+never ran. The GPU path's damage band remains unexercised by a moving window.
 
 ⛔ **F-keys because a modifier combo is not detectable here.** `bhumi_key_usage(ev)` is `ev & 0xFF` and
 `bhumi_key_pressed(ev)` is one bit — **no modifier state reaches the compositor at all**, the same gap that
 stops the terminal seeing Shift. ⛔ And not arrows: crab navigates with Left/Right/Up/Down and h/j/k/l, so
-consuming those would break the file manager. puka maps F1-F12 to CSI sequences but nothing downstream acts
-on them, so F1-F4 cost no client anything.
+consuming those would break the file manager.
+
+⛔ **F7-F10 AND NOT F1-F4, because F4 was ALREADY `IA_CLOSE_FOCUSED`.** The first cut of this mover bound
+F1-F4 and shipped to hardware that way, which made "move the focused window down" and "destroy the focused
+window" the same keystroke — with the close applied first, printing nothing. F7-F10 is the contiguous
+unclaimed block below the three window-management keys `HidUsage` already owned. `_bhumi_set1_to_hid`
+(lib/bhumi.cyr:699) decodes Set-1 `0x3B-0x44` → HID `0x3A-0x43` as one range, so the choice costs nothing at
+the seam. ⚠ `tests/input.tcyr` now asserts F4 is *still* close and F5 *still* maximize, so a future edit
+cannot re-open the collision quietly.
 
 ⛔ **The move CLAMPS into the screen**, and that is not cosmetic: `#88`/`#87` reject an out-of-range rect
 rather than clipping, and `ae_gpu_window_admissible` refuses a window past an edge — so a mover that could
-push a window off-screen would turn one keypress into a silent loss of hardware compositing.
+push a window off-screen would turn one keypress into a silent loss of hardware compositing. ⚠ The clamp
+**re-clamps low** afterwards: a window larger than the bound makes the low and high clamps disagree, the high
+one wins, and the coordinate goes NEGATIVE — precisely the rect the GPU refuses. A unit test covers it.
+
+### Fixed — ⛔ the first mover was DEAD CODE, and it flew to hardware that way
+
+⛔⛔ **The entire F1-F4 block was nested INSIDE the TAB branch.** `if (bhumi_key_usage(ev) == 0x2B) {` opened
+and did not close until after the mover, so the mover's own guard `if (bhumi_key_usage(ev) >= 0x3A)` asked
+whether 43 is at least 58 — two mutually exclusive predicates on the same pure expression, the inner one
+lexically inside the outer. **Unreachable for every possible input.** It compiled, it linked, `strings` found
+its console text in the flashed binary, and the only symptom on a real boot was one absent log line.
+
+⇒ **The mapping now lives in `input_map`/`input_apply`, where a unit test can reach it.** That is the actual
+fix; a re-indent alone would have left the next one just as invisible. An inline block inside a 250-line frame
+loop is unreachable *by construction* as far as testing goes, and `tests/input.tcyr` went **15 → 44 asserts**
+the moment the logic moved somewhere addressable. ⚠ Two mutants confirm the new asserts bite: deleting the
+re-clamp fails 2, zeroing the step fails 11.
+
+### Fixed — one TAB press advanced focus TWICE, and claimed keys leaked to clients
+
+⛔ **`input_handle` already APPLIED the action** (main.cyr:437 → `input_apply` → `comp_focus`), and the frame
+loop's TAB branch then called `comp_focus` again — so every TAB was a **double hop**. With three windows that
+reads as cycling backwards, and it was invisible on iron because both hops are legal. The 2026-08-08 burn's
+four `focus cycled by TAB` lines were four double hops.
+
+⛔ **And every key the compositor claimed was also forwarded.** The loop threw `input_handle`'s return value
+away except for the quit test, so F4/F5/F6 were applied *and* delivered to the focused client — one keypress
+closing a window and typing into it. `input_handle` now returns the action and **any non-`IA_NONE` action
+consumes the key**, which closes the double-hop and the leak in one place rather than per-key.
+
+### Changed — `input_apply` / `input_handle` take the usable screen bounds
+
+`input_apply(comp, action, bound_w, bound_h)` and `input_handle(comp, ev, bound_w, bound_h)`; the caller
+passes the height already reduced by reserved chrome. ⚠ **Bounds are parameters, not globals, and that is
+load-bearing:** the geometry lives in `main.cyr`, which is included *after* `input.cyr`, and Cyrius resolves
+forward references to functions but **not to variables** — so a global would have been invisible here. It also
+means the unit test can supply its own bounds without pulling in `render.cyr` for `TITLEBAR_H`. `AE_MOVE_STEP`
+moved into `input.cyr` for the same ordering reason.
+
+### Added — the compositor names every key usage it sees, bounded at 12
+
+⭐ **The instrument the 2026-08-08 burn did not have.** That boot printed every other line and not the
+mover's, and from the log alone "the keys were never pressed" and "they arrived and were dropped" were
+**indistinguishable** — a burn that cannot say which usages arrived cannot be re-run into an answer. Now the
+first twelve key-downs print their usage. ⚠ Bounded, and the bound is why it is safe always-on: that boot ran
+457 frames and delivered keys to two clients, so an unbounded trace would bury the log it exists to clarify.
+Twelve covers a deliberate probe (a focus key plus a run of directions) and stays invisible during typing.
 
 ### ⛔ `#91 gpu_blit_bb` has NO correct consumer here, and the ladder assumed otherwise
 
