@@ -153,9 +153,9 @@ agnos at `-smp 4` both launch paths reach 2/2 exit 95 while the `desktop`-mode f
 
 ### Build state — measured 2026-08-07
 
-Versions: **agnos 1.56.41** (open, empty) · **aethersafha 0.12.2** · **setu 0.8.4** (kernel floor
+Versions: **agnos 1.56.41** (open, empty) · **aethersafha 0.12.3** · **setu 0.8.4** (kernel floor
 agnos ≥ 1.56.40, **enforced by `CH_CAPS`, not documented** — a client built from it refuses on an older
-kernel rather than appearing to work) · **crab 0.4.5** · **bhumi 1.1.3** · **puka 0.6.9** · **mishran 0.5.4**.
+kernel rather than appearing to work) · **crab 0.4.5** · **bhumi 1.1.3** · **puka 0.6.10** · **mishran 0.5.4**.
 
 | Binary | `--agnos` | Size |
 |---|---|---|
@@ -186,7 +186,7 @@ on the substrate that can actually see it.
 | `AE-4` | Geometry from the kernel (`bhumi_output_query` / `#38 fbinfo`) | shipped, **iron-confirmed** 800×600 |
 | `AE-5` | Two concurrent real clients | ⭐ **IRON-PROVEN 2026-08-03 at 4 CPUs** (over TCP; **re-proven over the channel band in QEMU, then BURNED on the band 2026-08-07** — 278 frames, 2 clients placed, `cpus online: 4`; the iron re-burn is DONE and the band owes nothing) — `present_probe` + `crab` both composited as windows on archaemenid's panel, 278 frames, clean Esc quit. Also QEMU at `-smp 1/4/8/16` |
 | `AE-6` | Premultiplied blend (`#92` op 0x01) with a real consumer | unexercised on iron; crab is the natural first candidate (alpha-255 clean throughout) |
-| `AE-T` | ⭐ **A TERMINAL — puka hosts a live agnsh in a composited window** | ⭐ **DONE 2026-08-07 (QEMU).** puka 0.6.9 opens a setu window, mints a PTY on the `#97` band, spawns `/bin/agnsh` and renders it. Oracle: **4991 px of exact RGB (192,192,192)** (puka's `fb_def_fg`) on the panel — negative control **0** without puka. `agnos/scripts/harness/puka-terminal-test.py`. ⛔ QEMU only, never burned |
+| `AE-T` | ⭐ **A TERMINAL — puka hosts a live agnsh in a composited window** | ⭐ **DONE 2026-08-07 (QEMU).** puka 0.6.9 opens a setu window, mints a PTY on the `#97` band, spawns `/bin/agnsh` and renders it. Oracle: **4991 px of exact RGB (192,192,192)** (puka's `fb_def_fg`) on the panel — negative control **0** without puka. `agnos/scripts/harness/puka-terminal-test.py`. ⭐ **IRON-PROVEN 2026-08-07** — the panel showed agnsh's help in the window; the ONLCR fix that made its LAYOUT correct shipped in **0.6.10** |
 | `AE-T2` | Terminal INPUT — keystrokes reach the hosted shell | ⭐ **DONE 2026-08-07 (QEMU).** The hypothesis was right about the LAYER and wrong about the mechanism, and the answer was **one byte**: Enter encodes to **CR (13)** (`puka/src/input/evdev.cyr:74`, correctly — a terminal sends CR) and agnoshi's `read_line` terminates on **LF (10)** and nothing else (`agnsh.cyr:366`), so no line could ever complete. ⛔ Single-byte records were never the problem — `agnsh.cyr:363-375` accumulates across reads correctly. What was missing was CR→LF **and echo**, i.e. decomposition item **(iii)**, now `puka/src/line_discipline.cyr` (cooked: erase edits the line the child will get, so the screen cannot lie about what will run). Measured, repeatable and byte-identical across runs: **9 of 9 keys delivered**, echo **4991 → 5176** glyph px, **the shell answered 5176 → 6032**. 49/49 host asserts incl. a negative control that re-derives the CR bug from the production encoder. ⭐⭐ **IRON-PROVEN 2026-08-07** — `h-e-l-p-Enter` = 5 keys, none lost, then `line sent to the shell`, and agnsh's help rendered on the panel with a live prompt. ⚠ That burn also exposed the **missing ONLCR** (the output half): the child's bare LF moved down without returning the carriage, so the answer rendered as a staircase. Fixed and gated (correct = 6 text rows, staircase = 8), and the fix was **RE-FLASHED AND CONFIRMED ON IRON** — the kernel was byte-identical between the two flashes, so `/bin/puka` was the only variable. ⇒ the discipline is complete and hardware-validated in **both** directions: ICRNL + echo + erase + ONLCR |
 | `AE-7` | Pointer input | ⛔ **not possible today** — agnos xhci matches only HID boot **keyboard**, protocol 0x01 |
 | `AE-F` | Focus cycling (TAB) | ⭐ **FIXED 2026-08-07, UNRELEASED — and now PROVEN by `AE-T2`.** There was **no TAB handler at all**, while a comment in the frame loop asserted "a TAB in the input loop above" — so focus could never move and every key went to whichever client was added LAST, forever. A second client could not be typed into. Caught because puka's terminal received zero keys on a run where forwarding was working correctly — to the other window. The harness now types `tab` first and reaches the terminal, with `focus cycled by TAB` in the log; TAB is **consumed, not forwarded**, which is why the delivery count expects 9 and not 10 |
@@ -242,7 +242,8 @@ tense only so they are not re-derived:**
   it stayed true right up to the `#97` band, which is exactly what D2 predicted: **the PTY and the socket
   were the same missing primitive seen twice.** A PTY is (i) a bidirectional local channel, (ii) a way to
   hand one end to a child at spawn, (iii) a line discipline. The band shipped (i) and (ii); puka 0.6.9
-  mints a PTY on it, spawns `/bin/agnsh`, and renders it. ⚠ **(iii) is the open thread — see `AE-T2`.**
+  mints a PTY on it, spawns `/bin/agnsh`, and renders it. ⭐ **(iii) is COMPLETE at puka 0.6.10** — ICRNL +
+  echo + erase + ONLCR, all four hardware-validated. The decomposition held exactly as D2 predicted.
 
 **Still true, and it trips people:** `agnos/scripts/burn/stage-tools.sh:342` stages **setu's
 `present_probe`** under the name `puka` in the **shared** rootfs — the name is what the compositor spawns,

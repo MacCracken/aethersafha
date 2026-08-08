@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — `AE-0a`: the damage band drives the frame, and TAB cycles focus (it never did)
+## [0.12.3] - 2026-08-07 — `AE-0a`: the damage band drives the frame, and TAB cycles focus (it never did)
 
 ### Added — `AE-0a` damage tracking: the clear and the `#39` chrome blit are band-limited
 
