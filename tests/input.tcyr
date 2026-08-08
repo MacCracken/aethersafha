@@ -112,6 +112,54 @@ fn main() {
     var none = comp_new();
     assert_eq(input_apply(none, InputAction.IA_MOVE_LEFT, 800, 600), 0, "no focused window: move is a no-op");
 
+    # ⭐ THE KEY-ARRIVAL INSTRUMENT. Tested here because its first version lived inline in main.cyr's
+    # frame loop where nothing could call it — the same structural mistake that let the window mover
+    # ship as dead code. ⚠ `ae_inp_seen` is GLOBAL state, so every assert below uses a usage no other
+    # assert touches; do not "tidy" them onto shared values.
+    test_group("input — the key-usage trace names each DISTINCT usage once");
+    assert_eq(ae_usage_first_sight(0x40), 1, "F7 is named the first time");
+    assert_eq(ae_usage_first_sight(0x40), 0, "and NEVER again — a repeat costs no budget");
+    assert_eq(ae_usage_first_sight(0x40), 0, "still nothing on the third press");
+    assert_eq(ae_usage_first_sight(0x41), 1, "a DIFFERENT usage is still named");
+    # ⛔ THE WORD BOUNDARY. 256 bits live in 4 u64 slots, so bit 63 of one word and bit 0 of the next
+    # are adjacent usages in DIFFERENT words. A shift written `1 << u` instead of `1 << (u & 63)`
+    # aliases them, and a slot index used as a byte offset reads the wrong word entirely.
+    # ⚠ THE PAIR IS 191/192, NOT 63/64, and the first draft of this test got that wrong in a way worth
+    # recording: `0x40` IS 64, so the F7 assert above had already marked the very bit the boundary case
+    # then asserted was untouched — and the failure read as a bug in the bitmap rather than in the test.
+    # ⇒ Never mix hex and decimal for the same value in a test over shared state.
+    assert_eq(ae_usage_first_sight(191), 1, "usage 191 (last bit of word 2)");
+    assert_eq(ae_usage_first_sight(192), 1, "usage 192 (first bit of word 3) is INDEPENDENT of 191");
+    assert_eq(ae_usage_first_sight(191), 0, "191 stayed marked after 192 was marked");
+    assert_eq(ae_usage_first_sight(192), 0, "192 stayed marked too");
+    # ⛔ NEIGHBOUR ALIASING: marking 191 and 192 must not have marked anything either side of them.
+    assert_eq(ae_usage_first_sight(190), 1, "190 was NOT marked by its neighbour 191");
+    assert_eq(ae_usage_first_sight(193), 1, "193 was NOT marked by its neighbour 192");
+    assert_eq(ae_usage_first_sight(63), 1, "usage 63 — the last bit of word 0, sign-bit position");
+    assert_eq(ae_usage_first_sight(63), 0, "63 marks like any other despite being the sign bit");
+    assert_eq(ae_usage_first_sight(127), 1, "usage 127 (last bit of word 1)");
+    assert_eq(ae_usage_first_sight(255), 1, "usage 255 — the last bit of the last word");
+    assert_eq(ae_usage_first_sight(255), 0, "255 marks like any other");
+    # Out of range must be refused, not wrap into someone else's bit or write past the array.
+    assert_eq(ae_usage_first_sight(256), 0, "256 is out of range — refused, not wrapped to 0");
+    assert_eq(ae_usage_first_sight(0 - 1), 0, "a negative usage is refused");
+    assert_eq(ae_usage_first_sight(0), 1, "usage 0 was NOT marked by the out-of-range calls");
+    # And a usage nothing has touched is still unseen after all of the above.
+    assert_eq(ae_usage_first_sight(200), 1, "an untouched usage is still first-sight at the end");
+    # ⛔⛔ THE STRIDE. `load64(&ae_inp_seen + w * 8)` must scale the slot index by 8, because module-scope
+    # slots are u64-wide. Dropping the `* 8` makes the four words OVERLAP at byte offsets 0,1,2,3 instead
+    # of 0,8,16,24 — and the boundary asserts above DO NOT CATCH IT: under that aliasing usage 191 lands
+    # in byte 9 and 192 in byte 3, still independent, so every one of them still passes.
+    # ⇒ These two pairs are the ones that actually collide. Correct code maps usage u to byte u>>3 bit
+    # u&7; the broken stride maps it to byte (u>>6)+((u&63)>>3), which sends 8 and 64 to the same bit,
+    # and 16 and 128 likewise. `0x40` (= 64) was marked at the top of this group, so under the broken
+    # stride usage 8 reads back as ALREADY SEEN.
+    # ⚠ Verified as a real mutant: dropping the `* 8` fails exactly these lines and nothing else.
+    assert_eq(ae_usage_first_sight(8), 1, "usage 8 is unseen — it must NOT alias usage 64 (0x40, marked above)");
+    assert_eq(ae_usage_first_sight(128), 1, "usage 128 (word 2, bit 0)");
+    assert_eq(ae_usage_first_sight(16), 1, "usage 16 is unseen — it must NOT alias usage 128");
+    assert_eq(ae_usage_first_sight(24), 1, "usage 24 is unseen — it must NOT alias usage 192 (marked above)");
+
     return assert_summary();
 }
 

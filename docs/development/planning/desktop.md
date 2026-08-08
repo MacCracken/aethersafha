@@ -275,6 +275,33 @@ which is the only reason it has not fired.
 
 ## 4. Falsified / corrected — do not re-derive
 
+- ⛔⛔ **"`AE-0a`'s `union(cur, prev)` band handles a window DISAPPEARING because it handles one MOVING"
+  is FALSE, and it cost the F4 close.** The two are asymmetric and the asymmetry is the whole bug.
+  `#84 present` FLIPS the render target, so erasing a region needs **two** consecutive frames of band
+  coverage — one per buffer — and anything in `cur` gets that for free (it is `cur` now, `prev` next).
+  A moved window is in `cur` because its rect changed. A **closed** window is in neither, because every
+  damage producer walks the LIVE window list and it has just left it: one frame of coverage from the old
+  `prev`, then none. One buffer lost the window, the other kept it, `#84` alternated ⇒ **flashing at half
+  the frame rate.** ⇒ A close must RETIRE its rect into `cur` before unlinking. ⚠ And test it on the
+  BAND, not on pixels: a single framebuffer cannot show a flip, so the assertion that matters is coverage
+  on two consecutive frames.
+- ⛔ **"A window with no client is the easy case" is BACKWARDS — it is the worst one.** A
+  compositor-seeded window has `win_bufid == 0` and settles to `win_rect_changed == 0`, so it is in
+  neither `cur` nor `prev` **even on the frame it is closed**: closing it damages *nothing* and it stays
+  on screen in BOTH buffers permanently. "Flashing" and "not disappearing" were two symptoms of one
+  cause, separated only by whether the closed window had a live client surface.
+- ⛔ **A compositor-side window removal is NOT a close.** The client is a separate process; removing its
+  window from the vector is invisible to it. F4 left crab/puka **orphaned alive**, holding a `#97`
+  endpoint and one of only **16 system-wide `#86` shm slots**, for the rest of the boot. ⭐ `SETU_CLOSE`
+  (kind 7) was in the protocol all along and simply never sent or handled — the fix is wiring, not a
+  protocol extension. ⚠ The client's **exit** is the release mechanism (the kernel reclaims the endpoint
+  and slot on process death), so a client that ignores the message still leaks.
+- ⛔ **A silent path cannot be diagnosed from a burn, and "no client responded" has THREE causes.** The
+  close printed nothing, so "correctly told nobody because this window has no client" was
+  indistinguishable from "the send is broken" and from "the client ignored it". The first is NORMAL. ⚠ A
+  QEMU run was spent on it, and the run was mine — the harness had TABbed onto the seeded window, because
+  `IA_FOCUS_NEXT` wraps 2 -> 0 and index 0 is the compositor's own window. ⇒ The close path now names its
+  case, and the harness reads that line instead of inferring from silence.
 - ⛔⛔ **"The compositor's window mover works because it compiles and its string is in the binary" is FALSE, and
   it cost a hardware burn.** The first F1-F4 mover was nested **inside** the TAB branch — `if (usage == 0x2B) {`
   opened and did not close until after the block — so its own guard `if (usage >= 0x3A)` asked whether 43 is at

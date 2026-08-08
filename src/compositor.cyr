@@ -173,12 +173,127 @@ fn comp_find_by_id(c, id): i64 {
     return 0 - 1;
 }
 
+# ⛔⛔ THE RETIRED RECT — where a CLOSED window's pixels are remembered after the window is gone.
+#
+# This exists because closing a window left it **standing on the panel, flashing**, on the 2026-08-08
+# iron burn. The mechanism is worth stating exactly, because it is asymmetric with a MOVE in a way that
+# is easy to get wrong twice:
+#
+#   `AE-0a`'s damage band is `union(cur, prev)`, and `#84 present` FLIPS the render target. So erasing
+#   a region takes TWO consecutive frames of band coverage — one per buffer. Anything placed in `cur`
+#   gets exactly that for free: it is in `cur` this frame, and next frame the roll makes it `prev`.
+#   ⇒ A MOVED window is in `cur` (its rect changed), so it gets two frames and leaves no ghost — which
+#     is what the burn proved.
+#   ⇒ A CLOSED window is in NEITHER, because every damage producer walks the LIVE window list and it
+#     has just left it. It got one frame of coverage from the PREVIOUS frame's `prev` and no more, so
+#     the buffer drawn on the close frame lost the window and the other buffer kept it forever. `#84`
+#     alternates them ⇒ the window blinks at half the frame rate.
+#   ⛔ And a STATIC window with no client buffer (the compositor-seeded one) was in neither `cur` nor
+#     `prev` even on the close frame — `win_rect_changed` is 0 and `win_bufid` is 0 — so closing it
+#     damaged NOTHING and it simply stayed on screen in both buffers. Two symptoms, one cause.
+#
+# ⇒ A close records its rect HERE, and render.cyr folds it into `cur` exactly once. That buys the same
+# two frames a move gets, through the same mechanism, with no new special case in the band itself.
+#
+# ⚠ THE RECT IS STORED RAW, WITHOUT THE TITLEBAR. `TITLEBAR_H` is an enum in render.cyr, which is
+# included AFTER this file, and Cyrius does not resolve forward references to constants — so the chrome
+# extension is added by the consumer, which owns that number anyway.
+# ⚠ It is a BOUNDING BOX, unioned, because the band is one box per frame regardless: two windows closed
+# in one frame must both be covered, and `rend_dmg_add` would union them anyway.
+# First-occurrence latches for the two ways a close can end. See the note at the send site.
+var ae_close_told = 0;
+var ae_close_orphan = 0;
+var ae_retire_valid = 0;
+var ae_retire_x = 0;
+var ae_retire_y = 0;
+var ae_retire_x1 = 0;    # exclusive right edge, kept as an edge so the union is a min/max
+var ae_retire_y1 = 0;    # exclusive bottom edge
+
+fn comp_retire_valid(): i64 { return ae_retire_valid; }
+fn comp_retire_x(): i64 { return ae_retire_x; }
+fn comp_retire_y(): i64 { return ae_retire_y; }
+fn comp_retire_w(): i64 { return ae_retire_x1 - ae_retire_x; }
+fn comp_retire_h(): i64 { return ae_retire_y1 - ae_retire_y; }
+fn comp_retire_clear(): i64 {
+    ae_retire_valid = 0;
+    ae_retire_x = 0;
+    ae_retire_y = 0;
+    ae_retire_x1 = 0;
+    ae_retire_y1 = 0;
+    return 0;
+}
+
+# comp_retire_add(x, y, w, h): remember that this rect no longer has a window on it.
+# ⚠ A zero-or-negative extent is ignored rather than stored — an empty rect would make the box valid
+# while covering nothing, which reads downstream as "a close was handled" when none was.
+fn comp_retire_add(x, y, w, h): i64 {
+    if (w <= 0) { return 0; }
+    if (h <= 0) { return 0; }
+    var x1 = x + w;
+    var y1 = y + h;
+    if (ae_retire_valid == 0) {
+        ae_retire_valid = 1;
+        ae_retire_x = x;
+        ae_retire_y = y;
+        ae_retire_x1 = x1;
+        ae_retire_y1 = y1;
+        return 0;
+    }
+    if (x < ae_retire_x) { ae_retire_x = x; }
+    if (y < ae_retire_y) { ae_retire_y = y; }
+    if (x1 > ae_retire_x1) { ae_retire_x1 = x1; }
+    if (y1 > ae_retire_y1) { ae_retire_y1 = y1; }
+    return 0;
+}
+
 # comp_close_window(c, id): remove the window from the registry + active
 # workspace. -> 0 ok / -1 absent
 fn comp_close_window(c, id): i64 {
     var idx = comp_find_by_id(c, id);
     if (idx < 0) { return 0 - 1; }
     var v = load64(c + C_WINDOWS);
+    # ⛔ RETIRE THE RECT BEFORE UNLINKING, because after `vec_remove` this window is unreachable and
+    # its geometry is the only record of which pixels need repainting. See the retired-rect note above.
+    var dying = vec_get(v, idx);
+    if (dying != 0) {
+        comp_retire_add(win_x(dying), win_y(dying), win_w(dying), win_h(dying));
+        # ⛔⛔ TELL THE CLIENT. A setu client is a SEPARATE PROCESS, and removing its window from this
+        # vector is invisible to it — so before this fix, F4 left the process **orphaned alive**, still
+        # holding its `#97` channel end and its `#86` GPU-visible shm slot for the rest of the boot.
+        # There are only 16 of those slots system-wide, so a handful of closes exhausts GPU compositing
+        # for everything. That is the "not closing properly" half of the 2026-08-08 report, and it is a
+        # different defect from the flashing above.
+        # ⭐ `SETU_CLOSE` (kind 7, C<->S) HAS BEEN IN THE PROTOCOL ALL ALONG (lib/setu.cyr:140) with a
+        # constructor ready to use (`setu_close`, :382). Nothing sent it and no client handled it. This
+        # is wiring an existing message, not extending the protocol.
+        # ⚠ The CLIENT'S EXIT is what actually releases the channel end and the shm slot — the kernel
+        # reclaims both when the process dies. So this send is not a courtesy; it is the release
+        # mechanism. A client that ignores `SETU_CLOSE` still leaks, which is why crab and puka were
+        # taught to honour it in the same change.
+        # ⚠ `win_cfd == 0` is a compositor-seeded window with no client at all. Nothing to notify.
+        # ⛔ SAY WHICH CASE THIS WAS. The close path used to print nothing at all, and that cost a QEMU
+        # run: F4 arrived (the usage trace proved it), no client acknowledged, and the log could not
+        # distinguish "correctly told nobody, because this window has no client" from "the send is
+        # broken" from "the client ignored it". Three different bugs, one silence. ⚠ The first case is
+        # NORMAL — the compositor seeds a window of its own with no `#97` peer — and a diagnosis that
+        # cannot see it will go hunting in the wire.
+        # ⚠ One latch per case, so two lines maximum however many windows are closed; a close is a
+        # human-driven event and the identity of the case is the whole question, not the count.
+        var dying_cfd = win_cfd(dying);
+        if (dying_cfd != 0) {
+            setu_send(dying_cfd, setu_close(win_id(dying)));
+            if (ae_close_told == 0) {
+                ae_close_told = 1;
+                println("aethersafha: closed a window and sent SETU_CLOSE to its client");
+            }
+        }
+        if (dying_cfd == 0) {
+            if (ae_close_orphan == 0) {
+                ae_close_orphan = 1;
+                println("aethersafha: closed a window that has no client -- nothing to notify");
+            }
+        }
+    }
     vec_remove(v, idx);
     var aw = comp_get_workspace(c, load64(c + C_ACTIVE_WS));
     if (aw != 0) {

@@ -177,6 +177,102 @@ fn main() {
     assert_eq(bhumi_fb_get(gfb, 80, 100), GBG, "after the move: the VACATED region is background, not a ghost");
     assert(bhumi_fb_get(gfb, 80, 260) != GBG, "after the move: and the window is drawn at its new position");
 
+    # ⛔⛔ `AE-0a`: A **CLOSED** WINDOW IS NOT A MOVED WINDOW, and the difference cost an iron burn.
+    # The 2026-08-08 flash proved the move leaves no ghost (the group above). Closing a window instead
+    # left it **standing on the panel, flashing** — because every damage producer walks the LIVE window
+    # list, so a removed window is in neither `cur` nor `prev` and its rows are never repainted.
+    # ⭐ THE LOAD-BEARING PROPERTY IS **TWO** FRAMES OF COVERAGE, NOT ONE. `#84 present` flips the render
+    # target, so erasing a region takes one frame per buffer. A single frame erases the window from the
+    # buffer being drawn and leaves it in the other, and the flip then alternates them — that IS the
+    # flashing. Anything folded into `cur` gets two frames for free, because next frame's `prev` is this
+    # frame's `cur`. These asserts are on the BAND rather than on pixels for exactly that reason: one
+    # framebuffer cannot show a flip, but band coverage on two consecutive frames is what the flip needs.
+    test_group("render — AE-0a: a CLOSED window's rows are covered for TWO frames");
+    var kfb = bhumi_fb_new(400, 400);
+    var kcomp = comp_new();
+    var kwin = comp_create_window(kcomp, 40, 40, 120, 100, "K");
+    var KBG = 0x00101018;
+    ae_dmg_primed = 0;
+    ae_last_bg = 0 - 1;
+    rend_dmg_clear(ae_frame_dmg);
+    rend_dmg_clear(ae_prev_dmg);
+    comp_retire_clear();
+    ghost_frame(kcomp, kfb, kwin, KBG);       # frame 1 — primed full
+    ghost_frame(kcomp, kfb, kwin, KBG);       # frame 2
+    ghost_frame(kcomp, kfb, kwin, KBG);       # frame 3 — settled
+    assert_eq(rend_band_h(), 0, "settled before the close: an idle desktop writes nothing");
+    assert(bhumi_fb_get(kfb, 80, 100) != KBG, "the window really is on screen before the close");
+
+    comp_close_window(kcomp, win_id(kwin));
+    assert_eq(comp_count(kcomp), 0, "the close removed the window");
+    assert_eq(comp_retire_valid(), 1, "the close RECORDED the vacated rect before unlinking");
+    assert_eq(comp_retire_y(), 40, "the retired rect keeps the window's y");
+    assert_eq(comp_retire_h(), 100, "the retired rect keeps the window's h (titlebar added by render)");
+
+    # ---- frame 4: the close frame. The vacated rows must be in the band. ----
+    rend_frame_damage(kcomp, kfb, KBG);
+    assert_eq(rend_band_valid(), 1, "close frame: a band was computed");
+    assert(rend_band_y() <= 40, "close frame: the band reaches the closed window's top");
+    assert(rend_band_y() + rend_band_h() >= 40 + 100 + 30,
+           "close frame: ...and its bottom, titlebar included");
+    assert_eq(comp_retire_valid(), 0, "the retired rect is CONSUMED by the frame that folded it in");
+    if (rend_band_h() > 0) { rend_clear_band(kfb, rend_band_y(), rend_band_h(), KBG); }
+    assert_eq(bhumi_fb_get(kfb, 80, 100), KBG, "close frame: the vacated region is background");
+
+    # ---- frame 5: THE ASSERT THAT CATCHES THE FLASH. The other buffer still holds the window. ----
+    rend_frame_damage(kcomp, kfb, KBG);
+    assert_eq(rend_band_valid(), 1, "frame after the close: a band was computed");
+    assert(rend_band_y() <= 40,
+           "frame after the close: the band STILL reaches the old top — this is the OTHER buffer");
+    assert(rend_band_y() + rend_band_h() >= 40 + 100 + 30,
+           "frame after the close: ...and the old bottom. One frame of coverage is what flashed");
+
+    # ---- frame 6: and now it may settle. Coverage must not persist forever either. ----
+    rend_frame_damage(kcomp, kfb, KBG);
+    assert_eq(rend_band_h(), 0, "two frames after the close: settled — a retired rect does not linger");
+
+    # ⛔ THE STATIC, CLIENTLESS WINDOW — the worse of the two symptoms, and a DIFFERENT code path.
+    # A compositor-seeded window has no client buffer, so `win_bufid` is 0 and after its first frames
+    # `win_rect_changed` is 0 too: it was in NEITHER `cur` nor `prev` even on the close frame, so closing
+    # it damaged NOTHING and it stayed on screen in BOTH buffers permanently. That is "not disappearing"
+    # as distinct from "flashing", and the retired rect is what covers it.
+    test_group("render — AE-0a: closing a STATIC clientless window still damages its rows");
+    var sfb = bhumi_fb_new(400, 400);
+    var scomp = comp_new();
+    var swin = comp_create_window(scomp, 60, 60, 100, 80, "S");
+    var SBG = 0x00101018;
+    ae_dmg_primed = 0;
+    ae_last_bg = 0 - 1;
+    rend_dmg_clear(ae_frame_dmg);
+    rend_dmg_clear(ae_prev_dmg);
+    comp_retire_clear();
+    ghost_frame(scomp, sfb, swin, SBG);
+    ghost_frame(scomp, sfb, swin, SBG);
+    ghost_frame(scomp, sfb, swin, SBG);
+    assert_eq(rend_band_h(), 0, "static window: settled, and it never moved");
+    assert_eq(win_bufid(swin), 0, "static window: it genuinely has no client buffer");
+    assert_eq(win_rect_changed(swin), 0, "static window: and its rect is genuinely unchanged");
+    comp_close_window(scomp, win_id(swin));
+    rend_frame_damage(scomp, sfb, SBG);
+    assert_eq(rend_band_valid(), 1, "static close: a band was computed at all");
+    assert(rend_band_h() > 0, "static close: and it is NOT empty — nothing else could have damaged it");
+    assert(rend_band_y() <= 60, "static close: the band reaches the window's top");
+    assert(rend_band_y() + rend_band_h() >= 60 + 80 + 30, "static close: ...and its bottom + titlebar");
+
+    # Two windows closed in ONE frame must both be covered — the retired rect is a union.
+    test_group("render — AE-0a: two closes in one frame union into one band");
+    var ucomp = comp_new();
+    var uw1 = comp_create_window(ucomp, 10, 10, 50, 50, "U1");
+    var uw2 = comp_create_window(ucomp, 10, 300, 50, 50, "U2");
+    comp_retire_clear();
+    comp_close_window(ucomp, win_id(uw1));
+    comp_close_window(ucomp, win_id(uw2));
+    assert_eq(comp_retire_y(), 10, "union: top comes from the higher window");
+    assert_eq(comp_retire_y() + comp_retire_h(), 350, "union: bottom comes from the lower window");
+    assert_eq(comp_retire_valid(), 1, "union: still one valid box");
+    comp_retire_clear();
+    assert_eq(comp_retire_valid(), 0, "and clearing it invalidates it");
+
     # ⭐⭐ `AE-8` — THE PACKED 1bpp BITMAP MUST BE THE SAME GLYPHS THE CPU DRAWS.
     # This is the whole local verification of `#92` op 0x03, and it needs no GPU: expand the packed mask
     # the way the kernel's shader does (paint `color` where a bit is set, leave the rest) and compare it

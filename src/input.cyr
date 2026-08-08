@@ -47,6 +47,40 @@ enum HidUsage {
 # only from code that turned out to be unreachable, which hid the ordering problem.
 var AE_MOVE_STEP = 40;
 
+# ⛔ WHICH USAGES HAVE ALREADY BEEN NAMED IN THE LOG — the compositor's key-arrival instrument.
+#
+# ⭐ IT LIVES HERE, NOT IN main.cyr, DELIBERATELY. Its first version sat inline in main.cyr's frame loop
+# where no test can call it — the same structural mistake that let the window mover ship as dead code
+# earlier the same day. Bit manipulation that nothing can assert on is not an instrument, it is a hope.
+#
+# ⛔ AND IT TRACKS DISTINCT USAGES, NOT THE FIRST N EVENTS, because the first-N version failed in the
+# field on its first outing: on the 2026-08-08 GPU burn the operator held F8, eleven of the twelve trace
+# slots went to eleven copies of usage 65, and the budget was gone before they pressed the key whose
+# arrival was actually in question. A repeat must cost nothing.
+#
+# ⚠ MODULE-SCOPE `var X[N]` IS N*8 BYTES in Cyrius (function-local is N bytes), so 4 slots is 32 bytes
+# = 256 bits — exactly one bit per possible usage, since `bhumi_key_usage` is `ev & 0xFF`. Relies on
+# .bss zeroing like every other global here. [[feedback_cyrius_var_array_u64_units]]
+var ae_inp_seen[4];
+
+# ae_usage_first_sight(u): 1 the first time usage `u` is seen, 0 forever after. Marks it as seen.
+# ⚠ `>>` IS LOGICAL shift right in Cyrius (`>>>` is the arithmetic one — inverted from C/Java), which is
+# what is wanted here: `u` is `ev & 0xFF` so it is always 0..255.
+# ⚠ The `& 63` on the shift is DOCUMENTARY, not load-bearing — x86 `shl` already masks the count to its
+# low 6 bits, so removing it changes nothing and no test can catch it (verified: that mutant passes).
+# The RANGE GUARDS below are what actually keep this in bounds. The `* 8` stride, by contrast, IS
+# load-bearing and is mutation-tested — see the collision pairs in tests/input.tcyr.
+fn ae_usage_first_sight(u): i64 {
+    if (u < 0) { return 0; }
+    if (u > 255) { return 0; }
+    var w = u >> 6;                           # which of the 4 u64 slots
+    var m = 1 << (u & 63);                    # which bit inside it
+    var cur = load64(&ae_inp_seen + w * 8);    # *8: module-scope slots are u64-wide
+    if ((cur & m) != 0) { return 0; }
+    store64(&ae_inp_seen + w * 8, cur | m);
+    return 1;
+}
+
 # input_map(ev): pure key→action mapping for a pressed key (IA_NONE otherwise).
 fn input_map(ev): i64 {
     if (bhumi_key_pressed(ev) == 0) { return InputAction.IA_NONE; }

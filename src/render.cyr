@@ -563,6 +563,26 @@ fn rend_frame_damage(comp, fb, bg): i64 {
         if (ae_frame_dmg != 0) { rend_dmg_add(ae_frame_dmg, 0, 0, fw, fh); }
     }
 
+    # ⛔⛔ A CLOSED WINDOW'S PIXELS, which no loop above can see because every one of them walks the
+    # LIVE window list. Fold the retired rect into `cur` — and `cur` is the right tracker, not the band
+    # directly: anything in `cur` is in `prev` next frame, so this buys the SAME two frames of coverage
+    # a moved window gets, which is exactly what `#84`'s buffer flip requires. One frame erases the
+    # window from one buffer and leaves it standing in the other, which is what "flashing" was.
+    # ⚠ MUST BE AFTER the `rend_dmg_clear` above — a close is handled during input, earlier in the same
+    # frame than this function runs, so a rect written straight into `cur` at close time would be wiped
+    # by this frame's own clear before anyone read it.
+    # ⚠ TITLEBAR_H is added HERE. The compositor stores the raw window rect because this constant lives
+    # in this file, which is included after compositor.cyr.
+    # ⚠ Cleared UNCONDITIONALLY, including when there is no damage tracker at all: a retired rect that
+    # survived its frame would keep re-damaging those rows for the rest of the run.
+    if (comp_retire_valid() == 1) {
+        if (ae_frame_dmg != 0) {
+            rend_dmg_add(ae_frame_dmg, comp_retire_x(), comp_retire_y(),
+                         comp_retire_w(), comp_retire_h() + TITLEBAR_H);
+        }
+        comp_retire_clear();
+    }
+
     # ⭐ AND NOW IT DRIVES SOMETHING. Fold cur and prev into the full-width band the clear and the
     # `#39` chrome blit both consume. Computed last, so it sees every rect added above.
     rend_band_compute(fh, bg);

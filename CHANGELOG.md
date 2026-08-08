@@ -45,11 +45,14 @@ band shipped, and burned five times, on reasoning that had never been exercised.
 window 40 px. That is not a workaround for the pointer; it is the **missing stimulus** for a model that was
 already in production.
 
-⭐ **Proven end to end in QEMU on `qemu-xhci` + `usb-kbd` — the same USB HID producer archaemenid uses.**
-Eleven injected keys produced eleven usage traces in exactly the right order (`43, 64,64,64, 65,65, 66,66,
-67,67,67`), the window moved **40 px left and 40 px down** (the exact net of the sequence), and its old
-position came back **clean — no ghost**. ⚠ On the **CPU blit path**: QEMU has no amdgpu, so the GPU probe
-never ran. The GPU path's damage band remains unexercised by a moving window.
+⭐⭐⭐ **BURNED PASS 2026-08-08 — operator: "f7-f10 move the window, no ghost".** That is `AE-0a`'s
+`union(cur, prev)` band doing, on the **GPU path**, the one job it was written for, and it had never been
+asked to do it: the band shipped in 0.12.3 and rode **five flashes** on reasoning nobody could exercise,
+because a moving window needs a pointer (`AE-7`, a kernel xhci item) or a keyboard mover and neither existed.
+⭐ Proven in QEMU first, on `qemu-xhci` + `usb-kbd` — the same USB HID producer archaemenid uses: eleven
+injected keys produced eleven usage traces in exactly the right order (`43, 64,64,64, 65,65, 66,66, 67,67,67`)
+and the window moved **40 px left and 40 px down**, the exact net of the sequence, leaving its old position
+clean. ⚠ QEMU's leg was the **CPU blit path** (no amdgpu there); iron supplied the GPU half.
 
 ⛔ **F-keys because a modifier combo is not detectable here.** `bhumi_key_usage(ev)` is `ev & 0xFF` and
 `bhumi_key_pressed(ev)` is one bit — **no modifier state reaches the compositor at all**, the same gap that
@@ -105,14 +108,83 @@ forward references to functions but **not to variables** — so a global would h
 means the unit test can supply its own bounds without pulling in `render.cyr` for `TITLEBAR_H`. `AE_MOVE_STEP`
 moved into `input.cyr` for the same ordering reason.
 
-### Added — the compositor names every key usage it sees, bounded at 12
+### Added — the compositor names every DISTINCT key usage it sees
 
 ⭐ **The instrument the 2026-08-08 burn did not have.** That boot printed every other line and not the
 mover's, and from the log alone "the keys were never pressed" and "they arrived and were dropped" were
-**indistinguishable** — a burn that cannot say which usages arrived cannot be re-run into an answer. Now the
-first twelve key-downs print their usage. ⚠ Bounded, and the bound is why it is safe always-on: that boot ran
-457 frames and delivered keys to two clients, so an unbounded trace would bury the log it exists to clarify.
-Twelve covers a deliberate probe (a focus key plus a run of directions) and stays invisible during typing.
+**indistinguishable** — a burn that cannot say which usages arrived cannot be re-run into an answer, only
+re-run into the same ambiguity. Now every usage the compositor sees is named the first time it appears.
+
+⛔ **DISTINCT, and not "the first N events", because the first-N version failed on its very first outing.**
+Bounded at 12 key-downs, it went to hardware, the operator held F8, and **eleven of the twelve slots went to
+eleven copies of usage 65** — so the budget was gone before they pressed F4, the one key whose behaviour then
+came into question. An instrument a held key can exhaust goes quiet exactly when a session gets interesting.
+A repeat now costs nothing. 256 bits in 4 u64 slots; `ae_inp_traced < 32` is a second belt so a pathological
+run cannot flood a console three procs share unserialised.
+
+⚠ **It lives in `input.cyr`, not the frame loop, so a test can call it** — the same structural lesson as the
+dead mover, applied without waiting for another burn. `tests/input.tcyr` is at **67 asserts**, and the
+load-bearing ones were derived from a mutant: dropping the `* 8` slot stride makes the four words overlap at
+byte offsets 0-3, which usages 191/192 do **not** detect (they stay independent under that aliasing). The
+pairs that actually collide are **(8, 64), (16, 128), (24, 192)**, and with those asserted the stride mutant
+fails on exactly three lines. ⚠ The `& 63` on the shift is documentary only — x86 `shl` masks the count in
+hardware, so no test can catch its removal, and the range guards do the real work. Said here rather than
+implied by a green suite.
+
+### Fixed — ⛔⛔ closing a window left it on screen, FLASHING, and orphaned its client alive
+
+Operator, 2026-08-08 iron: *"closing application with f4 appears to have issues with flashing / not
+disappearing or closing properly."* ⚠ **Two defects wearing one sentence**, both pre-existing since the
+Rust→Cyrius port of `input.cyr` and both unexercised until the first session that pressed F4.
+
+⭐ **THE FLASHING — a close is not a move, and `union(cur, prev)` only saves the move.** `#84 present`
+FLIPS the render target, so erasing a region takes **two** consecutive frames of band coverage, one per
+buffer. Anything in `cur` gets that for free: it is `cur` this frame and `prev` the next. A MOVED window
+is in `cur` because its rect changed — which is exactly why the burn proved it leaves no ghost. A CLOSED
+window is in **neither**, because every damage producer walks the LIVE window list and it has just left
+it; it got one frame of coverage from the previous frame's `prev` and no more. So the buffer drawn on the
+close frame lost the window and the other buffer kept it, and `#84` alternated them: **a window blinking
+at half the frame rate.**
+
+⛔ **And the STATIC clientless window was worse — a second symptom from the same cause.** A
+compositor-seeded window has `win_bufid == 0` and, after its first frames, `win_rect_changed == 0`, so it
+was in neither `cur` nor `prev` **even on the close frame**: closing it damaged *nothing* and it simply
+stayed on screen in both buffers. That is "not disappearing" as distinct from "flashing".
+
+⇒ `comp_close_window` now records the dying window's rect (`comp_retire_add`) **before** unlinking it —
+after `vec_remove` the geometry is unreachable and it is the only record of which pixels need repainting
+— and `rend_frame_damage` folds that rect into `cur` exactly once, **after** its own clear. Folding into
+`cur` rather than into the band directly is the point: it buys the same two frames a move gets, through
+the same mechanism, with no new special case in the band. ⚠ The rect is stored raw and the consumer adds
+`TITLEBAR_H`, because that constant lives in render.cyr which is included *after* compositor.cyr.
+
+⚠ **Mutation-tested, and the asserts are on the BAND rather than on pixels** — one framebuffer cannot
+show a flip, but band coverage on two consecutive frames is what the flip requires. Removing either half
+of the fix fails 5 and 11 asserts respectively, including the literal *"one frame of coverage is what
+flashed"* line. `tests/render.tcyr` is at **160 asserts**, with the static-clientless case and a
+two-closes-in-one-frame union as their own groups.
+
+### Fixed — a closed client was left ORPHANED ALIVE, holding a `#97` endpoint and one of 16 shm slots
+
+⛔ A setu client is a **separate process**, and removing its window from the compositor's vector is
+invisible to it. So F4 left `crab`/`puka` running for the rest of the boot, still holding their `#97`
+channel end and their `#86` GPU-visible shm slot — and there are only **16 of those slots system-wide**,
+so a handful of closes would exhaust hardware compositing for everything.
+
+⭐ **`SETU_CLOSE` (kind 7, C<->S) has been in the protocol from the start** (`lib/setu.cyr:140`) with a
+constructor ready to use (`setu_close`, `:382`). Nothing ever sent it and no client ever handled it. This
+change is **wiring an existing message, not extending the protocol**: `comp_close_window` sends it to
+`win_cfd`, and crab and puka exit on receipt (both unreleased — the change is in their working trees). ⚠ The client's **exit** is what
+actually releases the endpoint and the slot — the kernel reclaims both on process death — so honouring
+the message is the release mechanism, not a courtesy.
+
+⚠ `win_cfd == 0` is a compositor-seeded window with no client, and notifying nobody is CORRECT there. The
+close path now says which case it took, because it previously printed nothing and that cost a QEMU run:
+F4 arrived, no client acknowledged, and the log could not separate "correctly told nobody" from "the send
+is broken" from "the client ignored it".
+
+⭐ **Verified in QEMU end to end**: compositor sent `SETU_CLOSE`, **crab acknowledged and exited**, and
+the screendump shows the window gone with clean background where it was — no ghost, no doubling.
 
 ### ⛔ `#91 gpu_blit_bb` has NO correct consumer here, and the ladder assumed otherwise
 

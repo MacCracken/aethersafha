@@ -511,20 +511,25 @@ fn main(): i64 {
                                 println("aethersafha: F7-F10 moved the focused window");
                             }
                         }
-                        # ⭐ NAME EVERY USAGE THE COMPOSITOR SEES, bounded. This is the instrument the
+                        # ⭐ NAME EVERY DISTINCT USAGE THE COMPOSITOR SEES. This is the instrument the
                         # 2026-08-08 burn did not have: it printed every other line of that boot and
                         # not the mover's, and from the log alone "the keys were never pressed" and
                         # "they arrived and were dropped" were INDISTINGUISHABLE. A burn that cannot
                         # say which usages arrived cannot be re-run into an answer.
-                        # ⚠ BOUNDED AT 12, and the bound is the whole reason this is safe to ship
-                        # always-on: that boot ran 457 frames and delivered keys to two clients, so an
-                        # unbounded per-key trace would bury the log it is meant to clarify. Twelve is
-                        # enough to cover a deliberate probe (a focus key plus a run of direction keys)
-                        # and small enough to be invisible during ordinary typing.
-                        if (ae_inp_traced < 12) {
-                            ae_inp_traced = ae_inp_traced + 1;
-                            println("aethersafha: key usage seen:");
-                            println_int(bhumi_key_usage(ev));
+                        # ⛔ DISTINCT, NOT FIRST-N, and the difference is not cosmetic. The first cut
+                        # traced the first twelve key-downs; on the GPU burn the operator held F8, so
+                        # ELEVEN slots went to eleven copies of usage 65 and the budget was exhausted
+                        # before they pressed F4 — the one key whose arrival was then in question. A
+                        # repeat now costs nothing, so holding a key cannot crowd out a key you have
+                        # not pressed yet. ⚠ The distinct-set is itself the bound (each usage prints at
+                        # most once), and `ae_inp_traced < 32` is a second belt so a pathological run
+                        # cannot flood a console three procs share unserialised.
+                        if (ae_inp_traced < 32) {
+                            if (ae_usage_first_sight(bhumi_key_usage(ev)) == 1) {
+                                ae_inp_traced = ae_inp_traced + 1;
+                                println("aethersafha: key usage seen:");
+                                println_int(bhumi_key_usage(ev));
+                            }
                         }
                     }
                     if (kdone == 0) {
