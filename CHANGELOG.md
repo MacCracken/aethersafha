@@ -4,7 +4,57 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — `AE-8`: chrome text renders on the shader cores, and `AE-6`: so do premultiplied surfaces
+## [Unreleased] — `AE-9`: the chrome fills move to the GPU and the `#39` blit is GONE
+
+### Added — `AE-9`: `#88 gpu_fill_rect` for the clear and every chrome rect
+
+⭐⭐ **The `#39` chrome blit is no longer issued on a GPU frame.** With the clear, the chrome rects, the
+glyphs (`AE-8`) and the client surfaces (`AE-6`) all going to the GPU, **nothing remains in the userland
+framebuffer for `#39` to copy** — so it is skipped. That is the order this file's own `#85`-removal note
+wrote down in advance: clear the back buffer, fill the window and panel rects, glyph the title text, and
+nothing overwrites the clear because there is no CPU layer left to copy over it.
+
+⭐ **The clear was the big one.** `AE-0a` measured it at 3.83 ms of a 6.40 ms frame and cut it to 2.46 ms by
+shrinking it to a damage band. It is now not a CPU store loop at all — the band is simply the first rect in
+the queue, filled by the same CP-DMA engine as the chrome.
+
+`fill_rect` and `rend_clear_band` enqueue instead of writing pixels; `ae_gpu_emit_chrome()` drains first, as
+the frame's bottom layer. ⚠ Uses the existing `sys_gpu_fill_rect` wrapper — no raw syscall, no cyrius change.
+
+⛔ **THE MIGRATION IS ALL-OR-NOTHING PER FRAME.** The `#39` blit is the bottom layer, so a frame that draws
+half its chrome into the userland framebuffer and half through `#88` has the two overwriting each other in
+whichever order the frame happens to run. `ae_chrome_on_gpu()` answers once per frame and every fill in that
+frame follows it.
+
+⛔ **CLIPPING MOVED INTO THE QUEUE, and it is not cosmetic.** `#88` bounds-checks against the back buffer and
+**REFUSES** an out-of-range rect, while `fill_rect` has always clipped silently. Passing an unclipped rect
+would turn a window dragged one pixel past the edge into a refusal — and a refusal retires the chrome path
+for the whole session.
+
+⛔ **A refusal must still blit THIS frame.** The rects were queued instead of drawn, so the userland
+framebuffer holds no chrome; a frame that neither fills nor blits shows **nothing at all**. `ae_gpu_emit_chrome`
+returns `-1`, the caller leaves the band intact so `#39` runs once, and the latch sends every later frame back
+to the CPU. Overflow behaves the same way and is counted.
+
+⛔ **A REAL BUG, CAUGHT BY RE-READING BEFORE IT SHIPPED.** The band-zeroing that skips the blit was first
+placed **above** the damage-band block — which assigns `band_h` unconditionally, so the zero was silently
+overwritten and the blit would have copied an **empty** framebuffer straight over the chrome the GPU had just
+filled. Order is the whole correctness of that block. The comment there now says so.
+
+⚠ **Batched `#92` (64 records per submission) is NOT part of this** and cannot be, as the ladder assumed:
+batching requires each record to name its own slot, and the glyph path deliberately reuses **one** staging
+slot per run (`#86` slots are scarce — 16 system-wide, each rounded to a 2 MB page). Records in one
+submission are processed after it is handed over, so a shared slot would give every record the last run's
+mask. Batching needs N slots or a per-record offset field the ABI does not have.
+
+**134/134** in `tests/render.tcyr` (was 103): queueing instead of drawing, the framebuffer left untouched,
+clipping on all four edges, the fully-off-screen no-op, the clear band as a rect, overflow refusing and
+counting, the CPU fallback still drawing, and the latch retiring the path.
+
+⚠ **QEMU proves the FALLBACK, not the GPU path** (no AMD device ⇒ `ae_gpu_frame_ok` is 0). Desktop counters
+byte-identical to pre-`AE-9`: dim-green 900514, red bar 972, non-black 3975361, terminal gate PASS twice.
+
+## Previously in this cycle — `AE-8`: chrome text on the shader cores, and `AE-6`: premultiplied surfaces
 
 ### Added — `AE-8`: glyphs off the CPU, via `#92` op 0x03 GLYPH_1BPP
 

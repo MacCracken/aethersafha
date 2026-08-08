@@ -310,6 +310,56 @@ fn ae_gpu_blend_rect(bid, wh, dstxy): i64 {
 }
 
 # ============================================================================================
+# ⭐⭐ `AE-9` — THE CHROME FILLS ON THE GPU, AND THE `#39` BLIT GOES AWAY.
+# ============================================================================================
+# `#88 gpu_fill_rect(color, wh, dstxy)` fills a rect in the back buffer with CP-DMA. With the clear, the
+# chrome rects, the glyphs and the client surfaces all issued to the GPU, **nothing remains in the userland
+# framebuffer for `#39` to copy** — so the blit is skipped rather than emitted, which is what this rung was
+# for. That is the order `gpu.cyr`'s own `#85`-removal note wrote down in advance: clear the back buffer,
+# fill the window and panel rects, glyph the title text, and nothing overwrites the clear because there is
+# no CPU layer left to copy over it.
+#
+# ⭐ THE CLEAR IS THE BIG ONE. `AE-0a` measured it at 3.83 ms of a 6.40 ms frame and cut it to 2.46 ms by
+# shrinking it to a damage band. Here it stops being a CPU store loop at all — the band is simply the first
+# rect in the queue, filled by the same engine as the chrome.
+#
+# ⚠ `sys_gpu_fill_rect` is the existing stdlib wrapper, so this needs no raw syscall and no cyrius change.
+# (`sys_gpu_fill` exists but drops the kernel's y0/h band arguments, so a full-width rect is both simpler
+# and more precise than reaching for the raw form.)
+var ae_gpu_chrome_seen = 0;
+
+# Drain the frame's chrome rects. -> count filled, or -1 if a fill was refused and the path is now retired.
+fn ae_gpu_emit_chrome(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var n = ae_rect_count();
+    if (n == 0) { return 0; }
+    var i = 0;
+    while (i < n) {
+        var wh = (ae_rect_get_h(i) << 16) | ae_rect_get_w(i);
+        var dstxy = (ae_rect_get_y(i) << 16) | ae_rect_get_x(i);
+        if (sys_gpu_fill_rect(ae_rect_get_col(i), wh, dstxy) != 0) {
+            # ⛔ ONE REFUSAL RETIRES THE PATH, AND THIS FRAME MUST STILL BLIT. The rects were queued instead
+            # of drawn, so the userland framebuffer holds no chrome — a frame that neither fills nor blits
+            # shows nothing at all. The caller reads -1 and falls back to `#39` for this frame; every later
+            # frame draws chrome on the CPU again, which is why this is a latch and not a per-frame retry.
+            ae_chrome_gpu_disable();
+            println("aethersafha: #88 gpu_fill_rect refused -- chrome returns to the CPU + #39");
+            return 0 - 1;
+        }
+        i = i + 1;
+    }
+    if (ae_gpu_chrome_seen == 0) {
+        ae_gpu_chrome_seen = 1;
+        println("aethersafha: chrome fills are on the GPU (#88 gpu_fill_rect) -- the #39 blit is gone");
+    }
+    return n;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+}
+
+# ============================================================================================
 # ⭐⭐ `AE-8` — GLYPHS ON THE SHADER CORES. `#92` op 0x03 GLYPH_1BPP.
 # ============================================================================================
 # The last chrome layer still drawn a pixel at a time. `draw_char` calls `bhumi_fb_set` per lit pixel —
@@ -463,6 +513,13 @@ fn ae_gpu_present_frame(comp, fb): i64 {
     # (`bhumi_fb_clear` walks `size` in 4s on exactly that basis) — but a future backend with a padded
     # pitch would silently blit skewed rows, so this checks and falls back to the full frame instead.
     # A skewed image is a much worse failure than a slower one.
+    # ⭐⭐ `AE-9`: WHEN THE CHROME IS ON THE GPU THERE IS NOTHING TO BLIT. The rects went to `#88` instead
+    # of into the userland framebuffer, so copying that framebuffer would paint a stale or blank layer over
+    # them. Setting the band height to 0 skips the blit — the deletion this rung existed for.
+    # ⚠ `-1` means a fill was refused mid-frame: the queue held the chrome, the framebuffer is empty, and the
+    # path has just been retired — so the blit MUST still run or this frame shows nothing.
+    var chrome_rc = 0;
+    if (ae_chrome_on_gpu() == 1) { chrome_rc = ae_gpu_emit_chrome(); }
     var band_y = 0;
     var band_h = fh;
     if (rend_band_valid() == 1) {
@@ -473,6 +530,11 @@ fn ae_gpu_present_frame(comp, fb): i64 {
             }
         }
     }
+    # ⛔⛔ THE ZEROING MUST COME AFTER THE DAMAGE BAND, AND THE FIRST VERSION OF THIS PUT IT BEFORE.
+    # The band block assigns `band_h` unconditionally, so zeroing above it was silently overwritten — the
+    # blit would then have run and copied an EMPTY userland framebuffer straight over the chrome the GPU had
+    # just filled. Order is the whole correctness of this block, not a style choice.
+    if (chrome_rc > 0) { band_h = 0; }
     # ⚠ A ZERO-HEIGHT BAND IS A RESULT, NOT AN ERROR: nothing changed in two frames, so the buffer about
     # to be flipped to already holds the right pixels and there is nothing to copy. Skip the blit and
     # still present — the flip is what puts the finished frame on screen.

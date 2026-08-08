@@ -52,6 +52,13 @@ enum Deco {
 # right call for genuinely scattered single pixels. Uses only bhumi's PUBLIC accessors, so this
 # needs no change to bhumi and no tag bump.
 fn fill_rect(fb, x, y, w, h, color): i64 {
+    # ⭐ `AE-9`: on a GPU frame every chrome rect goes to `#88 gpu_fill_rect` instead of a CPU store loop.
+    # ⛔ Decided by `ae_chrome_on_gpu()`, which is a per-FRAME answer — a half-migrated frame has the `#39`
+    # blit and the GPU rects overwriting each other. A refused enqueue falls through to the row walk below,
+    # and gpu.cyr then retires the path so later frames are consistent rather than partly drawn.
+    if (ae_chrome_on_gpu() == 1) {
+        if (ae_rect_enqueue(fb, x, y, w, h, color) == 1) { return 0; }
+    }
     var x0 = x;
     var y0 = y;
     var x1 = x + w;
@@ -94,6 +101,12 @@ fn fill_rect(fb, x, y, w, h, color): i64 {
 # ⚠ Falls back to `fill_rect` when the framebuffer has a PADDED pitch, where the rows genuinely are not
 # contiguous. Correct either way; only the constant changes.
 fn rend_clear_band(fb, y, h, color): i64 {
+    # ⭐ `AE-9`: the clear is a full-width rect, so it rides the same `#88` path. This is the big one —
+    # `AE-0a` measured the clear at 3.83 ms of a 6.40 ms frame and then cut it to 2.46 ms by shrinking it
+    # to a band; on the GPU it becomes a CP-DMA fill instead of a CPU store loop entirely.
+    if (ae_chrome_on_gpu() == 1) {
+        if (ae_rect_enqueue(fb, 0, y, bhumi_fb_width(fb), h, color) == 1) { return 0; }
+    }
     var fh = bhumi_fb_height(fb);
     var y0 = y;
     var y1 = y + h;
@@ -505,6 +518,7 @@ fn rend_frame_damage(comp, fb, bg): i64 {
     # one place, once per frame, so no caller can forget. A queue that survived a frame would re-emit
     # every title on top of the next one.
     ae_text_reset();
+    ae_rect_reset();
     if (ae_prev_dmg == 0) { ae_prev_dmg = rend_dmg_new(); }
     rend_dmg_copy(ae_prev_dmg, ae_frame_dmg);
     if (ae_frame_dmg != 0) { rend_dmg_clear(ae_frame_dmg); }
@@ -564,6 +578,87 @@ enum FontK {
     FONT_W   = 8;
     FONT_H   = 16;
     FONT_ADV = 9;   # 8px glyph + 1px spacing
+}
+
+# ============================================================================================
+# ⭐⭐ `AE-9` — THE CHROME FILLS OFF THE CPU. The rect queue.
+# ============================================================================================
+# Same shape as the text queue below, for the same reason: render runs before present, so a `#88` issued
+# during render would be overwritten by whatever lands in the back buffer afterwards. Render enqueues;
+# `ae_gpu_emit_chrome()` drains, FIRST, as the bottom layer of the frame.
+#
+# ⭐ THIS IS THE RUNG THAT DELETES THE `#39` BLIT. With the clear, the chrome rects, the text and the
+# client surfaces all issued to the GPU, nothing is left in the userland framebuffer for `#39` to copy —
+# and `gpu.cyr`'s own `#85`-removal note predicted exactly this order: clear the back buffer, fill the
+# window and panel rects, glyph the titles, and nothing overwrites the clear because there is no CPU layer
+# left to copy over it.
+#
+# ⛔ THE MIGRATION IS ALL-OR-NOTHING PER FRAME, AND THAT IS NOT CAUTION. The `#39` blit is the BOTTOM layer:
+# a frame that draws half its chrome into the userland framebuffer and half through `#88` has the two
+# overwriting each other in whichever order the frame happens to run. So the decision is taken ONCE per
+# frame, before anything is drawn, and every fill in that frame follows it.
+enum AeRect {
+    AE_RECT_MAX = 256;   # ~6 rects per window x 16 windows + the shell panel + the clear band, with room
+}
+var ae_rect_n = 0;
+var ae_rect_x[256];
+var ae_rect_y[256];
+var ae_rect_w[256];
+var ae_rect_h[256];
+var ae_rect_col[256];
+# ⛔ 1 = the GPU chrome path is still trusted. Cleared by gpu.cyr on a refusal, exactly like the text
+# latch, because a queued rect that never gets emitted is a HOLE in the frame — and with `#39` gone there
+# is no userland copy to fall back on after the fact. One bad frame, then the CPU path for the rest.
+var ae_chrome_gpu_ok = 1;
+# ⚠ Overflow is a frame with missing chrome, so it is counted AND it retires the path. Sizing above makes
+# it unreachable for any window count the compositor supports; the counter is there because "unreachable"
+# is a claim about today's code.
+var ae_rect_dropped = 0;
+
+fn ae_rect_reset(): i64 { ae_rect_n = 0; return 0; }
+fn ae_rect_count(): i64 { return ae_rect_n; }
+fn ae_rect_get_x(i): i64 { return load64(&ae_rect_x + i * 8); }
+fn ae_rect_get_y(i): i64 { return load64(&ae_rect_y + i * 8); }
+fn ae_rect_get_w(i): i64 { return load64(&ae_rect_w + i * 8); }
+fn ae_rect_get_h(i): i64 { return load64(&ae_rect_h + i * 8); }
+fn ae_rect_get_col(i): i64 { return load64(&ae_rect_col + i * 8); }
+fn ae_rect_dropped_get(): i64 { return ae_rect_dropped; }
+fn ae_chrome_gpu_ok_get(): i64 { return ae_chrome_gpu_ok; }
+fn ae_chrome_gpu_disable(): i64 { ae_chrome_gpu_ok = 0; return 0; }
+
+# 1 when this frame's chrome goes to the GPU. Read by every fill so one frame cannot be half-migrated.
+fn ae_chrome_on_gpu(): i64 {
+    if (ae_gpu_frame_ok != 1) { return 0; }
+    return ae_chrome_gpu_ok;
+}
+
+# Queue one chrome rect, CLIPPED to the framebuffer exactly as fill_rect clips. Returns 1 if queued.
+#
+# ⛔ THE CLIP MUST HAPPEN HERE, NOT IN THE KERNEL. `#88 gpu_fill_rect` bounds-checks against the back
+# buffer and REFUSES an out-of-range rect rather than clipping it — while `fill_rect` has always clipped
+# silently. Passing an unclipped rect would turn a window dragged one pixel past the edge from a clipped
+# fill into a refused op, and the refusal would retire the whole chrome path for the session.
+fn ae_rect_enqueue(fb, x, y, w, h, color): i64 {
+    var x0 = x;
+    var y0 = y;
+    var x1 = x + w;
+    var y1 = y + h;
+    if (x0 < 0) { x0 = 0; }
+    if (y0 < 0) { y0 = 0; }
+    var fw = bhumi_fb_width(fb);
+    var fh = bhumi_fb_height(fb);
+    if (x1 > fw) { x1 = fw; }
+    if (y1 > fh) { y1 = fh; }
+    if (x1 <= x0) { return 1; }                  # fully clipped: nothing to draw, nothing to fall back to
+    if (y1 <= y0) { return 1; }
+    if (ae_rect_n >= AE_RECT_MAX) { ae_rect_dropped = ae_rect_dropped + 1; return 0; }
+    store64(&ae_rect_x + ae_rect_n * 8, x0);
+    store64(&ae_rect_y + ae_rect_n * 8, y0);
+    store64(&ae_rect_w + ae_rect_n * 8, x1 - x0);
+    store64(&ae_rect_h + ae_rect_n * 8, y1 - y0);
+    store64(&ae_rect_col + ae_rect_n * 8, color);
+    ae_rect_n = ae_rect_n + 1;
+    return 1;
 }
 
 # ============================================================================================

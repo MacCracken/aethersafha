@@ -318,6 +318,79 @@ fn main() {
     ae_gpu_frame_ok = 0;
     ae_text_reset();
 
+    # ⭐⭐ `AE-9` — the chrome rect queue. A wrong rect here is a hole in the frame, because with the
+    # chrome on the GPU there is no userland framebuffer copy to fall back on after the fact.
+    test_group("render — AE-9: chrome rects queue, clip, and refuse honestly");
+    var rfb = bhumi_fb_new(400, 300);
+    ae_gpu_frame_ok = 0;
+    assert_eq(ae_chrome_on_gpu(), 0, "no GPU frame ⇒ chrome stays on the CPU");
+    ae_gpu_frame_ok = 1;
+    assert_eq(ae_chrome_on_gpu(), 1, "GPU frame + trusted path ⇒ chrome goes to #88");
+
+    ae_rect_reset();
+    assert_eq(ae_rect_count(), 0, "reset empties the queue");
+    fill_rect(rfb, 10, 20, 30, 40, 0x00112233);
+    assert_eq(ae_rect_count(), 1, "on a GPU frame fill_rect QUEUES instead of writing pixels");
+    assert_eq(ae_rect_get_x(0), 10, "x carried");
+    assert_eq(ae_rect_get_y(0), 20, "y carried");
+    assert_eq(ae_rect_get_w(0), 30, "w carried");
+    assert_eq(ae_rect_get_h(0), 40, "h carried");
+    assert_eq(ae_rect_get_col(0), 0x00112233, "colour carried");
+    # ⛔ AND IT MUST NOT HAVE TOUCHED THE FRAMEBUFFER. A fill that both queues and draws would double-paint
+    # on the fallback path and waste the whole point on the GPU path.
+    assert_eq(bhumi_fb_get(rfb, 15, 25), 0x00000000, "the framebuffer was NOT written");
+
+    # ⛔ CLIPPING HAPPENS IN THE QUEUE, because `#88` REFUSES an out-of-range rect where `fill_rect` always
+    # clipped silently. A window dragged one pixel past the edge must not retire the chrome path.
+    ae_rect_reset();
+    fill_rect(rfb, 0 - 10, 0 - 5, 30, 20, 0x00445566);
+    assert_eq(ae_rect_count(), 1, "a partly off-screen rect is queued");
+    assert_eq(ae_rect_get_x(0), 0, "clipped to x=0");
+    assert_eq(ae_rect_get_y(0), 0, "clipped to y=0");
+    assert_eq(ae_rect_get_w(0), 20, "width reduced by the clip (30 - 10)");
+    assert_eq(ae_rect_get_h(0), 15, "height reduced by the clip (20 - 5)");
+    ae_rect_reset();
+    fill_rect(rfb, 390, 290, 100, 100, 0x00778899);
+    assert_eq(ae_rect_get_w(0), 10, "clipped against the right edge");
+    assert_eq(ae_rect_get_h(0), 10, "clipped against the bottom edge");
+    ae_rect_reset();
+    fill_rect(rfb, 500, 500, 10, 10, 0x00AABBCC);
+    assert_eq(ae_rect_count(), 0, "a fully off-screen rect queues NOTHING");
+    assert_eq(bhumi_fb_get(rfb, 0, 0), 0x00000000, "...and draws nothing either");
+
+    # The clear band rides the same path as a full-width rect.
+    ae_rect_reset();
+    rend_clear_band(rfb, 50, 60, 0x00121218);
+    assert_eq(ae_rect_count(), 1, "the clear band is queued as one rect");
+    assert_eq(ae_rect_get_x(0), 0, "band starts at x=0");
+    assert_eq(ae_rect_get_w(0), 400, "band spans the full width");
+    assert_eq(ae_rect_get_y(0), 50, "band y carried");
+    assert_eq(ae_rect_get_h(0), 60, "band height carried");
+
+    # ⛔ OVERFLOW REFUSES, IS COUNTED, AND FALLS BACK TO DRAWING — never a silently missing rect.
+    ae_rect_reset();
+    var ri = 0;
+    while (ri < AE_RECT_MAX) { ae_rect_enqueue(rfb, 0, 0, 2, 2, 0x00010203); ri = ri + 1; }
+    assert_eq(ae_rect_count(), AE_RECT_MAX, "the queue fills to exactly AE_RECT_MAX");
+    var rd0 = ae_rect_dropped_get();
+    assert_eq(ae_rect_enqueue(rfb, 0, 0, 2, 2, 0x00010203), 0, "and then refuses");
+    assert_eq(ae_rect_dropped_get(), rd0 + 1, "...counted, because a silent drop is a lie");
+    bhumi_fb_clear(rfb, 0x00000000);
+    fill_rect(rfb, 100, 100, 4, 4, 0x00FF00FF);
+    assert_eq(bhumi_fb_get(rfb, 101, 101), 0x00FF00FF, "a refused fill DRAWS instead — no hole in the frame");
+
+    # ⛔ THE LATCH: once gpu.cyr retires the path, every later frame draws on the CPU.
+    ae_rect_reset();
+    ae_chrome_gpu_disable();
+    assert_eq(ae_chrome_on_gpu(), 0, "a refusal retires the chrome path for the run");
+    bhumi_fb_clear(rfb, 0x00000000);
+    fill_rect(rfb, 5, 5, 4, 4, 0x0000FF00);
+    assert_eq(ae_rect_count(), 0, "and fill_rect stops queueing");
+    assert_eq(bhumi_fb_get(rfb, 6, 6), 0x0000FF00, "...drawing instead");
+    ae_chrome_gpu_ok = 1;
+    ae_gpu_frame_ok = 0;
+    ae_rect_reset();
+
     test_group("render — decoration hit-test");
     var win = win_new(1, 100, 100, 400, 300, "T");
     assert_eq(deco_hit(win, 50, 50), Deco.DECO_NONE, "outside window");
