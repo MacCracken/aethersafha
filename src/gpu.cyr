@@ -46,6 +46,12 @@ var ae_gpu_fallback_seen = 0;
 var AE_GPU_CAP_PRESENT  = 1;    # bit0 — a GPU is bound
 var AE_GPU_CAP_ARMED    = 2;    # bit1 — the double-buffer is armed (a back buffer exists to composite into)
 var AE_GPU_CAP_CARVEOUT = 4;    # bit2 — a GPU carveout exists, so #86 slots can be served
+# ⭐⭐ bit4 — BATCHED SUBMISSION, and it is a SEMANTIC bit, not a performance hint. One `#92` call is ONE GPU
+# submission, so a failure cannot name which op died: the kernel answers `GPO_E_BATCH` and an INDETERMINATE
+# PREFIX has already landed in the back buffer. ⇒ The caller owes a DIFFERENT recovery than for a per-op
+# `GPO_E_DISPATCH`: re-clear with `#85` and **do not present**. A compositor that ignores this bit cannot know
+# which recovery it owes — the kernel's own caps comment says so — and until now this one ignored it.
+var AE_GPU_CAP_BATCHED  = 16;
 var AE_GPU_CAP_SHADER   = 8;    # bit3 — SHADER COMPOSITING available, i.e. gpu_shader_op#92 will actually
 # run. Mirrors the kernel's own gate: #92 refuses with E_UNPROVEN unless
 # the dispatch envelope was proven on THIS boot.
@@ -60,6 +66,27 @@ var AE_BLIT_DEFER = 0x10000000000;
 # buffer has nothing to composite into, and one with no carveout cannot serve the `#86` slots the clients'
 # surfaces live in — either way `#87` would fail per-window and we would produce a frame with chrome and no
 # content. Cheaper to answer honestly once.
+# ⭐ THE WHOLE `#89` RECORD IS READ NOW, NOT JUST `flags`. Bytes +4..+31 carry the real back-buffer geometry
+# and the `#86` slot budget, and both answer questions this compositor was previously guessing at:
+#   +4  bb_pitch (BYTES)   +8  bb_w (px)   +12 bb_h (px)
+#   +16 shm_max slots      +20 shm_free    +24 shm_slot_max bytes
+# ⛔ `bb_w` IS NOT A LAYOUT WIDTH. It is `pitch / 4`, and on archaemenid the pitch in pixels (832) EXCEEDS the
+# visible width (800) — laying out to it would push chrome into the invisible gutter, which is a mistake this
+# repo already made once with `#38 fbinfo`. It is the right bound for asking "will `#87`/`#88` ACCEPT this
+# rect", because those bounds-check against the BACK BUFFER and REJECT rather than clip. Two different
+# questions, two different numbers.
+var ae_gpu_bb_pitch = 0;
+var ae_gpu_bb_w = 0;
+var ae_gpu_bb_h = 0;
+var ae_gpu_shm_max = 0;
+var ae_gpu_shm_free = 0;
+var ae_gpu_shm_slot_max = 0;
+var ae_gpu_batched = 0;         # 1 = one #92 call is one submission ⇒ GPO_E_BATCH recovery applies
+
+fn ae_gpu_bb_w_get(): i64 { return ae_gpu_bb_w; }
+fn ae_gpu_bb_h_get(): i64 { return ae_gpu_bb_h; }
+fn ae_gpu_batched_get(): i64 { return ae_gpu_batched; }
+
 fn ae_gpu_probe(): i64 {
     if (ae_gpu_probed == 1) { return ae_gpu_mode; }
     ae_gpu_probed = 1;
@@ -68,6 +95,13 @@ fn ae_gpu_probe(): i64 {
     var caps[32];                       # function-local => 32 BYTES, the #89 record size
     if (sys_gpu_caps(&caps, 32) != 0) { return 0; }
     var flags = load32(&caps + 0) & 0xFFFFFFFF;
+    ae_gpu_bb_pitch     = load32(&caps + 4) & 0xFFFFFFFF;
+    ae_gpu_bb_w         = load32(&caps + 8) & 0xFFFFFFFF;
+    ae_gpu_bb_h         = load32(&caps + 12) & 0xFFFFFFFF;
+    ae_gpu_shm_max      = load32(&caps + 16) & 0xFFFFFFFF;
+    ae_gpu_shm_free     = load32(&caps + 20) & 0xFFFFFFFF;
+    ae_gpu_shm_slot_max = load32(&caps + 24) & 0xFFFFFFFF;
+    if ((flags & AE_GPU_CAP_BATCHED) != 0) { ae_gpu_batched = 1; }
     if ((flags & AE_GPU_CAP_PRESENT) == 0)  { return 0; }
     if ((flags & AE_GPU_CAP_ARMED) == 0)    { return 0; }
     if ((flags & AE_GPU_CAP_CARVEOUT) == 0) { return 0; }
@@ -76,6 +110,15 @@ fn ae_gpu_probe(): i64 {
     # compositing envelope is unproven. Opaque windows still go hardware; only the premultiplied ones
     # need this.
     if ((flags & AE_GPU_CAP_SHADER) != 0) { ae_gpu_blend = 1; }
+    # ⚠ STATE THE BUDGET RATHER THAN DISCOVERING IT BY FAILING. The glyph path needs one `#86` slot and each
+    # client surface needs one; there are only `shm_max` in the whole system and `shm_create` rounds every
+    # request up to a 2 MB page. Printing the free count at probe time means a later "no slot for glyphs"
+    # has a cause in the same log instead of being a mystery.
+    println("aethersafha: gpu back buffer and slot budget");
+    println_int(ae_gpu_bb_w);
+    println_int(ae_gpu_bb_h);
+    println_int(ae_gpu_shm_free);
+    if (ae_gpu_batched == 1) { println("aethersafha: #92 is BATCHED -- a failure means an indeterminate prefix landed"); }
     #endif
     return ae_gpu_mode;
 }
@@ -331,6 +374,16 @@ var ae_gpu_chrome_seen = 0;
 # Drain the frame's chrome rects. -> count filled, or -1 if a fill was refused and the path is now retired.
 fn ae_gpu_emit_chrome(): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
+    # ⛔ ANNOUNCE THE PATH, NOT THE EMISSION, AND SAY IT BEFORE THE EARLY RETURN.
+    # This logged only after a rect was successfully filled, so "no line" had TWO causes: the chrome never
+    # went to the GPU, or it did and the queue happened to be empty (an idle frame whose damage band is
+    # zero-height enqueues nothing, which is correct). One of those is a finding and the other is normal,
+    # and a reader cannot tell them apart from an absence. Stating it at the point the DECISION is live
+    # makes the line mean exactly "chrome is on the GPU this run".
+    if (ae_gpu_chrome_seen == 0) {
+        ae_gpu_chrome_seen = 1;
+        println("aethersafha: chrome fills are on the GPU (#88 gpu_fill_rect) -- the #39 blit is gone");
+    }
     var n = ae_rect_count();
     if (n == 0) { return 0; }
     var i = 0;
@@ -347,10 +400,6 @@ fn ae_gpu_emit_chrome(): i64 {
             return 0 - 1;
         }
         i = i + 1;
-    }
-    if (ae_gpu_chrome_seen == 0) {
-        ae_gpu_chrome_seen = 1;
-        println("aethersafha: chrome fills are on the GPU (#88 gpu_fill_rect) -- the #39 blit is gone");
     }
     return n;
     #endif
@@ -402,6 +451,42 @@ fn ae_gpu_glyph_rect(mask_id, wh, dstxy, color): i64 {
     #endif
 }
 
+# ⛔⛔ THE RECOVERY THE `BATCHED` BIT OBLIGES, AND THIS COMPOSITOR WAS NOT DOING IT.
+#
+# `GPO_E_BATCH` (15) means one `#92` call was one submission and an **INDETERMINATE PREFIX** of its ops has
+# already landed in the back buffer. The kernel's contract for that case is explicit: ring 3 recovers by
+# **re-clearing with `#85` and NOT calling `#84`**. Anything else presents a half-composited frame — and
+# because the prefix is indeterminate there is no way to repair it op by op.
+#
+# A per-op `GPO_E_DISPATCH` is the other case, and it is NOT the same: there the failing index is named,
+# ops `[0, idx)` composited cleanly, and demoting the frame to the CPU path is a sufficient answer.
+#
+# ⚠ The error encoding is `-((idx << 8) | reason)`, so the reason is the low byte of the negated return —
+# `idx` is meaningless for a batch error and must not be read as one.
+fn ae_gpu_err_reason(rc): i64 {
+    if (rc >= 0) { return 0; }
+    return (0 - rc) & 0xFF;
+}
+
+# 1 when a `#92` return demands the batch recovery (re-clear, do not present) rather than a plain demote.
+fn ae_gpu_err_is_batch(rc): i64 {
+    if (ae_gpu_err_reason(rc) == 15) { return 1; }        # GPO_E_BATCH
+    return 0;
+}
+
+# Re-clear the back buffer after an indeterminate batch failure. Returns 0 on success.
+# ⚠ `#85 gpu_fill` whole-buffer is exactly right here: the prefix could have touched anywhere, so a damage
+# band is not a sound bound for the repair. This is the one place the full-screen clear is still correct.
+fn ae_gpu_batch_recover(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    println("aethersafha: #92 batch failed -- indeterminate prefix landed, re-clearing and NOT presenting");
+    return sys_gpu_fill(0);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+}
+
 # Drain the frame's text runs onto the GPU. Returns the number emitted.
 #
 # ⛔ MUST RUN AFTER THE `#39` CHROME BLIT AND BEFORE `#84 present`. The blit copies the whole userland
@@ -438,7 +523,8 @@ fn ae_gpu_emit_text(): i64 {
         if (sys_shm_write(ae_gpu_glyph_slot, ae_gpu_glyph_buf, ae_text_bytes(len)) == 0) {
             var wh = (FONT_H << 16) | w;
             var dstxy = (ae_text_run_y(i) << 16) | ae_text_run_x(i);
-            if (ae_gpu_glyph_rect(ae_gpu_glyph_slot, wh, dstxy, ae_text_run_col(i)) == 0) {
+            var grc = ae_gpu_glyph_rect(ae_gpu_glyph_slot, wh, dstxy, ae_text_run_col(i));
+            if (grc == 0) {
                 emitted = emitted + 1;
             }
             else {
@@ -449,6 +535,11 @@ fn ae_gpu_emit_text(): i64 {
                 # line in the log to explain it.
                 ae_text_gpu_disable();
                 println("aethersafha: #92 op 0x03 refused a glyph run -- chrome text returns to the CPU");
+                # ⛔⛔ AND IF THE KERNEL BATCHES, THIS FRAME MUST NOT BE PRESENTED. An indeterminate prefix
+                # of the submission is already in the back buffer; presenting it shows a half-composited
+                # frame. -2 tells the caller to re-clear and skip the flip. Reading only "nonzero = bad"
+                # here is what made this compositor owe a recovery it never performed.
+                if (ae_gpu_err_is_batch(grc) == 1) { return 0 - 2; }
                 return emitted;
             }
         }
@@ -577,7 +668,15 @@ fn ae_gpu_present_frame(comp, fb): i64 {
             var use_blend = 0;
             if (win_premul(win) == 1) { if (ae_gpu_blend == 1) { use_blend = 1; } }
             if (use_blend == 1) {
-                if (ae_gpu_blend_rect(bid, wh, dstxy) != 0) { ae_gpu_demote(); return 0; }
+                var brc = ae_gpu_blend_rect(bid, wh, dstxy);
+                if (brc != 0) {
+                    # ⛔ SAME TWO RECOVERIES AS THE GLYPH PATH. A batch failure left an indeterminate prefix
+                    # in the back buffer, so re-clear and refuse the flip; a per-op failure is repairable by
+                    # demoting the frame to the CPU. Treating both as "demote" would present a partial frame.
+                    if (ae_gpu_err_is_batch(brc) == 1) { ae_gpu_batch_recover(); ae_gpu_demote(); return 0; }
+                    ae_gpu_demote();
+                    return 0;
+                }
                 if (ae_gpu_blend_seen == 0) {
                     ae_gpu_blend_seen = 1;
                     println("aethersafha: compositing a client surface with #92 op 0x01 (shader blend)");
@@ -598,7 +697,15 @@ fn ae_gpu_present_frame(comp, fb): i64 {
 
     # 2c. `AE-8` — the frame's chrome text, on the shader cores. AFTER the chrome blit (which would erase
     #     it) and the client surfaces (so a title cannot be hidden under a window), BEFORE the flip.
-    ae_gpu_emit_text();
+    # ⛔ -2 MEANS DO NOT PRESENT. A batched `#92` failure left an indeterminate prefix in the back buffer;
+    # the kernel's stated recovery is re-clear and no `#84`. Returning 0 here sends the caller to the CPU
+    # present, which repaints the whole frame from the userland framebuffer — the correct outcome, and the
+    # one thing that must NOT happen is flipping the half-composited buffer to the panel.
+    if (ae_gpu_emit_text() == 0 - 2) {
+        ae_gpu_batch_recover();
+        ae_gpu_demote();
+        return 0;
+    }
 
     # 2b. Pre-flip capture, if the selftest armed one. See the ae_gpu_cap_* block above for why this
     #     is here and not in a probe of its own, and why it cannot be moved below the present.

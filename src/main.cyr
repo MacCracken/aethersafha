@@ -64,6 +64,10 @@ var ae_inp_denied = 0;
 var ae_inp_down = 0;
 var ae_inp_tab = 0;
 var ae_inp_fwd = 0;
+var ae_inp_move = 0;
+# Pixels per F1-F4 press. Large enough that one tap visibly moves the window (so the operator can see the
+# damage model work) and small enough that a few taps do not slam it into an edge.
+var AE_MOVE_STEP = 40;
 enum AeProbe {
     # ⛔ THE BUDGET IS WALL TIME, NOT FRAMES, and the first version got this wrong. What a spawned
     # client needs in order to load from ext2, start, and complete a loopback TCP connect is SECONDS
@@ -463,6 +467,56 @@ fn main(): i64 {
                                 ae_inp_tab = 1;
                                 println("aethersafha: a TAB reached the compositor");
                             }
+                        # ⭐⭐ MOVE THE FOCUSED WINDOW WITH F1-F4, and this is the unlock for two things that
+                        # have been listed as untestable-without-a-pointer.
+                        #
+                        # ⛔ WHY F-KEYS AND NOT A MODIFIER COMBO. `bhumi_key_usage(ev)` is `ev & 0xFF` and
+                        # `bhumi_key_pressed(ev)` is one bit — **no modifier state reaches the compositor at
+                        # all**, which is the same gap that stops the terminal from seeing Shift. So a combo
+                        # is not detectable here, and a bare key it must be.
+                        # ⛔ WHY NOT ARROWS. crab navigates with Left/Right/Up/Down (and h/j/k/l), so
+                        # consuming arrows would break the file manager's whole interaction. puka maps F1-F12
+                        # to CSI sequences but nothing downstream acts on them, so F1-F4 cost no client
+                        # anything. HID usages: F1 0x3A, F2 0x3B, F3 0x3C, F4 0x3D.
+                        # ⭐ AND IT FINALLY EXERCISES `AE-0a`'s ONE UNTESTED CASE. The damage model's whole
+                        # reason for `union(cur, prev)` is a window that MOVES leaving its old pixels behind,
+                        # and this arc has recorded three times that nothing could move one without `AE-7`
+                        # pointer input. A keyboard mover is not a workaround for the pointer — it is the
+                        # missing stimulus for a model that was shipped on unexercised reasoning.
+                        # ⚠ CONSUMED, NOT FORWARDED, exactly like TAB: a move key that also reached the
+                        # client would scroll a file list while the window slid out from under it.
+                        if (bhumi_key_usage(ev) >= 0x3A) {
+                            if (bhumi_key_usage(ev) <= 0x3D) {
+                                var mw = comp_focused_window(comp);
+                                if (mw != 0) {
+                                    var mdx = 0;
+                                    var mdy = 0;
+                                    if (bhumi_key_usage(ev) == 0x3A) { mdx = 0 - AE_MOVE_STEP; }
+                                    if (bhumi_key_usage(ev) == 0x3B) { mdx = AE_MOVE_STEP; }
+                                    if (bhumi_key_usage(ev) == 0x3C) { mdy = 0 - AE_MOVE_STEP; }
+                                    if (bhumi_key_usage(ev) == 0x3D) { mdy = AE_MOVE_STEP; }
+                                    # ⛔ CLAMP INTO THE SCREEN. `#88`/`#87` REJECT an out-of-range rect
+                                    # rather than clipping, and `ae_gpu_window_admissible` refuses a window
+                                    # past an edge — which would drop the whole frame to the CPU. A mover
+                                    # that can push a window off-screen would therefore turn a keypress into
+                                    # a silent loss of hardware compositing.
+                                    var nx = win_x(mw) + mdx;
+                                    var ny = win_y(mw) + mdy;
+                                    if (nx < 0) { nx = 0; }
+                                    if (ny < 0) { ny = 0; }
+                                    if (nx + win_w(mw) > ae_geom_w) { nx = ae_geom_w - win_w(mw); }
+                                    if (ny + win_h(mw) + TITLEBAR_H > ae_geom_h) {
+                                        ny = ae_geom_h - win_h(mw) - TITLEBAR_H;
+                                    }
+                                    win_move(mw, nx, ny);
+                                    if (ae_inp_move == 0) {
+                                        ae_inp_move = 1;
+                                        println("aethersafha: F1-F4 moved the focused window");
+                                    }
+                                }
+                                kdone = 1;
+                            }
+                        }
                             if (n_win < 2) { println("aethersafha: TAB ignored -- fewer than two windows"); }
                             if (n_win > 1) {
                                 var nf = comp_focused(comp) + 1;

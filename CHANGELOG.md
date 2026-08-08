@@ -4,7 +4,79 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — `AE-9`: the chrome fills move to the GPU and the `#39` blit is GONE
+## [Unreleased] — `#89` caps in full (and the batch recovery it obliges), a keyboard window MOVER, and `AE-9`
+
+### Fixed — `#92`'s BATCHED failure mode demanded a recovery this compositor never performed
+
+⛔⛔ **`#89` caps bit4 (BATCHED) is SET whenever the shader is available, so it is set on archaemenid — and
+this compositor never read it.** The bit is semantic, not a hint: one `#92` call is one GPU submission, so a
+failure cannot name the op that died. The kernel answers `GPO_E_BATCH` and **an indeterminate prefix has
+already landed in the back buffer**, with an explicit contract for ring 3 — **re-clear with `#85` and do NOT
+call `#84`**. The kernel's own caps comment says a caller that ignores the bit cannot know which recovery it
+owes. This one owed the batch recovery and was doing the per-op one: on a glyph failure it returned and let
+the frame **present a half-composited buffer**.
+
+Both `#92` call sites now distinguish the two. `ae_gpu_err_is_batch()` reads the reason out of the
+`-((idx << 8) | reason)` encoding — ⚠ `idx` is meaningless for a batch error and must not be read as one —
+and a batch failure triggers `#85` whole-buffer re-clear plus a refusal to flip. A per-op `GPO_E_DISPATCH`
+keeps the old, sufficient answer: demote the frame to the CPU path.
+
+⚠ **The full-screen clear is correct in exactly this one place.** The landed prefix could have touched
+anywhere, so `AE-0a`'s damage band is not a sound bound for the repair.
+
+### Added — the whole `#89` record is read, not just `flags`
+
+Bytes +4..+31 were being ignored: `+4` bb_pitch, `+8` bb_w, `+12` bb_h, `+16` shm_max, `+20` shm_free,
+`+24` shm_slot_max. The slot budget is now **printed at probe time**, so a later "no graphics-visible slot for
+glyphs" has its cause in the same log instead of being a mystery — there are only 16 `#86` slots system-wide
+and `shm_create` rounds every request up to a 2 MB page.
+
+⛔ **`bb_w` IS NOT A LAYOUT WIDTH** and is deliberately not used as one. It is `pitch / 4`, and on archaemenid
+the pitch in pixels (832) exceeds the visible width (800) — laying out to it would push chrome into the
+invisible gutter, which is the mistake this repo already made once with `#38 fbinfo`. It is the right bound
+for "will `#87`/`#88` ACCEPT this rect", because those check against the back buffer and reject rather than
+clip. Two questions, two numbers.
+
+### Added — F1-F4 move the focused window, which unblocks `AE-0a`'s one untested case
+
+⭐⭐ **The damage model's whole reason for `union(cur, prev)` is a window that MOVES leaving its old pixels
+behind — and this arc recorded three times that nothing could move one without `AE-7` pointer input.** So the
+band shipped, and burned, on reasoning that had never been exercised. F1-F4 nudge the focused window 40 px,
+consumed and not forwarded (a move key that also reached the client would scroll a file list while the window
+slid out from under it). That is not a workaround for the pointer; it is the **missing stimulus** for a model
+that was already in production.
+
+⛔ **F-keys because a modifier combo is not detectable here.** `bhumi_key_usage(ev)` is `ev & 0xFF` and
+`bhumi_key_pressed(ev)` is one bit — **no modifier state reaches the compositor at all**, the same gap that
+stops the terminal seeing Shift. ⛔ And not arrows: crab navigates with Left/Right/Up/Down and h/j/k/l, so
+consuming those would break the file manager. puka maps F1-F12 to CSI sequences but nothing downstream acts
+on them, so F1-F4 cost no client anything.
+
+⛔ **The move CLAMPS into the screen**, and that is not cosmetic: `#88`/`#87` reject an out-of-range rect
+rather than clipping, and `ae_gpu_window_admissible` refuses a window past an edge — so a mover that could
+push a window off-screen would turn one keypress into a silent loss of hardware compositing.
+
+### ⛔ `#91 gpu_blit_bb` has NO correct consumer here, and the ladder assumed otherwise
+
+`#91` copies a rect **within** the back buffer — the natural use being "move a window without recompositing
+it". It does not apply to this compositor, for a reason that is structural rather than fixable by care:
+
+**Every window here is a live client surface that is re-composited every frame by design.** `render_window`
+re-reads a `bufid` window's buffer each frame and the damage model marks such windows damaged unconditionally
+— *"Treating those as undamaged would freeze animating windows"*. So the content a `#91` copy would move is
+already being rewritten from the client's buffer regardless, and copying stale composited pixels saves
+nothing. For a chrome-only window `#88` is already the cheap answer.
+
+⚠ A second obstacle sits behind that one: `#84 present` FLIPS, so a copy's source is 1 or 2 frames stale
+depending on a buffer parity **ring 3 cannot observe** — `gpu_bb_back` is kernel-private and is not in the
+`#89` record. Parity could be derived by counting successful presents, so this is the weaker of the two
+reasons; the content one stands on its own.
+
+⇒ `#91` becomes useful when the compositor preserves the back buffer and touches only damage, which is a
+different frame architecture from the one `AE-9` just finished. Recorded in the falsified list rather than
+implemented, because implementing it would add a path that saves nothing and can silently copy stale pixels.
+
+## Previously in this cycle — `AE-9`: the chrome fills move to the GPU and the `#39` blit is GONE
 
 ### Added — `AE-9`: `#88 gpu_fill_rect` for the clear and every chrome rect
 
