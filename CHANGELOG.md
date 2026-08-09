@@ -4,47 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — `AE-7` **P0**: one window-geometry convention, so the first click lands where it looks
+## [0.12.5] - 2026-08-08 — `AE-7`: THE POINTER WORKS — cursor, click-to-focus, titlebar drag
 
-⛔⛔ **Five consumers had drifted into THREE conventions for a window's vertical extent, and one function
-held two of them.** `win_h` is the CONTENT height with the titlebar ABOVE it, so a window occupies
-`win_y .. win_y + TITLEBAR_H + win_h`. That is what the damage model, the GPU client composite and
-`render_window`'s client blit all do — the three **iron-proven** paths. But:
-
-- `render_window`'s **theme body fill** used `h - TITLEBAR_H`, contradicting the client blit **50 lines
-  below it in the same function**: the theme body stopped 30 px short of the surface drawn over it.
-  Invisible while a client covered it, and 30 px short on the compositor's own clientless window.
-- `deco_hit` and `comp_window_at` ended the window at `y + win_h`, i.e. 30 px too high.
-
-⚠ **Inert only because nothing clicks yet.** The first pointer click would have landed 30 px out on every
-live setu window, the bottom-most 30 px of every client surface would have registered as *outside* the
-window (finding whatever was behind it), and the bottom resize strip would have fallen **inside** the
-client's content rather than on its edge — a drag there starting a resize in the middle of a window.
-
-⭐ **The convention now has exactly one definition**, in `src/window.cyr`: `win_total_h`, `win_body_y`,
-`win_bottom_y`, `win_prev_total_h`, with the whole history written beside them. Every consumer was routed
-through them — `deco_hit`, `comp_window_at`, the damage model's `cur` *and* `prev` terms, the GPU composite
-(both call sites), the client blit, the focus accent strip and foreign.cyr. **Do not open-code
-`+ TITLEBAR_H` at a call site again** — that is precisely how the drift happened.
-
-⚠ **`TITLEBAR_H` moved from render.cyr's `RenderK` to window.cyr's `WinGeom`**, because that was the
-mechanical cause: it sat in the renderer's *button-geometry* enum, and `compositor.cyr` is included
-EARLIER, so `comp_window_at` could not reach it and open-coded the wrong extent instead. A
-window-geometry fact belongs with the window model. Button geometry stays in the renderer.
-
-**Tests** `tests/render.tcyr` 160 → **179 asserts**, with the convention pinned explicitly
-(`win_body_y == 130`, `win_total_h == 330`, `win_bottom_y == 430` for a window at y=100 h=300) and every
-boundary asserted in both directions. ⚠ Two pre-existing asserts were **changed, not added**: `(300,397)`
-had been asserted as `DECO_RESIZE_B` for as long as that test existed, and under the real convention it is
-33 px inside the client surface — it is now the regression guard that fails if chrome-inside returns.
-⚠ Mutation-verified in both halves: reverting `win_bottom_y` fails 7 asserts, and reverting the body fill
-fails 1 — **that second test exists because the first mutant of it PASSED**, so the body's height was
-untested until four pixel asserts were added for it.
-
-⭐ No pointer code. This is the latent debt `AE-7` would otherwise have inherited, paid down on its own
-with its own tests. Design: agnos [`planning/pointer.md`](https://github.com/MacCracken/agnos/blob/main/docs/development/planning/pointer.md).
-
-## [Unreleased] — `AE-7`: the pointer works. Cursor, click-to-focus, titlebar drag.
+⭐ **The whole `AE-7` arc in one cut** (P0 + P4 here; the kernel's P1-P3 are agnos 1.56.42 and bhumi
+1.1.4). A USB mouse now moves a cursor, focuses a window by clicking it, and drags one by its
+titlebar — verified end to end in QEMU, and the first ring-3 use of `ptrscan #98`.
+⛔ **Not yet on iron.**
 
 ### Added — the compositor consumes pointer events (`AE-7` P4)
 
@@ -85,6 +50,46 @@ the guard now fails three asserts, one reading `got 1` = `IA_QUIT`.
 **Tests** input 91 asserts, render 179. `cyrius` pin 6.5.9 → **6.5.13** (`sys_ptrscan`, transitively via
 bhumi). ⭐ **QEMU end to end**: motion and clicks both reach the compositor — and this is the first
 ring-3 caller of `ptrscan #98`, so it is what proves that syscall at all.
+
+### Fixed — `AE-7` **P0**: one window-geometry convention, so the first click lands where it looks
+
+⛔⛔ **Five consumers had drifted into THREE conventions for a window's vertical extent, and one function
+held two of them.** `win_h` is the CONTENT height with the titlebar ABOVE it, so a window occupies
+`win_y .. win_y + TITLEBAR_H + win_h`. That is what the damage model, the GPU client composite and
+`render_window`'s client blit all do — the three **iron-proven** paths. But:
+
+- `render_window`'s **theme body fill** used `h - TITLEBAR_H`, contradicting the client blit **50 lines
+  below it in the same function**: the theme body stopped 30 px short of the surface drawn over it.
+  Invisible while a client covered it, and 30 px short on the compositor's own clientless window.
+- `deco_hit` and `comp_window_at` ended the window at `y + win_h`, i.e. 30 px too high.
+
+⚠ **Inert only because nothing clicks yet.** The first pointer click would have landed 30 px out on every
+live setu window, the bottom-most 30 px of every client surface would have registered as *outside* the
+window (finding whatever was behind it), and the bottom resize strip would have fallen **inside** the
+client's content rather than on its edge — a drag there starting a resize in the middle of a window.
+
+⭐ **The convention now has exactly one definition**, in `src/window.cyr`: `win_total_h`, `win_body_y`,
+`win_bottom_y`, `win_prev_total_h`, with the whole history written beside them. Every consumer was routed
+through them — `deco_hit`, `comp_window_at`, the damage model's `cur` *and* `prev` terms, the GPU composite
+(both call sites), the client blit, the focus accent strip and foreign.cyr. **Do not open-code
+`+ TITLEBAR_H` at a call site again** — that is precisely how the drift happened.
+
+⚠ **`TITLEBAR_H` moved from render.cyr's `RenderK` to window.cyr's `WinGeom`**, because that was the
+mechanical cause: it sat in the renderer's *button-geometry* enum, and `compositor.cyr` is included
+EARLIER, so `comp_window_at` could not reach it and open-coded the wrong extent instead. A
+window-geometry fact belongs with the window model. Button geometry stays in the renderer.
+
+**Tests** `tests/render.tcyr` 160 → **179 asserts**, with the convention pinned explicitly
+(`win_body_y == 130`, `win_total_h == 330`, `win_bottom_y == 430` for a window at y=100 h=300) and every
+boundary asserted in both directions. ⚠ Two pre-existing asserts were **changed, not added**: `(300,397)`
+had been asserted as `DECO_RESIZE_B` for as long as that test existed, and under the real convention it is
+33 px inside the client surface — it is now the regression guard that fails if chrome-inside returns.
+⚠ Mutation-verified in both halves: reverting `win_bottom_y` fails 7 asserts, and reverting the body fill
+fails 1 — **that second test exists because the first mutant of it PASSED**, so the body's height was
+untested until four pixel asserts were added for it.
+
+⭐ No pointer code. This is the latent debt `AE-7` would otherwise have inherited, paid down on its own
+with its own tests. Design: agnos [`planning/pointer.md`](https://github.com/MacCracken/agnos/blob/main/docs/development/planning/pointer.md).
 
 ## [0.12.4] - 2026-08-08 — the desktop's last CPU work moves to the GPU, and window management starts working
 
