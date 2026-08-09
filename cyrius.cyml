@@ -35,7 +35,7 @@ stdlib = [
 [deps.bhumi]
 git = "https://github.com/MacCracken/bhumi.git"
 path = "../bhumi"
-tag = "1.1.3"
+tag = "1.1.4"
 modules = ["dist/bhumi.cyr"]
 
 # --- Desktop theme-token core: rupa (रूप — form / appearance). The ONE source of
@@ -93,7 +93,7 @@ modules = ["src/types.cyr", "src/surface.cyr", "src/sandbox.cyr"]
 [deps.kavach]
 git = "https://github.com/MacCracken/kavach.git"
 path = "../kavach"
-tag = "3.11.0"
+tag = "3.11.7"
 modules = ["dist/kavach.cyr"]
 
 # --- DISPLAY plane contract: setu (सेतु — bridge). The dhancha client ↔ this
