@@ -585,6 +585,22 @@ fn ae_gpu_emit_cursor(): i64 {
     if (ae_cursor_q_pending() == 0) { return 0; }
     if (ae_gpu_text_fail == 1) { return 0; }
     if (ae_gpu_glyph_slot == 0) { return 0; }        # no staging slot -> the CPU path drew it already
+    # ⛔ CONSUME THE QUEUE HERE, NOT NOWHERE. It is set by `render_cursor` once per frame and was never
+    # cleared, so the flag latched at 1 for the rest of the run. That happens to be harmless in today's
+    # call graph — every `ae_gpu_present_frame` is preceded by a `render_desktop` that re-queues — but it
+    # means correctness rested on a call-ordering coincidence rather than on the queue's own contract. A
+    # present that ever runs without a render would composite the cursor at a STALE position.
+    ae_cursor_q_clear();
+    # ⛔⛔ THE SLOT IS BORROWED FROM THE TEXT PATH, AND ITS CAPACITY IS NOT THIS FILE'S TO ASSUME. It is
+    # sized for the widest glyph run (`ae_text_bytes(AE_TEXT_CHARS)`); a cursor mask is `cursor_max_bytes()`.
+    # ⚠ 40 vs 1152 today — I asserted that in a COMMENT and checked it nowhere, which is exactly how a
+    # later resize of the text slot turns into an shm overrun with no failing test.
+    # [[feedback_audit_re_derive_dont_validate_comments]]
+    if (cursor_max_bytes() > ae_text_bytes(AE_TEXT_CHARS)) {
+        ae_cursor_gpu_disable();
+        println("aethersafha: the cursor mask does not fit the glyph staging slot -- pointer moves to the CPU");
+        return 0;
+    }
     var cx = ae_cursor_q_x();
     var cy = ae_cursor_q_y();
     var vr = alloc(32);
@@ -609,6 +625,12 @@ fn ae_gpu_emit_cursor(): i64 {
             else {
                 # An indeterminate prefix is already in the back buffer — the frame cannot be presented.
                 if (ae_gpu_err_is_batch(rc) == 1) { return 0 - 2; }
+                # ⛔ RETIRE THE GPU CURSOR, DO NOT JUST GIVE UP ON THIS FRAME. `render_cursor` queued
+                # instead of drawing, so without this the pointer is absent this frame AND every frame
+                # after it — the queue re-fills and the op refuses again. Retiring sends the next frame to
+                # `render_cursor_cpu`, which draws per-pixel and cannot be refused.
+                ae_cursor_gpu_disable();
+                println("aethersafha: #92 op 0x03 refused a cursor mask -- the pointer returns to the CPU");
                 return emitted;
             }
         }

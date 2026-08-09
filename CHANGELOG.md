@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed — a refused cursor mask made the pointer permanently invisible
+
+⛔⛔ **0.12.7 shipped the 1.56.42 failure reproduced inside the fix for it.** `render_cursor` QUEUES for the
+GPU instead of drawing, and `ae_gpu_emit_cursor` had **no retirement latch** — so one refused `#92` op left
+the pointer absent for that frame, and because the next frame queued and refused again, absent for the rest
+of the boot, with a single log line to explain it. That is exactly what a refused glyph did to every caption
+on the desktop, one layer over.
+⇒ `ae_cursor_gpu_ok` retires the GPU cursor on the first refusal and sends every later frame to
+`render_cursor_cpu`, which draws per-pixel and cannot be refused. **One frame of missing pointer instead of
+a boot without one.** Separate from `ae_text_gpu_ok` deliberately: retiring captions because the *pointer*
+was refused would be the same mistake pointing the other way.
+
+⚠ **Found by auditing my own additions for dead code, not by a test** — `ae_cursor_q_clear` had zero call
+sites, and pulling that thread exposed the missing latch beside it. `tests/render.tcyr` 205 → **217** now
+covers it: on a GPU frame with the latch retired, all **131** arrow pixels must reach the framebuffer.
+Removing the latch check fails 4 asserts including *0 pixels drawn*.
+
+### Fixed — two more unvalidated claims in the same code
+
+- **The queue was never consumed.** `ae_cursor_q_clear()` existed and was called from nowhere, so the flag
+  latched at 1 for the run. Harmless in today's call graph (every present is preceded by a render that
+  re-queues) but it made correctness rest on call ordering rather than the queue's own contract — a present
+  without a render would have composited a STALE cursor position. The emit now consumes it.
+- **`cursor_max_bytes()` was checked in a comment and nowhere else.** The cursor borrows the text path's
+  `#86` staging slot; I asserted 40 ≤ 1152 in prose and never in code, which is how a later resize of the
+  text slot becomes an shm overrun with no failing test. Now a real guard that retires to the CPU.
+- **Dead API removed:** `cursor_hot_x()` / `cursor_hot_y()` had no caller in `src/` — accessors that only
+  looked used. The constants remain (the tip is drawn from them); the wrappers are gone.
+
 ## [0.12.7] - 2026-08-09 — the pointer is an arrow: a derived-outline cursor that clips
 
 ### Added — a REAL cursor: `src/cursor.cyr`, an arrow instead of a `+`

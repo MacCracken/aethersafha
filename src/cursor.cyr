@@ -33,8 +33,6 @@ enum CursorK {
 
 fn cursor_w(): i64 { return CursorK.CUR_W; }
 fn cursor_h(): i64 { return CursorK.CUR_H; }
-fn cursor_hot_x(): i64 { return CursorK.CUR_HOT_X; }
-fn cursor_hot_y(): i64 { return CursorK.CUR_HOT_Y; }
 
 # ⭐ THE ONLY ART IN THIS FILE — the arrow's INTERIOR, in bitmap coordinates. Three pieces:
 #

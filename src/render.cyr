@@ -493,6 +493,17 @@ fn ae_cursor_line_colour(): i64 { return bhumi_xrgb(0, 0, 0); }
 var ae_cur_q = 0;
 var ae_cur_qx = 0;
 var ae_cur_qy = 0;
+# ⛔⛔ THE CURSOR NEEDS ITS OWN RETIREMENT LATCH, AND SHIPPING WITHOUT ONE REPRODUCED THE 1.56.42 BUG IN A
+# NEW PLACE. `render_cursor` QUEUES instead of drawing, so if the GPU emit then refuses, the cursor is
+# simply absent — and because the next frame queues again and refuses again, it is absent FOREVER, with one
+# log line to explain it. That is exactly what the glyph path did to every caption on the desktop.
+# ⇒ gpu.cyr clears this on the first refusal, which sends every later frame to `render_cursor_cpu`. One
+# frame of missing pointer instead of a boot without one.
+# ⚠ SEPARATE from `ae_text_gpu_ok` on purpose: retiring captions because the POINTER was refused would be
+# the same mistake pointing the other way.
+var ae_cursor_gpu_ok = 1;
+fn ae_cursor_gpu_ok_get(): i64 { return ae_cursor_gpu_ok; }
+fn ae_cursor_gpu_disable(): i64 { ae_cursor_gpu_ok = 0; return 0; }
 fn ae_cursor_q_pending(): i64 { return ae_cur_q; }
 fn ae_cursor_q_x(): i64 { return ae_cur_qx; }
 fn ae_cursor_q_y(): i64 { return ae_cur_qy; }
@@ -527,11 +538,13 @@ fn render_cursor(fb): i64 {
     # the CPU while the blit is skipped loses it just as silently. These two flags have to agree.
     if (ae_gpu_frame_ok == 1) {
         if (ae_text_gpu_ok == 1) {
+        if (ae_cursor_gpu_ok == 1) {
             ae_cur_q = 1;
             ae_cur_qx = x;
             ae_cur_qy = y;
             rend_cursor_mark_drawn(x, y);
             return 0;
+        }
         }
     }
     render_cursor_cpu(fb, x, y);

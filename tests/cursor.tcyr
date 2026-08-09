@@ -76,8 +76,11 @@ fn main() {
 
     # ⭐ DIRECTIONAL: the tip is at the hotspot and the shape widens away from it. A symmetric blob would
     # pass a pixel count and fail this.
-    assert_eq(cursor_hot_x(), 0, "hotspot x is the bitmap origin");
-    assert_eq(cursor_hot_y(), 0, "hotspot y is the bitmap origin");
+    # ⚠ THE ENUM DIRECTLY, because the `cursor_hot_x()`/`cursor_hot_y()` accessors were DELETED — a
+    # dead-code audit found nothing in src/ ever called them, so they were API that only looked used. The
+    # constants are still real (`cursor_outline_at` draws the tip from them); only the wrappers went.
+    assert_eq(CursorK.CUR_HOT_X, 0, "hotspot x is the bitmap origin");
+    assert_eq(CursorK.CUR_HOT_Y, 0, "hotspot y is the bitmap origin");
     assert_eq(cursor_outline_at(0, 0), 1, "the hotspot pixel is the arrow's TIP, and it is drawn");
     assert_eq(cursor_fill_at(1, 1), 0, "row 1 is tip outline, not interior");
     assert_eq(cursor_fill_at(1, 2), 1, "interior begins at row 2");

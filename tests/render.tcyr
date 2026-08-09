@@ -15,6 +15,25 @@ include "src/render.cyr"
 include "src/input.cyr"
 
 # One frame for the ghost test, in render_desktop's exact order: damage, banded clear, draw, stamp.
+fn t_gt_r(a, b): i64 {
+    if (a > b) { return 1; }
+    return 0;
+}
+
+fn t_layer_count_r(layer): i64 {
+    var n = 0;
+    var y = 0;
+    while (y < cursor_h()) {
+        var x = 0;
+        while (x < cursor_w()) {
+            if (cursor_layer_at(layer, x, y) == 1) { n = n + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return n;
+}
+
 fn ghost_frame(comp, fb, win, bg): i64 {
     rend_frame_damage(comp, fb, bg);
     if (rend_band_valid() == 1) {
@@ -716,6 +735,80 @@ fn main() {
     rend_dmg_clear(cd);
     assert_eq(rend_cursor_damage(cd), 0, "settled at the new position -> free again");
     assert_eq(rend_dmg_valid(cd), 0, "  and nothing damaged");
+
+    # ================================================================
+    # AE-7: a retired GPU cursor must FALL BACK, not vanish
+    # ================================================================
+    # ⛔⛔ THE BUG THIS CATCHES WAS SHIPPED AND CAUGHT BY A DEAD-CODE AUDIT, NOT BY A TEST. `render_cursor`
+    # QUEUES for the GPU instead of drawing, so when the emit refused, the pointer was absent for that frame
+    # — and because the next frame queues and refuses again, absent FOREVER, with one log line. That is
+    # precisely what a refused glyph did to every caption on the desktop on 1.56.42, reproduced in the
+    # cursor path by the fix for it.
+    # ⇒ `ae_cursor_gpu_disable()` must send the next frame to `render_cursor_cpu`, which draws per-pixel and
+    # cannot be refused. Verified by DRAWN PIXELS, not by a flag.
+    test_group("render — a retired GPU cursor falls back to the CPU and is still drawn");
+    var curfb = bhumi_fb_new(64, 64);
+    ae_ptr_x = 0; ae_ptr_y = 0;
+    input_ptr_set(4, 4);
+    # A GPU frame with the cursor path healthy: render_cursor QUEUES and draws NOTHING itself.
+    ae_gpu_frame_ok = 1;
+    ae_text_gpu_ok = 1;
+    ae_cursor_gpu_ok = 1;
+    ae_cursor_q_clear();
+    render_cursor(curfb);
+    assert_eq(ae_cursor_q_pending(), 1, "a healthy GPU frame QUEUES the cursor");
+    assert_eq(ae_cursor_q_x(), 4, "  at the pointer x");
+    assert_eq(ae_cursor_q_y(), 4, "  at the pointer y");
+    # ⭐ AND IT DREW NOTHING — which is exactly why a refusal used to lose the pointer entirely.
+    assert_eq(bhumi_fb_get(curfb, 4, 4), 0, "  and drew NO pixel itself (the emit owes it)");
+
+    # Now retire it, as gpu.cyr does on a refusal, and demand real pixels.
+    ae_cursor_gpu_disable();
+    assert_eq(ae_cursor_gpu_ok_get(), 0, "the cursor GPU path is retired");
+    ae_cursor_q_clear();
+    render_cursor(curfb);
+    assert_eq(ae_cursor_q_pending(), 0, "a retired path does NOT queue");
+    # ⛔⛔ PRE-FILL, OR THIS ENTIRE CHECK IS VACUOUS — and the first version of it was. The outline colour is
+    # `bhumi_xrgb(0,0,0)` = **0**, which is byte-identical to an untouched framebuffer: a `!= 0` count sees
+    # only the FILL (73 of 131 pixels), and `assert_eq(fb_get(tip), xrgb(0,0,0))` passes on a zeroed buffer
+    # whether or not anything was drawn. Painting a distinctive background first makes "black" an observable
+    # WRITE instead of an absence. [[feedback_instrument_discipline]] rule 2 — calibrate the null.
+    # ⚠ PAINTED WITH `bhumi_fb_set` DIRECTLY, not `fill_rect`: this test needs `ae_gpu_frame_ok == 1` (that
+    # is the whole point — the LATCH, not the frame kind, must cause the fallback), and on a GPU frame
+    # `fill_rect` enqueues for the shader instead of touching the buffer. Measured: it painted nothing and
+    # the count read 200, i.e. the full bitmap box differing from a background that was never there.
+    var BG = bhumi_xrgb(9, 9, 9);
+    var by = 0;
+    while (by < 40) {
+        var bx = 0;
+        while (bx < 32) { bhumi_fb_set(curfb, bx, by, BG); bx = bx + 1; }
+        by = by + 1;
+    }
+    assert_eq(bhumi_fb_get(curfb, 4, 4), BG, "  precondition: the tip pixel starts as background");
+    assert_eq(ae_gpu_frame_ok, 1, "  precondition: this IS a GPU frame -- the latch is what redirects it");
+    ae_cursor_q_clear();
+    render_cursor(curfb);
+    # The tip is at the hotspot and it is outline (black); the body is white. Both are now REAL writes.
+    assert_eq(bhumi_fb_get(curfb, 4, 4), bhumi_xrgb(0, 0, 0), "the TIP is drawn on the CPU, in outline black");
+    assert_eq(bhumi_fb_get(curfb, 5, 6), bhumi_xrgb(255, 255, 255), "the BODY is drawn on the CPU, in fill white");
+    # Count what CHANGED from the background, so neither a one-pixel stub nor a fill-only draw can pass.
+    var drawn = 0;
+    var cy2 = 0;
+    while (cy2 < cursor_h()) {
+        var cx2 = 0;
+        while (cx2 < cursor_w()) {
+            if (bhumi_fb_get(curfb, 4 + cx2, 4 + cy2) != BG) { drawn = drawn + 1; }
+            cx2 = cx2 + 1;
+        }
+        cy2 = cy2 + 1;
+    }
+    assert_eq(drawn, t_layer_count_r(CursorK.CUR_FILL) + t_layer_count_r(CursorK.CUR_OUTLINE),
+              "every fill AND outline pixel of the arrow reached the framebuffer");
+    assert_eq(t_gt_r(t_layer_count_r(CursorK.CUR_OUTLINE), 0), 1, "  (and the outline count is non-zero)");
+    # ⚠ Restore, or every later assertion inherits a retired cursor.
+    ae_cursor_gpu_ok = 1;
+    ae_gpu_frame_ok = 0;
+    ae_cursor_q_clear();
 
     # ================================================================
     # AE-7 iron regression: the glyph run that retired the whole text path
