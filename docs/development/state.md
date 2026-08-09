@@ -38,15 +38,22 @@ backends), and why a green build here does not prove the declared graph builds.
 
 ## Open
 
-- **`#92` premultiplied compositing has never run** — on iron or in QEMU. No client sets
-  `SETU_SURF_PREMULTIPLIED`, so every surface takes the opaque `#87` path. Backlogged in
-  [`roadmap.md`](roadmap.md).
-- **6 of 13 GPU band numbers consumed**, 1 of 14 `#92` ops. Unconsumed and zero-kernel-change: `#88`
-  `gpu_fill_rect` (wrapper vendored, never called) · `#92` op 0x03 GLYPH_1BPP · `#92` batching · `#89`
-  bytes +4..+31 · `#90`/`#91`.
-- **No pointer input on iron** — agnos xhci matches only HID boot *keyboard* (protocol 0x01).
-- **Damage-limited blit is not safe to enable with the obvious one-liner.** `#84 present` FLIPS the render
-  target, so a single-frame damage rect leaves the other buffer two frames stale. Needs `union(cur, prev)`.
+> ⛔ **FOUR ENTRIES THAT USED TO LIVE HERE HAVE BURNED GREEN AND ARE CLOSED** (2026-08-07/08). They are
+> written out rather than deleted because each one stated a *premise* that is now falsified, and a premise
+> left in an "Open" list gets re-derived as work:
+> - ~~`#92` premultiplied compositing has never run~~ — **it runs on iron.** crab's surface sets
+>   `SETU_SURF_PREMULTIPLIED` and `#92` op 0x01 BLEND_RECT composites it
+>   ([`AE-6`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/iron-nuc-zen-log.md#tracker-15641-ae6-ae8)).
+> - ~~`#88 gpu_fill_rect` never called · `#92` op 0x03 GLYPH_1BPP unconsumed~~ — **both consumed and
+>   iron-proven**: `AE-9` puts the clear, the chrome fills, the client surfaces *and* the glyphs on the GPU
+>   with `#39` not issued. ⚠ Still genuinely unconsumed: `#92` batching (no correct consumer), `#89` bytes
+>   +4..+31, `#90`/`#91`.
+> - ~~No pointer input on iron — agnos xhci matches only HID boot keyboard (protocol 0x01)~~ — **falsified.**
+>   The kernel binds *every* boot-**mouse** interface across all slots; iron shows
+>   `hid: boot-mouse interfaces bound: 2`, including the composite same-slot case, with `#98 ptrscan`
+>   feeding motion and clicks to the compositor.
+> - ~~Damage-limited blit is not safe with the obvious one-liner; needs `union(cur, prev)`~~ — the
+>   requirement was right and **`AE-0a` implements exactly that and burned PASS** on the GPU path.
 - **`src/apps.cyr` names `sys_fork`/`sys_dup2`/`sys_execve`** — DCE'd on agnos by reachability, not by a
   guard. `app_launch_terminal` should route to `sys_spawn_path` #43 there.
 

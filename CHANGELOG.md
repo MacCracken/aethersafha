@@ -4,7 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.12.6] - 2026-08-08 — the terminal gets its keys: draining a queue that drops the oldest
+
+⭐⭐⭐ **BURNED PASS on archaemenid 2026-08-08** (AGNOS 1.56.42, userland-only flash). Two clients present
+(`setu client presented surface` twice vs once), `forwarded a key to the focused client` →
+`puka: key received` x5 (usages 11/8/15/19/40 = `help` + Enter) → `puka: line sent to the shell`, and the
+terminal's window shows a live `agnoshi 1.8.9` that answered `help`. The cursor is visible and
+`#92 op 0x03 refused a glyph run` never printed. 270 frames, clean Esc.
+⚠ **The RESYNC is not iron-proven** — `resynced past a stale record` never fired, meaning the ring did not
+overflow that run, so only the **drain** was exercised. The 47-assert suite covers resync from every drop
+offset; hardware has not seen it. ⛔ Do not record it as iron-proven.
 
 ### Fixed — a placed client that presents every frame can finish its handshake
 
@@ -33,6 +42,14 @@ looked like a puka bug.
 - ⚠ The `-11` / `-13` diagnostics were reworded: they no longer mean "the second/third frame", because the
   machine resyncs past loss. They fire only on a kind that is wrong in a way loss cannot explain.
 
+### Fixed — the placed-client retry counter was cumulative while its comment claimed "consecutive"
+
+⛔ Nothing zeroed `chan_fail` after its initial store, so 200 transient handshake errors spread across a
+long run would retire a perfectly live client — and the comment directly above it said "count consecutive
+failures", so a reader would never suspect it. A frame that consumed records without erroring is the
+definition of "the client is alive and behaving", and that is now the reset (`setu_hs_drained > 0`, exposed
+by the drain because a productive drain and an idle one both return 0).
+
 ### Fixed — the "a key reached NO client" latch was spent by a key-RELEASE
 
 ⛔ A press-only surface drops every key-UP **by design**, so the one-shot latch fired on the first release
@@ -47,12 +64,25 @@ uninteresting event can exhaust is not an instrument. [[feedback_instrument_disc
 `puka: key received` **twice** — the S→C leg was never broken, it had never been exercised, because the
 harness injected only keys the compositor consumes as actions.
 
+### Fixed — two more instrument holes, both found by an independent audit rather than by testing
+
+⛔ **`a key reached NO client` was boot-scoped**, so the first key pressed on the compositor's own
+clientless window consumed it and a later real failure printed nothing. Now **one report per distinct focus
+index** — a repeat costs nothing and every window that swallows a key gets a line.
+⛔ **Handshake codes `-9` (window table full) and `-12` (attach geometry/buffer id refused) had no print at
+all**, so a client could be retired in complete silence — indistinguishable from "the retry budget has not
+expired yet". Both are named, and a `pnamed` catch-all now prints for any code without its own line, so a
+silent retirement is impossible by construction.
+
 ### Added — the handshake finally has a test (`tests/setu_handshake.tcyr`, 47 asserts)
 
 ⭐ It had **none**, which is why this shipped to iron wrong. The oracle is external, not a mirror of the
 code: **from every offset a dropping ring can leave, the machine must complete within 3 records, and must
 never report a protocol error for something loss explains.** Restoring the old strictness fails **11** and
-**9** asserts respectively, so the suite is not vacuous. 21 → **22 suites**, 133 asserts in the sweep.
+**9** asserts respectively, so the suite is not vacuous. 21 → **22 suites**, all green.
+⚠ No battery assert total is quoted, deliberately: `cyrius test` prints a SUITE tally and the *last
+suite's* own count, so the trailing number is `apps.tcyr` alone (133), not the repo. Only per-suite figures
+mean anything here.
 
 ## [0.12.5] - 2026-08-08 — `AE-7`: THE POINTER WORKS — cursor, click-to-focus, titlebar drag
 

@@ -453,13 +453,21 @@ fn setu_srv_handshake_step(st, cfd, comp, dstx, dsty): i64 {
 # Returns exactly what the step returns: window id (> 0), 0 = still in progress, negative = error.
 enum SetuHsK { DRAIN_MAX = 64; }   # = CHAN_SLOTS, the agnos channel ring depth
 
+# ⚠ How many records the LAST drain call consumed. The caller needs this to tell "the client said
+# nothing this frame" from "the client spoke and behaved" — which is what makes its retry counter
+# genuinely CONSECUTIVE rather than cumulative. Not derivable from the return value: a productive
+# drain and an idle one both return 0.
+var setu_hs_drained = 0;
+
 fn setu_srv_handshake_drain(st, cfd, comp, dstx, dsty): i64 {
     var n = 0;
+    setu_hs_drained = 0;
     while (n < SetuHsK.DRAIN_MAX) {
         var r = setu_srv_handshake_step(st, cfd, comp, dstx, dsty);
         if (r != 0) { return r; }                   # completed or failed — the caller decides
         if (setu_hs_consumed == 0) { return 0; }    # channel empty: nothing more to do this frame
         n = n + 1;
+        setu_hs_drained = n;
     }
     return 0;
 }

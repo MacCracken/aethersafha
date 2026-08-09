@@ -64,7 +64,7 @@ var ae_inp_denied = 0;
 var ae_inp_down = 0;
 var ae_inp_tab = 0;
 var ae_inp_fwd = 0;
-var ae_inp_nofwd = 0;   # latched: a key-down reached a window with no setu client
+var ae_inp_nofwd = 0;   # BITMASK of focus indices already reported — NOT a boot-scoped latch (see the site)
 var ae_inp_move = 0;
 # ⭐ How many key usages have been named in the log so far. NOT a latch like the rungs above — a
 # bounded COUNTER, because the question it answers ("which usages actually arrived?") needs the
@@ -673,13 +673,28 @@ fn main(): i64 {
                         # is not an instrument. [[feedback_instrument_discipline]]
                         # ⚠ Gated on THIS key (`fk == 0`), not on "no key has ever been forwarded" — a key
                         # that goes nowhere after a successful forward is still a fact worth one line.
+                        # ⛔⛔ ONE REPORT PER DISTINCT FOCUS INDEX, NOT ONE PER BOOT. A boot-scoped latch is
+                        # SPENT BY THE UNINTERESTING CASE here, and the procedure guarantees it: focus lands
+                        # on the last client to present, so the first TAB WRAPS onto the compositor's own
+                        # clientless window — press a key there and the latch is gone, after which a REAL
+                        # failure on the terminal prints nothing and the burn cannot distinguish it from
+                        # success. ⇒ Bound by the DISTINCT value that matters (which window swallowed it),
+                        # so a repeat costs nothing and every window that eats a key still gets one line.
+                        # [[feedback_instrument_discipline]] rule 13, in its per-latch form.
                         if (bhumi_key_pressed(ev) == 1) {
                             if (fk == 0) {
-                                if (ae_inp_nofwd == 0) {
-                                    ae_inp_nofwd = 1;
-                                    println("aethersafha: a key reached NO client -- focused window has none, usage then focus index:");
-                                    println_int(bhumi_key_usage(ev));
-                                    println_int(comp_focused(comp));
+                                var fidx = comp_focused(comp);
+                                # Bitmask, so index 0 is representable; 63 windows is far past any real desktop.
+                                if (fidx >= 0) {
+                                    if (fidx < 63) {
+                                        var fbit = 1 << fidx;
+                                        if ((ae_inp_nofwd & fbit) == 0) {
+                                            ae_inp_nofwd = ae_inp_nofwd | fbit;
+                                            println("aethersafha: a key reached NO client -- focused window has none, usage then focus index:");
+                                            println_int(bhumi_key_usage(ev));
+                                            println_int(fidx);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -734,6 +749,16 @@ fn main(): i64 {
                     # is merely SLOW, and a transient read error while it is still starting is not the
                     # same fact as a client that died. Count consecutive failures and only give up
                     # after several, so "not ready yet" and "gone" stop being the same verdict.
+                    #
+                    # ⛔⛔ AND RESET IT ON PROGRESS, or "consecutive" is a claim the comment makes and the
+                    # code does not keep. Nothing zeroed this counter after the initial store, so it was
+                    # CUMULATIVE: 200 transient errors spread over a long run killed a perfectly live
+                    # client, and the reader of the comment above would never suspect it. A frame that
+                    # consumed records without erroring is the definition of "the client is alive and
+                    # behaving" — that is the reset. [[feedback_audit_re_derive_dont_validate_comments]]
+                    if (psid == 0) {
+                        if (setu_hs_drained > 0) { store64(&chan_fail + pi * 8, 0); }
+                    }
                     if (psid < 0) {
                         var fails = load64(&chan_fail + pi * 8) + 1;
                         store64(&chan_fail + pi * 8, fails);
@@ -747,15 +772,28 @@ fn main(): i64 {
                         # armed), so a bare number lands mid-line in somebody else's output and is
                         # unreadable. That already cost one diagnosis this session.
                         store64(&chan_served + pi * 8, 1);
-                        if (psid == 0 - 6) { println("aethersafha: placed client: channel read failed, peer gone or bad fd"); }
-                        if (psid == 0 - 8) { println("aethersafha: placed client: first frame was not create_surface"); }
-                        if (psid == 0 - 7) { println("aethersafha: placed client: could not write surface_created back"); }
+                        # ⛔⛔ EVERY RETIREMENT MUST SAY SOMETHING, AND TWO CODES USED TO SAY NOTHING.
+                        # `-9` (comp_create_window refused — window table full) and `-12` (attach geometry
+                        # or buffer id refused) are both returnable by the handshake and neither had a line
+                        # here, so a client could be retired in COMPLETE SILENCE. That silence is
+                        # indistinguishable from "the retry budget has not expired yet", which is exactly
+                        # the reading a burn card would give it — a wrong verdict with no way to catch it.
+                        # ⇒ `pnamed` makes silence IMPOSSIBLE: any code without its own line still prints.
+                        # [[feedback_instrument_discipline]] — a readout that suppresses a value makes
+                        # ABSENT and THAT VALUE indistinguishable.
+                        var pnamed = 0;
+                        if (psid == 0 - 6) { println("aethersafha: placed client: channel read failed, peer gone or bad fd"); pnamed = 1; }
+                        if (psid == 0 - 8) { println("aethersafha: placed client: first frame was not create_surface"); pnamed = 1; }
+                        if (psid == 0 - 7) { println("aethersafha: placed client: could not write surface_created back"); pnamed = 1; }
+                        if (psid == 0 - 9) { println("aethersafha: placed client: the compositor could not create a window -- table full"); pnamed = 1; }
+                        if (psid == 0 - 12) { println("aethersafha: placed client: attach refused -- surface geometry or buffer id out of range"); pnamed = 1; }
                         # ⚠ NO LONGER "the second/third frame" — the machine resyncs past records the
                         # channel ring dropped, so these fire only on a kind that is wrong in a way LOSS
                         # cannot explain: neither attach nor commit at a point where one of them is due.
-                        if (psid == 0 - 11) { println("aethersafha: placed client: expected attach, got neither attach nor commit"); }
-                        if (psid == 0 - 13) { println("aethersafha: placed client: attached, then got neither commit nor a re-attach"); }
-                        if (psid == 0 - 14) { println("aethersafha: placed client: buffer read or alloc failed"); }
+                        if (psid == 0 - 11) { println("aethersafha: placed client: expected attach, got neither attach nor commit"); pnamed = 1; }
+                        if (psid == 0 - 13) { println("aethersafha: placed client: attached, then got neither commit nor a re-attach"); pnamed = 1; }
+                        if (psid == 0 - 14) { println("aethersafha: placed client: buffer read or alloc failed"); pnamed = 1; }
+                        if (pnamed == 0) { println("aethersafha: placed client: retired on a handshake error with NO name -- add a line for this code"); }
                     }
                 }
                 pi = pi + 1;
