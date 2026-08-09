@@ -64,6 +64,7 @@ var ae_inp_denied = 0;
 var ae_inp_down = 0;
 var ae_inp_tab = 0;
 var ae_inp_fwd = 0;
+var ae_inp_nofwd = 0;   # latched: a key-down reached a window with no setu client
 var ae_inp_move = 0;
 # ⭐ How many key usages have been named in the log so far. NOT a latch like the rungs above — a
 # bounded COUNTER, because the question it answers ("which usages actually arrived?") needs the
@@ -203,7 +204,13 @@ fn ae_pointer_event(comp, ev): i64 {
     if (k == BhumiEvKind.BHUMI_EV_MOTION) {
         var dx = bhumi_motion_dx(ev);
         var dy = bhumi_motion_dy(ev);
-        input_ptr_move(dx, dy, ae_geom_w, ae_geom_h);
+        # ⚠ THE BOUND IS REDUCED BY THE CURSOR GLYPH, not just the screen. `input_ptr_move` clamps a POINT
+        # to `bound - 1`, which is right for a point and wrong for something 9x16 pixels wide: at
+        # x = 2559 the glyph reaches 2568 on a 2560-wide buffer, `#92` op 0x03 REFUSES an out-of-range
+        # rect, and on the 1.56.42 burn that one refusal retired the whole text path and blanked every
+        # glyph on the desktop. `ae_text_fits` now catches it as well, but keeping the cursor drawable is
+        # better than relying on the guard — a cursor that vanishes in the last 9 columns is still a bug.
+        input_ptr_move(dx, dy, ae_geom_w - FONT_ADV + 1, ae_geom_h - FONT_H + 1);
         if (ae_ptr_first == 0) {
             ae_ptr_first = 1;
             println("aethersafha: pointer motion received -- the cursor is live");
@@ -646,6 +653,20 @@ fn main(): i64 {
                             if (fk > 0) {
                                 ae_inp_fwd = 1;
                                 println("aethersafha: forwarded a key to the focused client");
+                            }
+                        }
+                        # ⛔ AND SAY SO WHEN IT GOES NOWHERE. On the 1.56.42 burn the operator reported
+                        # "puka didn't register key commands", eleven letter usages were traced arriving at
+                        # the compositor, and NO forward line printed — which is consistent with two
+                        # different things: the forward is broken, or focus was simply on a window with no
+                        # client (the compositor seeds one, and TAB cycles onto it). The log could not tell
+                        # them apart, so the next boot has to. ⚠ Latched, and it names the FOCUS INDEX so
+                        # the reader can see which window swallowed the key.
+                        if (ae_inp_fwd == 0) {
+                            if (ae_inp_nofwd == 0) {
+                                ae_inp_nofwd = 1;
+                                println("aethersafha: a key reached NO client -- focused window has none, index:");
+                                println_int(comp_focused(comp));
                             }
                         }
                     }

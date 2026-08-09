@@ -203,6 +203,15 @@ fn main() {
     input_ptr_move(500, 500, 800, 600);
     assert_eq(input_ptr_x(), 799, "clamps to bound_w - 1, not bound_w");
     assert_eq(input_ptr_y(), 599, "clamps to bound_h - 1, not bound_h");
+    # ⛔ THE CALLER REDUCES THE BOUND BY THE GLYPH. This clamps a POINT, which is right — but the cursor
+    # is 9x16 px, so the compositor passes `ae_geom_w - FONT_ADV + 1`. On a 2560-wide screen that caps x at
+    # 2551, and the glyph then ends exactly at 2560. Without it, x=2559 puts the glyph at 2568, `#92`
+    # op 0x03 refuses the rect, and the 1.56.42 burn showed that one refusal blanking every glyph on the
+    # desktop. Asserted here with the same arithmetic the compositor uses.
+    input_ptr_set(0, 0);
+    input_ptr_move(9999, 9999, 2560 - 9 + 1, 1440 - 16 + 1);
+    assert_eq(input_ptr_x(), 2551, "a 9 px cursor stops where its glyph still fits (2551 + 9 = 2560)");
+    assert_eq(input_ptr_y(), 1424, "...and a 16 px tall one at 1424 (1424 + 16 = 1440)");
 
     test_group("input — button edges are what a click IS");
     assert_eq(input_btn_edge(0, 1, 1), 1, "0 -> 1 is a PRESS");

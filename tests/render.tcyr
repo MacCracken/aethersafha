@@ -684,6 +684,55 @@ fn main() {
     blit_rect(cfb, 3, 3, src, 4, 0);
     assert_eq(bhumi_fb_get(cfb, 3, 3), 0, "offscreen, null src, and zero dims all draw nothing");
 
+    # ================================================================
+    # AE-7 iron regression: the glyph run that retired the whole text path
+    # ================================================================
+    # ⛔ THE 1.56.42 BURN. `#92` op 0x03 REFUSES an out-of-range rect (it does not clip), and the new
+    # cursor is a glyph at the cursor position. The position was clamped to `bound_w - 1`, so an 8 px
+    # glyph at x=2559 on a 2560-wide back buffer reached 2567, the op refused, `ae_text_gpu_disable()`
+    # retired the path for the session — and every glyph on the desktop disappeared, titles included.
+    # ⇒ The enqueue must refuse locally, exactly as `ae_rect_enqueue` already does for `#88`.
+    test_group("render — a text run outside the back buffer is refused LOCALLY, not by the kernel");
+    var tfb2 = bhumi_fb_new(2560, 1440);
+    ae_text_reset();
+    ae_text_gpu_ok = 1;
+    assert_eq(ae_text_fits(tfb2, "A", 100, 100), 1, "a run well inside fits");
+    # One 8x16 glyph at 2559 ends at 2567 — the exact case the burn hit.
+    assert_eq(ae_text_fits(tfb2, "A", 2559, 700), 0, "a glyph past the RIGHT edge does NOT fit");
+    assert_eq(ae_text_fits(tfb2, "A", 700, 1439), 0, "a glyph past the BOTTOM edge does NOT fit");
+    assert_eq(ae_text_fits(tfb2, "A", 0 - 1, 100), 0, "a negative x does not fit");
+    assert_eq(ae_text_fits(tfb2, "A", 100, 0 - 1), 0, "a negative y does not fit");
+    # The exact boundary, so an off-by-one in either direction fails.
+    # ⚠ 2551, not 2552: `ae_text_width` is `n * FONT_ADV` and FONT_ADV is 9 (an 8 px glyph plus 1 px of
+    # spacing), so one character occupies 9 columns. Deriving this from the constant rather than assuming
+    # the glyph width is what makes the boundary assert meaningful.
+    assert_eq(ae_text_fits(tfb2, "A", 2551, 700), 1, "the LAST fully-inside x fits (2551 + 9 = 2560)");
+    assert_eq(ae_text_fits(tfb2, "A", 2552, 700), 0, "one past it does NOT");
+    assert_eq(ae_text_fits(tfb2, "A", 700, 1424), 1, "the LAST fully-inside y fits");
+    # A multi-character run must account for its whole width, not one glyph.
+    assert_eq(ae_text_fits(tfb2, "AAAA", 2524, 700), 1, "a 4-char run ending exactly at the edge fits");
+    assert_eq(ae_text_fits(tfb2, "AAAA", 2530, 700), 0, "...and one that overruns it does not (whole RUN width, not one glyph)");
+    # ⚠ And a refusal must NOT retire the path — that is the difference between one missing frame and a
+    # blank desktop for the session.
+    assert_eq(ae_text_gpu_ok_get(), 1, "a locally-refused run leaves the GPU text path ENABLED");
+
+    # ⛔⛔ AND IF TEXT DOES RETIRE, CHROME MUST RETIRE WITH IT. `AE-8`'s fallback comment promised the
+    # desktop keeps its titles; `AE-9` then deleted the `#39` blit, so CPU-drawn glyphs land in a
+    # framebuffer nothing copies to screen. Coupling the two is what makes the fallback real.
+    test_group("render — a retired text path takes chrome off the GPU with it");
+    ae_gpu_frame_ok = 1;
+    ae_chrome_gpu_ok = 1;
+    ae_text_gpu_ok = 1;
+    assert_eq(ae_chrome_on_gpu(), 1, "both enabled: chrome is on the GPU");
+    ae_text_gpu_disable();
+    assert_eq(ae_chrome_on_gpu(), 0,
+              "text retired ⇒ chrome retires too, so the #39 blit returns and CPU text is VISIBLE");
+    ae_text_gpu_ok = 1;
+    assert_eq(ae_chrome_on_gpu(), 1, "and it comes back when text does");
+    ae_gpu_frame_ok = 0;
+    assert_eq(ae_chrome_on_gpu(), 0, "no GPU frame ⇒ never on the GPU");
+    ae_gpu_frame_ok = 1;
+
     return assert_summary();
 }
 
