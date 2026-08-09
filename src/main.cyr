@@ -660,13 +660,27 @@ fn main(): i64 {
                         # the compositor, and NO forward line printed — which is consistent with two
                         # different things: the forward is broken, or focus was simply on a window with no
                         # client (the compositor seeds one, and TAB cycles onto it). The log could not tell
-                        # them apart, so the next boot has to. ⚠ Latched, and it names the FOCUS INDEX so
-                        # the reader can see which window swallowed the key.
-                        if (ae_inp_fwd == 0) {
-                            if (ae_inp_nofwd == 0) {
-                                ae_inp_nofwd = 1;
-                                println("aethersafha: a key reached NO client -- focused window has none, index:");
-                                println_int(comp_focused(comp));
+                        # them apart, so the next boot has to. ⚠ Latched, and it names the USAGE and the
+                        # FOCUS INDEX so the reader can see which key went where.
+                        #
+                        # ⛔⛔ KEY-DOWN ONLY, AND THAT GUARD IS THE WHOLE POINT OF THIS BLOCK WORKING. A
+                        # press-only surface (the default) drops every key-UP *by design*, so a one-shot
+                        # latch armed on releases is spent by the FIRST RELEASE of the boot — and then
+                        # reports nothing about the key actually under test. ⚠ MEASURED, not reasoned:
+                        # this printed at serial line 148 during crab's startup, focus index 0, while the
+                        # QEMU gate simultaneously reported "neither marker fired" for two letters that
+                        # demonstrably reached the compositor. A budget an uninteresting event can exhaust
+                        # is not an instrument. [[feedback_instrument_discipline]]
+                        # ⚠ Gated on THIS key (`fk == 0`), not on "no key has ever been forwarded" — a key
+                        # that goes nowhere after a successful forward is still a fact worth one line.
+                        if (bhumi_key_pressed(ev) == 1) {
+                            if (fk == 0) {
+                                if (ae_inp_nofwd == 0) {
+                                    ae_inp_nofwd = 1;
+                                    println("aethersafha: a key reached NO client -- focused window has none, usage then focus index:");
+                                    println_int(bhumi_key_usage(ev));
+                                    println_int(comp_focused(comp));
+                                }
                             }
                         }
                     }
@@ -701,7 +715,12 @@ fn main(): i64 {
                     var pstep = accepted % 3;
                     var pcx = 30 + pstep * (ae_geom_w / 6);
                     var pcy = 50 + pstep * (ae_geom_h / 6);
-                    var psid = setu_srv_handshake_step(load64(&chan_st + pi * 8), load64(&chan_fd + pi * 8), comp, pcx, pcy);
+                    # ⛔ DRAIN, NOT ONE STEP. `..._step` consumes ONE record; a client that presents every
+                    # frame emits two per its (much faster) frame and wraps the 64-slot ring between two
+                    # compositor frames, and the ring drops the OLDEST — so sipping loses the handshake's
+                    # phase permanently. That is exactly why puka never got a client fd on iron and every
+                    # key it should have received died at forward_key's `cfd == 0`.
+                    var psid = setu_srv_handshake_drain(load64(&chan_st + pi * 8), load64(&chan_fd + pi * 8), comp, pcx, pcy);
                     if (psid > 0) {
                         store64(&chan_served + pi * 8, 1);
                         println("aethersafha: setu client presented surface");
@@ -731,8 +750,11 @@ fn main(): i64 {
                         if (psid == 0 - 6) { println("aethersafha: placed client: channel read failed, peer gone or bad fd"); }
                         if (psid == 0 - 8) { println("aethersafha: placed client: first frame was not create_surface"); }
                         if (psid == 0 - 7) { println("aethersafha: placed client: could not write surface_created back"); }
-                        if (psid == 0 - 11) { println("aethersafha: placed client: second frame was not attach"); }
-                        if (psid == 0 - 13) { println("aethersafha: placed client: third frame was not commit"); }
+                        # ⚠ NO LONGER "the second/third frame" — the machine resyncs past records the
+                        # channel ring dropped, so these fire only on a kind that is wrong in a way LOSS
+                        # cannot explain: neither attach nor commit at a point where one of them is due.
+                        if (psid == 0 - 11) { println("aethersafha: placed client: expected attach, got neither attach nor commit"); }
+                        if (psid == 0 - 13) { println("aethersafha: placed client: attached, then got neither commit nor a re-attach"); }
                         if (psid == 0 - 14) { println("aethersafha: placed client: buffer read or alloc failed"); }
                     }
                 }

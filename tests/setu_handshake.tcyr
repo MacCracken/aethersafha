@@ -1,0 +1,138 @@
+# aethersafha — setu placed-client handshake state machine (pure kind dispatch).
+#
+# ⭐⭐ WHY THIS SUITE EXISTS. The handshake had NO test at all, and it was wrong on iron for a reason
+# no amount of reading it would surface: the agnos channel is a 64-slot ring that DROPS THE OLDEST
+# record when full (`chan_queue`, agnos kernel/core/syscall.cyr:4586). A client that presents every
+# frame emits ATTACH+COMMIT per frame; the compositor's frame is far slower, so the client wraps the
+# ring between two compositor reads and the read cursor lands at an ARBITRARY point in the
+# …A,C,A,C,A,C… stream. The old machine demanded the exact next kind and therefore failed forever on a
+# parity it did not pick — puka got no client fd, so every key died at forward_key's `cfd == 0`.
+#
+# ⭐ THE ORACLE IS EXTERNAL, not a mirror of the code: "from ANY offset into a client's present stream,
+# the handshake must complete within a bounded number of records, and must never report a protocol
+# error for something record LOSS can explain." That is the field requirement the transport imposes;
+# it is not derived from how the machine is written. [[feedback_oracle_must_test_external_invariant]]
+#
+# Stdlib + [deps.*] auto-included via cyrius.cyml.
+include "lib/bhumi.cyr"
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/setu_dispatch.cyr"
+
+fn t_gt(a, b): i64 {
+    if (a > b) { return 1; }
+    return 0;
+}
+
+# The state transition the step applies, and nothing else — no fds, no buffers, no compositor.
+# Kept to three lines so the simulator cannot drift from production behaviour.
+fn hs_next_state(state, act): i64 {
+    if (act == SetuHsAct.HS_CREATE) { return 1; }
+    if (act == SetuHsAct.HS_ATTACH) { return 2; }
+    if (act == SetuHsAct.HS_COMMIT) { return 3; }
+    return state;                                  # HS_SKIP holds; HS_BAD is caught by the caller
+}
+
+# Drive `stream[0..len)` from `start` and return the number of records consumed to reach state 3,
+# or 0 - 1 if the machine reported HS_BAD, or 0 - 2 if it ran out of records without completing.
+fn hs_sim(start, stream, len): i64 {
+    var st = start;
+    var i = 0;
+    while (i < len) {
+        var act = setu_hs_action(st, load64(stream + i * 8));
+        if (act == SetuHsAct.HS_BAD) { return 0 - 1; }
+        st = hs_next_state(st, act);
+        i = i + 1;
+        if (st == 3) { return i; }
+    }
+    return 0 - 2;
+}
+
+# An `n`-record present stream as the ring holds it: ATTACH, COMMIT, ATTACH, COMMIT, …
+# `off` skips the first `off` records — exactly what "the ring dropped the oldest" does to a reader.
+fn hs_present_stream(n, off): i64 {
+    var s = alloc(n * 8);
+    var i = 0;
+    while (i < n) {
+        var k = SETU_ATTACH;
+        if (((i + off) % 2) == 1) { k = SETU_COMMIT; }
+        store64(s + i * 8, k);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn main() {
+    alloc_init();
+
+    # -----------------------------------------------------------------------
+    test_group("setu handshake — the action table, per state");
+    assert_eq(setu_hs_action(0, SETU_CREATE_SURFACE), SetuHsAct.HS_CREATE, "state 0 + create_surface -> create");
+    assert_eq(setu_hs_action(1, SETU_ATTACH), SetuHsAct.HS_ATTACH, "state 1 + attach -> attach");
+    assert_eq(setu_hs_action(2, SETU_COMMIT), SetuHsAct.HS_COMMIT, "state 2 + commit -> commit");
+
+    # ⭐ THE TWO RESYNCS — the whole fix. Neither of these is a protocol error, because record LOSS
+    # produces both of them from a perfectly well-behaved client.
+    assert_eq(setu_hs_action(1, SETU_COMMIT), SetuHsAct.HS_SKIP, "state 1 + commit -> SKIP (its attach was dropped)");
+    assert_eq(setu_hs_action(2, SETU_ATTACH), SetuHsAct.HS_ATTACH, "state 2 + attach -> re-attach (our commit was dropped)");
+
+    # -----------------------------------------------------------------------
+    test_group("setu handshake — kinds loss CANNOT explain are still errors");
+    # A client blocks on SURFACE_CREATED before it sends anything else, so its CREATE_SURFACE can never
+    # be pushed out of the ring by its own later writes — a missing one is a real protocol error.
+    assert_eq(setu_hs_action(0, SETU_ATTACH), SetuHsAct.HS_BAD, "state 0 + attach is a protocol error");
+    assert_eq(setu_hs_action(0, SETU_COMMIT), SetuHsAct.HS_BAD, "state 0 + commit is a protocol error");
+    assert_eq(setu_hs_action(1, SETU_CREATE_SURFACE), SetuHsAct.HS_BAD, "state 1 + create_surface is a protocol error");
+    assert_eq(setu_hs_action(2, SETU_CREATE_SURFACE), SetuHsAct.HS_BAD, "state 2 + create_surface is a protocol error");
+    assert_eq(setu_hs_action(1, SETU_CLOSE), SetuHsAct.HS_BAD, "state 1 + close is not a handshake record");
+    assert_eq(setu_hs_action(2, SETU_CLOSE), SetuHsAct.HS_BAD, "state 2 + close is not a handshake record");
+    assert_eq(setu_hs_action(3, SETU_COMMIT), SetuHsAct.HS_BAD, "already done -> no action");
+
+    # -----------------------------------------------------------------------
+    test_group("setu handshake — a lossless stream completes");
+    var clean = alloc(3 * 8);
+    store64(clean + 0, SETU_CREATE_SURFACE);
+    store64(clean + 8, SETU_ATTACH);
+    store64(clean + 16, SETU_COMMIT);
+    assert_eq(hs_sim(0, clean, 3), 3, "create + attach + commit completes in exactly 3 records");
+
+    # -----------------------------------------------------------------------
+    # ⭐⭐ THE INVARIANT THAT WAS BROKEN ON IRON. After CREATE_SURFACE the compositor is at state 1 and
+    # the channel holds some suffix of the client's endless present stream. Whichever parity that suffix
+    # starts on, the handshake must complete — and quickly, because the window is invisible until it does.
+    test_group("setu handshake — completes from EVERY offset a dropping ring can leave");
+    var off = 0;
+    var worst = 0;
+    while (off < 16) {
+        var s = hs_present_stream(8, off);
+        var n = hs_sim(1, s, 8);
+        assert_eq(t_gt(n, 0), 1, "state 1 completes from a stream at this drop offset");
+        if (n > worst) { worst = n; }
+        off = off + 1;
+    }
+    # An odd offset costs ONE skipped orphan commit, then attach+commit: 3 records, never more.
+    assert_eq(worst, 3, "worst case over all offsets is 3 records, not unbounded");
+
+    # The same from state 2 — the compositor already read an ATTACH, then the ring ate its COMMIT.
+    off = 0;
+    while (off < 16) {
+        var s2 = hs_present_stream(8, off);
+        assert_eq(t_gt(hs_sim(2, s2, 8), 0), 1, "state 2 completes from a stream at this drop offset");
+        off = off + 1;
+    }
+
+    # -----------------------------------------------------------------------
+    test_group("setu handshake — a long run of orphan commits does not fail, it waits");
+    # The pathological case: the reader landed such that every surviving record is a COMMIT (the client
+    # was killed mid-stream, or the ring holds one parity). This must be "not yet", never "error".
+    var orphans = alloc(8 * 8);
+    var oi = 0;
+    while (oi < 8) { store64(orphans + oi * 8, SETU_COMMIT); oi = oi + 1; }
+    assert_eq(hs_sim(1, orphans, 8), 0 - 2, "all-commits from state 1 is incomplete, NOT an error");
+
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);

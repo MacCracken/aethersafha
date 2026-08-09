@@ -310,21 +310,84 @@ fn setu_srv_serve_accepted(cfd, comp, fb): i64 {
 # connected, and the kernel's socket buffers absorbed the interleaving. A minted channel exists before
 # the client does, so the compositor now meets its peer's scheduling directly.
 #
-# State: 0 = await CREATE_SURFACE · 1 = await ATTACH · 2 = await COMMIT · 3 = done.
+# State: 0 = await CREATE_SURFACE · 1 = await ATTACH · 2 = attached, await COMMIT · 3 = done.
 # Returns the window id (> 0) on COMPLETION, 0 while still in progress, negative on a protocol error.
 # `st` is a 6-word scratch owned by the caller, one per client: [0]=state [1]=win [2]=pix [3]=w [4]=h.
+
+enum SetuHsAct {
+    HS_SKIP   = 0;    # a stale orphan record — consume it and stay in this state
+    HS_CREATE = 1;
+    HS_ATTACH = 2;
+    HS_COMMIT = 3;
+    HS_BAD    = 4;    # genuinely wrong kind for this state — the caller maps it to -8/-11/-13
+}
+
+# ⭐⭐ WHY THIS IS A PURE FUNCTION AND NOT AN `if` CHAIN INSIDE THE STEP: the record transport can
+# DELETE records under us, so "which kind is legal in which state" is the part that has to be
+# provably right, and it was not. It is separated so a test can drive it over every stream a lossy
+# ring can produce. [[feedback_compiled_is_not_reachable]] — logic a test cannot reach is logic
+# nobody checked, and this shipped to iron wrong.
+#
+# ⛔⛔ THE AGNOS CHANNEL RING DROPS THE **OLDEST** RECORD WHEN IT IS FULL (`chan_queue`,
+# agnos kernel/core/syscall.cyr:4586 — 64 slots, `store64(&chan_r ..., rv + 1)` on overflow). A client
+# that presents every frame emits ATTACH+COMMIT per frame; the compositor's frame is far slower
+# (full-screen composite), so the client wraps the ring between two compositor reads and the read
+# cursor is YANKED FORWARD to an arbitrary point in the …A,C,A,C,A,C… stream. A machine that demanded
+# the exact next kind then failed FOREVER on a parity it did not choose.
+# ⚠ MEASURED, 2026-08-08 iron burn: puka presents continuously and never got past this — no window
+# with a client fd, so `setu_srv_forward_key` dropped every key at its `cfd == 0` guard and the
+# terminal "didn't register key commands". crab survived only because it presents ONCE.
+# ⭐ The resync: a COMMIT before any ATTACH is an orphan whose ATTACH was dropped (SKIP it); a repeat
+# ATTACH after one landed means OUR commit was dropped (re-apply, idempotent). Either way the machine
+# is back in phase within one record instead of stuck for the rest of the boot.
+fn setu_hs_action(state, kind): i64 {
+    if (state == 0) {
+        if (kind == SETU_CREATE_SURFACE) { return SetuHsAct.HS_CREATE; }
+        return SetuHsAct.HS_BAD;
+    }
+    if (state == 1) {
+        if (kind == SETU_ATTACH) { return SetuHsAct.HS_ATTACH; }
+        if (kind == SETU_COMMIT) { return SetuHsAct.HS_SKIP; }
+        return SetuHsAct.HS_BAD;
+    }
+    if (state == 2) {
+        if (kind == SETU_COMMIT) { return SetuHsAct.HS_COMMIT; }
+        if (kind == SETU_ATTACH) { return SetuHsAct.HS_ATTACH; }
+        return SetuHsAct.HS_BAD;
+    }
+    return SetuHsAct.HS_BAD;
+}
+
+var setu_hs_consumed = 0;      # 1 = the last step took a record off the channel (drives the drain)
+var setu_hs_stale = 0;         # one-shot: a resync happened, i.e. the ring really did drop a pair
+
 fn setu_srv_handshake_step(st, cfd, comp, dstx, dsty): i64 {
     var m = setu_msg_new();
+    setu_hs_consumed = 0;
     var p = setu_poll_input(cfd, m);
     if (p == 0) { return 0; }                      # nothing this frame — NOT an error
     # ⛔ DO NOT ADD A DIAGNOSTIC `sys_chan_recv` HERE. A debug probe that reads the channel to
     # find out *why* the poll failed CONSUMES A RECORD, so the very handshake frame being chased
     # disappears into the diagnostic. A read is not a peek on a record transport.
     if (p < 0) { return 0 - 6; }
+    setu_hs_consumed = 1;
     var state = load64(st);
+    var act = setu_hs_action(state, setu_msg_kind(m));
 
-    if (state == 0) {
-        if (setu_msg_kind(m) != SETU_CREATE_SURFACE) { return 0 - 8; }
+    if (act == SetuHsAct.HS_SKIP) {
+        if (setu_hs_stale == 0) {
+            setu_hs_stale = 1;
+            println("aethersafha: placed client: resynced past a stale record -- the channel ring dropped its pair");
+        }
+        return 0;
+    }
+    if (act == SetuHsAct.HS_BAD) {
+        if (state == 0) { return 0 - 8; }
+        if (state == 1) { return 0 - 11; }
+        return 0 - 13;
+    }
+
+    if (act == SetuHsAct.HS_CREATE) {
         var win = comp_create_window(comp, 0, 0, setu_msg_arg(m, 0), setu_msg_arg(m, 1), "setu-surface");
         if (win == 0) { return 0 - 9; }
         win_set_keymode(win, setu_msg_arg(m, 2) & SETU_SURF_FULL_KEYS);
@@ -337,8 +400,7 @@ fn setu_srv_handshake_step(st, cfd, comp, dstx, dsty): i64 {
         return 0;
     }
 
-    if (state == 1) {
-        if (setu_msg_kind(m) != SETU_ATTACH) { return 0 - 11; }
+    if (act == SetuHsAct.HS_ATTACH) {
         var w2 = setu_msg_arg(m, 1);
         var ah = setu_msg_arg(m, 2);
         var stride = setu_msg_arg(m, 3);
@@ -351,8 +413,19 @@ fn setu_srv_handshake_step(st, cfd, comp, dstx, dsty): i64 {
         # agnos rather than emulating a stream. A client that presents inline here is a protocol error,
         # not something to work around.
         if (buf_id <= 0) { return 0 - 12; }
-        var pix = alloc(nbytes);
-        if (pix == 0) { return 0 - 14; }
+        # ⭐ IDEMPOTENT RE-ATTACH. This arm is reachable from state 2 (a repeat ATTACH whose predecessor's
+        # COMMIT the ring ate), so it must not allocate a second surface every time — a continuously
+        # presenting client would leak one FULL SURFACE per dropped commit. Reuse the buffer whenever the
+        # geometry is unchanged, which for a client re-presenting the same window is always.
+        # ⚠ A real resize (w/h differ) does abandon the old block; there is no free() on this allocator,
+        # and one leak per resize is the same cost the single-shot version already paid per attach.
+        var pix = load64(st + 16);
+        if (pix != 0) { if (load64(st + 24) != w2) { pix = 0; } }
+        if (pix != 0) { if (load64(st + 32) != ah) { pix = 0; } }
+        if (pix == 0) {
+            pix = alloc(nbytes);
+            if (pix == 0) { return 0 - 14; }
+        }
         if (setu_buf_read(buf_id, pix, nbytes) < 0) { return 0 - 14; }
         win_set_bufid(load64(st + 8), buf_id);
         store64(st + 16, pix);
@@ -362,14 +435,31 @@ fn setu_srv_handshake_step(st, cfd, comp, dstx, dsty): i64 {
         return 0;
     }
 
-    if (state == 2) {
-        if (setu_msg_kind(m) != SETU_COMMIT) { return 0 - 13; }
-        var win3 = load64(st + 8);
-        win_move(win3, dstx, dsty);
-        win_set_pix(win3, load64(st + 16));
-        win_set_cfd(win3, cfd);
-        store64(st, 3);
-        return win_id(win3);
+    var win3 = load64(st + 8);                     # HS_COMMIT — the only action left
+    win_move(win3, dstx, dsty);
+    win_set_pix(win3, load64(st + 16));
+    win_set_cfd(win3, cfd);                        # ⭐ THE KEY PATH: forward_key refuses on cfd == 0
+    store64(st, 3);
+    return win_id(win3);
+}
+
+# ⭐⭐ DRAIN, DO NOT SIP. One record per frame is not a rate the compositor gets to choose: a client
+# presenting every frame emits two records per ITS frame, and the compositor's frame is an order of
+# magnitude slower, so sipping one record per frame falls permanently behind a 64-slot ring that drops
+# the oldest to make room. The consumer must empty what is there, every frame.
+# ⛔ BOUNDED BY THE RING, so a client that writes faster than this loop reads cannot hold the frame
+# loop hostage: at most one ring's worth of records is processed per frame per client, then the
+# compositor renders regardless.
+# Returns exactly what the step returns: window id (> 0), 0 = still in progress, negative = error.
+enum SetuHsK { DRAIN_MAX = 64; }   # = CHAN_SLOTS, the agnos channel ring depth
+
+fn setu_srv_handshake_drain(st, cfd, comp, dstx, dsty): i64 {
+    var n = 0;
+    while (n < SetuHsK.DRAIN_MAX) {
+        var r = setu_srv_handshake_step(st, cfd, comp, dstx, dsty);
+        if (r != 0) { return r; }                   # completed or failed — the caller decides
+        if (setu_hs_consumed == 0) { return 0; }    # channel empty: nothing more to do this frame
+        n = n + 1;
     }
     return 0;
 }

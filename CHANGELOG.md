@@ -4,6 +4,56 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed — a placed client that presents every frame can finish its handshake
+
+⛔⛔ **The compositor sipped one record per frame from a queue that drops the OLDEST.** agnos's channel is
+a 64-slot ring and `chan_queue` (`kernel/core/syscall.cyr:4586`) advances the *read* cursor on overflow.
+A client that presents every frame emits ATTACH+COMMIT per present, and its frame is an order of magnitude
+faster than a full-screen composite — so it wrapped the ring between two compositor reads and the read
+cursor landed at an **arbitrary** point in the endless `…A,C,A,C…` stream. `setu_srv_handshake_step`
+demanded the exact next kind, so it then failed **forever** on a parity it did not choose.
+
+⚠ **Measured on iron** (agnos 1.56.42, archaemenid): puka got window **id 2** from handshake state 0 but
+never reached COMMIT, and `win_set_cfd` only runs on COMMIT — so `setu_srv_forward_key` dropped every key
+at its `cfd == 0` guard and the terminal "didn't register key commands". crab survived **only because it
+presents once**; its three records sat in the ring in order. That difference is the whole reason this
+looked like a puka bug.
+
+- **`setu_srv_handshake_drain`** — drain the channel every frame instead of taking one record, bounded by
+  one ring's depth (64) so a client that writes faster than the loop reads cannot hold the frame loop
+  hostage. `main.cyr` calls the drain; the step keeps its contract (`> 0` id, `0` in progress, `< 0` error).
+- **`setu_hs_action`** — the state/kind decision is now a **pure function** that **resyncs** rather than
+  erroring on the two shapes record *loss* produces: a COMMIT with no ATTACH is a stale orphan (skip it);
+  a repeat ATTACH means our COMMIT was eaten (re-apply). Kinds loss cannot explain are still `-8`/`-11`/`-13`.
+- **Idempotent re-attach** — the attach arm reuses the surface buffer when the geometry is unchanged. Now
+  that it is reachable more than once, allocating per attach would have leaked a **full surface** per
+  dropped commit.
+- ⚠ The `-11` / `-13` diagnostics were reworded: they no longer mean "the second/third frame", because the
+  machine resyncs past loss. They fire only on a kind that is wrong in a way loss cannot explain.
+
+### Fixed — the "a key reached NO client" latch was spent by a key-RELEASE
+
+⛔ A press-only surface drops every key-UP **by design**, so the one-shot latch fired on the first release
+of the boot — measured at serial line 148, during crab's startup — and then said nothing about the key
+actually under test, while the QEMU gate simultaneously reported "neither marker fired" for two letters
+that demonstrably reached the compositor. It is now gated on `bhumi_key_pressed(ev) == 1`, reports on
+**this** key (`fk == 0`) rather than "no key has ever been forwarded", and names the **usage** alongside
+the focus index. ⚠ Same shape as the F8-hold that exhausted the first-N trace budget: a budget an
+uninteresting event can exhaust is not an instrument. [[feedback_instrument_discipline]]
+
+⭐ With that corrected, QEMU shows `aethersafha: forwarded a key to the focused client` followed by
+`puka: key received` **twice** — the S→C leg was never broken, it had never been exercised, because the
+harness injected only keys the compositor consumes as actions.
+
+### Added — the handshake finally has a test (`tests/setu_handshake.tcyr`, 47 asserts)
+
+⭐ It had **none**, which is why this shipped to iron wrong. The oracle is external, not a mirror of the
+code: **from every offset a dropping ring can leave, the machine must complete within 3 records, and must
+never report a protocol error for something loss explains.** Restoring the old strictness fails **11** and
+**9** asserts respectively, so the suite is not vacuous. 21 → **22 suites**, 133 asserts in the sweep.
+
 ## [0.12.5] - 2026-08-08 — `AE-7`: THE POINTER WORKS — cursor, click-to-focus, titlebar drag
 
 ⭐ **The whole `AE-7` arc in one cut** (P0 + P4 here; the kernel's P1-P3 are agnos 1.56.42 and bhumi
