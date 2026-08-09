@@ -191,6 +191,42 @@ fn input_ptr_y(): i64 { return ae_ptr_y; }
 # input_btn_edge(prev, cur, mask): 1 = pressed this event, -1 = released, 0 = unchanged.
 # ⚠ Edges, not levels, are what a click IS — and deriving them here rather than in the frame loop is
 # what lets a test assert the press/release pair without a compositor.
+# ⭐⭐ THE BUTTON STATE MACHINE — press and release are NOT symmetric, and treating them as one edge on
+# `cur | seen` makes the RELEASE UNREACHABLE.
+#
+# ⛔⛔ MEASURED AGAINST THE KERNEL, not reasoned from the name. `hid_mouse_take`
+# (agnos kernel/arch/x86_64/usb/hid.cyr:232) ends with `hid_mouse_btn_seen = hid_mouse_btn` — the
+# OR-accumulator is re-seeded to the current LEVEL, so a HELD button reports `seen = 1` on every drain.
+# An edge test on `cur | seen` therefore reads 1 both while the button is down AND on the poll where it
+# comes up, so the transition never appears: a titlebar drag is entered and never exited, the window
+# follows the pointer for the rest of the session, and no client ever receives a button-up.
+#
+# ⇒ The two tests need different inputs:
+#   PRESS   uses `cur | seen` — `seen` exists precisely so a click that begins AND ends inside one frame
+#           is not invisible, and that click has `cur == 0`.
+#   RELEASE uses `cur` ALONE — the level is the only thing that says the button is up.
+# And a folded click must produce BOTH in the same event, or the client is left with a stuck button.
+#
+# `believed_down` is the CONSUMER's belief, not the device level. Returns a bitmask:
+#   bit 0 = a press happened in this event · bit 1 = a release happened in this event.
+fn input_btn_transitions(believed_down, cur, seen, mask): i64 {
+    var r = 0;
+    var wentdown = (cur | seen) & mask;
+    var down = cur & mask;
+    if (believed_down == 0) {
+        if (wentdown != 0) { r = r | 1; }
+    }
+    var holding = believed_down;
+    if ((r & 1) != 0) { holding = 1; }
+    if (holding != 0) {
+        if (down == 0) { r = r | 2; }
+    }
+    return r;
+}
+
+fn input_btn_pressed(t): i64 { return t & 1; }
+fn input_btn_released(t): i64 { if ((t & 2) != 0) { return 1; } return 0; }
+
 fn input_btn_edge(prev, cur, mask): i64 {
     var was = prev & mask;
     var now = cur & mask;

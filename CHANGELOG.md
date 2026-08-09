@@ -4,36 +4,59 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [Unreleased] — pointer-chain audit: the defects a burn would have found
 
-### Fixed — a refused cursor mask made the pointer permanently invisible
+An adversarial read-only audit of the whole `AE-7` chain across agnos/bhumi/aethersafha produced 27
+findings; 12 survived independent refutation. The burn was held for these.
 
-⛔⛔ **0.12.7 shipped the 1.56.42 failure reproduced inside the fix for it.** `render_cursor` QUEUES for the
-GPU instead of drawing, and `ae_gpu_emit_cursor` had **no retirement latch** — so one refused `#92` op left
-the pointer absent for that frame, and because the next frame queued and refused again, absent for the rest
-of the boot, with a single log line to explain it. That is exactly what a refused glyph did to every caption
-on the desktop, one layer over.
-⇒ `ae_cursor_gpu_ok` retires the GPU cursor on the first refusal and sends every later frame to
-`render_cursor_cpu`, which draws per-pixel and cannot be refused. **One frame of missing pointer instead of
-a boot without one.** Separate from `ae_text_gpu_ok` deliberately: retiring captions because the *pointer*
-was refused would be the same mistake pointing the other way.
+### Fixed — a titlebar drag could be entered but never exited (burn blocker)
 
-⚠ **Found by auditing my own additions for dead code, not by a test** — `ae_cursor_q_clear` had zero call
-sites, and pulling that thread exposed the missing latch beside it. `tests/render.tcyr` 205 → **217** now
-covers it: on a GPU frame with the latch retired, all **131** arrow pixels must reach the framebuffer.
-Removing the latch check fails 4 asserts including *0 pixels drawn*.
+⛔⛔ `hid_mouse_take` (agnos `kernel/arch/x86_64/usb/hid.cyr:232`) ends with
+`hid_mouse_btn_seen = hid_mouse_btn` — the OR-accumulator is re-seeded to the current LEVEL, so a held
+button reports `seen = 1` on every drain. An edge test on `cur | seen` therefore reads 1 while the button
+is down AND on the poll where it comes up: **the release transition never appears.** On hardware the first
+titlebar click glues that window to the pointer for the rest of the session and no client ever receives a
+button-up. ⇒ `input_btn_transitions` — PRESS on `cur | seen` (so a click folded into one frame is not
+invisible), RELEASE on `cur` alone, and a folded click emits **both** so no client is left holding a
+phantom button. 12 asserts; the mutant restoring the old logic fails 3.
 
-### Fixed — two more unvalidated claims in the same code
+### Fixed — the cursor's CPU fallback did not actually put the cursor on screen
 
-- **The queue was never consumed.** `ae_cursor_q_clear()` existed and was called from nowhere, so the flag
-  latched at 1 for the run. Harmless in today's call graph (every present is preceded by a render that
-  re-queues) but it made correctness rest on call ordering rather than the queue's own contract — a present
-  without a render would have composited a STALE cursor position. The emit now consumes it.
-- **`cursor_max_bytes()` was checked in a comment and nowhere else.** The cursor borrows the text path's
-  `#86` staging slot; I asserted 40 ≤ 1152 in prose and never in code, which is how a later resize of the
-  text slot becomes an shm overrun with no failing test. Now a real guard that retires to the CPU.
-- **Dead API removed:** `cursor_hot_x()` / `cursor_hot_y()` had no caller in `src/` — accessors that only
-  looked used. The constants remain (the tip is drawn from them); the wrappers are gone.
+⛔⛔ Two separate reasons, both of which made the previous cut's retirement latch inert:
+- `ae_chrome_on_gpu()` consulted only `ae_text_gpu_ok`, so retiring the CURSOR left chrome on the GPU, the
+  `#39` blit skipped, and `render_cursor_cpu` painting into a buffer nothing copies to screen.
+- Restoring the blit is still not enough: the blit is the **BOTTOM** layer and client surfaces composite on
+  top of it, so a CPU cursor sits under every hosted window. ⇒ `ae_gpu_frame_plan` now refuses the GPU
+  frame outright when the cursor path is retired, so clients composite per-pixel and `render_desktop`
+  draws the cursor LAST. Same trade the text path takes, one layer further.
+
+### Fixed — five more in the cursor emit and the pointer handler
+
+- **The staging slot is ensured, not assumed.** `ae_gpu_glyph_ensure_slot()` is factored out of
+  `ae_gpu_emit_text`, which created the slot BELOW its no-text early exit — so a frame with nothing to
+  caption left the slot at 0 and the cursor retired permanently on a desktop whose only fault was having
+  no window titles.
+- **Early returns no longer discard an already-QUEUED cursor** without retiring, which lost the pointer for
+  the rest of the boot when the `#86` slot could not be had.
+- **A failed `sys_shm_write` is no longer silent** — it retires and logs.
+- **No `alloc(32)` per frame** in the emit; agnos's allocator is a bump over 2 MB chunks and never frees.
+- **The drag holds a window ID, never a raw `Window` pointer.** `comp_close_window` unlinks the object, so a
+  stored pointer kept moving a window that was no longer in the scene.
+- **A close-button click no longer forwards a phantom press OR release** to whatever was underneath —
+  `ae_ptr_forward` re-derives `comp_window_at` at the same cursor position, so both forwards needed the guard.
+- **The pointer starts at screen centre.** `input_ptr_set` had zero production call sites, so the cursor
+  booted at (0,0) — directly under the shell status panel, where "never appeared" and "parked under the
+  panel" look identical on a burn photo.
+
+### Known open (verified, not yet fixed)
+
+`--clients` always exits **92** on agnos (`setu_sfd` is only assigned under `#ifndef CYRIUS_TARGET_AGNOS`,
+so the whole 95/94/93/91 verdict ladder is dead on the only target that uses it) · minimized windows are
+still rendered but excluded from hit-testing, so clicks fall through a visible window · every pointer event
+over a titlebar is forwarded with a NEGATIVE surface-relative y · no shipped client decodes PTR_MOVE/PTR_BTN,
+so each forward spends a `#97` ring slot for no visible effect · a refused cursor frame is still recorded as
+DRAWN, so the missing pixels are never re-damaged · `bhumi/programs/backend-demo.cyr` hands a 32-byte buffer
+where 256 are needed · `bhumi/tests/bhumi.tcyr` smashes its own frame with `var prec[2]` for a 16-byte record.
 
 ## [0.12.7] - 2026-08-09 — the pointer is an arrow: a derived-outline cursor that clips
 
@@ -63,9 +86,24 @@ a dark desktop, which is precisely where the accent-coloured `+` failed.
 - **Emitted LAST, after the text drain**, which is what makes the arrow top-most over chrome, captions and
   client surfaces alike. ⛔ That ordering is also required because both share the one `#86` glyph staging
   slot — emitting the cursor first would have its mask overwritten by the first caption packed after it.
-- **A CPU arm as well**, taken whenever the GPU is not compositing the frame. It is gated on the same
-  `ae_text_gpu_ok` latch as captions, because `ae_chrome_on_gpu()` consults that latch to decide whether the
-  `#39` blit runs — and that blit is the only thing that makes CPU-drawn pixels reach the screen.
+- **A CPU arm as well**, taken whenever the GPU is not compositing the frame. It is gated on
+  `ae_text_gpu_ok` — because `ae_chrome_on_gpu()` consults that latch to decide whether the `#39` blit runs,
+  and that blit is the only thing that makes CPU-drawn pixels reach the screen — **and** on its own
+  `ae_cursor_gpu_ok`.
+- ⛔⛔ **`ae_cursor_gpu_ok`: a refused mask must RETIRE the path, not lose the pointer.** `render_cursor`
+  queues instead of drawing, so an emit that refuses leaves the pointer absent for that frame — and since the
+  next frame queues and refuses identically, absent for the rest of the boot, with one log line. That is what
+  a refused glyph did to every caption on the desktop, one layer over. The first refusal now retires the GPU
+  cursor and every later frame goes to `render_cursor_cpu`, which draws per-pixel and cannot be refused: one
+  frame of missing pointer instead of a boot without one. ⚠ Kept SEPARATE from `ae_text_gpu_ok` — retiring
+  captions because the *pointer* was refused would be the same mistake pointing the other way.
+- **The emit consumes its queue.** `ae_cursor_q_clear()` runs in `ae_gpu_emit_cursor`, so the one-entry queue
+  is genuinely per-frame. Left unconsumed the flag latches at 1 for the run, which is harmless only while
+  every present happens to be preceded by a render that re-queues — a present without one would composite a
+  STALE cursor position.
+- **The borrowed staging slot is checked, not assumed.** The cursor packs into the text path's `#86` slot,
+  sized for the widest glyph run; `cursor_max_bytes()` (40 B) is compared against `ae_text_bytes(AE_TEXT_CHARS)`
+  (1152 B) at emit time and retires to the CPU if it ever stops fitting, instead of overrunning the slot.
 - Damage now uses the cursor's **own** extent. It was `FONT_W + 2` x `FONT_H + 2` (10x18), which is *almost*
   the arrow's 10x20 — a stale rect would have smeared only the bottom two rows, only while moving. Exactly
   the defect that survives a screenshot and reappears as "the pointer leaves a trail" three burns later.
@@ -75,7 +113,12 @@ a dark desktop, which is precisely where the accent-coloured `+` failed.
 ⭐ `tests/cursor.tcyr` (**61 asserts**): the silhouette's slope, the seal invariant (no fill pixel may touch
 a transparent one), layer disjointness, clipping at every edge including a 1x1 at the last pixel, and
 MSB-first bit layout. It also **prints the arrow as ASCII** — the shape is art, and art is reviewed by
-looking at it. `tests/render.tcyr` 194 → **205** adds the damage-extent coverage (a font-sized rect fails).
+looking at it. `tests/render.tcyr` 194 → **217**: the damage extent (a font-sized rect fails at 218 vs 220),
+and the retirement fallback — on a GPU frame with `ae_cursor_gpu_ok` cleared, all **131** arrow pixels must
+reach the framebuffer; removing the latch check fails 4 asserts including *0 pixels drawn*.
+⚠ That fallback assertion pre-paints a background first: the outline colour is `bhumi_xrgb(0,0,0)` = **0**,
+byte-identical to an untouched framebuffer, so a `!= 0` count sees only the 73 fill pixels and a
+`== xrgb(0,0,0)` check on the tip passes whether anything drew or not.
 22 → **23 suites**.
 
 ⭐⭐ **And an external oracle at last.** Every previous cursor check was a serial line, i.e. the compositor's

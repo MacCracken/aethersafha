@@ -222,6 +222,64 @@ fn main() {
     assert_eq(input_btn_edge(0, 2, 1), 0, "a RIGHT press is not a left-button edge");
     assert_eq(input_btn_edge(0, 2, 2), 1, "...but it is a right-button edge");
 
+    # =====================================================================
+    # AE-7: the button state machine — press and release are NOT one edge
+    # =====================================================================
+    # ⛔⛔ THE BUG THIS EXISTS FOR WAS A BURN-BLOCKER, caught by audit. The old code took ONE edge on
+    # `cur | seen`. The kernel re-seeds `seen` to the held LEVEL on every drain
+    # (`hid_mouse_take`, agnos kernel/arch/x86_64/usb/hid.cyr:232 `hid_mouse_btn_seen = hid_mouse_btn`),
+    # so `cur | seen` reads 1 while the button is down AND on the poll where it comes up — the release
+    # transition never appears. A titlebar drag was entered and never exited: the window follows the
+    # pointer for the rest of the session, and no client ever receives a button-up.
+    test_group("input — button transitions (press uses cur|seen, release uses cur ALONE)");
+    # A normal press: level down, seen down.
+    var t1 = input_btn_transitions(0, 1, 1, 1);
+    assert_eq(input_btn_pressed(t1), 1, "press: fires on the way down");
+    assert_eq(input_btn_released(t1), 0, "press: no release while the level is down");
+
+    # ⭐ THE REGRESSION. Believed-down, level now UP, but `seen` still 1 from the kernel's re-seed.
+    var t2 = input_btn_transitions(1, 0, 1, 1);
+    assert_eq(input_btn_released(t2), 1, "RELEASE fires even though seen is still 1 -- the blocker");
+    assert_eq(input_btn_pressed(t2), 0, "release: not also a press");
+
+    # Held down across polls: neither transition.
+    var t3 = input_btn_transitions(1, 1, 1, 1);
+    assert_eq(input_btn_pressed(t3), 0, "held: no repeat press");
+    assert_eq(input_btn_released(t3), 0, "held: no release");
+
+    # ⭐ A FOLDED CLICK — began and ended inside one frame, so the level is already back up. It must
+    # emit BOTH, or the client is left holding a button that was never released.
+    var t4 = input_btn_transitions(0, 0, 1, 1);
+    assert_eq(input_btn_pressed(t4), 1, "folded click: press");
+    assert_eq(input_btn_released(t4), 1, "folded click: AND release, in the same event");
+
+    # Idle: nothing at all.
+    var t5 = input_btn_transitions(0, 0, 0, 1);
+    assert_eq(input_btn_pressed(t5), 0, "idle: no press");
+    assert_eq(input_btn_released(t5), 0, "idle: no release");
+
+    # Believed-up with the level up stays quiet even if a stale seen lingers at 0.
+    assert_eq(input_btn_transitions(0, 0, 0, 1), 0, "idle is exactly zero");
+
+    # Mask isolation: the right button must not drive the left button's state.
+    var t6 = input_btn_transitions(0, 2, 2, 1);
+    assert_eq(input_btn_pressed(t6), 0, "a RIGHT-button press is not a left press");
+    assert_eq(input_btn_released(t6), 0, "and not a left release");
+
+    # ⭐ THE FULL SEQUENCE a real click produces on hardware, driven through the machine the way the
+    # compositor drives it — this is the end-to-end statement that a drag can be exited.
+    var believed = 0;
+    var seq = input_btn_transitions(believed, 1, 1, 1);          # poll N: pressed
+    assert_eq(input_btn_pressed(seq), 1, "sequence: press at poll N");
+    believed = 0;
+    if (input_btn_pressed(seq) == 1) { if (input_btn_released(seq) == 0) { believed = 1; } }
+    assert_eq(believed, 1, "sequence: believed down after the press");
+    seq = input_btn_transitions(believed, 0, 1, 1);               # poll N+1: released, seen re-seeded
+    assert_eq(input_btn_released(seq), 1, "sequence: RELEASE at poll N+1 -- the drag can end");
+    believed = 0;
+    if (input_btn_pressed(seq) == 1) { if (input_btn_released(seq) == 0) { believed = 1; } }
+    assert_eq(believed, 0, "sequence: believed up again, so the next click is not swallowed");
+
     return assert_summary();
 }
 

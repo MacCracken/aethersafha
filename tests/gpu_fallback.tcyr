@@ -31,6 +31,7 @@ include "src/geom.cyr"
 include "src/window.cyr"
 include "src/compositor.cyr"
 include "src/theme.cyr"
+include "src/cursor.cyr"   # gpu.cyr's cursor emit packs this bitmap
 include "src/render.cyr"
 include "src/gpu.cyr"
 
@@ -180,6 +181,24 @@ fn main() {
     ae_gpu_demote();
     assert_eq(ae_gpu_active(), 0, "demote clears the active flag");
     assert_eq(ae_gpu_frame_plan(comp, fb), 0, "a demoted compositor plans no GPU frame");
+
+    # =====================================================================
+    # AE-7: a retired cursor must take the WHOLE frame off the GPU
+    # =====================================================================
+    # ⛔⛔ ORDERING, NOT VISIBILITY — restoring the `#39` blit alone does NOT fix it. The blit is the BOTTOM
+    # layer; client surfaces composite on top of it (step 2 of `ae_gpu_present_frame`, before the text and
+    # cursor emits). A CPU-drawn cursor therefore sits UNDER every hosted window, and the pointer vanishes
+    # the moment it crosses puka or crab — most of the screen. Only a CPU frame composites clients
+    # per-pixel and lets `render_desktop` draw the cursor LAST.
+    test_group("gpu — a retired cursor demotes the whole frame, so the pointer stays on top");
+    ae_gpu_mode = 1;
+    ae_cursor_gpu_ok = 1;
+    ae_cursor_gpu_disable();
+    assert_eq(ae_cursor_gpu_ok_get(), 0, "precondition: the cursor path is retired");
+    assert_eq(ae_gpu_frame_plan(comp, fb), 0, "a retired cursor refuses the GPU frame");
+    assert_eq(ae_gpu_frame_ok, 0, "  ae_gpu_frame_ok stays clear, so render_cursor takes the CPU arm");
+    assert_eq(ae_chrome_on_gpu(), 0, "  and chrome follows, so the #39 blit runs");
+    ae_cursor_gpu_ok = 1;
 
     return 0;
 }

@@ -303,6 +303,17 @@ fn ae_gpu_frame_plan(comp, fb): i64 {
     var fh = bhumi_fb_height(fb);
     if (fw < 1) { return 0; }
     if (fh < 1) { return 0; }
+    # ⛔⛔ A RETIRED CURSOR TAKES THE WHOLE FRAME OFF THE GPU, and it has to — ORDERING, not visibility.
+    # The `#39` chrome blit is the BOTTOM layer: client surfaces composite ON TOP of it (step 2 of
+    # `ae_gpu_present_frame`, above the text and cursor emits). So a CPU-drawn cursor lives in the blit
+    # layer and every hosted window paints over it — the pointer would vanish the moment it crossed puka
+    # or crab, which is most of the screen. Making `ae_chrome_on_gpu()` follow the cursor latch restores
+    # the blit but cannot reorder it.
+    # ⇒ If the cursor cannot go on the shader cores, nothing does: a CPU frame composites clients
+    # per-pixel and `render_desktop` draws the cursor LAST, which is the only arrangement that puts it on
+    # top. Same trade the text path already takes, one layer further — a slower desktop beats a pointer
+    # you lose over every window.
+    if (ae_cursor_gpu_ok != 1) { return 0; }
     var v = comp_windows(comp);
     var n = vec_len(v);
     var i = 0;
@@ -497,24 +508,42 @@ fn ae_gpu_batch_recover(): i64 {
 # are already correct in the back buffer at this point — losing the frame over a titlebar caption would
 # trade a whole desktop for a string. On refusal the text is simply absent for that frame and the run is
 # counted, which is visible without being fatal.
+# Make sure the 1bpp staging slot exists. Returns 1 if usable, 0 if it could not be had.
+#
+# ⛔⛔ THIS IS SHARED, AND FACTORING IT OUT IS A BUG FIX, NOT TIDYING. It used to live inside
+# `ae_gpu_emit_text`, BELOW that function's `if (n == 0) { return 0; }` early exit — so a frame with no
+# text to draw never created the slot. The cursor emit then saw `ae_gpu_glyph_slot == 0` and permanently
+# retired the pointer, on a desktop whose only fault was having nothing to caption. ⇒ The cursor needs the
+# slot on its OWN terms; it must not depend on some other layer having run first.
+# ⚠ Sized for the widest glyph run so the slot never has to grow; the cursor's mask is far smaller and is
+# checked against this capacity at its call site.
+fn ae_gpu_glyph_ensure_slot(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (ae_gpu_text_fail == 1) { return 0; }
+    if (ae_gpu_glyph_slot != 0) { return 1; }
+    var cap = ae_text_bytes(AE_TEXT_CHARS);
+    var sl = sys_shm_create_gpu(cap);
+    if (sl < 1) {
+        ae_gpu_text_fail = 1;
+        println("aethersafha: no graphics-visible slot for glyphs -- titles stay on the CPU");
+        return 0;
+    }
+    ae_gpu_glyph_slot = sl;
+    ae_gpu_glyph_buf = alloc(cap);
+    if (ae_gpu_glyph_buf == 0) { ae_gpu_text_fail = 1; return 0; }
+    return 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+}
+
 fn ae_gpu_emit_text(): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     var n = ae_text_count();
     if (n == 0) { return 0; }
     if (ae_gpu_text_fail == 1) { return 0; }
-    # Widest run the queue admits, so the slot never has to grow.
-    var cap = ae_text_bytes(AE_TEXT_CHARS);
-    if (ae_gpu_glyph_slot == 0) {
-        var sl = sys_shm_create_gpu(cap);
-        if (sl < 1) {
-            ae_gpu_text_fail = 1;
-            println("aethersafha: no graphics-visible slot for glyphs -- titles stay on the CPU");
-            return 0;
-        }
-        ae_gpu_glyph_slot = sl;
-        ae_gpu_glyph_buf = alloc(cap);
-        if (ae_gpu_glyph_buf == 0) { ae_gpu_text_fail = 1; return 0; }
-    }
+    if (ae_gpu_glyph_ensure_slot() == 0) { return 0; }
     var emitted = 0;
     var i = 0;
     while (i < n) {
@@ -559,6 +588,8 @@ fn ae_gpu_emit_text(): i64 {
 }
 
 var ae_gpu_cursor_seen = 0;     # first-occurrence log latch
+# Visible-rect scratch for the cursor emit. MODULE scope => 4 x u64 = 32 bytes, reused every frame.
+var ae_cur_vr[4];
 
 # ⭐⭐ THE POINTER, AS TWO 1bpp MASKS THROUGH THE SAME op 0x03 — outline in black, then fill in white.
 #
@@ -583,8 +614,20 @@ var ae_gpu_cursor_seen = 0;     # first-occurrence log latch
 fn ae_gpu_emit_cursor(): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     if (ae_cursor_q_pending() == 0) { return 0; }
-    if (ae_gpu_text_fail == 1) { return 0; }
-    if (ae_gpu_glyph_slot == 0) { return 0; }        # no staging slot -> the CPU path drew it already
+    # ⛔⛔ THESE TWO USED TO `return 0` AND THAT LOST THE POINTER FOREVER. `render_cursor` gates on
+    # `ae_text_gpu_ok` + `ae_cursor_gpu_ok`, NOT on these — so when the staging slot cannot be had
+    # (`ae_gpu_text_fail`, or `#86`'s 16 system-wide slots exhausted by the clients) the cursor is already
+    # QUEUED and not drawn, and a bare return leaves it undrawn this frame and every frame after.
+    # ⇒ Retire, so the next frame draws it per-pixel. The flags must not be allowed to disagree silently.
+    # ⛔ ENSURE, DO NOT RETIRE. An earlier cut retired the pointer here whenever the slot did not already
+    # exist — but the slot was only ever created by the TEXT path, below its no-text early exit, so a frame
+    # with nothing to caption killed the cursor for the rest of the boot. The cursor asks for the slot
+    # itself now; only a slot that genuinely cannot be had is a retirement.
+    if (ae_gpu_glyph_ensure_slot() == 0) {
+        ae_cursor_gpu_disable();
+        println("aethersafha: no graphics-visible slot for the cursor mask -- the pointer moves to the CPU");
+        return 0;
+    }
     # ⛔ CONSUME THE QUEUE HERE, NOT NOWHERE. It is set by `render_cursor` once per frame and was never
     # cleared, so the flag latched at 1 for the rest of the run. That happens to be harmless in today's
     # call graph — every `ae_gpu_present_frame` is preceded by a `render_desktop` that re-queues — but it
@@ -603,8 +646,12 @@ fn ae_gpu_emit_cursor(): i64 {
     }
     var cx = ae_cursor_q_x();
     var cy = ae_cursor_q_y();
-    var vr = alloc(32);
-    if (cursor_visible_rect(cx, cy, ae_gpu_bb_w, ae_gpu_bb_h, vr) == 0) { return 0; }
+    # ⛔ A MODULE-SCOPE SCRATCH, NOT `alloc(32)` PER FRAME. agnos's allocator is a bump over 2 MB mmap
+    # chunks and NEVER FREES, so a 32-byte allocation in a once-per-frame path burns a fresh chunk about
+    # every 65536 frames and grows without bound for the life of the desktop. ⚠ MODULE-scope `var X[4]` is
+    # 4 x u64 = 32 BYTES, which is what `cursor_visible_rect` writes; the function-local form would be 4.
+    if (cursor_visible_rect(cx, cy, ae_gpu_bb_w, ae_gpu_bb_h, &ae_cur_vr) == 0) { return 0; }
+    var vr = &ae_cur_vr;
     var vx = load64(vr + 0);
     var vy = load64(vr + 8);
     var vw = load64(vr + 16);
@@ -619,7 +666,16 @@ fn ae_gpu_emit_cursor(): i64 {
         var col = ae_cursor_line_colour();
         if (pass == 1) { col = ae_cursor_fill_colour(); }
         var nb = cursor_pack(ae_gpu_glyph_buf, layer, cx, cy, vr);
-        if (sys_shm_write(ae_gpu_glyph_slot, ae_gpu_glyph_buf, nb) == 0) {
+        var wrc = sys_shm_write(ae_gpu_glyph_slot, ae_gpu_glyph_buf, nb);
+        # ⛔ A FAILED WRITE USED TO SKIP THE PASS IN SILENCE — no log, no retirement, no change to
+        # `emitted`. The slot can be refused for a recycled id or a bad range, and the pointer would then
+        # be absent every frame with nothing in the log to say why. Same disease as the refused op below.
+        if (wrc != 0) {
+            ae_cursor_gpu_disable();
+            println("aethersafha: could not stage the cursor mask into its slot -- the pointer moves to the CPU");
+            return emitted;
+        }
+        if (wrc == 0) {
             var rc = ae_gpu_glyph_rect(ae_gpu_glyph_slot, wh, dstxy, col);
             if (rc == 0) { emitted = emitted + 1; }
             else {

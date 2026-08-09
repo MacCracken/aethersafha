@@ -807,6 +807,13 @@ fn ae_chrome_on_gpu(): i64 {
     # CPU text visible again. ⚠ It costs the `AE-9` win for the rest of that session, which is the correct
     # trade: a slower desktop beats an invisible one.
     if (ae_text_gpu_ok != 1) { return 0; }
+    # ⛔⛔ AND THE CURSOR RETIRES CHROME TOO — the same trap, found by audit before it reached iron. The
+    # cursor's own retirement latch sends `render_cursor` to `render_cursor_cpu`, but if chrome stayed on
+    # the GPU the `#39` blit stays skipped and those CPU pixels land in a framebuffer nothing copies to
+    # screen. ⇒ The "fix" for an invisible cursor would have produced an invisible cursor. Any layer that
+    # falls back to per-pixel drawing must drag chrome back with it, because the blit is the only thing
+    # that carries per-pixel output to the panel.
+    if (ae_cursor_gpu_ok != 1) { return 0; }
     return ae_chrome_gpu_ok;
 }
 

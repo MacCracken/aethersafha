@@ -165,7 +165,21 @@ fn ae_query_geometry(): i64 {
     ae_geom_w = w;
     ae_geom_h = h;
     ae_geom_asked = 1;
+    ae_centre_pointer();
     return 1;
+}
+
+# ⛔ THE POINTER MUST START SOMEWHERE DELIBERATE, AND (0,0) IS THE WORST AVAILABLE CHOICE.
+# `input_ptr_set` existed with ZERO production call sites — an audit found it — so `ae_ptr_x`/`ae_ptr_y`
+# kept their .bss zeros and the pointer booted at the top-left pixel. That is exactly where the shell
+# status panel is drawn, so the very first composited frame puts a 10x20 arrow on top of the panel, and it
+# stays there until the user happens to move the mouse. It also makes "the cursor never appeared" and "the
+# cursor is parked under the panel" look identical on a burn photo.
+# ⚠ Called from `ae_query_geometry` only after the geometry is KNOWN — centring against the 1280x720
+# fallback and then learning the real 2560x1440 would park it off-centre with no second chance.
+fn ae_centre_pointer(): i64 {
+    input_ptr_set(ae_geom_w / 2, ae_geom_h / 2);
+    return 0;
 }
 
 # ================================================================
@@ -178,7 +192,13 @@ fn ae_query_geometry(): i64 {
 # (kind 9) and `SETU_INPUT_PTR_BTN` (kind 10). Nothing here is a new mechanism.
 var ae_ptr_btn = 0;        # last button bitmap, for edge detection
 var ae_ptr_drag = 0;       # 1 = dragging a window by its titlebar
-var ae_ptr_drag_win = 0;   # the window being dragged
+# ⛔⛔ THE WINDOW **ID**, NEVER A RAW Window POINTER. A drag outlives the thing it drags: F4, a
+# close-button click, or the client simply exiting all run `comp_close_window`, which unlinks the Window
+# from the compositor's vector — and a stored pointer then addresses an object that is no longer in the
+# scene. Every later motion would call `input_move` on it, writing geometry nobody composites and, once
+# the allocator reuses that memory, writing into whatever now lives there. An id is re-resolved against
+# the live vector each motion, so a closed window ENDS the drag instead of continuing it invisibly.
+var ae_ptr_drag_id = 0;    # window id being dragged (0 = none)
 var ae_ptr_first = 0;      # one-shot marker latch
 var ae_ptr_click = 0;      # one-shot marker latch
 
@@ -223,8 +243,17 @@ fn ae_pointer_event(comp, ev): i64 {
         # including its clamp, which is what keeps a dragged window from crossing an edge and dropping
         # the whole frame off the GPU (`#88`/`#87` REJECT an out-of-range rect rather than clipping).
         if (ae_ptr_drag == 1) {
-            if (ae_ptr_drag_win != 0) {
-                input_move(ae_ptr_drag_win, dx, dy, ae_geom_w, ae_geom_h - TITLEBAR_H);
+            # Re-resolve by id: if it is gone, the drag is over.
+            var didx = comp_find_by_id(comp, ae_ptr_drag_id);
+            if (didx < 0) {
+                ae_ptr_drag = 0;
+                ae_ptr_drag_id = 0;
+            }
+            if (didx >= 0) {
+                var dwin = comp_get(comp, didx);
+                if (dwin != 0) {
+                    input_move(dwin, dx, dy, ae_geom_w, ae_geom_h - TITLEBAR_H);
+                }
             }
         }
         ae_ptr_forward(comp, 0, 0, 0);
@@ -236,33 +265,50 @@ fn ae_pointer_event(comp, ev): i64 {
         # ⚠ `buttons_seen` OR-folds a click that began AND ended inside one frame. Without this a fast
         # click is invisible: the level is back to 0 by the time the compositor looks.
         var seen = bhumi_button_seen(ev);
-        var effective = cur | seen;
-        var edge = input_btn_edge(ae_ptr_btn, effective, 1);   # left button only, for now
-        if (edge == 1) {
+        # ⛔ NOT an edge on `cur | seen` — that makes the RELEASE unreachable, because the kernel re-seeds
+        # `seen` to the held level on every drain. See `input_btn_transitions`.
+        var tr = input_btn_transitions(ae_ptr_btn, cur, seen, 1);   # left button only, for now
+        var closed = 0;
+        if (input_btn_pressed(tr) == 1) {
             var win = comp_window_at(comp, input_ptr_x(), input_ptr_y());
             if (win != 0) {
                 # CLICK TO FOCUS — the first consumer `comp_window_at` has ever had.
                 var idx = comp_find_by_id(comp, win_id(win));
                 if (idx >= 0) { comp_focus(comp, idx); }
                 var hit = deco_hit(win, input_ptr_x(), input_ptr_y());
-                if (hit == Deco.DECO_CLOSE) { comp_close_window(comp, win_id(win)); }
+                # ⛔ A CLOSE CONSUMES THE CLICK. Without `closed`, the forward below re-derives
+                # `comp_window_at` at the SAME cursor position — the window it found is gone, so it now
+                # finds whatever was underneath and sends THAT client a button press at a coordinate the
+                # user never clicked in it. A click that destroys a window must not also be delivered.
+                if (hit == Deco.DECO_CLOSE) {
+                    comp_close_window(comp, win_id(win));
+                    closed = 1;
+                }
                 if (hit == Deco.DECO_TITLEBAR) {
                     ae_ptr_drag = 1;
-                    ae_ptr_drag_win = win;
+                    ae_ptr_drag_id = win_id(win);
                 }
             }
             if (ae_ptr_click == 0) {
                 ae_ptr_click = 1;
                 println("aethersafha: pointer button click routed");
             }
-            ae_ptr_forward(comp, 1, 1, 1);
+            if (closed == 0) { ae_ptr_forward(comp, 1, 1, 1); }
         }
-        if (edge == 0 - 1) {
+        if (input_btn_released(tr) == 1) {
             ae_ptr_drag = 0;
-            ae_ptr_drag_win = 0;
-            ae_ptr_forward(comp, 1, 1, 0);
+            ae_ptr_drag_id = 0;
+            # ⛔ `closed` GUARDS THIS TOO — an earlier cut guarded only the press. `ae_ptr_forward`
+            # re-derives `comp_window_at` at the same cursor position, so after a close-button click the
+            # window it finds is the one UNDERNEATH, and that client receives a button RELEASE it never
+            # got a press for. Half a guard is not a guard.
+            if (closed == 0) { ae_ptr_forward(comp, 1, 1, 0); }
         }
-        ae_ptr_btn = cur;      # ⚠ store the LEVEL, not `effective` — a folded click must not latch down
+        # ⚠ THE BELIEF, not the device level. A folded click (press and release inside one frame) emits
+        # both transitions above and must end BELIEVED-UP, or the next press is swallowed.
+        ae_ptr_btn = 0;
+        if (input_btn_pressed(tr) == 1) { if (input_btn_released(tr) == 0) { ae_ptr_btn = 1; } }
+        if (input_btn_pressed(tr) == 0) { if (input_btn_released(tr) == 0) { ae_ptr_btn = (cur & 1); } }
         return 0;
     }
     return 0;

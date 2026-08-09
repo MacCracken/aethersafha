@@ -765,6 +765,13 @@ fn main() {
     # Now retire it, as gpu.cyr does on a refusal, and demand real pixels.
     ae_cursor_gpu_disable();
     assert_eq(ae_cursor_gpu_ok_get(), 0, "the cursor GPU path is retired");
+    # ⛔⛔ THE ASSERTION THAT WOULD HAVE CAUGHT A SHIPPED-BUT-USELESS FIX. Falling back to the CPU is only
+    # a fix if those pixels reach the panel, and they only do when the `#39` blit runs — which
+    # `ae_chrome_on_gpu()` decides. It consulted `ae_text_gpu_ok` alone, so retiring the CURSOR left chrome
+    # on the GPU, the blit skipped, and `render_cursor_cpu` painting into a buffer nothing copies. The
+    # "fix" for an invisible cursor produced an invisible cursor. Found by audit, not by the test above —
+    # which passes either way, because it only checks which BRANCH runs.
+    assert_eq(ae_chrome_on_gpu(), 0, "a retired CURSOR pulls chrome off the GPU too, restoring the #39 blit");
     ae_cursor_q_clear();
     render_cursor(curfb);
     assert_eq(ae_cursor_q_pending(), 0, "a retired path does NOT queue");
