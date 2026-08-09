@@ -558,6 +558,75 @@ fn ae_gpu_emit_text(): i64 {
     #endif
 }
 
+var ae_gpu_cursor_seen = 0;     # first-occurrence log latch
+
+# ⭐⭐ THE POINTER, AS TWO 1bpp MASKS THROUGH THE SAME op 0x03 — outline in black, then fill in white.
+#
+# Called AFTER `ae_gpu_emit_text`, which is what makes the cursor top-most: op order is paint order, so the
+# last thing enqueued is the last thing composited. A cursor that goes under a titlebar caption is a cursor
+# you lose exactly when you are trying to click the titlebar.
+#
+# ⭐ OUTLINE FIRST, THEN FILL. The two masks are disjoint by construction (`tests/cursor.tcyr` asserts it),
+# so the order does not matter for correctness — but it does for a partial failure: if the second op is
+# refused, an outline with no fill still reads as a cursor, whereas a fill with no outline is an
+# unidentifiable white blob.
+#
+# ⛔ IT SHARES THE GLYPH SLOT, and that is safe only because it runs after the text drain has finished with
+# it. `#86` slots are scarce (16 system-wide, each rounded up to 2 MB) so a second slot for 40 bytes would
+# be indefensible — but this ordering dependency is real: moving this call above the text drain would have
+# the cursor's mask overwritten by the first caption.
+#
+# ⚠ A REFUSAL HERE MUST NOT RETIRE THE TEXT PATH. `cursor_visible_rect` already guarantees the rect is
+# on-surface, so a refusal is not the out-of-range case that `ae_text_fits` guards — retiring captions
+# because the pointer was refused would be the 1.56.42 failure in reverse. It costs one frame of cursor.
+# Returns the number of masks emitted (0..2), or -2 if the kernel batched and the frame must not present.
+fn ae_gpu_emit_cursor(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (ae_cursor_q_pending() == 0) { return 0; }
+    if (ae_gpu_text_fail == 1) { return 0; }
+    if (ae_gpu_glyph_slot == 0) { return 0; }        # no staging slot -> the CPU path drew it already
+    var cx = ae_cursor_q_x();
+    var cy = ae_cursor_q_y();
+    var vr = alloc(32);
+    if (cursor_visible_rect(cx, cy, ae_gpu_bb_w, ae_gpu_bb_h, vr) == 0) { return 0; }
+    var vx = load64(vr + 0);
+    var vy = load64(vr + 8);
+    var vw = load64(vr + 16);
+    var vh = load64(vr + 24);
+    var wh = (vh << 16) | vw;
+    var dstxy = (vy << 16) | vx;
+    var emitted = 0;
+    var layer = CursorK.CUR_OUTLINE;
+    var pass = 0;
+    while (pass < 2) {
+        if (pass == 1) { layer = CursorK.CUR_FILL; }
+        var col = ae_cursor_line_colour();
+        if (pass == 1) { col = ae_cursor_fill_colour(); }
+        var nb = cursor_pack(ae_gpu_glyph_buf, layer, cx, cy, vr);
+        if (sys_shm_write(ae_gpu_glyph_slot, ae_gpu_glyph_buf, nb) == 0) {
+            var rc = ae_gpu_glyph_rect(ae_gpu_glyph_slot, wh, dstxy, col);
+            if (rc == 0) { emitted = emitted + 1; }
+            else {
+                # An indeterminate prefix is already in the back buffer — the frame cannot be presented.
+                if (ae_gpu_err_is_batch(rc) == 1) { return 0 - 2; }
+                return emitted;
+            }
+        }
+        pass = pass + 1;
+    }
+    if (emitted > 0) {
+        if (ae_gpu_cursor_seen == 0) {
+            ae_gpu_cursor_seen = 1;
+            println("aethersafha: the pointer is a real arrow on the shader cores (two #92 op 0x03 masks)");
+        }
+    }
+    return emitted;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+}
+
 # ae_gpu_present_frame — composite and flip one frame on the GPU.
 # Returns 1 if the frame was presented on the GPU, 0 if the caller must fall back to the CPU present.
 #
@@ -702,6 +771,16 @@ fn ae_gpu_present_frame(comp, fb): i64 {
     # present, which repaints the whole frame from the userland framebuffer — the correct outcome, and the
     # one thing that must NOT happen is flipping the half-composited buffer to the panel.
     if (ae_gpu_emit_text() == 0 - 2) {
+        ae_gpu_batch_recover();
+        ae_gpu_demote();
+        return 0;
+    }
+
+    # 2d. THE POINTER, LAST. Op order is paint order, so this is what makes the arrow top-most — over
+    #     chrome, over captions, over client surfaces. ⛔ It must stay AFTER the text drain for a second
+    #     reason too: both share the one `#86` glyph staging slot, so emitting the cursor first would have
+    #     its mask overwritten by the first caption packed after it.
+    if (ae_gpu_emit_cursor() == 0 - 2) {
         ae_gpu_batch_recover();
         ae_gpu_demote();
         return 0;

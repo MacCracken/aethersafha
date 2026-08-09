@@ -3,57 +3,53 @@
 > **⛔ 60-LINE CAP. NOT A LOG.** History belongs in [`../../CHANGELOG.md`](../../CHANGELOG.md), milestones in
 > [`roadmap.md`](roadmap.md). This file reached 181 lines by absorbing release narrative, and carried a
 > version, a toolchain pin and eight dependency versions that were all wrong. Over the cap means cut prose,
-> never facts. **Last refresh** 2026-08-02.
+> never facts. **Last refresh** 2026-08-09.
 
 ## TRUE — measured today
 
 | Field | Value | Source |
 |---|---|---|
-| Version | **0.12.1** | [`VERSION`](../../VERSION) |
-| Cyrius pin | **6.5.5** | `cyrius.cyml [package].cyrius` |
-| Modules / tests | 25 `src/*.cyr` · **21 `.tcyr` suites** | `ls` |
-| `--agnos` build | **GREEN** — staged `/bin/aethersafha` 15,592,080 B, static ELF64 | `agnos/build/rootfs/bin/` |
-| Backend | **bhumi** 1.1.3 (scanout + input). GPU via the agnos ring-3 band `#82`-`#94` — **not** mabda; there is no `[deps.mabda]` | `cyrius.cyml` |
+| Version | **0.12.7** | [`VERSION`](../../VERSION) |
+| Cyrius pin | **6.5.13** | `cyrius.cyml [package].cyrius` |
+| Modules / tests | 26 `src/*.cyr` · **23 `.tcyr` suites** | `ls` |
+| `--agnos` build | **GREEN** — staged `/bin/aethersafha` 13,563,480 B, static ELF64 | `agnos/build/rootfs/bin/` |
+| Backend | **bhumi** 1.1.4 (scanout + input + pointer). GPU via the agnos ring-3 band `#82`-`#94` — **not** mabda; there is no `[deps.mabda]` | `cyrius.cyml` |
 
-**Deps** (all declare a tag **and** a `path` override): bhumi 1.1.3 · rupa 0.1.2 · agnostik 1.3.4 ·
-agnodrm 1.5.0 · kashi 1.0.4 · mehman 1.0.1 · kavach 3.11.0 · setu 0.7.2.
+**Deps** (all declare a tag **and** a `path` override): bhumi 1.1.4 · rupa 0.1.2 · agnostik 1.3.4 ·
+agnodrm 1.5.0 · kashi 1.0.4 · mehman 1.0.1 · kavach 3.11.7 · setu 0.8.4.
 ⛔ **The path WINS over the tag.** The vendored copy tracks the local checkout whatever the tag says — that
 is why this repo's `--agnos` build broke for a week with no change to this repo (kavach 3.9.1's Linux-only
 backends), and why a green build here does not prove the declared graph builds.
 
 ## Proven, and by what
 
-- **Composites on iron.** `run /bin/aethersafha --selftest` → **`exit 95`** on archaemenid (AMD gfx90c /
-  DCN2.1), 0.11.1: the client's sentinel words read back out of the GPU's own back buffer at the client's
-  coordinates, margin ring clean, far frame clean. `#87` / `#90` / `#84` are iron-proven for **one opaque
-  client surface**.
-- **Hosts two real clients, foreground, in QEMU** (2026-08-02): `aethersafha` typed at the agnsh prompt —
-  no `&` — reaches **connected 2, presented 2** with `/bin/puka` (setu's `present_probe`) and `/bin/crab`
-  (the dhancha file manager) composited as windows, crab rendering real ext2 directory contents. Verified
-  on the **framebuffer**, not the serial: the screendump carries crab's panes and the probe's own
-  `0x00003000` / `0x00FF0000` bands.
-  ⚠ This required an agnos kernel fix (1.56.34, syscall-kstack direct-map on the `#37` restore path) and
-  agnoshi routing the foreground through `spawn_path #43` + a waitpid poll instead of `execwait #37`.
-  **Not yet re-confirmed on iron.**
+- **Composites on iron.** `--selftest` → **`exit 95`** on archaemenid (gfx90c / DCN2.1), 0.11.1: the client's
+  sentinel words read back out of the GPU's own back buffer at the client's coordinates, margins and far
+  frame clean. `#87` / `#90` / `#84` iron-proven for **one opaque client surface**.
+- **Hosts two real clients** — `/bin/puka` + `/bin/crab` composited as windows, crab rendering real ext2
+  contents, verified on the **framebuffer** not the serial. Needed an agnos fix (1.56.34 syscall-kstack
+  direct-map on the `#37` restore path) and agnoshi routing the foreground via `spawn_path #43`.
+- ⭐⭐ **CONFIRMED ON IRON 2026-08-08** (agnos 1.56.42, 0.12.6): **two** clients present with distinct window
+  ids, and the terminal's shell **answers typed keys** — `forwarded a key to the focused client` →
+  `puka: key received` x5 → `puka: line sent to the shell`, with a live agnoshi in puka's window answering
+  `help`. ⛔ Getting there needed the placed-client handshake to **drain** a channel that drops the OLDEST
+  record and **resync** past what loss removes; a one-record-per-frame consumer lost phase permanently
+  against a client that presents every frame.
+- ⭐ **The pointer is a real arrow** (0.12.7), two `#92` op 0x03 masks — outline black, fill white — with
+  a derived outline and true clipping so the hotspot reaches the last pixel. Verified in QEMU on the CPU arm
+  by matching the **full 10x20 shape in the captured framebuffer**, bit-identical to the shape module's own
+  dump. ⚠ The GPU arm is **unburned**.
 
 ## Open
 
-> ⛔ **FOUR ENTRIES THAT USED TO LIVE HERE HAVE BURNED GREEN AND ARE CLOSED** (2026-08-07/08). They are
-> written out rather than deleted because each one stated a *premise* that is now falsified, and a premise
-> left in an "Open" list gets re-derived as work:
-> - ~~`#92` premultiplied compositing has never run~~ — **it runs on iron.** crab's surface sets
->   `SETU_SURF_PREMULTIPLIED` and `#92` op 0x01 BLEND_RECT composites it
->   ([`AE-6`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/iron-nuc-zen-log.md#tracker-15641-ae6-ae8)).
-> - ~~`#88 gpu_fill_rect` never called · `#92` op 0x03 GLYPH_1BPP unconsumed~~ — **both consumed and
->   iron-proven**: `AE-9` puts the clear, the chrome fills, the client surfaces *and* the glyphs on the GPU
->   with `#39` not issued. ⚠ Still genuinely unconsumed: `#92` batching (no correct consumer), `#89` bytes
->   +4..+31, `#90`/`#91`.
-> - ~~No pointer input on iron — agnos xhci matches only HID boot keyboard (protocol 0x01)~~ — **falsified.**
->   The kernel binds *every* boot-**mouse** interface across all slots; iron shows
->   `hid: boot-mouse interfaces bound: 2`, including the composite same-slot case, with `#98 ptrscan`
->   feeding motion and clicks to the compositor.
-> - ~~Damage-limited blit is not safe with the obvious one-liner; needs `union(cur, prev)`~~ — the
->   requirement was right and **`AE-0a` implements exactly that and burned PASS** on the GPU path.
+> ⛔ **FOUR ENTRIES HERE BURNED GREEN AND ARE CLOSED** (2026-08-07/08) — written out, not deleted, because
+> each stated a *premise* now falsified, and a falsified premise left under "Open" gets re-derived as work:
+> ~~`#92` premultiplied never runs~~ (it composites crab on iron, `AE-6`) · ~~`#88` never called, op 0x03
+> unconsumed~~ (`AE-9`: clear, chrome, surfaces AND glyphs on the GPU, `#39` not issued) · ~~no pointer on
+> iron, xhci matches only protocol 0x01~~ (binds *every* boot-mouse interface; `boot-mouse interfaces
+> bound: 2` incl. the composite same-slot case, `#98` feeding motion+clicks) · ~~damage-limited blit unsafe,
+> needs `union(cur, prev)`~~ (that requirement was right; `AE-0a` implements it and burned PASS).
+> ⚠ Still genuinely unconsumed: `#92` batching (no correct consumer), `#89` bytes +4..+31, `#90`/`#91`.
 - **`src/apps.cyr` names `sys_fork`/`sys_dup2`/`sys_execve`** — DCE'd on agnos by reachability, not by a
   guard. `app_launch_terminal` should route to `sys_spawn_path` #43 there.
 

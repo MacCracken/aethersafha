@@ -1,0 +1,242 @@
+# aethersafha — the pointer cursor's shape, clipping and bit layout.
+#
+# ⭐ WHY THIS SUITE CAN EXIST AT ALL: `src/cursor.cyr` is pure — no syscall, no framebuffer, no font — so
+# the arrow's silhouette and its 1bpp packing are verifiable on the dev machine instead of by photographing
+# the operator's only box. Every previous cursor defect (a refused rect at the screen edge, a glyph drawn
+# into a buffer nothing blits) was found on iron because nothing here could reach it.
+#
+# ⭐ IT ALSO PRINTS THE ARROW. The shape is art, and art is reviewed by looking at it — `t_dump()` renders
+# the derived bitmap as ASCII so a human can see what changed when a bound moves. Asserting a silhouette
+# you have never looked at is how you end up with a provably-closed outline around the wrong shape.
+include "src/cursor.cyr"
+
+# Render the cursor as ASCII: 'o' outline, '#' fill, '.' transparent.
+fn t_dump(): i64 {
+    println("cursor shape (o = outline/black, # = fill/white, . = transparent):");
+    var y = 0;
+    while (y < cursor_h()) {
+        var line = alloc(64);
+        var x = 0;
+        while (x < cursor_w()) {
+            var ch = 46;                                     # '.'
+            if (cursor_outline_at(x, y) == 1) { ch = 111; }   # 'o'
+            if (cursor_fill_at(x, y) == 1) { ch = 35; }       # '#'
+            store8(line + x, ch);
+            x = x + 1;
+        }
+        store8(line + cursor_w(), 0);
+        println(line);
+        y = y + 1;
+    }
+    return 0;
+}
+
+# Count set bits in a packed 1bpp buffer of `stride` x `rows`.
+fn t_popcount(buf, stride, rows): i64 {
+    var n = 0;
+    var i = 0;
+    while (i < stride * rows) {
+        var b = load8(buf + i);
+        var k = 0;
+        while (k < 8) {
+            if ((b & (1 << k)) != 0) { n = n + 1; }
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn t_layer_count(layer): i64 {
+    var n = 0;
+    var y = 0;
+    while (y < cursor_h()) {
+        var x = 0;
+        while (x < cursor_w()) {
+            if (cursor_layer_at(layer, x, y) == 1) { n = n + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return n;
+}
+
+fn main() {
+    alloc_init();
+    t_dump();
+
+    # -----------------------------------------------------------------------
+    test_group("cursor — it is a POINTER, not a pixel");
+    # ⭐ The whole point of this cut. A `+` glyph was 8x16 with ~20 lit pixels and no direction; assert the
+    # arrow is a substantial, directional shape so a regression back to a token mark fails here.
+    assert_eq(cursor_w(), 10, "10 px wide");
+    assert_eq(cursor_h(), 20, "20 px tall");
+    assert_eq(t_gt(t_layer_count(CursorK.CUR_FILL), 45), 1, "the fill is a real body, not a mark");
+    assert_eq(t_gt(t_layer_count(CursorK.CUR_OUTLINE), 30), 1, "the outline is a real border");
+
+    # ⭐ DIRECTIONAL: the tip is at the hotspot and the shape widens away from it. A symmetric blob would
+    # pass a pixel count and fail this.
+    assert_eq(cursor_hot_x(), 0, "hotspot x is the bitmap origin");
+    assert_eq(cursor_hot_y(), 0, "hotspot y is the bitmap origin");
+    assert_eq(cursor_outline_at(0, 0), 1, "the hotspot pixel is the arrow's TIP, and it is drawn");
+    assert_eq(cursor_fill_at(1, 1), 0, "row 1 is tip outline, not interior");
+    assert_eq(cursor_fill_at(1, 2), 1, "interior begins at row 2");
+    # the head widens one column per row
+    # ⭐ THE LEADING EDGE IS 1 COLUMN PER 2 ROWS — assert the SLOPE, not just that fill exists. A 45deg
+    # edge (the first, wedge-shaped cut) passes a pixel count and fails every pair below.
+    assert_eq(cursor_fill_at(2, 4), 1, "row 4 interior reaches x=2");
+    assert_eq(cursor_fill_at(3, 4), 0, "row 4 stops at x=2 -- 45deg would reach x=4");
+    assert_eq(cursor_fill_at(3, 6), 1, "row 6 reaches x=3");
+    assert_eq(cursor_fill_at(4, 6), 0, "row 6 stops at x=3");
+    assert_eq(cursor_fill_at(5, 9), 1, "row 9 reaches x=5");
+    assert_eq(cursor_fill_at(6, 9), 0, "row 9 stops at x=5 -- the staircase is regular");
+    assert_eq(cursor_fill_at(7, 13), 1, "head reaches its full 7 columns at row 13");
+
+    # -----------------------------------------------------------------------
+    test_group("cursor — the outline SEALS the fill (the derived-outline guarantee)");
+    # ⭐⭐ THE INVARIANT THE DERIVATION EXISTS FOR: no fill pixel may touch a transparent pixel, in any of
+    # the 8 directions. A hand-drawn outline breaks this with one typo and the symptom is the desktop
+    # showing through the arrow's edge — visible only on hardware.
+    var leaks = 0;
+    var y = 0;
+    while (y < cursor_h()) {
+        var x = 0;
+        while (x < cursor_w()) {
+            if (cursor_fill_at(x, y) == 1) {
+                var dy = 0 - 1;
+                while (dy <= 1) {
+                    var dx = 0 - 1;
+                    while (dx <= 1) {
+                        var nx = x + dx;
+                        var ny = y + dy;
+                        # A neighbour is safe if it is fill, or outline. Off-bitmap counts as a LEAK:
+                        # the arrow must not run off its own mask with an open edge.
+                        var ok = 0;
+                        if (cursor_fill_at(nx, ny) == 1) { ok = 1; }
+                        if (cursor_outline_at(nx, ny) == 1) { ok = 1; }
+                        if (ok == 0) { leaks = leaks + 1; }
+                        dx = dx + 1;
+                    }
+                    dy = dy + 1;
+                }
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(leaks, 0, "NO fill pixel touches a transparent pixel or the bitmap edge");
+
+    # Layers are disjoint — a pixel is one colour or the other, never both.
+    var both = 0;
+    y = 0;
+    while (y < cursor_h()) {
+        var x2 = 0;
+        while (x2 < cursor_w()) {
+            if (cursor_fill_at(x2, y) == 1) {
+                if (cursor_outline_at(x2, y) == 1) { both = both + 1; }
+            }
+            x2 = x2 + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(both, 0, "fill and outline never overlap");
+
+    # -----------------------------------------------------------------------
+    test_group("cursor — the notch, which is what makes it read as an arrow");
+    # At row 11 the lobe and tail are contiguous (one straight bottom edge); by row 13 they have separated
+    # and there is outline BETWEEN them. That separation is the arrow's tail joint.
+    assert_eq(cursor_fill_at(4, 14), 1, "row 14: lobe and tail are contiguous");
+    assert_eq(cursor_fill_at(5, 14), 1, "row 14: tail begins in the same run");
+    assert_eq(cursor_fill_at(4, 16), 0, "row 16: the lobe has narrowed away from x=4");
+    assert_eq(cursor_outline_at(4, 16), 1, "row 16: outline fills the notch between lobe and tail");
+    assert_eq(cursor_fill_at(6, 18), 1, "the tail reaches its last row");
+    assert_eq(cursor_fill_at(6, 19), 0, "and stops there");
+    assert_eq(cursor_outline_at(6, 19), 1, "with an outline cap below it");
+
+    # -----------------------------------------------------------------------
+    test_group("cursor — CLIPPING, so the hotspot reaches the last pixel");
+    var r = alloc(32);
+    # Fully on-surface, nowhere near an edge.
+    assert_eq(cursor_visible_rect(100, 100, 800, 600, r), 1, "interior placement is visible");
+    assert_eq(load64(r + 0), 100, "  vis x");
+    assert_eq(load64(r + 8), 100, "  vis y");
+    assert_eq(load64(r + 16), 10, "  full width");
+    assert_eq(load64(r + 24), 20, "  full height");
+
+    # ⭐⭐ THE CASE THAT COST AN IRON BURN: the hotspot on the very last pixel. `#92` would REFUSE the full
+    # rect; clipping sends a 1x1. Under the old clamp this position was unreachable at all.
+    assert_eq(cursor_visible_rect(799, 599, 800, 600, r), 1, "hotspot on the LAST pixel is still visible");
+    assert_eq(load64(r + 16), 1, "  clipped to 1 px wide");
+    assert_eq(load64(r + 24), 1, "  clipped to 1 px tall");
+    # Right edge only.
+    assert_eq(cursor_visible_rect(795, 100, 800, 600, r), 1, "near the right edge");
+    assert_eq(load64(r + 16), 5, "  width clipped to what remains");
+    assert_eq(load64(r + 24), 20, "  height untouched");
+    # Bottom edge only.
+    assert_eq(cursor_visible_rect(100, 590, 800, 600, r), 1, "near the bottom edge");
+    assert_eq(load64(r + 16), 10, "  width untouched");
+    assert_eq(load64(r + 24), 10, "  height clipped to what remains");
+    # Entirely off-surface -> emit nothing (never a zero-extent op, which #92 also refuses).
+    assert_eq(cursor_visible_rect(800, 100, 800, 600, r), 0, "one past the right edge is invisible");
+    assert_eq(cursor_visible_rect(100, 600, 800, 600, r), 0, "one past the bottom edge is invisible");
+    assert_eq(cursor_visible_rect(0 - 10, 100, 800, 600, r), 0, "fully off the left is invisible");
+    # Negative origin, partially visible — the pointer never goes negative today, but the packer must not
+    # produce a negative dstxy if it ever does.
+    assert_eq(cursor_visible_rect(0 - 4, 0 - 5, 800, 600, r), 1, "partially off the top-left is visible");
+    assert_eq(load64(r + 0), 0, "  vis x floored at 0");
+    assert_eq(load64(r + 8), 0, "  vis y floored at 0");
+    assert_eq(load64(r + 16), 6, "  width is what falls on-surface");
+    assert_eq(load64(r + 24), 15, "  height is what falls on-surface");
+
+    # -----------------------------------------------------------------------
+    test_group("cursor — 1bpp packing, MSB-first");
+    assert_eq(cursor_stride(10), 2, "10 px packs into 2 bytes per row");
+    assert_eq(cursor_stride(8), 1, "8 px is exactly 1 byte");
+    assert_eq(cursor_stride(1), 1, "1 px still needs a byte");
+    assert_eq(cursor_max_bytes(), 40, "worst case is 2 x 20 bytes");
+
+    var buf = alloc(256);
+    assert_eq(cursor_visible_rect(0, 0, 800, 600, r), 1, "unclipped for the packing checks");
+    var nb = cursor_pack(buf, CursorK.CUR_OUTLINE, 0, 0, r);
+    assert_eq(nb, 40, "packed the whole outline mask");
+    # ⭐ MSB-FIRST: the tip at bitmap (0,0) is outline, so row 0's first byte must have bit 7 set. If the
+    # packer were LSB-first this would be bit 0 and the arrow would render mirrored.
+    assert_eq((load8(buf + 0) & 0x80) != 0, 1, "row 0 bit 7 set -> leftmost pixel, MSB-first");
+    # The packed bit count must equal the layer's pixel count — nothing lost, nothing invented.
+    assert_eq(t_popcount(buf, 2, 20), t_layer_count(CursorK.CUR_OUTLINE), "outline bits == outline pixels");
+
+    var nf = cursor_pack(buf, CursorK.CUR_FILL, 0, 0, r);
+    assert_eq(nf, 40, "packed the whole fill mask");
+    assert_eq((load8(buf + 0) & 0x80) != 0, 0, "row 0 has no FILL pixel (the tip is outline)");
+    assert_eq(t_popcount(buf, 2, 20), t_layer_count(CursorK.CUR_FILL), "fill bits == fill pixels");
+
+    # ⭐ A CLIPPED PACK MUST PACK THE RIGHT SUB-IMAGE, not the top-left corner of the bitmap. Place the
+    # cursor so only its right half is on-surface: the packed rows must equal the bitmap's right half.
+    assert_eq(cursor_visible_rect(0 - 6, 0, 800, 600, r), 1, "left half off-surface");
+    assert_eq(load64(r + 16), 4, "  4 columns visible");
+    cursor_pack(buf, CursorK.CUR_FILL, 0 - 6, 0, r);
+    # visible column c corresponds to bitmap column c + 6
+    var mism = 0;
+    var rr = 0;
+    while (rr < 20) {
+        var cc = 0;
+        while (cc < 4) {
+            var packed = 0;
+            if ((load8(buf + rr * 1 + (cc / 8)) & (1 << (7 - (cc % 8)))) != 0) { packed = 1; }
+            if (packed != cursor_fill_at(cc + 6, rr)) { mism = mism + 1; }
+            cc = cc + 1;
+        }
+        rr = rr + 1;
+    }
+    assert_eq(mism, 0, "a clipped pack carries the correct sub-image, offset and all");
+
+    return assert_summary();
+}
+
+fn t_gt(a, b): i64 {
+    if (a > b) { return 1; }
+    return 0;
+}
+
+var ec = main();
+syscall(60, ec);

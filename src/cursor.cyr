@@ -1,0 +1,183 @@
+# aethersafha — the pointer cursor: shape, clipping, and 1bpp packing.
+#
+# ⭐⭐ A REAL CURSOR, NOT A GLYPH. `AE-7`'s first cut drew the character `+` at the pointer position,
+# because that reused the already-iron-proven `#92` op 0x03 GLYPH_1BPP path instead of introducing a second
+# overlay kind to debug alongside the pointer itself. That was the right first cut and it is now spent: a
+# `+` in the theme accent is a *pixel*, not a pointer — it has no direction, no hotspot you can see, and it
+# vanishes against any surface near the accent colour.
+#
+# ⭐ THIS NEEDS NO NEW KERNEL PATH EITHER. `#92` op 0x03 takes an arbitrary 1bpp mask and paints `color`
+# where a bit is set, leaving everything else untouched — it is not font-specific. So an arrow is just
+# TWO masks through the same op: the outline in black, then the fill in white. Two-tone is not decoration;
+# it is the only reason a cursor stays visible over a white terminal AND a dark desktop.
+#
+# ⛔⛔ THE OUTLINE IS DERIVED, NEVER HAND-DRAWN. A hand-authored outline is one typo away from a hole that
+# leaks the fill onto the desktop, and the typo is invisible until it is on a panel. Here the FILL is the
+# only art, and the outline is computed as its 8-neighbourhood boundary — so the outline is closed by
+# construction, and `tests/cursor.tcyr` asserts that no fill pixel ever touches a transparent one.
+#
+# ⚠ PURE — no syscalls, no framebuffer, no font. Every function here runs on the host, which is the point:
+# the shape and its bit layout are verifiable on this machine instead of on the operator's only box.
+
+enum CursorK {
+    CUR_W     = 10;    # bitmap extent — outline included
+    CUR_H     = 20;
+    # The hotspot is the tip, at the bitmap origin. ⚠ Keep it (0,0): `render_cursor` and the damage rect
+    # both place the bitmap AT the pointer position, so a non-zero hotspot would need an offset in three
+    # places and silently mis-aim clicks in whichever one was missed.
+    CUR_HOT_X = 0;
+    CUR_HOT_Y = 0;
+    CUR_FILL    = 0;
+    CUR_OUTLINE = 1;
+}
+
+fn cursor_w(): i64 { return CursorK.CUR_W; }
+fn cursor_h(): i64 { return CursorK.CUR_H; }
+fn cursor_hot_x(): i64 { return CursorK.CUR_HOT_X; }
+fn cursor_hot_y(): i64 { return CursorK.CUR_HOT_Y; }
+
+# ⭐ THE ONLY ART IN THIS FILE — the arrow's INTERIOR, in bitmap coordinates. Three pieces:
+#
+#   rows 2..13   the head, whose leading edge advances **one column every two rows** (`x <= (y+1)/2`),
+#                reaching seven columns wide
+#   rows 14..17  the head's bottom-left lobe, narrowing back to a point (`x <= 18 - y`)
+#   rows 14..18  the tail, a three-column bar (x 5..7) hanging from the middle of the head
+#
+# ⛔ THE SLOPE IS THE WHOLE LOOK, AND IT TOOK TWO TRIES. `x <= y` (45°) reads as a fat wedge, not a
+# pointer: the head reaches full width before the tail even starts, leaving the tail a stub on the corner
+# of a triangle. `x <= 2y/3` narrowed it but integer division made the edge RAGGED — widths stepped
+# 1,2,2,3,4,4,5,6,6,7, an uneven staircase you can see. `(y+1)/2` advances exactly one column per two
+# rows, so the staircase is regular and the arrow is tall and narrow like every real left-pointer.
+#
+# At row 14 the lobe (x 1..4) and the tail (x 5..7) are contiguous, so the head's bottom edge is one
+# straight run; from row 15 they separate and the derived outline fills the gap with the notch every arrow
+# cursor has. ⇒ Changing any bound here changes the silhouette and nothing else — outline, clipping and
+# packing all follow, and `tests/cursor.tcyr` prints the result so the change is reviewable.
+fn cursor_fill_at(x, y): i64 {
+    if (x < 1) { return 0; }                       # column 0 is reserved for the outline's left edge
+    if (y < 2) { return 0; }                       # rows 0..1 are the tip's outline
+    if (x >= CursorK.CUR_W) { return 0; }
+    if (y >= CursorK.CUR_H) { return 0; }
+    if (y <= 13) {
+        if (x <= (y + 1) / 2) { return 1; }        # head — leading edge, one column per two rows
+        return 0;
+    }
+    if (y <= 17) {
+        if (x <= 18 - y) { return 1; }             # bottom-left lobe
+    }
+    if (y <= 18) {
+        if (x >= 5) {
+            if (x <= 7) { return 1; }              # tail bar
+        }
+    }
+    return 0;
+}
+
+# The outline: every non-fill pixel that TOUCHES a fill pixel, diagonals included.
+#
+# ⛔ 8-ADJACENCY, NOT 4. With 4-adjacency the diagonal leading edge leaks — each step of the staircase
+# leaves a corner where fill meets transparent only diagonally, and the desktop shows through a
+# one-pixel gap all the way down the arrow's long edge. 8-adjacency seals it. ⚠ Its one cost is a blunt
+# 3 px cap on the first drawn row, which is why the fill starts at row 2 and the hotspot is added
+# explicitly below — that combination gives a sealed edge AND a one-pixel tip.
+# ⚠ `cursor_fill_at` bounds-checks its own arguments, so the neighbour probes below may run off the
+# bitmap freely and simply read 0 there.
+fn cursor_outline_at(x, y): i64 {
+    if (x < 0) { return 0; }
+    if (y < 0) { return 0; }
+    if (x >= CursorK.CUR_W) { return 0; }
+    if (y >= CursorK.CUR_H) { return 0; }
+    if (cursor_fill_at(x, y) == 1) { return 0; }   # a pixel is one layer or the other, never both
+    # ⭐ THE TIP, THE ONE PIXEL THAT IS NOT DERIVED. The hotspot must be DRAWN — a pointer whose exact
+    # aim-point is transparent is a pointer you cannot aim — but the fill starts at row 2, so (0,0) has no
+    # fill neighbour and the derivation alone would leave it blank. Adding it here costs nothing and cannot
+    # break the seal (that invariant is about FILL never touching transparent, and this only ever adds
+    # outline). It also sharpens the tip: without it the first drawn row is a 3 px cap.
+    # ⚠ Connected, not floating: (0,0) touches (0,1) and (1,1), which the derivation makes outline.
+    if (x == CursorK.CUR_HOT_X) {
+        if (y == CursorK.CUR_HOT_Y) { return 1; }
+    }
+    var dy = 0 - 1;
+    while (dy <= 1) {
+        var dx = 0 - 1;
+        while (dx <= 1) {
+            if (cursor_fill_at(x + dx, y + dy) == 1) { return 1; }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+    return 0;
+}
+
+fn cursor_layer_at(layer, x, y): i64 {
+    if (layer == CursorK.CUR_OUTLINE) { return cursor_outline_at(x, y); }
+    return cursor_fill_at(x, y);
+}
+
+# Row stride in bytes of a `w`-wide 1bpp mask. `#92` op 0x03 requires byte-aligned rows.
+fn cursor_stride(w): i64 { return (w + 7) / 8; }
+
+# ⭐⭐ CLIP, DO NOT CLAMP — this is why the pointer can reach the last pixel of the screen.
+#
+# ⛔ `#92` op 0x03 REFUSES an out-of-range rect rather than clipping it, and the 1.56.42 iron burn is what
+# that costs: a glyph at the right edge was refused, the path retired, and every caption on the desktop
+# disappeared. The fix at the time was to shrink the pointer's clamp by the glyph extent — correct, but it
+# means the hotspot stops short of the edge and you cannot point at the last column. For an 8 px glyph
+# nobody noticed; for a 20 px arrow it is the bottom-right corner of the screen going unreachable.
+# ⇒ Compute the VISIBLE sub-rectangle and send only that. The hotspot then goes anywhere on the panel and
+# the arrow simply runs off the edge, which is what every real cursor does.
+#
+# out4 receives the visible rect in SCREEN coordinates: [0]=x [1]=y [2]=w [3]=h.
+# Returns 1 if any part is on-surface, 0 if the cursor is entirely off it (emit nothing).
+fn cursor_visible_rect(cx, cy, fbw, fbh, out4): i64 {
+    var x0 = cx;
+    var y0 = cy;
+    if (x0 < 0) { x0 = 0; }
+    if (y0 < 0) { y0 = 0; }
+    var x1 = cx + CursorK.CUR_W;
+    var y1 = cy + CursorK.CUR_H;
+    if (x1 > fbw) { x1 = fbw; }
+    if (y1 > fbh) { y1 = fbh; }
+    if (x1 <= x0) { return 0; }
+    if (y1 <= y0) { return 0; }
+    store64(out4 + 0, x0);
+    store64(out4 + 8, y0);
+    store64(out4 + 16, x1 - x0);
+    store64(out4 + 24, y1 - y0);
+    return 1;
+}
+
+# Pack the visible part of one layer into a 1bpp MSB-first bitmap at `dst`. Returns bytes written.
+#
+# ⛔ MSB-FIRST, matching `ae_text_pack_1bpp` and the kernel's glyph shader: bit 7 of a byte is the
+# LEFTMOST pixel. Reading LSB-first mirrors the arrow horizontally — it would still look like a cursor,
+# pointing the wrong way, which is exactly the kind of wrong that survives a glance.
+# ⚠ `out4` must come from `cursor_visible_rect` for the same (cx, cy); the two are a pair, because the
+# packed bitmap's origin IS the visible rect's origin and the caller passes that rect as the op's dstxy.
+fn cursor_pack(dst, layer, cx, cy, out4): i64 {
+    var vx = load64(out4 + 0);
+    var vy = load64(out4 + 8);
+    var vw = load64(out4 + 16);
+    var vh = load64(out4 + 24);
+    var stride = cursor_stride(vw);
+    var total = stride * vh;
+    var z = 0;
+    while (z < total) { store8(dst + z, 0); z = z + 1; }
+    var r = 0;
+    while (r < vh) {
+        var c = 0;
+        while (c < vw) {
+            # screen (vx + c, vy + r) -> bitmap coordinates, by subtracting where the bitmap was placed
+            if (cursor_layer_at(layer, vx + c - cx, vy + r - cy) == 1) {
+                var off = r * stride + (c / 8);
+                store8(dst + off, load8(dst + off) | (1 << (7 - (c % 8))));
+            }
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    return total;
+}
+
+# Worst-case packed size of one layer — the whole bitmap, unclipped. The GPU staging slot must hold this.
+fn cursor_max_bytes(): i64 { return cursor_stride(CursorK.CUR_W) * CursorK.CUR_H; }

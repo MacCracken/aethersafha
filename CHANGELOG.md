@@ -4,6 +4,59 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.12.7] - 2026-08-09 — the pointer is an arrow: a derived-outline cursor that clips
+
+### Added — a REAL cursor: `src/cursor.cyr`, an arrow instead of a `+`
+
+⭐⭐ **The pointer was a text glyph.** `AE-7`'s first cut drew the character `+` at the pointer position —
+deliberately, to reuse the iron-proven `#92` op 0x03 GLYPH_1BPP path rather than debug a second overlay kind
+alongside the pointer itself. Operator's verdict on seeing it on the panel was exactly right: that is a
+*pixel*, not a cursor. It has no direction, no visible hotspot, and it vanishes against any surface near the
+theme accent.
+
+⭐ **And it needs no new kernel path either**, because op 0x03 paints an *arbitrary* 1bpp mask in a colour —
+it is not font-specific. The arrow is **two masks through the same op**: outline in black, then fill in
+white. Two-tone is not decoration; it is the only reason a cursor stays legible over a white terminal *and*
+a dark desktop, which is precisely where the accent-coloured `+` failed.
+
+- **The outline is DERIVED, never hand-drawn.** The fill shape is the only art; the outline is computed as
+  its 8-neighbourhood boundary, so it is closed by construction. A hand-authored outline is one typo from a
+  hole that leaks the desktop through the arrow's edge — invisible until it is on a panel.
+  ⚠ 8-adjacency, not 4: with 4 the diagonal leading edge leaks at every staircase corner (**measured: 13
+  leaks**, and the suite catches it).
+- **It CLIPS instead of refusing, so the hotspot reaches the last pixel.** `#92` op 0x03 refuses an
+  out-of-range rect, and the 1.56.42 fix for that was to shrink the pointer's clamp by the glyph extent —
+  correct then, but it meant the pointer stopped short of the right and bottom edges. For a 20 px arrow that
+  is the whole bottom-right corner of the screen going unreachable. `cursor_visible_rect` computes the
+  on-surface sub-rectangle and only that is sent; the clamp is now the full geometry.
+- **Emitted LAST, after the text drain**, which is what makes the arrow top-most over chrome, captions and
+  client surfaces alike. ⛔ That ordering is also required because both share the one `#86` glyph staging
+  slot — emitting the cursor first would have its mask overwritten by the first caption packed after it.
+- **A CPU arm as well**, taken whenever the GPU is not compositing the frame. It is gated on the same
+  `ae_text_gpu_ok` latch as captions, because `ae_chrome_on_gpu()` consults that latch to decide whether the
+  `#39` blit runs — and that blit is the only thing that makes CPU-drawn pixels reach the screen.
+- Damage now uses the cursor's **own** extent. It was `FONT_W + 2` x `FONT_H + 2` (10x18), which is *almost*
+  the arrow's 10x20 — a stale rect would have smeared only the bottom two rows, only while moving. Exactly
+  the defect that survives a screenshot and reappears as "the pointer leaves a trail" three burns later.
+
+### Added — the shape is unit-tested, and the harness now checks the PANEL
+
+⭐ `tests/cursor.tcyr` (**61 asserts**): the silhouette's slope, the seal invariant (no fill pixel may touch
+a transparent one), layer disjointness, clipping at every edge including a 1x1 at the last pixel, and
+MSB-first bit layout. It also **prints the arrow as ASCII** — the shape is art, and art is reviewed by
+looking at it. `tests/render.tcyr` 194 → **205** adds the damage-extent coverage (a font-sized rect fails).
+22 → **23 suites**.
+
+⭐⭐ **And an external oracle at last.** Every previous cursor check was a serial line, i.e. the compositor's
+*opinion* — `pointer motion received -- the cursor is live` printed on the 1.56.42 burn while the cursor was
+invisible. `aethersafha-clients-test.py` now matches the **full 10x20 shape** in the captured framebuffer,
+position-independently. Verified against a real capture: the rendered pixels are **bit-identical** to the
+shape module's own dump, and the matcher returns None both when the arrow is erased and when a *single*
+interior pixel is broken — a shape check, not a pixel count.
+
+⚠ **Scope: the GPU arm is unburned.** QEMU has no amdgpu, so the harness exercises `render_cursor_cpu`; the
+two-`#92`-mask path is iron-only and is not claimed until it burns.
+
 ## [0.12.6] - 2026-08-08 — the terminal gets its keys: draining a queue that drops the oldest
 
 ⭐⭐⭐ **BURNED PASS on archaemenid 2026-08-08** (AGNOS 1.56.42, userland-only flash). Two clients present

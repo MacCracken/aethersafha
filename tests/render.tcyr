@@ -7,6 +7,7 @@ include "src/geom.cyr"
 include "src/window.cyr"
 include "src/compositor.cyr"
 include "src/theme.cyr"        # ae_bhumi — render_window packs its colours through it
+include "src/cursor.cyr"      # render_cursor draws this bitmap; cursor.tcyr owns the shape itself
 include "src/render.cyr"
 # ⚠ The cursor lives in input.cyr (`input_ptr_x/y`) and render.cyr calls it — a forward function
 # reference, legal in Cyrius and exactly what the real include chain does. The test must carry the
@@ -685,13 +686,48 @@ fn main() {
     assert_eq(bhumi_fb_get(cfb, 3, 3), 0, "offscreen, null src, and zero dims all draw nothing");
 
     # ================================================================
+    # AE-7: the cursor's DAMAGE rect must match the cursor's BITMAP
+    # ================================================================
+    # ⛔ WHEN THE CURSOR GREW FROM A GLYPH TO AN ARROW, THIS WAS THE SILENT HAZARD. The damage rect was
+    # `FONT_W + 2` x `FONT_H + 2` (10x18) — which happens to be *almost* the arrow's 10x20, so a stale rect
+    # would smear only the bottom two rows and only while moving. That is exactly the kind of defect that
+    # survives a screenshot and shows up as "the pointer leaves a trail" three burns later.
+    test_group("render — the cursor damages its own extent, and nothing when it is still");
+    ae_ptr_x = 0; ae_ptr_y = 0;
+    rend_cursor_mark_drawn(0, 0);
+    var cd = rend_dmg_new();
+    # Still -> no damage at all. This is what keeps an idle desktop free under AE-0a.
+    assert_eq(rend_cursor_damage(cd), 0, "a stationary cursor returns 0");
+    assert_eq(rend_dmg_valid(cd), 0, "a stationary cursor damages NOTHING");
+    # Moved -> union of old and new, each the full bitmap extent.
+    input_ptr_set(100, 200);
+    rend_cursor_damage(cd);
+    assert_eq(rend_dmg_valid(cd), 1, "a moved cursor damages");
+    assert_eq(rend_dmg_x(cd), 0, "  union starts at the OLD position");
+    assert_eq(rend_dmg_y(cd), 0, "  union starts at the OLD position");
+    # old rect (0,0,w,h) + new rect (100,200,w,h) -> union is 100+w wide, 200+h tall.
+    assert_eq(rend_dmg_w(cd), 100 + cursor_w(), "  union spans to the NEW rect's right edge");
+    assert_eq(rend_dmg_h(cd), 200 + cursor_h(), "  union spans to the NEW rect's bottom edge");
+    # ⭐ THE ASSERTION THAT CATCHES A FONT-SIZED RECT: the extent is the cursor's, not the glyph's.
+    assert_eq(cursor_w(), 10, "  and that extent is the bitmap's width");
+    assert_eq(cursor_h(), 20, "  and the bitmap's height (a FONT_H+2 rect would be 18 and smear)");
+    # A single un-moved settle then re-damages nothing, proving mark_drawn pairs with the damage.
+    rend_cursor_mark_drawn(100, 200);
+    rend_dmg_clear(cd);
+    assert_eq(rend_cursor_damage(cd), 0, "settled at the new position -> free again");
+    assert_eq(rend_dmg_valid(cd), 0, "  and nothing damaged");
+
+    # ================================================================
     # AE-7 iron regression: the glyph run that retired the whole text path
     # ================================================================
-    # ⛔ THE 1.56.42 BURN. `#92` op 0x03 REFUSES an out-of-range rect (it does not clip), and the new
-    # cursor is a glyph at the cursor position. The position was clamped to `bound_w - 1`, so an 8 px
-    # glyph at x=2559 on a 2560-wide back buffer reached 2567, the op refused, `ae_text_gpu_disable()`
-    # retired the path for the session — and every glyph on the desktop disappeared, titles included.
+    # ⛔ THE 1.56.42 BURN. `#92` op 0x03 REFUSES an out-of-range rect (it does not clip), and the cursor
+    # was then a GLYPH at the cursor position. The position was clamped to `bound_w - 1`, so an 8 px glyph
+    # at x=2559 on a 2560-wide back buffer reached 2567, the op refused, `ae_text_gpu_disable()` retired the
+    # path for the session — and every glyph on the desktop disappeared, titles included.
     # ⇒ The enqueue must refuse locally, exactly as `ae_rect_enqueue` already does for `#88`.
+    # ⚠ THE CURSOR NO LONGER TAKES THIS PATH — it is a real bitmap in `src/cursor.cyr` and CLIPS instead of
+    # refusing, so the pointer can sit on the last pixel. This guard is still load-bearing for CAPTIONS,
+    # which have no clipping of their own, and the cursor is only how it was found.
     test_group("render — a text run outside the back buffer is refused LOCALLY, not by the kernel");
     var tfb2 = bhumi_fb_new(2560, 1440);
     ae_text_reset();

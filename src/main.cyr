@@ -13,6 +13,7 @@ include "src/geom.cyr"
 include "src/window.cyr"
 include "src/compositor.cyr"
 include "src/theme.cyr"          # sovereign desktop theme tokens (MUDRA / SHANTA) — before render
+include "src/cursor.cyr"      # pointer bitmap: shape + clipping + 1bpp packing (pure) — before render
 include "src/render.cyr"
 include "src/gpu.cyr"           # hardware compositing on agnos (#87 + #84) — after render.cyr for TITLEBAR_H
 include "src/input.cyr"
@@ -204,13 +205,16 @@ fn ae_pointer_event(comp, ev): i64 {
     if (k == BhumiEvKind.BHUMI_EV_MOTION) {
         var dx = bhumi_motion_dx(ev);
         var dy = bhumi_motion_dy(ev);
-        # ⚠ THE BOUND IS REDUCED BY THE CURSOR GLYPH, not just the screen. `input_ptr_move` clamps a POINT
-        # to `bound - 1`, which is right for a point and wrong for something 9x16 pixels wide: at
-        # x = 2559 the glyph reaches 2568 on a 2560-wide buffer, `#92` op 0x03 REFUSES an out-of-range
-        # rect, and on the 1.56.42 burn that one refusal retired the whole text path and blanked every
-        # glyph on the desktop. `ae_text_fits` now catches it as well, but keeping the cursor drawable is
-        # better than relying on the guard — a cursor that vanishes in the last 9 columns is still a bug.
-        input_ptr_move(dx, dy, ae_geom_w - FONT_ADV + 1, ae_geom_h - FONT_H + 1);
+        # ⭐⭐ THE FULL SCREEN, because the cursor CLIPS now. This used to be reduced by the glyph extent
+        # (`ae_geom_w - FONT_ADV + 1`) so the cursor's rect could never leave the buffer and be refused by
+        # `#92` op 0x03 — correct at the time, but it meant the pointer stopped short of the right and
+        # bottom edges and the last columns of the screen were unreachable. A 20 px arrow would make that
+        # the whole bottom-right corner, including anything you might want to click there.
+        # ⇒ `cursor_visible_rect` computes the on-surface sub-rectangle and only that is sent, so the
+        # hotspot is free to sit on the final pixel while the arrow simply runs off the edge — which is
+        # what every real cursor does. `input_ptr_move` clamps a POINT to `bound - 1`, so passing the raw
+        # geometry lands the hotspot on the last addressable pixel exactly.
+        input_ptr_move(dx, dy, ae_geom_w, ae_geom_h);
         if (ae_ptr_first == 0) {
             ae_ptr_first = 1;
             println("aethersafha: pointer motion received -- the cursor is live");
