@@ -166,9 +166,107 @@ fn ae_query_geometry(): i64 {
     return 1;
 }
 
-# Open the bhumi backend under a full output+input capability. -> *BhumiBackend (0 fail)
+# ================================================================
+# `AE-7` — POINTER HANDLING
+# ================================================================
+#
+# ⭐ THIS IS MOSTLY WIRING, WHICH IS THE POINT. `comp_window_at` (z-ordered, skips minimized), the
+# 9-region `deco_hit`, and `input_move`'s GPU-safe clamp were all written long ago and never called —
+# they were waiting for a pointer. The setu protocol likewise already carries `SETU_INPUT_PTR_MOVE`
+# (kind 9) and `SETU_INPUT_PTR_BTN` (kind 10). Nothing here is a new mechanism.
+var ae_ptr_btn = 0;        # last button bitmap, for edge detection
+var ae_ptr_drag = 0;       # 1 = dragging a window by its titlebar
+var ae_ptr_drag_win = 0;   # the window being dragged
+var ae_ptr_first = 0;      # one-shot marker latch
+var ae_ptr_click = 0;      # one-shot marker latch
+
+# Forward a pointer event to the window under the cursor, using the setu messages that already exist.
+# ⚠ Coordinates are sent SURFACE-RELATIVE: a client knows nothing about where the compositor placed it,
+# so screen coordinates would make every client's hit-testing wrong by its own window origin.
+fn ae_ptr_forward(comp, kind_is_btn, btn, pressed): i64 {
+    var win = comp_window_at(comp, input_ptr_x(), input_ptr_y());
+    if (win == 0) { return 0; }
+    var cfd = win_cfd(win);
+    if (cfd == 0) { return 0; }                 # a compositor-seeded window has no client
+    var rx = input_ptr_x() - win_x(win);
+    var ry = input_ptr_y() - win_body_y(win);   # relative to the CONTENT rect, not the chrome
+    if (kind_is_btn == 0) { setu_send(cfd, setu_input_ptr_move(win_id(win), rx, ry)); }
+    if (kind_is_btn == 1) { setu_send(cfd, setu_input_ptr_btn(win_id(win), btn, pressed)); }
+    return 1;
+}
+
+# ae_pointer_event(comp, ev): handle one MOTION or BUTTON event from the bhumi batch.
+# ⚠ Only ever called for events whose kind is NOT key — the frame loop routes on `bhumi_ev_is_key`.
+fn ae_pointer_event(comp, ev): i64 {
+    var k = bhumi_ev_kind(ev);
+
+    if (k == BhumiEvKind.BHUMI_EV_MOTION) {
+        var dx = bhumi_motion_dx(ev);
+        var dy = bhumi_motion_dy(ev);
+        input_ptr_move(dx, dy, ae_geom_w, ae_geom_h);
+        if (ae_ptr_first == 0) {
+            ae_ptr_first = 1;
+            println("aethersafha: pointer motion received -- the cursor is live");
+        }
+        # ⭐ A DRAG IS A MOVE BY A DELTA, so it reuses the mover F7-F10 already proved on iron —
+        # including its clamp, which is what keeps a dragged window from crossing an edge and dropping
+        # the whole frame off the GPU (`#88`/`#87` REJECT an out-of-range rect rather than clipping).
+        if (ae_ptr_drag == 1) {
+            if (ae_ptr_drag_win != 0) {
+                input_move(ae_ptr_drag_win, dx, dy, ae_geom_w, ae_geom_h - TITLEBAR_H);
+            }
+        }
+        ae_ptr_forward(comp, 0, 0, 0);
+        return 0;
+    }
+
+    if (k == BhumiEvKind.BHUMI_EV_BUTTON) {
+        var cur = bhumi_button_state(ev);
+        # ⚠ `buttons_seen` OR-folds a click that began AND ended inside one frame. Without this a fast
+        # click is invisible: the level is back to 0 by the time the compositor looks.
+        var seen = bhumi_button_seen(ev);
+        var effective = cur | seen;
+        var edge = input_btn_edge(ae_ptr_btn, effective, 1);   # left button only, for now
+        if (edge == 1) {
+            var win = comp_window_at(comp, input_ptr_x(), input_ptr_y());
+            if (win != 0) {
+                # CLICK TO FOCUS — the first consumer `comp_window_at` has ever had.
+                var idx = comp_find_by_id(comp, win_id(win));
+                if (idx >= 0) { comp_focus(comp, idx); }
+                var hit = deco_hit(win, input_ptr_x(), input_ptr_y());
+                if (hit == Deco.DECO_CLOSE) { comp_close_window(comp, win_id(win)); }
+                if (hit == Deco.DECO_TITLEBAR) {
+                    ae_ptr_drag = 1;
+                    ae_ptr_drag_win = win;
+                }
+            }
+            if (ae_ptr_click == 0) {
+                ae_ptr_click = 1;
+                println("aethersafha: pointer button click routed");
+            }
+            ae_ptr_forward(comp, 1, 1, 1);
+        }
+        if (edge == 0 - 1) {
+            ae_ptr_drag = 0;
+            ae_ptr_drag_win = 0;
+            ae_ptr_forward(comp, 1, 1, 0);
+        }
+        ae_ptr_btn = cur;      # ⚠ store the LEVEL, not `effective` — a folded click must not latch down
+        return 0;
+    }
+    return 0;
+}
+
+# Open the bhumi backend under a full output+input+pointer capability. -> *BhumiBackend (0 fail)
+#
+# ⭐ `BHUMI_DEV_POINTER` IS THE OPT-IN, and asking for it here is what turns pointer events on. bhumi
+# gates the pointer drain on this bit precisely so a consumer that has NOT asked cannot be handed an
+# event it would misread: `bhumi_key_usage` is the LOW BYTE of dx and `bhumi_key_pressed` is BIT 8 of
+# dx, so a horizontal motion of 297 px (0x129 — bit 8 set, low byte 0x29) reads as Escape, which this
+# compositor maps to QUIT. Every capability in the tree was OUTPUT|INPUT until now.
+# ⇒ Adding this bit is a commitment that every consumer of the event batch checks `bhumi_ev_kind` FIRST.
 fn ae_backend_open(w, h): i64 {
-    var cap = bhumi_cap_new(1, BHUMI_DEV_OUTPUT | BHUMI_DEV_INPUT, 0, 0);
+    var cap = bhumi_cap_new(1, BHUMI_DEV_OUTPUT | BHUMI_DEV_INPUT | BHUMI_DEV_POINTER, 0, 0);
     if (cap == 0) { return 0; }
     return bhumi_backend_open(cap, w, h);
 }
@@ -430,6 +528,16 @@ fn main(): i64 {
                 var i = 0;
                 while (i < n) {
                     var ev = load64(&events + i * 8);
+                    # ⛔⛔ CLASSIFY BEFORE READING. Since bhumi 1.1.4 this batch carries POINTER events
+                    # alongside keys, and every key accessor below is `ev & 0xFF` — so an unrouted motion
+                    # event is read as a usage. dx = 297 (0x129: bit 8 set, low byte 0x29) reads as a
+                    # PRESSED Escape and quits the desktop. Routing once here keeps the six key call sites
+                    # below exactly as they were, instead of six independent chances to forget.
+                    if (bhumi_ev_is_key(ev) == 0) {
+                        ae_pointer_event(comp, ev);
+                        i = i + 1;
+                        continue;
+                    }
                     if (bhumi_key_pressed(ev) == 1) {
                         if (ae_inp_down == 0) {
                             ae_inp_down = 1;

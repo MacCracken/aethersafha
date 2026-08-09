@@ -319,7 +319,12 @@ fn comp_window_at(c, px, py): i64 {
             var inx = 0;
             if ((px >= x) && (px < x + win_w(win))) { inx = 1; }
             if (inx == 1) {
-                if ((py >= y) && (py < y + win_h(win))) { return win; }
+                # ⛔ `win_bottom_y`, NOT `y + win_h`. This used to end the window at `y + win_h`, i.e.
+                # chrome-INSIDE, while every rendering path places the content at `y + TITLEBAR_H` for
+                # `win_h` rows — so the bottom-most TITLEBAR_H rows of a live client surface were
+                # considered OUTSIDE the window and a click there would have hit whatever was behind it.
+                # Inert while nothing clicked. The convention lives in src/window.cyr.
+                if ((py >= y) && (py < win_bottom_y(win))) { return win; }
             }
         }
         i = i - 1;

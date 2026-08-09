@@ -89,7 +89,7 @@ fn render_foreign_content(fb, f): i64 {
     var buf = MehmanSurface_buffer(foreign_surface(f));
     if (buf == 0) { return 0; }
     var tx = win_x(win) + 6;
-    var ty = win_y(win) + TITLEBAR_H + 4;
+    var ty = win_body_y(win) + 4;
     return draw_text_lines(fb, buf, tx, ty, bhumi_xrgb(190, 230, 190));
 }
 

@@ -8,6 +8,10 @@ include "src/window.cyr"
 include "src/compositor.cyr"
 include "src/theme.cyr"        # ae_bhumi — render_window packs its colours through it
 include "src/render.cyr"
+# ⚠ The cursor lives in input.cyr (`input_ptr_x/y`) and render.cyr calls it — a forward function
+# reference, legal in Cyrius and exactly what the real include chain does. The test must carry the
+# same set or it fails to link on functions the production build resolves fine.
+include "src/input.cyr"
 
 # One frame for the ghost test, in render_desktop's exact order: damage, banded clear, draw, stamp.
 fn ghost_frame(comp, fb, win, bg): i64 {
@@ -23,6 +27,12 @@ fn ghost_frame(comp, fb, win, bg): i64 {
 
 fn main() {
     alloc_init();
+    # ⚠ SETTLE THE CURSOR before any band assertion. `rend_cursor_damage` reports the cursor as moved
+    # until something records where it was last DRAWN, and these tests call the damage pass without
+    # `render_cursor` (they predate the cursor entirely). Left unsettled, every "an idle desktop writes
+    # NOTHING" assert reads 18 rows — which is a real property of an UNPAIRED damage/draw, not noise.
+    input_ptr_set(0, 0);
+    rend_cursor_mark_drawn(0, 0);
 
     test_group("render — alpha blend");
     assert_eq(rend_blend(0x000000, 0xFFFFFF, 255), 0xFFFFFF, "full src alpha = src");
@@ -487,8 +497,18 @@ fn main() {
     ae_gpu_frame_ok = 0;
     ae_rect_reset();
 
-    test_group("render — decoration hit-test");
+    # ⛔⛔ THE WINDOW'S VERTICAL CONVENTION IS PINNED HERE. `win_h` is the CONTENT height and the titlebar
+    # sits ABOVE it, so a window at y=100 with h=300 occupies **100..430**, not 100..400. Five consumers
+    # had drifted into three conventions (see the note in src/window.cyr); these asserts are what stops
+    # that happening again, and two of them below were CHANGED by the reconciliation rather than added —
+    # they used to encode the wrong convention and passed.
+    test_group("render — the window geometry convention (chrome is OUTSIDE win_h)");
     var win = win_new(1, 100, 100, 400, 300, "T");
+    assert_eq(win_body_y(win), 130, "content begins one TITLEBAR_H below the window origin");
+    assert_eq(win_total_h(win), 330, "on-screen height is TITLEBAR_H + content height");
+    assert_eq(win_bottom_y(win), 430, "exclusive bottom edge is y + TITLEBAR_H + h");
+
+    test_group("render — decoration hit-test");
     assert_eq(deco_hit(win, 50, 50), Deco.DECO_NONE, "outside window");
     assert_eq(deco_hit(win, 300, 250), Deco.DECO_BODY, "body");
     assert_eq(deco_hit(win, 200, 110), Deco.DECO_TITLEBAR, "titlebar drag strip");
@@ -496,8 +516,53 @@ fn main() {
     assert_eq(deco_hit(win, 463, 112), Deco.DECO_MAX, "maximize button");
     assert_eq(deco_hit(win, 440, 112), Deco.DECO_MIN, "minimize button");
     assert_eq(deco_hit(win, 497, 250), Deco.DECO_RESIZE_R, "right resize edge");
-    assert_eq(deco_hit(win, 300, 397), Deco.DECO_RESIZE_B, "bottom resize edge");
-    assert_eq(deco_hit(win, 497, 397), Deco.DECO_RESIZE_BR, "bottom-right resize corner");
+    # ⚠ 424..429 is the bottom grab strip now (430 - RESIZE_M), NOT 394..399.
+    assert_eq(deco_hit(win, 300, 427), Deco.DECO_RESIZE_B, "bottom resize edge");
+    assert_eq(deco_hit(win, 497, 427), Deco.DECO_RESIZE_BR, "bottom-right resize corner");
+    # ⛔ THE REGRESSION GUARD. (300,397) was asserted as DECO_RESIZE_B for as long as this test existed,
+    # because the window was believed to end at y+h=400. Under the real convention it is 33 px inside the
+    # client surface — so a drag there would have started a RESIZE in the middle of a window's content.
+    # If this line ever reads RESIZE_B again, the chrome-inside convention has come back.
+    assert_eq(deco_hit(win, 300, 397), Deco.DECO_BODY, "y+h-3 is BODY, not the bottom edge (was wrong before)");
+    # The exact boundaries, so an off-by-one in either direction fails.
+    assert_eq(deco_hit(win, 300, 129), Deco.DECO_TITLEBAR, "last titlebar row");
+    assert_eq(deco_hit(win, 300, 130), Deco.DECO_BODY, "first content row");
+    assert_eq(deco_hit(win, 300, 429), Deco.DECO_RESIZE_B, "last row inside the window");
+    assert_eq(deco_hit(win, 300, 430), Deco.DECO_NONE, "first row BELOW the window");
+
+    # ⭐ comp_window_at must agree with deco_hit, and it did not: it ended the window at y+win_h too, so
+    # a click in the bottom TITLEBAR_H rows of a live client surface found whatever was BEHIND the window.
+    test_group("render — comp_window_at agrees with the same convention");
+    var hc = comp_new();
+    var hw = comp_create_window(hc, 100, 100, 400, 300, "H");
+    assert_eq(comp_window_at(hc, 300, 110), hw, "titlebar row hits the window");
+    assert_eq(comp_window_at(hc, 300, 250), hw, "content hits the window");
+    assert_eq(comp_window_at(hc, 300, 420), hw, "the bottom TITLEBAR_H rows hit it too (they did NOT before)");
+    assert_eq(comp_window_at(hc, 300, 429), hw, "last row inside");
+    assert_eq(comp_window_at(hc, 300, 430), 0, "one row below is a MISS");
+    assert_eq(comp_window_at(hc, 300, 99), 0, "one row above is a MISS");
+    win_set_state(hw, WinState.WS_MINIMIZED);
+    assert_eq(comp_window_at(hc, 300, 250), 0, "a minimized window is not hit");
+    win_set_state(hw, WinState.WS_NORMAL);
+
+    # ⛔ THE THEME BODY MUST REACH THE BOTTOM OF THE CONTENT RECT. `render_window` used to fill it with
+    # height `h - TITLEBAR_H` while blitting the client surface at the same origin with height `h`, in the
+    # SAME function — so the theme body stopped TITLEBAR_H short of the surface drawn over it. Invisible
+    # whenever a client covered it, and 30 px short on the compositor's own clientless window.
+    # ⚠ Added because a mutant restoring `h - TITLEBAR_H` PASSED the whole suite: nothing measured the
+    # body's height, so that half of the reconciliation was untested until these four lines.
+    test_group("render — the theme body fills the whole content rect");
+    var bfb = bhumi_fb_new(240, 240);
+    var BBG = 0x00090909;
+    bhumi_fb_clear(bfb, BBG);
+    var bwin = win_new(9, 20, 20, 160, 120, "B");     # content 20+30=50 .. 170, bottom edge 170
+    render_window(bfb, bwin, 0);
+    var body_col = ae_bhumi(rupa_theme_widget(rupa_theme_active()));
+    assert_eq(bhumi_fb_get(bfb, 100, win_body_y(bwin) + 2), body_col, "body is painted just below the titlebar");
+    assert_eq(bhumi_fb_get(bfb, 100, win_bottom_y(bwin) - 2), body_col,
+              "body reaches the LAST content row — a short fill stops TITLEBAR_H above this");
+    assert_eq(bhumi_fb_get(bfb, 100, win_bottom_y(bwin) + 2), BBG, "and stops at the bottom edge");
+    assert(bhumi_fb_get(bfb, 100, win_y(bwin) + 2) != body_col, "the titlebar is not the body colour");
 
     test_group("render — bitmap text (kashi VGA 8x16)");
     kashi_font_init();

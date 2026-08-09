@@ -160,6 +160,59 @@ fn main() {
     assert_eq(ae_usage_first_sight(16), 1, "usage 16 is unseen — it must NOT alias usage 128");
     assert_eq(ae_usage_first_sight(24), 1, "usage 24 is unseen — it must NOT alias usage 192 (marked above)");
 
+    # ================================================================
+    # AE-7 — the pointer
+    # ================================================================
+    # ⛔ THE KIND GUARD IS THE SAFETY PROPERTY. `input_map` reads `ev & 0xFF`, so an unguarded pointer
+    # event is interpreted as a keystroke — and a vertical motion of 41 is HID 0x29 = Escape = IA_QUIT.
+    # Without this guard, moving the mouse downward would QUIT THE DESKTOP.
+    test_group("input — a pointer event is NEVER read as a key");
+    # ⛔ dx = 297 IS THE CASE THAT DISCRIMINATES, and deriving it mattered: `bhumi_key_usage` is the LOW
+    # BYTE of dx and `bhumi_key_pressed` is BIT 8 of dx. So the hazard needs both — bit 8 set AND a low
+    # byte that maps. 297 = 0x129: bit 8 set, low byte 0x29 = Escape. A horizontal flick of 297 px would
+    # QUIT THE DESKTOP without the kind guard.
+    # ⚠ The first version of this test used dy=41 and PASSED WITH THE GUARD REMOVED — dy lives in bits
+    # 24-47 and cannot touch bit 8, so the `pressed` check caught it and the guard was never exercised.
+    # A mutant that survives means the test proved nothing; this one kills it.
+    assert_eq(input_map(bhumi_motion_event(297, 0)), InputAction.IA_NONE,
+              "dx=297 does NOT map to IA_QUIT (bit 8 set + low byte 0x29 = Escape)");
+    assert_eq(input_map(bhumi_motion_event(256 + 0x2B, 0)), InputAction.IA_NONE, "dx=299 is not TAB");
+    assert_eq(input_map(bhumi_motion_event(256 + 0x40, 0)), InputAction.IA_NONE, "dx=320 is not F7");
+    assert_eq(input_map(bhumi_motion_event(0, 41)), InputAction.IA_NONE, "dy=41 is inert either way");
+    assert_eq(input_map(bhumi_button_event(1, 1)), InputAction.IA_NONE, "a button event maps to nothing");
+    # ...and the guard must not have broken real keys.
+    assert_eq(input_map(bhumi_key_event(1, 0x29)), InputAction.IA_QUIT, "a REAL Esc still quits");
+    assert_eq(input_map(bhumi_key_event(1, 0x40)), InputAction.IA_MOVE_LEFT, "a REAL F7 still moves");
+
+    test_group("input — the cursor clamps to the screen");
+    input_ptr_set(100, 100);
+    assert_eq(input_ptr_move(10, 5, 800, 600), 1, "a real move reports 1");
+    assert_eq(input_ptr_x(), 110, "x advanced");
+    assert_eq(input_ptr_y(), 105, "y advanced");
+    assert_eq(input_ptr_move(0 - 20, 0 - 10, 800, 600), 1, "negative deltas move it back");
+    assert_eq(input_ptr_x(), 90, "x went LEFT (a lost sign would send it right)");
+    assert_eq(input_ptr_y(), 95, "y went UP");
+    input_ptr_set(5, 5);
+    input_ptr_move(0 - 50, 0 - 50, 800, 600);
+    assert_eq(input_ptr_x(), 0, "clamps at the left edge");
+    assert_eq(input_ptr_y(), 0, "clamps at the top edge");
+    assert_eq(input_ptr_move(0 - 5, 0 - 5, 800, 600), 0, "already at the origin: no move");
+    # ⛔ THE HIGH EDGE IS EXCLUSIVE. A cursor at x == bound_w sits one pixel off a bound_w-wide screen,
+    # where it is outside every window's hit rect — and the screen edge is somewhere users do click.
+    input_ptr_set(700, 500);
+    input_ptr_move(500, 500, 800, 600);
+    assert_eq(input_ptr_x(), 799, "clamps to bound_w - 1, not bound_w");
+    assert_eq(input_ptr_y(), 599, "clamps to bound_h - 1, not bound_h");
+
+    test_group("input — button edges are what a click IS");
+    assert_eq(input_btn_edge(0, 1, 1), 1, "0 -> 1 is a PRESS");
+    assert_eq(input_btn_edge(1, 0, 1), 0 - 1, "1 -> 0 is a RELEASE");
+    assert_eq(input_btn_edge(1, 1, 1), 0, "held is not an edge");
+    assert_eq(input_btn_edge(0, 0, 1), 0, "idle is not an edge");
+    # The right button must not register as the left one.
+    assert_eq(input_btn_edge(0, 2, 1), 0, "a RIGHT press is not a left-button edge");
+    assert_eq(input_btn_edge(0, 2, 2), 1, "...but it is a right-button edge");
+
     return assert_summary();
 }
 

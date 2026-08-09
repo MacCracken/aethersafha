@@ -271,7 +271,7 @@ fn ae_gpu_window_admissible(win, fw, fh): i64 {
     var w = win_w(win);
     var h = win_h(win);
     var dx = win_x(win);
-    var dy = win_y(win) + TITLEBAR_H;        # the body sits below the titlebar, as in render_window
+    var dy = win_body_y(win);                # the content sits below the titlebar — one definition, in window.cyr
     if (dx < 0) { return 0; }
     if (dy < 0) { return 0; }
     if (w < 1) { return 0; }
@@ -652,7 +652,7 @@ fn ae_gpu_present_frame(comp, fb): i64 {
             var w = win_w(win);
             var h = win_h(win);
             var dx = win_x(win);
-            var dy = win_y(win) + TITLEBAR_H;      # the body sits below the titlebar, as in render_window
+            var dy = win_body_y(win);              # the content sits below the titlebar — see window.cyr
             var wh = (h << 16) | w;
             var dstxy = (dy << 16) | dx;
             # ⛔ A FAILURE HERE IS A GPU REFUSAL, NOT A GEOMETRY PROBLEM — geometry was settled by the

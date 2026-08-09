@@ -4,6 +4,88 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased] — `AE-7` **P0**: one window-geometry convention, so the first click lands where it looks
+
+⛔⛔ **Five consumers had drifted into THREE conventions for a window's vertical extent, and one function
+held two of them.** `win_h` is the CONTENT height with the titlebar ABOVE it, so a window occupies
+`win_y .. win_y + TITLEBAR_H + win_h`. That is what the damage model, the GPU client composite and
+`render_window`'s client blit all do — the three **iron-proven** paths. But:
+
+- `render_window`'s **theme body fill** used `h - TITLEBAR_H`, contradicting the client blit **50 lines
+  below it in the same function**: the theme body stopped 30 px short of the surface drawn over it.
+  Invisible while a client covered it, and 30 px short on the compositor's own clientless window.
+- `deco_hit` and `comp_window_at` ended the window at `y + win_h`, i.e. 30 px too high.
+
+⚠ **Inert only because nothing clicks yet.** The first pointer click would have landed 30 px out on every
+live setu window, the bottom-most 30 px of every client surface would have registered as *outside* the
+window (finding whatever was behind it), and the bottom resize strip would have fallen **inside** the
+client's content rather than on its edge — a drag there starting a resize in the middle of a window.
+
+⭐ **The convention now has exactly one definition**, in `src/window.cyr`: `win_total_h`, `win_body_y`,
+`win_bottom_y`, `win_prev_total_h`, with the whole history written beside them. Every consumer was routed
+through them — `deco_hit`, `comp_window_at`, the damage model's `cur` *and* `prev` terms, the GPU composite
+(both call sites), the client blit, the focus accent strip and foreign.cyr. **Do not open-code
+`+ TITLEBAR_H` at a call site again** — that is precisely how the drift happened.
+
+⚠ **`TITLEBAR_H` moved from render.cyr's `RenderK` to window.cyr's `WinGeom`**, because that was the
+mechanical cause: it sat in the renderer's *button-geometry* enum, and `compositor.cyr` is included
+EARLIER, so `comp_window_at` could not reach it and open-coded the wrong extent instead. A
+window-geometry fact belongs with the window model. Button geometry stays in the renderer.
+
+**Tests** `tests/render.tcyr` 160 → **179 asserts**, with the convention pinned explicitly
+(`win_body_y == 130`, `win_total_h == 330`, `win_bottom_y == 430` for a window at y=100 h=300) and every
+boundary asserted in both directions. ⚠ Two pre-existing asserts were **changed, not added**: `(300,397)`
+had been asserted as `DECO_RESIZE_B` for as long as that test existed, and under the real convention it is
+33 px inside the client surface — it is now the regression guard that fails if chrome-inside returns.
+⚠ Mutation-verified in both halves: reverting `win_bottom_y` fails 7 asserts, and reverting the body fill
+fails 1 — **that second test exists because the first mutant of it PASSED**, so the body's height was
+untested until four pixel asserts were added for it.
+
+⭐ No pointer code. This is the latent debt `AE-7` would otherwise have inherited, paid down on its own
+with its own tests. Design: agnos [`planning/pointer.md`](https://github.com/MacCracken/agnos/blob/main/docs/development/planning/pointer.md).
+
+## [Unreleased] — `AE-7`: the pointer works. Cursor, click-to-focus, titlebar drag.
+
+### Added — the compositor consumes pointer events (`AE-7` P4)
+
+⭐ **Mostly wiring, which was the point.** `comp_window_at` (z-ordered, skips minimized), the 9-region
+`deco_hit`, and `input_move`'s GPU-safe clamp were all written long ago and **never called** — they were
+waiting for a pointer. The setu protocol already carried `SETU_INPUT_PTR_MOVE`/`_BTN`. No new mechanism.
+
+- **Cursor** — position + clamp in `input.cyr` (testable; the high edge is exclusive, so `bound_w - 1`),
+  drawn by `render_cursor` **last**, after every window and the shell panel.
+- **Click to focus** — `comp_window_at` gets its first consumer, ever.
+- **Titlebar drag** — reuses `input_move`, so a drag inherits the clamp that keeps a window from crossing
+  an edge and dropping the frame off the GPU. A drag *is* a move by a delta.
+- **Close button** — `deco_hit` → `DECO_CLOSE` → `comp_close_window`, which already retires its damage.
+- Pointer events are forwarded to the window under the cursor **surface-relative**, over the setu
+  messages that already existed.
+
+⛔ **THE CURSOR CANNOT BE DRAWN AS CHROME.** On a GPU frame the chrome rect queue is emitted BEFORE the
+client surfaces and `#39` is skipped, so a `fill_rect` cursor lands *under* every app. It goes through
+`draw_text`'s queue, which is drained AFTER the client blits — that ordering exists for exactly this.
+
+⚠ **The cursor damages only when it MOVES.** The first cut damaged both rects unconditionally and made an
+idle desktop write 18 rows every frame — which destroys the whole value of the `AE-0a` band. Four asserts
+caught it. ⚠ `rend_cursor_damage` and `render_cursor` are a **pair**: damage without draw leaves the
+previous position stale and the cursor re-damages forever.
+
+### Changed — the event batch is MIXED, so the loop classifies before reading
+
+⛔ Pointer events share the array with keys, and every key accessor is `ev & 0xFF`. `bhumi_key_usage` is
+the **low byte of dx** and `bhumi_key_pressed` is **bit 8 of dx** — so `dx = 297` (0x129) is a *pressed
+Escape* and a horizontal flick would **quit the desktop**. The frame loop now routes on `bhumi_ev_kind`
+once, and `input_map` carries a second guard because it is the part a unit test can reach.
+
+⚠ **The first version of that test was vacuous** and a mutant proved it: it used `dy = 41`, but dy lives
+in bits 24-47 and cannot reach bit 8, so the *pressed* check caught it and the kind guard was never
+exercised. Deriving the discriminating value (`dx = 297`) is what turned it into a real test — removing
+the guard now fails three asserts, one reading `got 1` = `IA_QUIT`.
+
+**Tests** input 91 asserts, render 179. `cyrius` pin 6.5.9 → **6.5.13** (`sys_ptrscan`, transitively via
+bhumi). ⭐ **QEMU end to end**: motion and clicks both reach the compositor — and this is the first
+ring-3 caller of `ptrscan #98`, so it is what proves that syscall at all.
+
 ## [0.12.4] - 2026-08-08 — the desktop's last CPU work moves to the GPU, and window management starts working
 
 ⭐⭐⭐ **Iron-validated across four flashes of AGNOS 1.56.41** (a byte-identical kernel every time, so this

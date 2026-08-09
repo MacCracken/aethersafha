@@ -111,6 +111,45 @@ fn win_rect_changed(p): i64 {
     return 0;
 }
 
+# ⛔⛔ THE WINDOW'S VERTICAL CONVENTION, AND IT HAS EXACTLY ONE DEFINITION FROM NOW ON.
+#
+# `win_h` is the **CONTENT** height — the client surface — and the titlebar sits ABOVE it. So a window
+# occupies `win_y .. win_y + TITLEBAR_H + win_h` on screen. Chrome is OUTSIDE the content rect.
+#
+# ⚠ IT WAS NOT ONE CONVENTION BEFORE, AND THE DISAGREEMENT WAS INERT ONLY BECAUSE NOTHING CLICKS YET.
+# Five consumers, three conventions, in one codebase:
+#   - the damage model (render.cyr) unions `win_h + TITLEBAR_H`     -> chrome OUTSIDE  ✅ iron-proven
+#   - the GPU client composite (gpu.cyr) puts the body at `y + TITLEBAR_H` -> OUTSIDE  ✅ iron-proven
+#   - `render_window`'s CLIENT BLIT lands at `y + TITLEBAR_H`, height `h` -> OUTSIDE   ✅ iron-proven
+#   - `render_window`'s THEME BODY FILL used `h - TITLEBAR_H`             -> INSIDE    ⛔ contradicted
+#     the client blit **in the same function**
+#   - `deco_hit` + `comp_window_at` treated the window as `y .. y + h`   -> INSIDE    ⛔
+# ⇒ Chrome-OUTSIDE wins because it is what all three *rendering* paths do and those are the ones burned
+# to hardware. Had the hit-tests shipped as they were, the first pointer click would have landed 30 px
+# out on every live setu window, and the bottom resize strip would have fallen INSIDE the client surface.
+#
+# ⭐ WHY THIS LIVES IN window.cyr AND NOT THE RENDERER. `TITLEBAR_H` was an entry in render.cyr's
+# `RenderK` enum next to button widths, so `compositor.cyr` — included EARLIER — could not reach it, and
+# `comp_window_at` open-coded the wrong extent instead. A window-geometry fact belongs with the window
+# model. ⚠ Button geometry stays in the renderer; only this one constant moved.
+#
+# ⇒ **Use `win_total_h` / `win_body_y`. Do not open-code `+ TITLEBAR_H` at a call site again** — that is
+# how five consumers drifted into three conventions in the first place.
+enum WinGeom {
+    TITLEBAR_H = 30;
+}
+
+# The window's full on-screen height: chrome plus content.
+fn win_total_h(p): i64 { return TITLEBAR_H + load64(p + W_H); }
+# The y at which the content (client surface / theme body) begins.
+fn win_body_y(p): i64 { return load64(p + W_Y) + TITLEBAR_H; }
+# The PREVIOUS frame's full on-screen height, for the damage model's `prev` term. ⚠ Needed as its own
+# accessor because a stamped prev rect must be extended by the same chrome the current rect is, or the
+# band under-covers the rows a moved window vacated — which is precisely the ghost `AE-0a` exists to stop.
+fn win_prev_total_h(p): i64 { return TITLEBAR_H + load64(p + W_PH); }
+# The first y BELOW the window — exclusive bottom edge.
+fn win_bottom_y(p): i64 { return load64(p + W_Y) + TITLEBAR_H + load64(p + W_H); }
+
 fn win_id(p)    { return load64(p + W_ID); }
 fn win_x(p)     { return load64(p + W_X); }
 fn win_y(p)     { return load64(p + W_Y); }

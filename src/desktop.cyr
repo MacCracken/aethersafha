@@ -136,5 +136,8 @@ fn render_desktop(d, fb): i64 {
         i = i + 1;
     }
     render_shell_panel(fb, desk_shell(d));
+    # ⭐ THE CURSOR LAST — after every window and the shell panel, because a cursor that is not on top
+    # of everything is not a cursor.
+    render_cursor(fb);
     return 0;
 }

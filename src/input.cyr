@@ -83,6 +83,14 @@ fn ae_usage_first_sight(u): i64 {
 
 # input_map(ev): pure key→action mapping for a pressed key (IA_NONE otherwise).
 fn input_map(ev): i64 {
+    # ⛔⛔ KIND FIRST. The event batch is MIXED since bhumi 1.1.4 — pointer events share the array — and
+    # every read below is `ev & 0xFF`, so an unchecked motion event is interpreted as a keystroke. The
+    # numbers are not harmless: `bhumi_key_usage` is the LOW BYTE of dx and `bhumi_key_pressed` is BIT 8
+    # of dx, so a horizontal motion of 297 px (0x129) reads as a pressed Escape = `IA_QUIT` and would QUIT
+    # THE DESKTOP. ⚠ Derived, not guessed: a first test using dy=41 passed with this guard REMOVED,
+    # because dy lives in bits 24-47 and cannot reach bit 8. The main loop routes by kind too; this guard is the second
+    # line, and it is here rather than only there because this function is the one a unit test can reach.
+    if (bhumi_ev_is_key(ev) == 0) { return InputAction.IA_NONE; }
     if (bhumi_key_pressed(ev) == 0) { return InputAction.IA_NONE; }
     var u = bhumi_key_usage(ev);
     if (u == HidUsage.HID_ESC) { return InputAction.IA_QUIT; }
@@ -137,6 +145,57 @@ fn input_move(win, dx, dy, bound_w, bound_h): i64 {
     win_move(win, nx, ny);
     if (nx != ox) { return 1; }
     if (ny != oy) { return 1; }
+    return 0;
+}
+
+# ================================================================
+# POINTER STATE (`AE-7`) — the cursor position, kept here so a test can reach it
+# ================================================================
+#
+# ⚠ Lives in input.cyr for the same reason `input_move` does: main.cyr's frame loop is not reachable
+# from a unit test, and cursor clamping is arithmetic that fails silently. Bounds are PARAMETERS — the
+# screen geometry is a main.cyr global declared after this file is included.
+var ae_ptr_x = 0;
+var ae_ptr_y = 0;
+
+# input_ptr_move(dx, dy, bound_w, bound_h): advance the cursor and clamp it on screen.
+# Returns 1 if the position actually changed, 0 if the clamp held it.
+#
+# ⚠ THE CLAMP IS EXCLUSIVE ON THE HIGH EDGE: a cursor at `bound_w` is one pixel off the right of a
+# `bound_w`-wide screen, so the last legal column is `bound_w - 1`. Getting this wrong puts the hotspot
+# outside every window's hit rect at the screen edge, where a user will absolutely try to click.
+fn input_ptr_move(dx, dy, bound_w, bound_h): i64 {
+    var ox = ae_ptr_x;
+    var oy = ae_ptr_y;
+    var nx = ox + dx;
+    var ny = oy + dy;
+    if (nx < 0) { nx = 0; }
+    if (ny < 0) { ny = 0; }
+    if (nx > bound_w - 1) { nx = bound_w - 1; }
+    if (ny > bound_h - 1) { ny = bound_h - 1; }
+    # A degenerate bound (0 or negative) would make the two clamps disagree and hand back -1.
+    if (nx < 0) { nx = 0; }
+    if (ny < 0) { ny = 0; }
+    ae_ptr_x = nx;
+    ae_ptr_y = ny;
+    if (nx != ox) { return 1; }
+    if (ny != oy) { return 1; }
+    return 0;
+}
+
+# Place the cursor outright (screen centre at startup, or a test fixture).
+fn input_ptr_set(x, y): i64 { ae_ptr_x = x; ae_ptr_y = y; return 0; }
+fn input_ptr_x(): i64 { return ae_ptr_x; }
+fn input_ptr_y(): i64 { return ae_ptr_y; }
+
+# input_btn_edge(prev, cur, mask): 1 = pressed this event, -1 = released, 0 = unchanged.
+# ⚠ Edges, not levels, are what a click IS — and deriving them here rather than in the frame loop is
+# what lets a test assert the press/release pair without a compositor.
+fn input_btn_edge(prev, cur, mask): i64 {
+    var was = prev & mask;
+    var now = cur & mask;
+    if (was == 0) { if (now != 0) { return 1; } }
+    if (was != 0) { if (now == 0) { return 0 - 1; } }
     return 0;
 }
 

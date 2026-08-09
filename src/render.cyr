@@ -5,8 +5,11 @@
 # Minimal skeleton: solid desktop bg + per-window body + titlebar (focus-tinted).
 # Damage tracking / scene graph / bitmap text are follow-on parity work.
 
+# ⚠ `TITLEBAR_H` USED TO LIVE HERE and now lives in src/window.cyr's `WinGeom`, with the window's
+# vertical convention documented beside it. It moved because `compositor.cyr` is included EARLIER than
+# this file and therefore could not reach it — so `comp_window_at` open-coded the wrong extent instead.
+# Button geometry below is genuinely the renderer's, and stays.
 enum RenderK {
-    TITLEBAR_H = 30;
     BTN_W      = 18;   # titlebar button width
     BTN_H      = 18;
     BTN_GAP    = 4;    # gap between buttons
@@ -388,21 +391,27 @@ fn deco_hit(win, px, py): i64 {
     var x = win_x(win);
     var y = win_y(win);
     var w = win_w(win);
-    var h = win_h(win);
+    # ⛔ THE BOTTOM EDGE IS `win_bottom_y`, NOT `y + win_h`. This function used to end the window at
+    # `y + h`, i.e. chrome-INSIDE, while the damage model, the GPU composite and the client blit all
+    # place the content at `y + TITLEBAR_H` for `h` rows. On a live setu window that put every hit 30 px
+    # out and dropped the bottom-most 30 px of the client surface outside the window entirely — and the
+    # bottom resize strip landed INSIDE the surface rather than on its edge. Inert until something
+    # clicked; `AE-7` is the something. See the convention note in src/window.cyr.
+    var yb = win_bottom_y(win);
     if (px < x) { return Deco.DECO_NONE; }
     if (py < y) { return Deco.DECO_NONE; }
     if (px >= x + w) { return Deco.DECO_NONE; }
-    if (py >= y + h) { return Deco.DECO_NONE; }
+    if (py >= yb) { return Deco.DECO_NONE; }
     # resize edges — bottom-right corner takes priority
     var nr = 0;
     var nb = 0;
     if (px >= x + w - RESIZE_M) { nr = 1; }
-    if (py >= y + h - RESIZE_M) { nb = 1; }
+    if (py >= yb - RESIZE_M) { nb = 1; }
     if ((nr == 1) && (nb == 1)) { return Deco.DECO_RESIZE_BR; }
     if (nr == 1) { return Deco.DECO_RESIZE_R; }
     if (nb == 1) { return Deco.DECO_RESIZE_B; }
     # titlebar: buttons first, else the draggable strip
-    if (py < y + TITLEBAR_H) {
+    if (py < win_body_y(win)) {
         var by = deco_btn_y(win);
         if (deco_in_btn(px, py, deco_close_x(win), by) == 1) { return Deco.DECO_CLOSE; }
         if (deco_in_btn(px, py, deco_max_x(win), by) == 1) { return Deco.DECO_MAX; }
@@ -412,21 +421,85 @@ fn deco_hit(win, px, py): i64 {
     return Deco.DECO_BODY;
 }
 
+# ⭐⭐ THE CURSOR (`AE-7`) — drawn through `draw_text`, and that choice is load-bearing.
+#
+# ⛔ IT CANNOT GO THROUGH `fill_rect`. On an agnos GPU frame the chrome rect queue is emitted BEFORE the
+# client surfaces and the `#39` blit is skipped entirely, so anything drawn as chrome lands UNDER every
+# client window — a cursor that disappears the moment it crosses an app. `draw_text`'s queue is drained
+# AFTER the client blits (that ordering exists for exactly this reason), so a glyph composites on top
+# with no new GPU path and no change to the frame plan.
+#
+# ⚠ A GLYPH, NOT A BITMAP, in this first cut: it reuses the `#92` op 0x03 GLYPH_1BPP path that is
+# already iron-proven, rather than introducing a second kind of overlay to debug at the same time as
+# the pointer itself.
+var AE_CURSOR_GLYPH = "+";
+
+# ⚠ THE CURSOR MOVES EVERY FRAME IT MOVES AT ALL, so it damages every frame — and its OLD position must
+# be damaged too or it smears a trail. That is the same `union(cur, prev)` requirement a moving window
+# has, and the same trap as the CLOSED window whose rect left the live list: the damage model only
+# knows about things it is told about, and the cursor is not in the window vector.
+var ae_cursor_px = 0 - 1;      # previous frame's cursor position (-1 = never drawn)
+var ae_cursor_py = 0 - 1;
+
+# Fold the cursor's current AND previous rects into this frame's damage. Called by the damage pass.
+fn rend_cursor_damage(dmg): i64 {
+    if (dmg == 0) { return 0; }
+    var x = input_ptr_x();
+    var y = input_ptr_y();
+    # ⛔ ONLY WHEN IT MOVED. The first cut damaged both rects unconditionally, which made an IDLE desktop
+    # write 18 rows every frame forever — and "an idle desktop writes NOTHING" is the entire value of the
+    # `AE-0a` band. Four asserts caught it immediately. A stationary cursor is already correct in both
+    # flip buffers, so it needs no damage at all.
+    if (x == ae_cursor_px) {
+        if (y == ae_cursor_py) { return 0; }
+    }
+    var cw = FONT_W + 2;
+    var ch = FONT_H + 2;
+    # ⚠ BOTH rects, exactly like a moved window: the OLD one so the vacated pixels are repainted, the NEW
+    # one so the glyph lands. Being in `cur` this frame puts it in `prev` next frame, which is the two
+    # frames of coverage `#84`'s buffer flip requires.
+    if (ae_cursor_px >= 0) { rend_dmg_add(dmg, ae_cursor_px, ae_cursor_py, cw, ch); }
+    rend_dmg_add(dmg, x, y, cw, ch);
+    return 0;
+}
+
+# Record where the cursor was last DRAWN. ⚠ `rend_cursor_damage` and `render_cursor` are a PAIR — a
+# caller that damages without drawing leaves the previous position stale, so the cursor re-damages the
+# same rows every frame forever and an idle desktop stops being free. Exposed separately so a test can
+# settle the cursor without a framebuffer or a font.
+fn rend_cursor_mark_drawn(x, y): i64 {
+    ae_cursor_px = x;
+    ae_cursor_py = y;
+    return 0;
+}
+
+fn render_cursor(fb): i64 {
+    var x = input_ptr_x();
+    var y = input_ptr_y();
+    draw_text(fb, AE_CURSOR_GLYPH, x, y, ae_bhumi(rupa_theme_accent(rupa_theme_active())));
+    rend_cursor_mark_drawn(x, y);
+    return 0;
+}
+
 fn render_window(fb, win, focused): i64 {
     var x = win_x(win);
     var y = win_y(win);
     var w = win_w(win);
     var h = win_h(win);
     var th = rupa_theme_active();
-    # body — the window content surface
-    fill_rect(fb, x, y + TITLEBAR_H, w, h - TITLEBAR_H, ae_bhumi(rupa_theme_widget(th)));
+    # body — the window content surface.
+    # ⛔ THIS USED TO BE `h - TITLEBAR_H`, which contradicted the CLIENT BLIT in this same function
+    # (`blit_rect(... win_body_y, w, h)`) — the theme body was 30 px shorter than the surface drawn over
+    # it. Invisible while a client covered it, and 30 px short on the compositor's own clientless window.
+    # `win_h` is the CONTENT height; see the convention note in src/window.cyr.
+    fill_rect(fb, x, win_body_y(win), w, h, ae_bhumi(rupa_theme_widget(th)));
     # titlebar: panel when idle, raised (widget) when focused
     var tb = ae_bhumi(rupa_theme_panel(th));
     if (focused == 1) { tb = ae_bhumi(rupa_theme_widget(th)); }
     fill_rect(fb, x, y, w, TITLEBAR_H, tb);
     # a focused window gets a 2px accent seal-strip along the titlebar's lower edge
     # (the theme's ONE bold hue = "this window is active/verified")
-    if (focused == 1) { fill_rect(fb, x, y + TITLEBAR_H - 2, w, 2, ae_bhumi(rupa_theme_accent(th))); }
+    if (focused == 1) { fill_rect(fb, x, win_body_y(win) - 2, w, 2, ae_bhumi(rupa_theme_accent(th))); }
     # title text — primary ink when focused, muted otherwise
     var tc = ae_bhumi(rupa_theme_mute(th));
     if (focused == 1) { tc = ae_bhumi(rupa_theme_ink(th)); }
@@ -467,7 +540,7 @@ fn render_window(fb, win, focused): i64 {
         }
         # Row-walking copy (blit_rect) rather than the per-pixel bhumi_fb_set loop this used to be.
         # Same pixels, same clipping; measured 23.974 ms -> see blit_rect's header for the numbers.
-        if (spix != 0) { blit_rect(fb, x, y + TITLEBAR_H, spix, w, h); }
+        if (spix != 0) { blit_rect(fb, x, win_body_y(win), spix, w, h); }
     }
     return 0;
 }
@@ -528,10 +601,10 @@ fn rend_frame_damage(comp, fb, bg): i64 {
             if (ae_frame_dmg != 0) {
                 if (win_px(w0) >= 0) {
                     rend_dmg_add(ae_frame_dmg, win_px(w0), win_py(w0),
-                                 win_pw(w0), win_ph(w0) + TITLEBAR_H);
+                    win_pw(w0), win_prev_total_h(w0));
                 }
                 rend_dmg_add(ae_frame_dmg, win_x(w0), win_y(w0),
-                             win_w(w0), win_h(w0) + TITLEBAR_H);
+                win_w(w0), win_total_h(w0));
             }
         }
         wi = wi + 1;
@@ -547,7 +620,7 @@ fn rend_frame_damage(comp, fb, bg): i64 {
         if (win_bufid(w1) != 0) {
             if (ae_frame_dmg != 0) {
                 rend_dmg_add(ae_frame_dmg, win_x(w1), win_y(w1),
-                             win_w(w1), win_h(w1) + TITLEBAR_H);
+                win_w(w1), win_total_h(w1));
             }
         }
         wi = wi + 1;
@@ -575,10 +648,14 @@ fn rend_frame_damage(comp, fb, bg): i64 {
     # in this file, which is included after compositor.cyr.
     # ⚠ Cleared UNCONDITIONALLY, including when there is no damage tracker at all: a retired rect that
     # survived its frame would keep re-damaging those rows for the rest of the run.
+    # ⭐ THE CURSOR'S OWN DAMAGE — current AND previous position. The cursor is not in the window vector,
+    # so no loop above can see it; without this it leaves a trail of itself across the desktop. Same
+    # `union(cur, prev)` requirement as a moving window, third instance of the same trap.
+    rend_cursor_damage(ae_frame_dmg);
     if (comp_retire_valid() == 1) {
         if (ae_frame_dmg != 0) {
             rend_dmg_add(ae_frame_dmg, comp_retire_x(), comp_retire_y(),
-                         comp_retire_w(), comp_retire_h() + TITLEBAR_H);
+            comp_retire_w(), comp_retire_h() + TITLEBAR_H);
         }
         comp_retire_clear();
     }
@@ -824,11 +901,11 @@ fn draw_text(fb, s, x, y, color): i64 {
     # ⚠ A refused enqueue (queue or pool full) falls through to the CPU path below, so text is never lost.
     if (ae_gpu_frame_ok == 1) {
         if (ae_text_gpu_ok == 1) {
-        if (ae_text_enqueue(s, x, y, color) == 1) {
-            var n = 0;
-            while (load8(s + n) != 0) { n = n + 1; }
-            return ae_text_width(n);
-        }
+            if (ae_text_enqueue(s, x, y, color) == 1) {
+                var n = 0;
+                while (load8(s + n) != 0) { n = n + 1; }
+                return ae_text_width(n);
+            }
         }
     }
     var cx = x;
