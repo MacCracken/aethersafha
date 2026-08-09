@@ -67,6 +67,17 @@ var ae_inp_tab = 0;
 var ae_inp_fwd = 0;
 var ae_inp_nofwd = 0;   # BITMASK of focus indices already reported — NOT a boot-scoped latch (see the site)
 var ae_inp_move = 0;
+# ⛔⛔ THE DRAG'S OWN RUNGS, because a subject whose only oracle is a REMEMBERED GESTURE goes unmeasured.
+# The press-hold-RELEASE transition is what `input_btn_transitions` was written for — the burn blocker of
+# this whole cut — and it left NO trace in the serial, so two consecutive iron burns could not say whether
+# it worked. Both times the operator simply did not perform the motion, and nothing in the log noticed.
+# ⇒ Latch both ends. `drag started` proves the press+titlebar path; `drag released after N frames` proves
+# the transition that could not previously happen. ⚠ The FRAME COUNT is the payload: a release at frame
+# N+1 is a click, a release hundreds of frames later is a real drag, and a `drag started` with NO release
+# line is precisely the glued-window failure — an absence that now MEANS something.
+var ae_drag_started = 0;
+var ae_drag_released = 0;
+var ae_drag_frame = 0;
 # ⭐ How many key usages have been named in the log so far. NOT a latch like the rungs above — a
 # bounded COUNTER, because the question it answers ("which usages actually arrived?") needs the
 # identity of several keys, not the fact that one arrived. Bound and rationale at the print site.
@@ -217,9 +228,11 @@ fn ae_ptr_forward(comp, kind_is_btn, btn, pressed): i64 {
     return 1;
 }
 
-# ae_pointer_event(comp, ev): handle one MOTION or BUTTON event from the bhumi batch.
+# ae_pointer_event(comp, ev, frame): handle one MOTION or BUTTON event from the bhumi batch.
+# ⚠ `frame` is passed, not read from a global: the frame counter is a LOCAL of the frame loop, and Cyrius
+# would not resolve a forward reference to it from here even if it were module-scope and declared below.
 # ⚠ Only ever called for events whose kind is NOT key — the frame loop routes on `bhumi_ev_is_key`.
-fn ae_pointer_event(comp, ev): i64 {
+fn ae_pointer_event(comp, ev, frame): i64 {
     var k = bhumi_ev_kind(ev);
 
     if (k == BhumiEvKind.BHUMI_EV_MOTION) {
@@ -287,6 +300,11 @@ fn ae_pointer_event(comp, ev): i64 {
                 if (hit == Deco.DECO_TITLEBAR) {
                     ae_ptr_drag = 1;
                     ae_ptr_drag_id = win_id(win);
+                    ae_drag_frame = frame;
+                    if (ae_drag_started == 0) {
+                        ae_drag_started = 1;
+                        println("aethersafha: drag started -- a titlebar press was caught");
+                    }
                 }
             }
             if (ae_ptr_click == 0) {
@@ -296,6 +314,17 @@ fn ae_pointer_event(comp, ev): i64 {
             if (closed == 0) { ae_ptr_forward(comp, 1, 1, 1); }
         }
         if (input_btn_released(tr) == 1) {
+            # ⭐ THE LINE THE BURN BLOCKER NEEDED. Before `input_btn_transitions` this branch was
+            # UNREACHABLE: the kernel re-seeds `seen` to the held level, so an edge on `cur | seen` never
+            # saw the button come up and a titlebar drag never ended. Printing here makes the fix
+            # self-evidencing on any boot, and makes its absence-after-`drag started` the failure signal.
+            if (ae_ptr_drag == 1) {
+                if (ae_drag_released == 0) {
+                    ae_drag_released = 1;
+                    println("aethersafha: drag released -- the window stopped, frames held:");
+                    println_int(frame - ae_drag_frame);
+                }
+            }
             ae_ptr_drag = 0;
             ae_ptr_drag_id = 0;
             # ⛔ `closed` GUARDS THIS TOO — an earlier cut guarded only the press. `ae_ptr_forward`
@@ -591,7 +620,7 @@ fn main(): i64 {
                     # PRESSED Escape and quits the desktop. Routing once here keeps the six key call sites
                     # below exactly as they were, instead of six independent chances to forget.
                     if (bhumi_ev_is_key(ev) == 0) {
-                        ae_pointer_event(comp, ev);
+                        ae_pointer_event(comp, ev, frame);
                         i = i + 1;
                         continue;
                     }
