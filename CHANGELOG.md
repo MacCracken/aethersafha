@@ -4,7 +4,36 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.13.0] - 2026-08-10 — the desktop survives being relaunched
+
+⭐⭐⭐ **The headline is a class of bug, not a feature**: a compositor that exits must release what it
+spawned. Until this cut it released nothing on agnos, and four launch/quit cycles were enough to exhaust the
+system's 16 process slots and leave the desktop hosting nothing. Found by an iron burn that produced **no
+evidence at all**, root-caused in QEMU, and closed on hardware the next day with four launches in one boot.
+
+### Changed — `cyrius.cyml` interpolates its version at last, and the bump script stops undoing it
+
+⚠ `version` was a hardcoded literal sitting directly under a comment that said *"⚠ INTERPOLATED, NOT
+DUPLICATED"* and explained, at length, why duplicating it was the agnoshi drift bug. `release.yml` resolved
+`${file:VERSION}` too, and its comment asserted the manifest used it. **Every sibling in the stack — puka,
+crab, setu, bhumi, agnoshi, kriya — already did.** aethersafha was the lone holdout, and the reason it never
+converted is that `scripts/version-bump.sh` `sed`-ed a fresh literal over the line at every cut. ⇒ The script
+now NORMALISES to `${file:VERSION}` instead of assigning, and its self-check resolves the value exactly the
+way release.yml does — so a green bump means the tag will be accepted, not that the script agrees with
+itself. **Two comments describing a fix that a third file silently reverted** is the shape to watch for.
+
+### ⚠ The tagged binary is NOT byte-identical to the one that burned — and this is why
+
+The iron proof below was taken on **13,568,328 B**; this cut builds **13,584,728 B**. The delta is entirely
+`lib/agnodrm.cyr` + `lib/agnostik.cyr`, which `cyrius build` **re-materialised** during the release build
+(`cyrius.lock` moved with them). ⭐ Neither dep's *source* has changed since 2026-08-07 and both stayed at
+their declared tags (agnodrm 1.5.0, agnostik 1.3.4) — so the burned binary was linked against **stale
+vendored copies** and this one matches the declared graph. That is the right direction, not a regression.
+⚠ **What is verified**: 23/23 suites, `--agnos` builds clean, and the growth landed in the *unreachable*
+count (5144 → 5168 fns), which is what vendoring more dead surface looks like on an arm where agnodrm's
+DRM/udev paths are not reachable at all. ⚠ **What is NOT verified**: that nothing newly vendored became
+*reachable* — **no burn was taken on this binary.** Read the iron results below as proof of the FIX, not of
+this artifact. [[reference_stale_vendored_lib_masks_stdlib_fix]]
 
 ### Fixed — the compositor never released its clients on agnos, and four relaunches killed the desktop
 
@@ -34,6 +63,19 @@ a closing compositor never repaints, and walking the vector while removing from 
 ⭐ **Before/after with one variable**, `AE_CLIENTS_MODE=relaunch` in agnos's clients harness: the sequence
 broke at **relaunch #4** before, and ran **8/8 clean** after, with the exit teardown firing 10 times and
 reaping both clients every time. 23/23 suites.
+
+⭐⭐⭐ **BURNED PASS ON IRON 2026-08-10** (agnos 1.56.42, archaemenid, `cpus online: 4`). **Four launches in
+one boot — `--clients` foreground, `--clients &`, plain, plain — and all four hosted two clients**, where
+QEMU reproduced the old failure at exactly #4. Operator: *"works correctly, --clients, multi launch, drag
+drop window, close window, min/max window"*.
+⭐⭐ **The instrument read BOTH ways on hardware, which is what makes it believable**: `at exit — clients
+told to close:` printed **2 · 2 · 0 · 2**, and the **0** is the run where F4 had already closed both windows.
+It counts LIVE clients rather than printing a constant, and every non-zero count is followed by the clients'
+own `compositor closed the window -- exiting`. ⭐ `--clients` also returned **95** rather than the hardcoded
+92 that every previous iron run was told.
+⚠ **The min/max BUTTONS are not distinguishable from the F5/F6 KEYS in the serial** — usages 62/63 were
+seen, `input_apply` routes click and key identically, and neither action prints a line. The operator's eye is
+the oracle for that pair and for F6-leaves-no-ghost; the log does not corroborate the button path.
 
 ## [0.12.9] - 2026-08-09 — the Known-open list, cleared
 

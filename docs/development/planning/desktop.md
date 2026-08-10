@@ -16,7 +16,21 @@ type: planning
 > *shipped-at-1.56.17* in agnos. Compositor rungs in this file carry the `AE-` prefix; kernel band
 > numbers keep their `#NN` syscall form.
 
-**Last refresh** 2026-08-08 — ⭐⭐⭐ **THE CPU NO LONGER DRAWS THE DESKTOP.** `AE-9` burned PASS: `#88` clear +
+**Last refresh** 2026-08-10 — ⭐⭐⭐ **THE DESKTOP SURVIVES BEING RELAUNCHED, AND A FAILED RUN IS READABLE.**
+The 08-09 audit-clearance burn **FAILED**: after `--clients` → plain → F4 → Esc → relaunch, the desktop came
+up hosting nothing and left **no evidence at all**. Root-caused in QEMU the same day — this repo had **no
+session teardown on agnos** (`main.cyr`'s only exit release sits under `#ifndef CYRIUS_TARGET_AGNOS`), so
+**F4 reaped a client and Esc reaped nothing**, leaking puka + its agnsh + crab per relaunch into a **16-slot**
+process table (`agnos/kernel/core/proc.cyr:275`) that filled at launch #4. `comp_close_all_clients()` fixes it;
+agnos now NAMES a full table instead of refusing in silence, and `gpu_release_pid` spills the log ring to
+`/klug.txt` when a scanout owner exits, so a covered console stops meaning a lost log.
+⭐⭐⭐ **BURNED PASS 2026-08-10**: four launches in one boot, two clients every launch, the spill firing on all
+four exits, and `clients told to close:` reading **2·2·0·2** — the 0 on the run F4 had already cleared, which
+is what proves it counts live clients rather than printing a constant
+([card](https://github.com/MacCracken/agnosticos/blob/main/docs/development/iron-nuc-zen-log.md#tracker-15642-relaunch)).
+⚠ `/klug.txt`'s CONTENT is still unread, and a compositor that WEDGES never reaches the spill.
+
+Earlier: ⭐⭐⭐ **THE CPU NO LONGER DRAWS THE DESKTOP.** `AE-9` burned PASS: `#88` clear +
 chrome fills, `#92 op 0x01` client surfaces, `#92 op 0x03` glyphs, and the **`#39` blit is not issued** — every
 layer of the frame is on the GPU, in both runs of one boot
 ([card](https://github.com/MacCracken/agnosticos/blob/main/docs/development/iron-nuc-zen-log.md#tracker-15641-ae9)).
