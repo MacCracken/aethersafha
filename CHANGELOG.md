@@ -58,6 +58,33 @@ so each forward spends a `#97` ring slot for no visible effect · a refused curs
 DRAWN, so the missing pixels are never re-damaged · `bhumi/programs/backend-demo.cyr` hands a 32-byte buffer
 where 256 are needed · `bhumi/tests/bhumi.tcyr` smashes its own frame with `var prec[2]` for a 16-byte record.
 
+## [Unreleased]
+
+### Changed — the desktop starts EMPTY, and windows carry the application's name
+
+⭐ **The "Files" demo window is gone** (operator call). It was a compositor-seeded placeholder from before
+there were real clients, and keeping it past that point was not neutral: it had **no client fd**, so it
+silently swallowed every key focused onto it — that produced the "puka didn't register key commands"
+report, cost a burn to diagnose, and then needed a latched `a key reached NO client` line whose only job was
+to describe a window that should not have existed. It also sat at index 0 in the TAB cycle, so one tab from
+the last-presented client wrapped onto it, and two burn cards had to carry a "keep TABbing" warning.
+⇒ Every window on screen now belongs to a real process, and `desktop up — windows:` reads **0** until one
+connects.
+
+⭐ **Titlebars say `puka` and `crab`, not `setu-surface`.** setu carries no title in `CREATE_SURFACE`, but
+the compositor **spawns** these clients and therefore already knows what each channel will carry — the name
+rides down from the spawn site through `setu_srv_handshake_drain`, so no protocol change was needed.
+⚠ Clients that arrive by the accept paths still get `setu-surface`, which is honest: nothing there knows
+better yet.
+
+### Added — the drag phase aims by MEASUREMENT, not by arithmetic
+
+⛔ The harness's drag aim was computed from the compositor's cascade formula (`pcx = 30 + pstep * (w/6)`).
+It worked once and then silently missed — the window is not where that formula says — and a missed press
+reports "says nothing about the release", i.e. the phase quietly stops testing without failing.
+⇒ `find_titlebar()` locates the focused window's cyan accent underline in the captured framebuffer and aims
+at the titlebar above it. Reading the compositor's own output cannot drift out of step with its layout.
+
 ## [0.12.7] - 2026-08-09 — the pointer is an arrow: a derived-outline cursor that clips
 
 ### Added — a REAL cursor: `src/cursor.cyr`, an arrow instead of a `+`

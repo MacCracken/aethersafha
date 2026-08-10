@@ -361,7 +361,7 @@ fn setu_hs_action(state, kind): i64 {
 var setu_hs_consumed = 0;      # 1 = the last step took a record off the channel (drives the drain)
 var setu_hs_stale = 0;         # one-shot: a resync happened, i.e. the ring really did drop a pair
 
-fn setu_srv_handshake_step(st, cfd, comp, dstx, dsty): i64 {
+fn setu_srv_handshake_step(st, cfd, comp, dstx, dsty, title): i64 {
     var m = setu_msg_new();
     setu_hs_consumed = 0;
     var p = setu_poll_input(cfd, m);
@@ -388,7 +388,13 @@ fn setu_srv_handshake_step(st, cfd, comp, dstx, dsty): i64 {
     }
 
     if (act == SetuHsAct.HS_CREATE) {
-        var win = comp_create_window(comp, 0, 0, setu_msg_arg(m, 0), setu_msg_arg(m, 1), "setu-surface");
+        # ⭐ THE APPLICATION'S NAME, NOT "setu-surface". Every window on the desktop used to be captioned
+        # with the protocol's name for a surface, which tells the user nothing and made two windows
+        # indistinguishable in a photograph. setu carries no title in CREATE_SURFACE, but the compositor
+        # SPAWNED these clients and therefore already knows what each one is — the name rides down from the
+        # spawn site instead of needing a protocol change. ⚠ A client that arrives some other way (the
+        # accept paths below) still gets "setu-surface"; that is honest, because nothing there knows better.
+        var win = comp_create_window(comp, 0, 0, setu_msg_arg(m, 0), setu_msg_arg(m, 1), title);
         if (win == 0) { return 0 - 9; }
         win_set_keymode(win, setu_msg_arg(m, 2) & SETU_SURF_FULL_KEYS);
         var pmul = 0;
@@ -459,11 +465,11 @@ enum SetuHsK { DRAIN_MAX = 64; }   # = CHAN_SLOTS, the agnos channel ring depth
 # drain and an idle one both return 0.
 var setu_hs_drained = 0;
 
-fn setu_srv_handshake_drain(st, cfd, comp, dstx, dsty): i64 {
+fn setu_srv_handshake_drain(st, cfd, comp, dstx, dsty, title): i64 {
     var n = 0;
     setu_hs_drained = 0;
     while (n < SetuHsK.DRAIN_MAX) {
-        var r = setu_srv_handshake_step(st, cfd, comp, dstx, dsty);
+        var r = setu_srv_handshake_step(st, cfd, comp, dstx, dsty, title);
         if (r != 0) { return r; }                   # completed or failed — the caller decides
         if (setu_hs_consumed == 0) { return 0; }    # channel empty: nothing more to do this frame
         n = n + 1;

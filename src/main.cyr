@@ -427,16 +427,18 @@ fn main(): i64 {
     # a11y, gestures, theme, tray, plugins) wired together.
     var desk = desktop_new();
     var comp = desk_comp(desk);
-    # The terminal is now puka — a setu CLIENT that connects at runtime (its own
-    # window arrives over setu), not a compositor-seeded placeholder. Files stays
-    # as a demo window until it too is a real client.
-    # ⚠ PROPORTIONAL TO THE REAL SURFACE, not to the old 1280x720 assumption. The literal
-    # (240,180,520x360) was ~19%/25% in and ~41%x50% of a 1280x720 desktop; on the 800x600 the
-    # compositor actually gets, the same fractions keep it on-screen and roughly where it looked
-    # right. A hardcoded 520-wide window on an 800-wide surface is not wrong so much as unbalanced,
-    # and the next surface size would break it again.
-    comp_create_window(comp, ae_geom_w * 3 / 16, ae_geom_h / 4,
-    ae_geom_w * 13 / 32, ae_geom_h / 2, "Files");
+    # ⛔⛔ THE "Files" DEMO WINDOW IS GONE (2026-08-09, operator call). It was a compositor-SEEDED
+    # placeholder from before there were real clients — an empty rect with chrome and no process behind it
+    # — and every real client now arrives over setu. Keeping it past that point was not neutral:
+    #   · It had **no client fd**, so it silently swallowed every key focused onto it. That produced the
+    #     "puka didn't register key commands" report, cost a burn to diagnose, and then needed a latched
+    #     `a key reached NO client` line to explain — an instrument that only existed to describe a window
+    #     that should not have been there.
+    #   · It sat at index 0 in the TAB cycle, so ONE tab from the last-presented client wrapped onto it.
+    #     Both the previous cards had to carry a "keep TABbing" warning for that.
+    #   · It made every window count off by one, so `desktop up — windows: 1` before any client connected
+    #     read as "something is up" when nothing was.
+    # ⇒ The desktop now starts EMPTY and every window on screen belongs to a real process.
     desktop_add_tray_item(desk, 1, "network", "Network");
     # Host a foreign-ABI app as a kavach-sandboxed guest (mehman "swallow" seam),
     # run it, and present its captured stdout as the window's content (M2 handoff).
@@ -525,6 +527,10 @@ fn main(): i64 {
     var chan_served[32];   # 1 once that client's surface has been committed
     var chan_st[32];       # per-client handshake scratch (see setu_srv_handshake_step)
     var chan_fail[32];     # consecutive handshake failures per client
+    # ⭐ THE APPLICATION NAME, captured where it is already known. The compositor spawns these clients by
+    # path, so it knows what each channel will carry before the client says a word — no protocol change and
+    # no guessing. 4 slots x 8 bytes = 32, same sizing rule as the arrays above.
+    var chan_name[32];     # window title for the client on this channel
     var chan_n = 0;
     #ifdef CYRIUS_TARGET_AGNOS
     var envbuf = alloc(64);
@@ -546,8 +552,9 @@ fn main(): i64 {
                 store8(envbuf + w, 48 + (afd % 10)); w = w + 1;
                 store8(envbuf + w, 0); w = w + 1;
                 var pk = 0 - 1;
-                if (ci == 0) { pk = sys_spawn_path_env("/bin/puka", 9, envbuf, w); }
-                if (ci == 1) { pk = sys_spawn_path_env("/bin/crab", 9, envbuf, w); }
+                var cname = "setu-surface";
+                if (ci == 0) { pk = sys_spawn_path_env("/bin/puka", 9, envbuf, w); cname = "puka"; }
+                if (ci == 1) { pk = sys_spawn_path_env("/bin/crab", 9, envbuf, w); cname = "crab"; }
                 if (pk < 0) { println("aethersafha: spawn_path_env FAILED"); }
                 else {
                     store64(&chan_fd + chan_n * 8, mine);
@@ -557,6 +564,7 @@ fn main(): i64 {
                     while (zi < 8) { store64(stbuf + zi * 8, 0); zi = zi + 1; }
                     store64(&chan_st + chan_n * 8, stbuf);
                     store64(&chan_fail + chan_n * 8, 0);
+                    store64(&chan_name + chan_n * 8, cname);
                     chan_n = chan_n + 1;
                     println("aethersafha: client spawned on a placed channel");
                     println_int(afd);
@@ -814,7 +822,7 @@ fn main(): i64 {
                     # compositor frames, and the ring drops the OLDEST — so sipping loses the handshake's
                     # phase permanently. That is exactly why puka never got a client fd on iron and every
                     # key it should have received died at forward_key's `cfd == 0`.
-                    var psid = setu_srv_handshake_drain(load64(&chan_st + pi * 8), load64(&chan_fd + pi * 8), comp, pcx, pcy);
+                    var psid = setu_srv_handshake_drain(load64(&chan_st + pi * 8), load64(&chan_fd + pi * 8), comp, pcx, pcy, load64(&chan_name + pi * 8));
                     if (psid > 0) {
                         store64(&chan_served + pi * 8, 1);
                         println("aethersafha: setu client presented surface");
