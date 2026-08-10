@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — pointer-chain audit: the defects a burn would have found
+## [0.12.8] - 2026-08-09 — the pointer chain audited; an empty desktop; windows that say what they are
 
 An adversarial read-only audit of the whole `AE-7` chain across agnos/bhumi/aethersafha produced 27
 findings; 12 survived independent refutation. The burn was held for these.
@@ -57,8 +57,6 @@ over a titlebar is forwarded with a NEGATIVE surface-relative y · no shipped cl
 so each forward spends a `#97` ring slot for no visible effect · a refused cursor frame is still recorded as
 DRAWN, so the missing pixels are never re-damaged · `bhumi/programs/backend-demo.cyr` hands a 32-byte buffer
 where 256 are needed · `bhumi/tests/bhumi.tcyr` smashes its own frame with `var prec[2]` for a 16-byte record.
-
-## [Unreleased]
 
 ### Changed — the desktop starts EMPTY, and windows carry the application's name
 

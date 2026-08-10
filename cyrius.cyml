@@ -3,7 +3,7 @@ name = "aethersafha"
 # ⚠ INTERPOLATED, NOT DUPLICATED. This was a hardcoded literal and drifted from `VERSION` at every cut —
 # the same shape as agnoshi printing "1.8.6" from a hardcoded string while its VERSION said 1.8.8, which
 # cost a false staleness finding on 2026-08-07. puka already uses this form; one source of truth.
-version = "0.12.7"
+version = "0.12.8"
 description = "aethersafha — AI-augmented AGNOS compositor (Cyrius port, from 27207 lines of Rust)"
 license = "GPL-3.0-only"
 language = "cyrius"
