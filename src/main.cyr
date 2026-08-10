@@ -994,6 +994,22 @@ fn main(): i64 {
         if (setu_sfd >= 0) { sys_close(setu_sfd); }
         #endif
 
+        # ⛔⛔ AND RELEASE THE CLIENTS, WHICH ON agnos NOTHING DID. The listener close above is the
+        # WHOLE of this exit path's release and it is `#ifndef CYRIUS_TARGET_AGNOS` — so on agnos, the
+        # one target that reaches here by being quit and relaunched by hand, the compositor exited
+        # holding nothing and freeing nothing, and left every client it spawned ALIVE. Nothing reaps
+        # them: `--clients` returns its verdict, Esc ends the frame loop, this function returns, the
+        # process dies, and puka + puka's agnsh + crab keep running with their `#97` ends, their `#86`
+        # slots and their process-table rows held for the rest of the boot.
+        # ⛔ THE CEILING IS 16 (`agnos/kernel/core/proc.cyr:275`) and the refusal is silent on both
+        # sides of the syscall — so the symptom is not an error, it is a desktop that starts, draws
+        # its chrome and hosts nothing. That is the shape reported from iron on 2026-08-09.
+        # ⚠ The comment on the line above says the lesson "predates the transport and outlives it".
+        # It did outlive it, and the fix was applied only to the arm that no longer matters.
+        var ae_told = comp_close_all_clients(comp);
+        println("aethersafha: at exit — clients told to close:");
+        println_int(ae_told);
+
         # ⭐ SAY WHAT THE RUN ACTUALLY ACHIEVED. "frame loop ok" is true of a desktop that hosted two
         # apps and of one that hosted none, which is why the burn above could not be read: both
         # clients printed "launched" and then nothing ever said whether either arrived. Reporting the

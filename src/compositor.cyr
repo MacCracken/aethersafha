@@ -248,6 +248,46 @@ fn comp_retire_add(x, y, w, h): i64 {
 
 # comp_close_window(c, id): remove the window from the registry + active
 # workspace. -> 0 ok / -1 absent
+# comp_close_all_clients(c) -> the number of clients told to close.
+#
+# ⛔⛔ THE COMPOSITOR HAD NO SESSION TEARDOWN ON agnos AT ALL, and that is a resource leak with a hard
+# ceiling behind it. `main.cyr`'s only exit-path release is `sys_close(setu_sfd)` wrapped in
+# `#ifndef CYRIUS_TARGET_AGNOS` — so on the ONE target that has no listener, nothing was released.
+# Everything the compositor itself holds is reclaimed when its process dies; everything its SPAWNED
+# CHILDREN hold is not, because they do not die. A `--clients` probe run or an Esc quit therefore left
+# puka, puka's own agnsh and crab **alive forever**, each holding a `#97` channel end, an `#86`
+# GPU-visible shm slot and a row in a process table that has exactly **16** of them
+# (`agnos/kernel/core/proc.cyr:275`). Relaunching the desktop a few times marches that count to the cap,
+# after which `proc_alloc_slot` refuses every spawn and the desktop comes up hosting NOTHING.
+#
+# ⭐ THE RELEASE MECHANISM ALREADY EXISTS AND IS PROVEN — this is the same `SETU_CLOSE` (kind 7) that
+# `comp_close_window` sends for F4, which burned PASS on iron 2026-08-08. As that function's own note
+# says: the CLIENT'S EXIT is what releases the endpoint and the slot, so the send is not a courtesy,
+# it is the mechanism. Session teardown is the identical operation with a wider scope.
+#
+# ⚠ It does NOT unlink or retire anything. A closing compositor is about to stop drawing forever, so
+# the retired-rect bookkeeping `comp_close_window` needs for a REPAINT has no consumer here — and
+# walking the vector while removing from it is how that path would go wrong.
+# ⚠ `win_cfd == 0` is a compositor-seeded window with no client. Nothing to notify, and not an error.
+fn comp_close_all_clients(c): i64 {
+    var v = load64(c + C_WINDOWS);
+    var n = vec_len(v);
+    var i = 0;
+    var told = 0;
+    while (i < n) {
+        var win = vec_get(v, i);
+        if (win != 0) {
+            var cfd = win_cfd(win);
+            if (cfd != 0) {
+                setu_send(cfd, setu_close(win_id(win)));
+                told = told + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return told;
+}
+
 fn comp_close_window(c, id): i64 {
     var idx = comp_find_by_id(c, id);
     if (idx < 0) { return 0 - 1; }

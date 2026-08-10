@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed — the compositor never released its clients on agnos, and four relaunches killed the desktop
+
+⛔⛔ There was **no session teardown on agnos at all**. This file's exit path releases exactly one thing —
+`sys_close(setu_sfd)` — and it sits inside `#ifndef CYRIUS_TARGET_AGNOS`, so on the ONE target that has no
+listener, and the only one a person quits and relaunches by hand, nothing was released. Everything the
+compositor itself holds is reclaimed when its process dies; everything its **spawned children** hold is
+not, because they do not die. A `--clients` probe or an Esc quit therefore left puka, puka's own agnsh and
+crab alive forever, each holding a `#97` channel end, an `#86` shm slot and a row in a process table with
+exactly **16** of them (`agnos/kernel/core/proc.cyr:275`).
+
+⭐ **The serial names the asymmetry in one grep:** every F4 produced
+`puka/crab: compositor closed the window -- exiting`; every `frame loop ok` produced **none**. F4 reaps a
+client, Esc reaps nothing — three rows leaked per relaunch, four cycles to the cap, after which
+`proc_alloc_slot` refuses every spawn and the desktop comes up hosting nothing.
+
+⚠ **This is what the 2026-08-09 iron burn hit** (*"just FB lines"*), and the comment above the listener
+close had already written the lesson down — *"predates the transport and outlives it"*. It did outlive it;
+the fix had been applied only to the arm that stopped mattering.
+
+⇒ `comp_close_all_clients()` in `compositor.cyr`, called at exit. The same `SETU_CLOSE` (kind 7) that
+`comp_close_window` sends for F4 and that burned PASS on iron 2026-08-08 — as that function's own note
+says, the client's exit is what releases the endpoint and the slot, so the send is not a courtesy, it is
+the mechanism. crab and puka both already honour it. ⚠ It deliberately does **not** retire rects or unlink:
+a closing compositor never repaints, and walking the vector while removing from it is how that would break.
+
+⭐ **Before/after with one variable**, `AE_CLIENTS_MODE=relaunch` in agnos's clients harness: the sequence
+broke at **relaunch #4** before, and ran **8/8 clean** after, with the exit teardown firing 10 times and
+reaping both clients every time. 23/23 suites.
+
 ## [0.12.9] - 2026-08-09 — the Known-open list, cleared
 
 ### Changed — `[deps.bhumi]` 1.1.4 → **1.1.5**
