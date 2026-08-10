@@ -4,7 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — the Known-open list, cleared
+## [0.12.9] - 2026-08-09 — the Known-open list, cleared
+
+### Changed — `[deps.bhumi]` 1.1.4 → **1.1.5**
+
+Picks up bhumi's two function-local `var X[N]` byte-sizing fixes. ⚠ Neither touches the consumable lib —
+they are a program and a test — so this is not a functional change for the compositor; it is the declared
+graph tracking the released dep. The vendored `lib/bhumi.cyr` re-materialised to `Version: 1.1.5` and
+`cyrius.lock`'s content hash moved with it.
 
 Every item the 0.12.8 audit left open is fixed. All were found by reading, none by a burn.
 

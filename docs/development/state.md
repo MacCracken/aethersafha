@@ -9,13 +9,13 @@
 
 | Field | Value | Source |
 |---|---|---|
-| Version | **0.12.8** | [`VERSION`](../../VERSION) |
+| Version | **0.12.9** | [`VERSION`](../../VERSION) |
 | Cyrius pin | **6.5.13** | `cyrius.cyml [package].cyrius` |
 | Modules / tests | 26 `src/*.cyr` · **23 `.tcyr` suites** | `ls` |
-| `--agnos` build | **GREEN** — staged `/bin/aethersafha` 13,564,024 B, static ELF64 | `agnos/build/rootfs/bin/` |
-| Backend | **bhumi** 1.1.4 (scanout + input + pointer). GPU via the agnos ring-3 band `#82`-`#94` — **not** mabda; there is no `[deps.mabda]` | `cyrius.cyml` |
+| `--agnos` build | **GREEN** — staged `/bin/aethersafha` 13,567,968 B, static ELF64 | `agnos/build/rootfs/bin/` |
+| Backend | **bhumi** 1.1.5 (scanout + input + pointer). GPU via the agnos ring-3 band `#82`-`#94` — **not** mabda; there is no `[deps.mabda]` | `cyrius.cyml` |
 
-**Deps** (all declare a tag **and** a `path` override): bhumi 1.1.4 · rupa 0.1.2 · agnostik 1.3.4 ·
+**Deps** (all declare a tag **and** a `path` override): bhumi 1.1.5 · rupa 0.1.2 · agnostik 1.3.4 ·
 agnodrm 1.5.0 · kashi 1.0.4 · mehman 1.0.1 · kavach 3.11.7 · setu 0.8.4.
 ⛔ **The path WINS over the tag.** The vendored copy tracks the local checkout whatever the tag says — that
 is why this repo's `--agnos` build broke for a week with no change to this repo (kavach 3.9.1's Linux-only
