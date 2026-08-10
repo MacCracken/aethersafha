@@ -93,7 +93,17 @@ fn ae_gpu_probe(): i64 {
     ae_gpu_mode = 0;
     #ifdef CYRIUS_TARGET_AGNOS
     var caps[32];                       # function-local => 32 BYTES, the #89 record size
-    if (sys_gpu_caps(&caps, 32) != 0) { return 0; }
+    # ⛔⛔ EVERY REFUSAL BELOW USED TO RETURN IN SILENCE, and that cost a diagnosis. On a SECOND launch in
+    # one boot (close the clients, Esc out, run it again) the probe fails and the compositor falls to the
+    # CPU for every frame — and because `AE-9` deleted the `#39` blit, a CPU frame draws into a buffer
+    # nothing copies to screen. The operator sees the console text and no desktop, and the log contains
+    # NOTHING about why: the four returns here print not one word between them, so the failure presents as
+    # an ABSENCE of the GPU lines rather than a reason. [[feedback_instrument_discipline]] rule 9 — a
+    # readout that suppresses a value makes ABSENT and THAT VALUE indistinguishable.
+    if (sys_gpu_caps(&caps, 32) != 0) {
+        println("aethersafha: #89 gpu_caps REFUSED -- no hardware compositing this run");
+        return 0;
+    }
     var flags = load32(&caps + 0) & 0xFFFFFFFF;
     ae_gpu_bb_pitch     = load32(&caps + 4) & 0xFFFFFFFF;
     ae_gpu_bb_w         = load32(&caps + 8) & 0xFFFFFFFF;
@@ -102,9 +112,23 @@ fn ae_gpu_probe(): i64 {
     ae_gpu_shm_free     = load32(&caps + 20) & 0xFFFFFFFF;
     ae_gpu_shm_slot_max = load32(&caps + 24) & 0xFFFFFFFF;
     if ((flags & AE_GPU_CAP_BATCHED) != 0) { ae_gpu_batched = 1; }
-    if ((flags & AE_GPU_CAP_PRESENT) == 0)  { return 0; }
-    if ((flags & AE_GPU_CAP_ARMED) == 0)    { return 0; }
-    if ((flags & AE_GPU_CAP_CARVEOUT) == 0) { return 0; }
+    # ⚠ NAME THE MISSING BIT, and print the whole flags word — which bit is absent is the difference
+    # between "this box has no GPU" and "the previous compositor left the band disarmed".
+    if ((flags & AE_GPU_CAP_PRESENT) == 0) {
+        println("aethersafha: gpu caps lack PRESENT -- no hardware compositing this run, flags:");
+        println_int(flags);
+        return 0;
+    }
+    if ((flags & AE_GPU_CAP_ARMED) == 0) {
+        println("aethersafha: gpu caps lack ARMED -- the band is not armed for this process, flags:");
+        println_int(flags);
+        return 0;
+    }
+    if ((flags & AE_GPU_CAP_CARVEOUT) == 0) {
+        println("aethersafha: gpu caps lack CARVEOUT -- no back buffer to composite into, flags:");
+        println_int(flags);
+        return 0;
+    }
     ae_gpu_mode = 1;
     # bit3 is a SEPARATE capability from bit0-2: a GPU can serve opaque #87 blits while the shader
     # compositing envelope is unproven. Opaque windows still go hardware; only the premultiplied ones
@@ -806,6 +830,13 @@ fn ae_gpu_present_frame(comp, fb): i64 {
     while (i < n) {
         var win = vec_get(v, i);
         var bid = win_bufid(win);
+        # ⛔⛔ A MINIMIZED WINDOW IS NOT COMPOSITED EITHER, AND MISSING THIS SHIPPED TO IRON. A window is
+        # drawn in TWO places — `render_window` paints the chrome on the CPU, and this loop blits the
+        # CLIENT SURFACE on the GPU. The minimize fix skipped only the first, so F6 removed the titlebar
+        # and left the client's pixels on screen: operator, 2026-08-09, *"minimize fails - only appears to
+        # lose the topbar"*. ⇒ Skipping a window means skipping EVERY path that draws it; one guard per
+        # drawing site, and there are two.
+        if (win_state(win) == WinState.WS_MINIMIZED) { bid = 0; }
         if (bid != 0) {
             # ⚠ NO BOUNDS RE-CHECK HERE. ae_gpu_window_admissible already cleared every window in
             # this frame, and render_window skipped its CPU composite on the strength of that. A
