@@ -188,7 +188,6 @@ fn input_ptr_set(x, y): i64 { ae_ptr_x = x; ae_ptr_y = y; return 0; }
 fn input_ptr_x(): i64 { return ae_ptr_x; }
 fn input_ptr_y(): i64 { return ae_ptr_y; }
 
-# input_btn_edge(prev, cur, mask): 1 = pressed this event, -1 = released, 0 = unchanged.
 # ⚠ Edges, not levels, are what a click IS — and deriving them here rather than in the frame loop is
 # what lets a test assert the press/release pair without a compositor.
 # ⭐⭐ THE BUTTON STATE MACHINE — press and release are NOT symmetric, and treating them as one edge on
@@ -227,13 +226,12 @@ fn input_btn_transitions(believed_down, cur, seen, mask): i64 {
 fn input_btn_pressed(t): i64 { return t & 1; }
 fn input_btn_released(t): i64 { if ((t & 2) != 0) { return 1; } return 0; }
 
-fn input_btn_edge(prev, cur, mask): i64 {
-    var was = prev & mask;
-    var now = cur & mask;
-    if (was == 0) { if (now != 0) { return 1; } }
-    if (was != 0) { if (now == 0) { return 0 - 1; } }
-    return 0;
-}
+# ⛔ `input_btn_edge` WAS DELETED (2026-08-09). It computed ONE edge from a single level, which is the
+# wrong shape for this kernel: `hid_mouse_take` re-seeds `buttons_seen` to the held LEVEL, so a caller had
+# to hand it `cur | seen` to catch a folded click — and that made the RELEASE unreachable, which is the
+# burn blocker `input_btn_transitions` exists for. It survived only because its own unit test fed it an
+# argument pair the real caller could not produce. Two edge APIs where one is subtly wrong is an invitation
+# to reach for the wrong one; there is now exactly one. [[feedback_compiled_is_not_reachable]]
 
 # input_apply(comp, action, bound_w, bound_h): apply a window-management action to the compositor.
 # Focus-next cycles the z-order; the rest act on the focused window. Returns 1 when a move actually
@@ -266,6 +264,12 @@ fn input_apply(comp, action, bound_w, bound_h): i64 {
         return 0;
     }
     if (action == InputAction.IA_MINIMIZE_FOCUSED) {
+        # ⛔ RETIRE THE RECT, exactly as `comp_close_window` does. A minimized window stops being drawn,
+        # and every damage producer walks the LIVE window list — so the region it vacated is in neither
+        # `cur` nor `prev` and nothing ever repaints it. That is the same defect the F4 close had: the
+        # window would simply stay on screen as a ghost. `#84` FLIPS, so the rect needs two frames of
+        # coverage, which is what putting it in `cur` buys.
+        comp_retire_add(win_x(win), win_y(win), win_w(win), win_total_h(win));
         win_set_state(win, WinState.WS_MINIMIZED);
         return 0;
     }

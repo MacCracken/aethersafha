@@ -128,7 +128,16 @@ fn render_desktop(d, fb): i64 {
         var focused = 0;
         if (i == comp_focused(comp)) { focused = 1; }
         var win = vec_get(v, i);
-        render_window(fb, win, focused);
+        # ⛔⛔ A MINIMIZED WINDOW IS NOT DRAWN — and until now it was. `comp_window_at` has always skipped
+        # minimized windows for hit-testing, but nothing here skipped them for RENDERING, so pressing F6
+        # left the window fully on screen (chrome, buttons, live client surface) while every click passed
+        # straight THROUGH it into whatever was behind. A window you can see and cannot click is worse
+        # than either state on its own: the desktop looks broken and the cause is invisible.
+        # ⇒ Render and hit-test now agree. `win_stamp_prev` still runs below, so the damage model keeps
+        # tracking it and the frame it vanishes on repaints the rect it vacated.
+        if (win_state(win) != WinState.WS_MINIMIZED) {
+            render_window(fb, win, focused);
+        }
         # ⛔ STAMP THE PREV RECT LAST, after the window is drawn. Stamping at the top of the frame
         # would destroy the "was" before damage is computed from it, and every move would leave
         # its vacated region uncleared.

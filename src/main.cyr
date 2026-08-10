@@ -202,6 +202,8 @@ fn ae_centre_pointer(): i64 {
 # they were waiting for a pointer. The setu protocol likewise already carries `SETU_INPUT_PTR_MOVE`
 # (kind 9) and `SETU_INPUT_PTR_BTN` (kind 10). Nothing here is a new mechanism.
 var ae_ptr_btn = 0;        # last button bitmap, for edge detection
+var ae_ptr_fwd_x = 0 - 1;  # last surface-relative position forwarded (dedupe; -1 = none yet)
+var ae_ptr_fwd_y = 0 - 1;
 var ae_ptr_drag = 0;       # 1 = dragging a window by its titlebar
 # ⛔⛔ THE WINDOW **ID**, NEVER A RAW Window POINTER. A drag outlives the thing it drags: F4, a
 # close-button click, or the client simply exiting all run `comp_close_window`, which unlinks the Window
@@ -223,7 +225,29 @@ fn ae_ptr_forward(comp, kind_is_btn, btn, pressed): i64 {
     if (cfd == 0) { return 0; }                 # a compositor-seeded window has no client
     var rx = input_ptr_x() - win_x(win);
     var ry = input_ptr_y() - win_body_y(win);   # relative to the CONTENT rect, not the chrome
-    if (kind_is_btn == 0) { setu_send(cfd, setu_input_ptr_move(win_id(win), rx, ry)); }
+    # ⛔⛔ CHROME IS NOT THE CLIENT'S SURFACE. `comp_window_at` hit-tests from `win_y` so the TITLEBAR is
+    # inside the window (it has to be — that is what makes a drag possible), but coordinates handed to a
+    # client are CONTENT-relative. A pointer anywhere on the titlebar therefore produced `ry` in [-30, -1]
+    # and sent it down the wire: a client indexing a row array by `ry / row_h` reads BEFORE its buffer.
+    # setu carries these as full i64 so nothing corrupts them — the number arrives intact and wrong.
+    # ⇒ A position outside the content rect is not this client's event. Drop it: chrome interaction is the
+    # compositor's (drag, close), and forwarding it as well was double-handling the same press.
+    if (ry < 0) { return 0; }
+    if (rx < 0) { return 0; }
+    if (rx >= win_w(win)) { return 0; }
+    if (ry >= win_h(win)) { return 0; }
+    # ⚠ MOTION IS DEDUPED. Every frame the pointer is over a client cost a `#97` ring slot even when the
+    # surface-relative position had not changed, and that ring drops the OLDEST record when it fills — so a
+    # stationary pointer could push a client's real events out. No shipped client decodes PTR_MOVE yet, so
+    # this is pure cost today; a proper per-surface opt-in flag is the real fix and needs a protocol bit.
+    if (kind_is_btn == 0) {
+        if (rx == ae_ptr_fwd_x) {
+            if (ry == ae_ptr_fwd_y) { return 0; }
+        }
+        ae_ptr_fwd_x = rx;
+        ae_ptr_fwd_y = ry;
+        setu_send(cfd, setu_input_ptr_move(win_id(win), rx, ry));
+    }
     if (kind_is_btn == 1) { setu_send(cfd, setu_input_ptr_btn(win_id(win), btn, pressed)); }
     return 1;
 }
@@ -297,6 +321,14 @@ fn ae_pointer_event(comp, ev, frame): i64 {
                     comp_close_window(comp, win_id(win));
                     closed = 1;
                 }
+                # ⭐ THE MAXIMIZE AND MINIMIZE BUTTONS DO SOMETHING NOW. `deco_hit` has returned nine
+                # regions since it was written and this handler consumed exactly two of them, so both
+                # buttons were PAINTED on every titlebar in their own theme colours — they looked live and
+                # were inert. Worse than absent: a control that ignores you reads as a broken desktop.
+                # ⚠ The actions already existed (F5/F6 drive them); this is wiring, not new behaviour, and
+                # it routes through `input_apply` so click and key take the identical path.
+                if (hit == Deco.DECO_MAX) { input_apply(comp, InputAction.IA_MAXIMIZE_FOCUSED, ae_geom_w, ae_geom_h - TITLEBAR_H); closed = 1; }
+                if (hit == Deco.DECO_MIN) { input_apply(comp, InputAction.IA_MINIMIZE_FOCUSED, ae_geom_w, ae_geom_h - TITLEBAR_H); closed = 1; }
                 if (hit == Deco.DECO_TITLEBAR) {
                     ae_ptr_drag = 1;
                     ae_ptr_drag_id = win_id(win);
@@ -537,12 +569,12 @@ fn main(): i64 {
     var ci = 0;
     while (ci < 2) {
         var mint = alloc(32);
-        if (sys_chan_mint(mint) != 0) { println("aethersafha: chan_mint FAILED — this client cannot be hosted"); ci = ci + 1; }
+        if (sys_chan_mint(mint) != 0) { println("aethersafha: chan_mint FAILED — this client cannot be hosted"); ae_spawn_failed = 1; ci = ci + 1; }
         else {
             var mine = load64(mint + 8);                  # the compositor keeps the PEER end
             var give = load64(mint);                      # the child is endowed this one
             var afd = sys_chan_endow(give);
-            if (afd < 3) { println("aethersafha: chan_endow FAILED — spawning without a channel would be pointless"); }
+            if (afd < 3) { println("aethersafha: chan_endow FAILED — spawning without a channel would be pointless"); ae_spawn_failed = 1; }
             else {
                 # "AGNOS_CHAN=<fd>\0" — the announcement. Wayland's WAYLAND_SOCKET shape.
                 var w = 0;
@@ -555,7 +587,7 @@ fn main(): i64 {
                 var cname = "setu-surface";
                 if (ci == 0) { pk = sys_spawn_path_env("/bin/puka", 9, envbuf, w); cname = "puka"; }
                 if (ci == 1) { pk = sys_spawn_path_env("/bin/crab", 9, envbuf, w); cname = "crab"; }
-                if (pk < 0) { println("aethersafha: spawn_path_env FAILED"); }
+                if (pk < 0) { println("aethersafha: spawn_path_env FAILED"); ae_spawn_failed = 1; }
                 else {
                     store64(&chan_fd + chan_n * 8, mine);
                     store64(&chan_served + chan_n * 8, 0);
@@ -575,18 +607,11 @@ fn main(): i64 {
     }
     if (chan_n == 0) { println("aethersafha: NO client could be given a channel this run"); }
     #endif
-    #ifdef CYRIUS_TARGET_AGNOS
-    if (0 == 1) {
-        var pk1 = sys_spawn_path("/bin/puka", 9);         # (retired TCP launch — unreachable)
-        var pk2 = sys_spawn_path("/bin/crab", 9);
-        if (pk1 >= 0) { println("aethersafha: launched setu client #1"); }
-        if (pk2 >= 0) { println("aethersafha: launched setu client #2 (crab)"); }
-        # Same reasoning as the listener above: only the success path printed, so a client that
-        # never left the ground was indistinguishable from one that was merely slow to connect.
-        if (pk1 < 0) { println("aethersafha: could not start the first app"); ae_spawn_failed = 1; }
-        if (pk2 < 0) { println("aethersafha: could not start the file manager"); ae_spawn_failed = 1; }
-    }
-    #endif
+    # ⛔ THE RETIRED TCP LAUNCH BLOCK IS DELETED (was `#ifdef CYRIUS_TARGET_AGNOS` + `if (0 == 1)`).
+    # It was unreachable by construction AND it held the only two writers of `ae_spawn_failed`, so the
+    # verdict ladder's exit 91 ("a client could not be spawned") could never fire while the LIVE spawn path
+    # a few lines above set nothing. Keeping dead code that owns a live flag's only assignments is how a
+    # verdict silently stops meaning anything. The live path now sets the flag; this block is gone.
 
     # Frame loop: poll bhumi input, dispatch, render, composite setu clients,
     # scan out. Bounded so the host build terminates; on agnos this becomes
@@ -993,7 +1018,16 @@ fn main(): i64 {
             println("aethersafha: probe ran for milliseconds, and ignored this many quit keys:");
             println_int(ae_now_ms() - ae_probe_t0);
             println_int(ae_quit_ignored);
+            # ⛔⛔ 92 IS A LINUX-ONLY VERDICT AND IT WAS FIRING ON EVERY agnos RUN. `setu_sfd` is assigned
+            # in exactly one place, inside `#ifndef CYRIUS_TARGET_AGNOS`, so on agnos it keeps its -1
+            # initialiser for the whole run — and this test then returned 92 ("the display socket never
+            # opened") no matter what happened. The entire 95/94/93/91 ladder was DEAD on the only target
+            # the probe is used on, and every iron run that read this exit code was told the wrong thing.
+            # ⇒ On agnos there IS no listener by design (the channel band replaced it), so a missing socket
+            # is not a failure and must not be tested. [[feedback_compiled_is_not_reachable]]
+            #ifndef CYRIUS_TARGET_AGNOS
             if (setu_sfd < 0) { return 92; }
+            #endif
             if (ae_spawn_failed == 1) { return 91; }
             if (accepted >= 2) { return 95; }
             if (accepted == 1) { return 94; }

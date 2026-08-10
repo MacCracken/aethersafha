@@ -318,7 +318,12 @@ fn ae_gpu_frame_plan(comp, fb): i64 {
     var n = vec_len(v);
     var i = 0;
     while (i < n) {
-        if (ae_gpu_window_admissible(vec_get(v, i), fw, fh) == 0) { return 0; }
+        # ⚠ A MINIMIZED WINDOW IS NOT COMPOSITED, so its geometry must not veto the frame. Judging one
+        # would let an off-screen or oversized minimized window take the WHOLE desktop off the GPU for a
+        # surface that is never drawn.
+        if (win_state(vec_get(v, i)) != WinState.WS_MINIMIZED) {
+            if (ae_gpu_window_admissible(vec_get(v, i), fw, fh) == 0) { return 0; }
+        }
         i = i + 1;
     }
     ae_gpu_frame_ok = 1;
@@ -625,6 +630,7 @@ fn ae_gpu_emit_cursor(): i64 {
     # itself now; only a slot that genuinely cannot be had is a retirement.
     if (ae_gpu_glyph_ensure_slot() == 0) {
         ae_cursor_gpu_disable();
+        rend_cursor_unmark();
         println("aethersafha: no graphics-visible slot for the cursor mask -- the pointer moves to the CPU");
         return 0;
     }
@@ -641,6 +647,7 @@ fn ae_gpu_emit_cursor(): i64 {
     # [[feedback_audit_re_derive_dont_validate_comments]]
     if (cursor_max_bytes() > ae_text_bytes(AE_TEXT_CHARS)) {
         ae_cursor_gpu_disable();
+        rend_cursor_unmark();
         println("aethersafha: the cursor mask does not fit the glyph staging slot -- pointer moves to the CPU");
         return 0;
     }
@@ -672,6 +679,7 @@ fn ae_gpu_emit_cursor(): i64 {
         # be absent every frame with nothing in the log to say why. Same disease as the refused op below.
         if (wrc != 0) {
             ae_cursor_gpu_disable();
+            rend_cursor_unmark();
             println("aethersafha: could not stage the cursor mask into its slot -- the pointer moves to the CPU");
             return emitted;
         }
@@ -686,6 +694,12 @@ fn ae_gpu_emit_cursor(): i64 {
                 # after it — the queue re-fills and the op refuses again. Retiring sends the next frame to
                 # `render_cursor_cpu`, which draws per-pixel and cannot be refused.
                 ae_cursor_gpu_disable();
+                # ⛔ AND UN-MARK THE POSITION. `render_cursor` already called `rend_cursor_mark_drawn` for
+                # this frame, but the cursor was NOT drawn — the op refused. With the position recorded as
+                # drawn, `rend_cursor_damage` sees no movement next frame and damages nothing, so a
+                # STATIONARY pointer stays invisible until the user happens to move it. Clearing the mark
+                # makes the next frame treat it as moved and repaint it.
+                rend_cursor_unmark();
                 println("aethersafha: #92 op 0x03 refused a cursor mask -- the pointer returns to the CPU");
                 return emitted;
             }

@@ -214,13 +214,18 @@ fn main() {
     assert_eq(input_ptr_y(), 1424, "...and a 16 px tall one at 1424 (1424 + 16 = 1440)");
 
     test_group("input — button edges are what a click IS");
-    assert_eq(input_btn_edge(0, 1, 1), 1, "0 -> 1 is a PRESS");
-    assert_eq(input_btn_edge(1, 0, 1), 0 - 1, "1 -> 0 is a RELEASE");
-    assert_eq(input_btn_edge(1, 1, 1), 0, "held is not an edge");
-    assert_eq(input_btn_edge(0, 0, 1), 0, "idle is not an edge");
-    # The right button must not register as the left one.
-    assert_eq(input_btn_edge(0, 2, 1), 0, "a RIGHT press is not a left-button edge");
-    assert_eq(input_btn_edge(0, 2, 2), 1, "...but it is a right-button edge");
+    # ⛔ `input_btn_edge`'s tests are gone with the function. They asserted `input_btn_edge(1, 0, 1) == -1`
+    # — a RELEASE — using an argument pair the only production caller could NOT produce, because the
+    # kernel re-seeds `buttons_seen` to the held level. A green unit test on unreachable inputs is what let
+    # the burn blocker ship. `input_btn_transitions` is tested against the sequences hardware really emits.
+    # ⇒ Ported to the surviving API rather than dropped: the MASK coverage below is real and the new
+    # sequence tests do not otherwise exercise a non-left button.
+    assert_eq(input_btn_transitions(0, 0, 0, 1), 0, "idle is neither press nor release");
+    assert_eq(input_btn_pressed(input_btn_transitions(0, 2, 2, 1)), 0, "a RIGHT press is not a left press");
+    assert_eq(input_btn_released(input_btn_transitions(0, 2, 2, 1)), 0, "...and not a left release");
+    assert_eq(input_btn_pressed(input_btn_transitions(0, 2, 2, 2)), 1, "...but it IS a right-button press");
+    # ⚠ And the right button's own release must work for the same reason the left's does.
+    assert_eq(input_btn_released(input_btn_transitions(1, 0, 2, 2)), 1, "a right-button RELEASE fires too");
 
     # =====================================================================
     # AE-7: the button state machine — press and release are NOT one edge

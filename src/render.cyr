@@ -472,6 +472,16 @@ fn rend_cursor_damage(dmg): i64 {
 # caller that damages without drawing leaves the previous position stale, so the cursor re-damages the
 # same rows every frame forever and an idle desktop stops being free. Exposed separately so a test can
 # settle the cursor without a framebuffer or a font.
+# ⛔ THE PAIR'S MISSING HALF. `render_cursor` marks the position drawn BEFORE the emit can refuse, so a
+# refused frame leaves a position recorded as painted that never was. The move-gate in
+# `rend_cursor_damage` then sees no movement and damages nothing — a stationary pointer stays invisible
+# until it happens to move. Clearing the record forces the next frame to treat it as moved.
+fn rend_cursor_unmark(): i64 {
+    ae_cursor_px = 0 - 1;
+    ae_cursor_py = 0 - 1;
+    return 0;
+}
+
 fn rend_cursor_mark_drawn(x, y): i64 {
     ae_cursor_px = x;
     ae_cursor_py = y;

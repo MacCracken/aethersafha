@@ -4,6 +4,82 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased] — the Known-open list, cleared
+
+Every item the 0.12.8 audit left open is fixed. All were found by reading, none by a burn.
+
+### Fixed — `--clients` returned a hardcoded verdict on agnos (the second burn blocker)
+
+⛔⛔ `setu_sfd` is assigned in exactly one place, inside `#ifndef CYRIUS_TARGET_AGNOS`, so on agnos it kept
+its `-1` initialiser for the whole run — and the verdict ladder's first test returned **92 = "the display
+socket never opened"** no matter what happened. The entire 95/94/93/91 ladder was dead on the only target
+that uses the probe, and every iron run that read this exit code was told the wrong thing. On agnos there
+IS no listener by design (the channel band replaced it), so a missing socket is not a failure and is no
+longer tested there.
+⛔ **And exit 91 could never fire either.** The retired `if (0 == 1)` TCP-launch block held the ONLY two
+writers of `ae_spawn_failed`, while the live `sys_spawn_path_env` path set nothing. The live path sets it
+now — mint, endow and spawn failures all — and the dead block is deleted rather than left owning a live
+flag's assignments.
+
+### Fixed — a minimized window was still drawn, and clicks fell through it
+
+⛔ `comp_window_at` has always skipped minimized windows for hit-testing; nothing skipped them for
+RENDERING. F6 left the window fully on screen — chrome, buttons, live client surface — while every click
+passed straight through into whatever was behind. Render and hit-test now agree, minimizing **retires the
+vacated rect** (the same `#84`-flip requirement a close has, or the window stays as a ghost), and the GPU
+frame plan no longer judges the admissibility of a surface it is not compositing.
+
+### Fixed — clients were told the pointer was above their own surface
+
+⛔ `comp_window_at` hit-tests from `win_y` so the titlebar is inside the window (it must be, or a drag is
+impossible), but client coordinates are CONTENT-relative — so any pointer on the titlebar sent
+`ry` in [-30, -1] down the wire, and setu carries full i64 so it arrived intact and wrong. A position
+outside the content rect is now dropped: chrome interaction belongs to the compositor.
+⚠ **Motion is also deduped** — every frame the pointer sat over a client cost a `#97` ring slot even when
+the surface-relative position had not changed, and that ring drops the OLDEST record when it fills, so a
+stationary pointer could push a client's real events out. A per-surface opt-in flag is the proper fix and
+needs a protocol bit.
+
+### Fixed — a refused cursor frame was recorded as DRAWN
+
+⛔ `render_cursor` marks the position drawn BEFORE the emit can refuse, so a refused frame left a position
+recorded as painted that never was — the move-gate then saw no movement and damaged nothing, leaving a
+STATIONARY pointer invisible until the user happened to move it. `rend_cursor_unmark()` is called on every
+refusal path.
+
+### Fixed — the titlebar's maximize and minimize buttons did nothing
+
+⛔ `deco_hit` has returned nine regions since it was written and the handler consumed two. Both buttons
+were painted in their own theme colours on every window — they looked live and were inert, which reads as
+a broken desktop. Wired through `input_apply`, so click and F5/F6 take the identical path.
+
+### Fixed — two byte-sizing traps in bhumi, and an SMP race in the kernel
+
+- `bhumi/programs/backend-demo.cyr` declared `var evs[32]` — **32 BYTES** — and authorised
+  `bhumi_backend_poll` to write 32 events = **256 bytes** into it, over `frame`, `fb`, `be`, `now` and the
+  return address. Invisible on the host (the non-agnos arm returns 0 events); CI cross-compiles it for
+  agnos, where the first poll drains the whole agnsh-prompt backlog.
+- `bhumi/tests/bhumi.tcyr` had `var prec[2]` for a 16-byte record and `var ptev[4]` for a 32-byte event
+  budget, smashing ~40 bytes of its own frame — and the asserts passed anyway, which is the worst version:
+  a green test standing on a corrupted stack.
+- **`hid_mouse_take` now takes `hid_poll_lock`.** Its banner claimed "CALLER MUST HOLD IF=0" was
+  sufficient; `cli` is per-CPU, and the syscall runs wherever agnsh migrated to while the MSI-X lands on
+  another CPU, so a whole report's delta could be lost between the read and the reset. A try-lock, so a
+  busy drain costs nothing — the accumulator persists to the next poll.
+
+### Removed — `input_btn_edge`, the superseded edge API
+
+⛔ It computed one edge from a single level, which is the wrong shape for this kernel, and survived only
+because its unit test fed it an argument pair the real caller could not produce. Two edge APIs where one is
+subtly wrong is an invitation to reach for the wrong one. Its mask coverage was ported to
+`input_btn_transitions` rather than dropped.
+
+### Fixed — the harness's drag gate was flaky
+
+⚠ Two runs of the same binary disagreed: one aimed and dragged, one found no titlebar, because the
+screendump can catch the panel mid-composite. A gate that passes intermittently teaches you to re-run until
+green. The aim now re-measures up to four times, and the gesture retries once if the press missed.
+
 ## [0.12.8] - 2026-08-09 — the pointer chain audited; an empty desktop; windows that say what they are
 
 An adversarial read-only audit of the whole `AE-7` chain across agnos/bhumi/aethersafha produced 27
