@@ -106,14 +106,24 @@ enum AeProbe {
     AE_PROBE_REPORT_MS = 5000;   # progress cadence, so the log shows the run stayed alive
 }
 
-# Monotonic milliseconds, or 0 where there is no such clock (host). ⚠ Returning 0 makes the elapsed
-# test inert off agnos rather than wrong — the host loop is already bounded by setu_cap.
+# Monotonic milliseconds on BOTH targets.
+#
+# ⛔ THE HOST ARM USED TO `return 0`, AND THAT LEFT THE LINUX BUILD WITH NO TIMING AT ALL. The
+# justification on the line ("inert rather than wrong — the host loop is already bounded by
+# setu_cap") was true of the elapsed *budget* and false of everything else that reads this clock:
+# `el = ae_now_ms() - ae_probe_t0` was always `0 - 0`, so the 30 s budget never bound, the 5 s
+# progress line never printed, and the end-of-run "probe ran for milliseconds" readout always
+# printed 0. A host run that was slow, starved or wedged looked byte-identical to a fast one.
+# ⚠ Inert is not free when the thing made inert is the instrument. Measured 2026-08-12: the whole
+# bounded host run is **142 ms**, which is a fact nothing in the build could report at the time.
+# ⇒ `clock_now_ms` (`lib/chrono.cyr:46`, CLOCK_MONOTONIC) has always been available and `chrono`
+# has always been in `[deps].stdlib`. There was never a reason for the host arm to be blind.
 fn ae_now_ms(): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     return sys_uptime_ms();
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    return 0;
+    return clock_now_ms();
     #endif
 }
 
@@ -401,6 +411,24 @@ fn ae_has_flag(flag): i64 {
     return 0;
 }
 
+# The i64 value of `--flag N`, or `dflt` when the flag is absent or is the LAST argument (nothing
+# follows it to read). Scans from 1 for the same reason `ae_has_flag` does: argv(0) is the program.
+# ⚠ `atoi` answers 0 for a non-numeric argument, and 0 is meaningful here (`--frames 0` = run until
+# quit), so a typo'd count reads as "unbounded" rather than as an error. That is the safe direction
+# for a compositor — an operator who mistypes gets a desktop they can quit, not one that vanishes.
+fn ae_flag_int(flag, dflt): i64 {
+    var n = argc();
+    var i = 1;
+    while (i < n) {
+        if (streq(argv(i), flag) == 1) {
+            if ((i + 1) < n) { return atoi(argv(i + 1)); }
+            return dflt;
+        }
+        i = i + 1;
+    }
+    return dflt;
+}
+
 fn main(): i64 {
     alloc_init();
     kashi_font_init();   # populate the VGA 8x16 glyph tables (kashi font-data core)
@@ -529,7 +557,27 @@ fn main(): i64 {
     #endif
     var setu_cap = 3;
     #ifndef CYRIUS_TARGET_AGNOS
-    if (setu_sfd >= 0) { setu_cap = 400; }           # host: spin (render-paced) long enough to catch a client
+    # ⛔ THE COMMENT THAT USED TO SIT HERE — "spin (render-paced) long enough to catch a client" — WAS
+    # FALSE, and nothing in the build could contradict it while `ae_now_ms` answered 0 on this arm.
+    # Measured 2026-08-12 with the clock restored: **400 frames is 142 ms**, which is not long enough
+    # for a spawned client to be loaded, scheduled and connected. Every host run that "caught" a client
+    # did so because the client was already up and racing the listener, not because the cap allowed it.
+    if (setu_sfd >= 0) { setu_cap = 400; }
+    # ⛔ AND THE PROBE MUST NOT BE BOUND BY THE DEV CAP — it has three terminators of its own and the
+    # cap defeats all three. `--clients` documents a **30 s wall-time budget** (`AE_PROBE_MS`) chosen
+    # precisely because "what a spawned client needs to load, start and connect is seconds and
+    # scheduler slices"; `setu_cap` then ended the run at frame 400. Measured 2026-08-12: that is
+    # **130 ms**, so the budget was over-stated by a factor of ~230 and every host `--clients` run
+    # gave a client a ninth of a second to exist. A client that connected did so by already being up.
+    # ⚠ This is the same shape as the deleted `running = 0` above and as 0.12.9's hardcoded 92: a
+    # documented verdict the code structurally cannot produce. Let the probe's own budget govern.
+    if (ae_probe == 1) { setu_cap = 0; }
+    # ⭐ `--frames N` — the host session bound, and **`--frames 0` means run until quit**. Linux has no
+    # quit key yet (bhumi's `_bhumi_kbscan` answers 0 off agnos, so Escape cannot arrive), so an
+    # unbounded run is ended by SIGINT until the Linux input backend lands. The default is unchanged at
+    # 400/3 deliberately: nothing that runs this binary today expects it to block.
+    # ⚠ agnos does not read this. Its loop is `while (running == 1)` and its quit is a real Escape.
+    setu_cap = ae_flag_int("--frames", setu_cap);
     #endif
 
     # First resident: on agnos the compositor LAUNCHES its first setu client — the
@@ -628,7 +676,8 @@ fn main(): i64 {
     while (running == 1) {                            # agnos: the real compositor loop — renders until quit
         #endif
         #ifndef CYRIUS_TARGET_AGNOS
-        while ((running == 1) && (frame < setu_cap)) {    # host: bounded so the dev build terminates
+        # host: bounded so the dev build terminates — unless `--frames 0` asked for a real session.
+        while ((running == 1) && ((setu_cap == 0) || (frame < setu_cap))) {
             #endif
             var n = bhumi_backend_poll(be, &events, AE_MAXEV, now);
             if (n == BHUMI_SEAT_DENIED) {
@@ -935,10 +984,20 @@ fn main(): i64 {
                         println_int(sid);
                         comp_focus(comp, comp_count(comp) - 1);   # focus the just-added client → input routes to it
                         accepted = accepted + 1;
-                        #ifndef CYRIUS_TARGET_AGNOS
-                        running = 0;                   # host: one present proves the wire; exit the bounded loop
-                        #endif
-                        # agnos: keep compositing so the harness screendumps the client windows
+                        # ⛔⛔ REMOVED 2026-08-12: `#ifndef CYRIUS_TARGET_AGNOS { running = 0; }` — "host: one
+                        # present proves the wire; exit the bounded loop". It was wrong in BOTH modes, and the
+                        # second one is the worse:
+                        #   · DESKTOP mode — the Linux session ended on the first frame a client presented. The
+                        #     host build was a wire proof that could never become a desktop, by construction.
+                        #   · `--clients` mode — it fired at `accepted == 1`, so the loop left before the
+                        #     `accepted >= 2` test below could ever see 2. **Exit 95 was structurally
+                        #     unreachable on Linux** and the ladder could only ever answer 94. Same class as
+                        #     the 92-on-every-agnos-run defect 0.12.9 fixed: a verdict the code cannot emit.
+                        # ⚠ Gating it to either value of `ae_probe` preserves one of the two bugs — there is no
+                        # mode in which quitting on the first present is correct. It is deleted, not gated.
+                        # The probe's own three terminators (`accepted >= 2`, the frame backstop and the wall-
+                        # clock budget) end a probe run; `--frames` ends a desktop run until input lands.
+                        # agnos: unchanged — it kept compositing so the harness screendumps the client windows.
                     }
                 }
             }

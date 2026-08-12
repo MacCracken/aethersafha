@@ -4,6 +4,90 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased] — the host arm gets a clock, and stops quitting on the first frame
+
+⭐⭐ **Linux is now a declared display target** (operator, 2026-08-12), superseding bhumi's ADR 0001 and the
+three-substrate matrix in `planning/desktop.md:53-57` that assigned Linux the logic-only role. Backend
+decision: **fbdev first, DRM/KMS later** — bhumi's seam is already fbdev-shaped (`#38 fbinfo` ↔
+`FBIOGET_VSCREENINFO`, `#39 blit` ↔ `mmap` + row copy). Sequencing lives in `roadmap.md` **M6**, a
+milestone two agnos documents had been handing work to **by name** since 1.56.42 while it did not exist here.
+
+### Changed — toolchain pin 6.5.13 → **6.5.20**, and the kavach tag stops lying
+
+⛔ **The manifest declared a dependency graph that nothing here had built since 3.11.7.** `[deps.kavach]`
+said `tag = "3.11.7"` while HEAD vendored **3.11.8** and any local build silently re-materialised **3.11.10**
+from `../kavach` — because these deps declare a `tag` *and* a `path`, and **the path wins**. That is the
+hazard `state.md` has warned about in the abstract since 0.13.0; here it was live, and wrong in *committed*
+state for two cuts. Bumped to **3.11.10** after verifying it is a real tag on a clean kavach tree, so the
+declared graph is now both fetchable and identical to the vendored copy.
+
+⚠ **Everything else was already honest.** All eight deps were checked against their sibling `VERSION` *and*
+against an existing git tag: bhumi 1.1.5 · rupa 0.1.2 · agnostik 1.3.4 · agnodrm 1.5.0 · kashi 1.0.4 ·
+mehman 1.0.1 · setu 0.8.4 all matched. Only kavach drifted.
+
+The toolchain pin was seven patches behind the installed `cycc`, which the build reported on every
+invocation as *"cyrius.cyml pins 6.5.13 but cycc is 6.5.20 — toolchain drift"* alongside a shadow-lib
+warning (`sigil 3.12.7` vendored against `3.12.5` pinned). ⇒ pin **6.5.20**, `cyrius lib sync --full`
+(107-file snapshot, 17 changed), `cyrius deps` relocked. **Both warnings are gone.** 23/23 suites green,
+both targets build, and the Linux `--clients` run still returns 95.
+⚠ `--agnos` moves 13,584,728 → **13,584,832 B** (+104), which is the toolchain bump and nothing else — but
+it does mean the staged `agnos/build/rootfs/bin/aethersafha` is now toolchain-stale as well as
+hash-divergent. Restaging is M6-A1 and is owed before the next burn.
+⛔ **Not touched, deliberately**: sibling repos keep their own pins. `bhumi` pins 6.5.13, and regenerating
+its `dist/` with the local 6.5.20 would be the wrong toolchain for that repo.
+
+### Fixed — `ae_now_ms()` answered 0 on the host, and that hid the two defects below
+
+⛔ The host arm was `return 0`, justified in place as *"inert off agnos rather than wrong — the host loop is
+already bounded by setu_cap"*. That was true of the elapsed budget and false of every other reader: `el`
+was always `0 - 0`, so the 30 s budget never bound, the 5 s progress line never printed, and the
+end-of-run "probe ran for milliseconds" readout always printed **0**. A host run that was slow, starved or
+wedged was byte-identical in the log to a fast one. ⇒ `clock_now_ms()` (`lib/chrono.cyr:46`), which has
+always been available with `chrono` always in `[deps].stdlib`. ⚠ **Inert is not free when the thing made
+inert is the instrument** — and with the clock restored, the whole bounded host run measures **142 ms**.
+
+### Fixed — the Linux compositor quit on the first presented frame, and exit 95 could never fire
+
+⛔⛔ `running = 0` sat under `#ifndef CYRIUS_TARGET_AGNOS` in the present handler, commented *"host: one
+present proves the wire; exit the bounded loop"*. It was wrong in **both** modes:
+- **desktop mode** — the session ended on the first frame a client presented, so the host build was a wire
+  proof that could not become a desktop, by construction;
+- **`--clients` mode** — it fired at `accepted == 1`, so the loop left before the `accepted >= 2` test could
+  ever see 2. **Exit 95 was structurally unreachable on Linux** and the ladder could only answer 94.
+
+⚠ Gating it to either value of `ae_probe` preserves one of the two bugs, so it is **deleted, not gated**.
+Same class as 0.12.9's hardcoded 92: a documented verdict the code cannot emit.
+
+### Fixed — `--clients` had a 30-second budget and spent 130 milliseconds of it
+
+⛔ The probe's three terminators (`accepted >= 2`, a 200000-frame backstop, a 30 s wall-clock budget) were
+all defeated by the host's `setu_cap = 400` dev bound. Measured: **130 ms**, over-stating the budget by
+~230x, so every host `--clients` run gave a spawned client a ninth of a second to load, be scheduled and
+connect. A client that "connected" did so by already being up and racing the listener. ⇒ the cap no longer
+applies when `ae_probe == 1`; the probe now runs its full budget (measured 30000 ms / 95439 frames).
+⚠ The comment claiming 400 frames was *"long enough to catch a client"* could not be contradicted by
+anything in the build while `ae_now_ms` answered 0. Two defects, one blind instrument.
+
+### Added — `--frames N`, and `--frames 0` means run until quit
+
+The host loop stays bounded by default (400/3, unchanged — nothing that runs this binary expects it to
+block). `--frames 0` gives a real session. ⚠ Linux has no quit key yet — bhumi's `_bhumi_kbscan` answers 0
+off agnos, so Escape cannot arrive and SIGINT ends the run until M6-B4 lands.
+
+⭐ **Verified on Linux 2026-08-12**: `--clients` with two setu clients now prints `setu client connected` /
+`presented surface` twice, reaps both (`clients told to close: 2`) and **returns 95**. 23/23 suites;
+`--agnos` builds unchanged.
+
+### Changed — five falsified claims struck from `roadmap.md`
+
+All five were work-generating, and each is contradicted by a code path or an iron capture: *pointer input
+still absent on iron* (iron-proven 2026-08-09, drag **and** the two-`#92`-mask cursor); *premultiplied never
+run against a real client* (crab sets it unconditionally; `AE-6` burned); *nothing in the GPU band has ever
+executed on iron* (`stage-tools.sh:302` stages the desktop; `AE-2/6/8/9` burned); *`#88` and `#92` op 0x03
+unconsumed* (both shipped; the band is 7 of 13 and 2 of 14, not 6 and 1); *the damage-limited blit is not
+safe to enable* (shipped 0.12.3 as `AE-0a`). ⚠ `#91` and batched `#92` are recorded as **falsified**, not
+pending, so they stop being re-derived as tasks.
+
 ## [0.13.0] - 2026-08-10 — the desktop survives being relaunched
 
 ⭐⭐⭐ **The headline is a class of bug, not a feature**: a compositor that exits must release what it

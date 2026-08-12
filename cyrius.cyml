@@ -7,7 +7,7 @@ version = "${file:VERSION}"
 description = "aethersafha — AI-augmented AGNOS compositor (Cyrius port, from 27207 lines of Rust)"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.5.13"
+cyrius = "6.5.20"
 
 [build]
 entry = "src/main.cyr"
@@ -93,7 +93,11 @@ modules = ["src/types.cyr", "src/surface.cyr", "src/sandbox.cyr"]
 [deps.kavach]
 git = "https://github.com/MacCracken/kavach.git"
 path = "../kavach"
-tag = "3.11.7"
+# ⚠ 3.11.7 → 3.11.10 (2026-08-12). The tag had been WRONG IN COMMITTED STATE for two cuts: HEAD vendored
+# 3.11.8 and any local build re-materialised 3.11.10 from `../kavach`, because the `path` override wins.
+# So the manifest declared a graph nothing here had built since 3.11.7. Verified before bumping: 3.11.10 is
+# a real tag on a clean kavach tree, so the declared graph is now fetchable and matches the vendored copy.
+tag = "3.11.10"
 modules = ["dist/kavach.cyr"]
 
 # --- DISPLAY plane contract: setu (सेतु — bridge). The dhancha client ↔ this

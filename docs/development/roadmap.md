@@ -13,8 +13,15 @@
 - [ ] Benchmarks captured in `docs/benchmarks.md`
 - [x] Runs on the agnos kernel via bhumi (real scanout + input) — ✅ `--selftest` → `exit 95` on
       archaemenid (0.11.1: GPU-composited a client surface at the client's coordinates); geometry read
-      live from the kernel. ⚠ **Pointer input is still absent on iron** (agnos xhci matches only HID
-      boot *keyboard*), so "real input" is keyboard-only.
+      live from the kernel.
+      ⛔ **CORRECTED 2026-08-12 — this line used to end "Pointer input is still absent on iron (agnos
+      xhci matches only HID boot *keyboard*), so real input is keyboard-only." That is FALSE and was
+      falsified four days after it was written.** The pointer is iron-proven end to end: `hid:
+      boot-mouse interfaces bound: 2`, a titlebar `drag released ... frames held: 7`, and the cursor
+      drawn as **two `#92` op 0x03 masks on the shader cores** — agnosticos
+      `prior-art/desktop-drag-release-iron-0809.txt:57, :219, :295` and `iron-log.md:152-153, :160`.
+      ⚠ Do not replace it with "the GPU cursor arm is unburned" either (`CHANGELOG.md:312-313`) —
+      that arm burned on 2026-08-09 and four more times on 2026-08-10.
 - [ ] CHANGELOG complete from v0.1.0 onward
 - [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`)
 
@@ -69,9 +76,12 @@ symbols), each compiling + smoke-tested. Driven by the parity workflow.
   Wayland port): server transport + dispatch (`src/setu_server.cyr`, `src/setu_dispatch.cyr`),
   shared-buffer present, full key events. **Two real clients composited as windows on agnos from a
   foreground launch** (2026-08-02, QEMU) — `/bin/puka` and `/bin/crab`, verified on the framebuffer.
-- Decorations + bitmap text (kashi) ✅ · damage tracking present but the damage-limited blit is
-  **not safe to enable** with the obvious one-liner (`#84` flips the render target — needs
-  `union(cur, prev)`; see state.md).
+- Decorations + bitmap text (kashi) ✅ · damage-limited blit ✅ **SHIPPED 0.12.3 as `AE-0a`** — this
+  line used to say it was *"not safe to enable"*, which was true only of the obvious one-liner. The
+  band is `union(cur, prev)`, forced by `#84 present` flipping the render target; iron-proven with no
+  ghosting across 278 frames, and the moving-window case exercised in QEMU (`AE-M`). Clear cost fell
+  3.937 → 2.460 ms (1.60x). ⚠ Still open: the GPU path's band under a *moving* window
+  (`planning/desktop.md:204`).
 - Remaining: scene graph, drag/resize state machines, workspaces, input routing depth.
 
 ### M4 — Apps + capture + plugins (v0.4.0)
@@ -100,16 +110,135 @@ symbols), each compiling + smoke-tested. Driven by the parity workflow.
 - Remaining: consume mehman 1.0.0's per-ABI `guest`/`shim` modules; real XRGB pixel
   fidelity beyond the stdout-as-framebuffer MVP (mehman ADR 0004).
 
+### M6 — Userland desktop: the arc comes home, and Linux becomes a real target (v0.14.0+) — 🚧 OPEN 2026-08-12
+
+> ⛔ **THIS MILESTONE EXISTED BY NAME IN ANOTHER REPO BEFORE IT EXISTED HERE, AND THAT COST A SESSION.**
+> agnos closed the desktop arc at **1.56.42** and handed all forward work to *"aethersafha's own
+> roadmap (**M6, userland**)"* — `agnos/docs/development/state.md` and `agnos/CHANGELOG.md:32-34`, both
+> naming a milestone this file did not define. A reader following the handoff arrived at a roadmap that
+> stopped at M5, and the only way to find "the next desktop work" was to re-derive it from a document
+> carrying five falsified claims (all struck above, 2026-08-12). **A handoff to a milestone that does
+> not exist is not a handoff.**
+
+**The two tracks are independent and neither blocks the other.** agnos is feature-complete for the
+desktop and its remaining items are kernel debt; Linux has never had a screen at all.
+
+#### M6-A — agnos: close the debt, not the features
+
+Every `AE-` rung is shipped and iron-proven (`planning/desktop.md:203-217`). What is left is not desktop
+work, it is the bill:
+
+- **A1 — reconcile the staged binary.** `state.md` quotes 13,584,728 B as if the size identifies the
+  artifact. Measured 2026-08-12: **three distinct binaries share that byte count** — `build/aethersafha_agnos`
+  (`1b8b3c57`), the staged `agnos/build/rootfs/bin/aethersafha` (`690160b9`), and a fresh local rebuild
+  (`a692279f`). A burn scheduled today flashes an unknown one. Rebuild, restage, re-measure, and quote a
+  **hash** beside every size from now on.
+- **A2 — instrument the min/max button path.** `AE-M` is the only unburned rung, and its button path is
+  un-adjudicable from a capture: `input_apply` (`src/input.cyr:242-278`) prints nothing for either the
+  button or the F5/F6 key, so the two are indistinguishable in the serial and the operator's eye is the
+  only oracle. This arc has been burned by exactly that shape twice. Then it rides the next burn.
+- **A3 — consume `#89` byte +28** (the `#92` op-support mask) in `ae_gpu_probe` and route op dispatch off
+  it, instead of discovering support by calling and reading the error.
+- **A4 🔴 — one iron burn with the USB mouse attached**, closing agnos tracker H3 and H5 in one boot with
+  the media-key stimulus **declared in advance**. H5 is a real defect if it fails: the kernel issues
+  `SET_PROTOCOL(Boot)` but never `GET_PROTOCOL` and never parses the report descriptor, so if the
+  Keychron's phantom mouse interface is not mute, **a media key can move the cursor or synthesise a
+  click**. Depends on A1 — we must know which binary is flashed.
+- **A5 🔴 — agnos 1.56.44 is OPEN** (operator, 2026-08-12) for the two kernel defects below.
+- **A6 — the `VFS_CHAN` close leak.** `vfs_close_inner` has arms for every tag but `VFS_CHAN`
+  (`agnos/kernel/core/vfs.cyr:35, :1262-1282`); `chan_release_pid` runs only on process death. Fix at the
+  `SYS_CLOSE` dispatch, and **derive authority first** — an inherited, non-owned channel fd in a child
+  must not release its parent's endpoint. `VFS_PIPE`'s owner-aware release is the shape to copy.
+- **A7 — re-derive the 1.56.41 keystroke loss from scratch.** Still open at HEAD (0/9, 4/9, 4/9 keys at a
+  ~100 ms hold). ⛔ **Its recorded mechanism is contradicted by the code**: the CHANGELOG says the HID ring
+  is drained *only* inside `kbscan #42`, but `hid_poll()` also runs from the 100 Hz timer ISR
+  (`pic.cyr:79`) and the xHCI MSI-X handler (`pic.cyr:258`). The cause is **unexplained**, so the proposed
+  fix ("a faster frame") rests on a false premise. Instrumented QEMU run counting enqueued vs delivered
+  **before** any iron time is spent. This is `AE-T2`'s input path.
+
+#### M6-B — Linux: a sovereign desktop on a second substrate
+
+> ⭐⭐ **DECIDED 2026-08-12 (operator): Linux is a REAL display target, not merely the logic substrate.**
+> This reverses the three-substrate matrix at `planning/desktop.md:53-57`, which assigned Linux
+> *"protocol logic, layout maths, the render pipeline, every unit suite"* and gave the visual proofs to
+> QEMU and iron. It also **supersedes bhumi's ADR 0001** (`bhumi/docs/adr/0001-scanout-via-agnos-fbinfo-blit.md`,
+> Accepted, which specifies `-1` stubs for non-agnos targets) and strikes *"Out of scope (for v1.0):
+> Non-AGNOS targets"* from `bhumi/docs/development/roadmap.md:99`.
+>
+> ⭐ **BACKEND DECISION (operator, 2026-08-12): fbdev FIRST, DRM/KMS LATER.** The reason fbdev is not a
+> compromise here is that **bhumi's seam is already fbdev-shaped**: agnos `#38 fbinfo` → `FBIOGET_VSCREENINFO`
+> and `#39 blit` → `mmap` + row copy, which is a 1:1 mapping onto the two functions the Linux arm stubs.
+> DRM/KMS dumb buffers is the durable answer but needs buffer lifetime and page-flip semantics the current
+> seam does not express — it is a **second** backend behind the same interface, not a prerequisite.
+> ⛔ **Nested Wayland was considered and is NOT the path**: a sovereign compositor rendering into another
+> compositor's window is a different product. ⛔ **mabda remains ruled out** (see the correction below).
+
+**Measured baseline, 2026-08-12** — everything above the device seam already works on Linux. The AF_UNIX/
+SOCK_SEQPACKET wire, the shared-buffer handoff, `CREATE_SURFACE → ATTACH_BUF → COMMIT`, window mint,
+composite, chrome, damage band and exit teardown all run. **The pixels are correct and in RAM; nothing
+scans them out.**
+
+- **B1 ✅ DONE 0.14.0-dev — the host session is real.** Three defects, all in `src/main.cyr`, all found by
+  running the binary rather than reading it:
+  - `ae_now_ms()` returned **0** on the host arm, so the host build had *no timing diagnostics at all* —
+    the 30 s budget never bound, the 5 s progress line never printed, and every elapsed readout was 0.
+    Now `clock_now_ms()`. ⚠ It was this blindness that let the two defects below survive.
+  - `running = 0` fired on the **first** client present (host arm only). It ended a desktop session on
+    frame 1 **and** made `--clients` return at `accepted == 1`, so **exit 95 was structurally unreachable
+    on Linux** — the same class as 0.12.9's hardcoded 92. Deleted, not gated: no mode wants it.
+  - the probe was bound by the dev frame cap, so its documented **30 s** budget was really **130 ms**
+    (measured). `--clients` now runs unbounded and its own three terminators govern.
+  - ⭐ New `--frames N`, where **`--frames 0` runs until quit**. Default unchanged (400/3).
+  - ⭐ **Verified: `--clients` with two clients now exits 95 on Linux**, both reaped at exit.
+- **B2 — a host pixel oracle.** `--ppm <path>` dumping `bhumi_backend_fb(be)` as P6. ~30 lines; the dumper
+  is already written twice in this repo (`programs/setu_serve_probe.cyr:32`, `setu_demo_probe.cyr:15`).
+  This is what makes B3/B4 verifiable rather than hopeful, and it is worth having *even after* scanout
+  lands, because a file can be diffed and a screen cannot.
+- **B3 — bhumi's Linux output arm** (fbdev): `_bhumi_kfbinfo` and `_bhumi_kblit` at
+  `bhumi/src/scanout.cyr:70-71`. Geometry needs **no ioctl** — `/sys/class/graphics/fb0/{virtual_size,
+  stride,bits_per_pixel}` fills the existing 24-byte struct exactly, and `amdgpudrmfb` reports BGRX,
+  which *is* `BhumiFb`'s store order, so a raw blit is colour-correct. `cyr_mmap`/`mmap_file_rw` already
+  exist in `lib/mmap.cyr`. ⚠ bhumi's `[deps].stdlib` must gain `mmap` + `fs`. ⚠ Guard must be **three-way**:
+  `CYRIUS_TARGET_LINUX` *is* compiler-predefined (`cyrius/src/main.cyr:1099`), and bhumi today branches
+  only on `#ifndef CYRIUS_TARGET_AGNOS`. ⚠ Only safe from a bare VT — on a box running a desktop, `/dev/fb0`
+  is that desktop's framebuffer.
+- **B4 — bhumi's Linux input arm** (evdev): `_bhumi_kbscan` / `_bhumi_ptrscan`.
+  🔴 **Needs an operator action first** — `/dev/input/event*` is `root:input` and the dev user is not in
+  the `input` group. ⛔ **And the scancode table does not transfer wholesale**: Linux `KEY_*` base codes
+  are AT/XT Set-1 make codes so the base plane maps directly, but bhumi's extended table
+  (`src/kbscan.cyr:143-157`) is keyed on **0xE0-prefixed** codes, which **evdev never emits**. Arrows,
+  RCtrl/RAlt/Meta, Home/End/PgUp/PgDn and Insert/Delete all need a second table.
+- **B5 — host client launch.** Today a client must be started by hand in another shell. `plp_spawn`
+  (`programs/puka_launch_probe.cyr:34-45`) already proves the fork+execve-then-accept shape on the host.
+- **B6 — one rendezvous path, ecosystem-wide.** ⛔ There are currently **three defaults across four
+  repos**: aethersafha binds `/tmp/aethersafha-setu.sock` (`src/main.cyr`), crab hardcodes the same
+  (`crab/src/main.cyr:178`, so crab connects today), while setu's default — used by `present_probe` and by
+  puka whenever `$SETU_SOCKET` is unset — is `/tmp/setu-display.sock` (`setu/src/client.cyr:58`).
+  ⛔ And three files still tell readers *"the path is ADVISORY and always was — setu ignores it"*
+  (`puka/.../window_setu.cyr:31`, `crab/src/main.cyr:168`, `src/setu_server.cyr:15-19`), which has been
+  **false since setu 0.8.4**: `setu_un_path` (`setu/src/client.cyr:97-101`) honours the caller's path and
+  `$SETU_SOCKET` is a working override.
+- **B7 — client-side Linux gaps**, handed to the owning repos: puka's `PUKA_SHELL = "/bin/agnsh"` is a
+  compile-time constant with no env override and its `pty_spawn` returns the fork pid before knowing
+  execve succeeded; crab's `readdir`/`stat` and its whole input loop are agnos-only, so it presents once
+  with empty panes and exits.
+
+**M6 exit criteria** — a Linux desktop that opens on a real screen, hosts a real client window, takes
+real keyboard and pointer input, and quits cleanly; **and** the agnos debt list closed with A4 burned.
+
 ## Backlog
 
-- **Premultiplied compositing (`#92` op 0x01) has never run against a real client.** No client sets
-  `SETU_SURF_PREMULTIPLIED` — not puka, crab, jalwa, or dhancha — so every surface today takes the
-  opaque `gpu_blit_shm` **#87** path, which ignores byte 3. Producers that emit alpha 0
-  (`puka/src/render/pixfmt.cyr`, jalwa `gui/draw.cyr`) are a latent hazard for whoever opts in
-  first, not a live defect. ▶ **Unblocked 2026-08-02** — two clients now connect and present from a
-  foreground launch, so the "wait until a client reliably presents" gate is met. The remaining
-  prerequisite is a producer that actually emits premultiplied pixels; crab is the nearest candidate,
-  being alpha-255 clean throughout.
+- ⛔ **CLOSED, NOT BACKLOG — corrected 2026-08-12.** This entry read *"Premultiplied compositing
+  (`#92` op 0x01) has never run against a real client. No client sets `SETU_SURF_PREMULTIPLIED` — not
+  puka, crab, jalwa, or dhancha…"*. **crab has set it unconditionally since 0.4.x** (`crab/src/main.cyr:38`),
+  the compositor consumes it at `src/setu_dispatch.cyr:62, :401`, and **`AE-6` BURNED PASS on
+  archaemenid 2026-08-07** with no fallback line (`planning/desktop.md:210`). Routing is per-window in
+  `ae_gpu_present_frame`, so a blend-requesting client no longer demotes the whole frame.
+  ⚠ **The one live hazard the old entry named is real and survives**: producers that emit alpha 0
+  (`puka/src/render/pixfmt.cyr` writes byte 3 = 0; jalwa `gui/draw.cyr` discards a real alpha byte)
+  would render as an **additive over-bright ghost** under `#92`, not as a missing window — the shader
+  is `out = src + dst*(1 - src_a)`, so `a = 0` gives `out = src + dst`. Harmless while they take the
+  opaque `#87` path; a trap for whoever opts them in. See `planning/desktop.md:352-356`.
 
 ## Known cleanup
 - **Deferred deps** (mehman / agnostik / agnodrm): `cyrius build` auto-prepends
@@ -138,12 +267,32 @@ survived in three live documents at once (here, `parity-plan.md` "Bite H", and a
 - **There is no `[deps.mabda]` in this repo's manifest, and there does not need to be.** The path
   is the agnos kernel's ring-3 GPU band (`#82`-`#94`), reached by direct syscall. mabda's GPU
   surface rides Linux's driver stack; the sovereign compositor does not go through it.
-- **What is genuinely still open** is the rest of the band. The desktop consumes 6 of 13 band
-  numbers and 1 of 14 `#92` ops. Unconsumed and valuable: `#88 gpu_fill_rect` (kills the per-pixel
-  chrome rects), `#92` op 0x03 GLYPH_1BPP (all desktop text off the CPU), `#92` batching, `#90`/`#91`
-  (a readback oracle and GPU window-move), and the 3D ops `0x08`-`0x10`.
+- **What is genuinely still open** — ⛔ **RE-MEASURED 2026-08-12; this list was four items stale.**
+  It used to name `#88 gpu_fill_rect`, `#92` op 0x03 GLYPH_1BPP and `#90` as unconsumed. All three
+  shipped: `#88` at `src/gpu.cyr:425, :433` (`AE-9`), op 0x03 at `:482`/`:609`/`:736` (`AE-8`), and
+  `#90` has a live consumer at `:915` armed from `src/selftest.cyr:344, :413`. The desktop consumes
+  **7 of 13** band numbers and **2 of 14** `#92` ops, not 6 and 1.
+  Genuinely unconsumed, and each for a stated reason:
+  - **`#89` byte +28 — the `#92` op-support mask.** `src/gpu.cyr:107-113` reads +0..+24 and stops, so
+    the desktop still discovers op support by *calling and reading the error* — the exact shape `#86`
+    already proved wrong. The kernel documents the bitmask at `agnos/kernel/core/syscall.cyr:4294`
+    precisely so a caller need not probe by trial. **This one is worth doing** (M6-A3).
+  - **`#91 gpu_blit_bb`** — ⛔ *falsified* for this architecture, not merely unbuilt. Every window here
+    is a live client surface re-composited every frame, so the pixels a `#91` copy would move are
+    rewritten from the client's buffer anyway. See `planning/desktop.md:396-405`. Do not re-derive it.
+  - **Batched `#92`** — ⛔ not reachable as the ladder assumed. Every record names its own `mask_id`
+    slot, so N glyph runs sharing one staging slot all read the last run's mask. It needs a slot model
+    or an ABI field, not a follow-up. See `planning/desktop.md:406-412`.
+  - The 3D ops `0x08`-`0x10` — genuinely untouched, and no consumer wants them yet.
 
-⚠ **Nothing in this band has ever executed on iron.** No desktop binary appears in any `stage_one`
-call in agnos's `scripts/burn/stage-tools.sh`, and QEMU cannot substitute: it exposes no AMD PCI
-device, so `gpu_find` never matches, `gpu_present` stays 0, `gpu_caps` reports flags 0, and
-`ae_gpu_probe` answers 0. **A green desktop smoke says nothing about the GPU path, structurally.**
+⛔⛔ **CORRECTED 2026-08-12 — THE PARAGRAPH THAT WAS HERE WAS FALSE IN BOTH HALVES.** It read
+*"Nothing in this band has ever executed on iron. No desktop binary appears in any `stage_one` call in
+agnos's `scripts/burn/stage-tools.sh`…"*. Measured: `stage-tools.sh:302` is
+`stage_one aethersafha  src/main.cyr aethersafha || rc=1`, and `AE-2`, `AE-6`, `AE-8` and `AE-9` all
+**BURNED PASS** on archaemenid 2026-08-07/08 — the clear, the chrome fills, the client surfaces and
+the glyphs are all on the shader cores, with the `#39` blit no longer issued.
+
+⚠ **What IS still true, and is the only part worth keeping:** QEMU cannot substitute for iron. It
+exposes no AMD PCI device, so `gpu_find` never matches, `gpu_present` stays 0, `gpu_caps` reports
+flags 0, and `ae_gpu_probe` answers 0. **A green desktop smoke in QEMU says nothing about the GPU
+path, structurally** — it verifies the CPU fallback.
