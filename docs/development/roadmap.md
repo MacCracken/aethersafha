@@ -212,9 +212,16 @@ scans them out.**
   `CYRIUS_TARGET_LINUX` *is* compiler-predefined (`cyrius/src/main.cyr:1099`), and bhumi today branches
   only on `#ifndef CYRIUS_TARGET_AGNOS`. ⚠ Only safe from a bare VT — on a box running a desktop, `/dev/fb0`
   is that desktop's framebuffer.
-- **B4 — bhumi's Linux input arm** (evdev): `_bhumi_kbscan` / `_bhumi_ptrscan`.
-  🔴 **Needs an operator action first** — `/dev/input/event*` is `root:input` and the dev user is not in
-  the `input` group. ⛔ **And the scancode table does not transfer wholesale**: Linux `KEY_*` base codes
+- **B4 🚧 KEYBOARD DONE (bhumi 1.3.0), POINTER OPEN.** ⭐ Proven end to end in QEMU *through the
+  emulated input device*: QMP `send-key esc` → i8042 → `atkbd` → `/dev/input/event*` → bhumi → HID
+  usage **41**, ending an unbounded session at frame 2729; negative-controlled (no key → no quit).
+  ⭐ **The operator action turned out NOT to be a blocker for development** — the QEMU guest's init is
+  PID 1, so evdev is readable there with no group change. It is still required to run on the host.
+  ⛔ **Base plane only.** evdev emits no 0xE0 prefix (`KEY_UP` is 103, not `E0 48`), so arrows,
+  RCtrl/RAlt/Meta, Home/End/PgUp/PgDn and Insert/Delete are dropped as unmapped — a second table keyed
+  on evdev's own numbering is the fix. **Pointer** (`_bhumi_ptrscan`) is still the `0` stub; its
+  `EV_REL`/button records arrive on nodes the keyboard arm already opens, so it is wiring, not plumbing.
+  Original note, still true for a host run: ⛔ **And the scancode table does not transfer wholesale**: Linux `KEY_*` base codes
   are AT/XT Set-1 make codes so the base plane maps directly, but bhumi's extended table
   (`src/kbscan.cyr:143-157`) is keyed on **0xE0-prefixed** codes, which **evdev never emits**. Arrows,
   RCtrl/RAlt/Meta, Home/End/PgUp/PgDn and Insert/Delete all need a second table.

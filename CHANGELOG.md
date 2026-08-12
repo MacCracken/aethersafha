@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.13.5] - 2026-08-12 — a real keypress reaches the Linux desktop
+
+⭐⭐ **Esc typed at the guest quits the compositor.** bhumi **1.3.0** adds the Linux evdev keyboard, and
+the proof goes through the *emulated input device* rather than poking the compositor: QMP
+`send-key esc` → i8042 → `atkbd` → `/dev/input/event*` → bhumi → **HID usage 41** →
+`IA_QUIT`, ending an unbounded `--frames 0` session at frame 2729.
+⭐ **Negative-controlled**: the identical run with no key sent ran 20 s and never quit. A quit path that
+cannot be shown NOT to fire proves nothing.
+
+⚠ This closes the last thing that made `--frames 0` awkward on Linux — there is now a real quit key,
+not only SIGINT. ⛔ **Base plane only**: evdev emits no 0xE0 prefix, so arrows, RCtrl/RAlt/Meta,
+Home/End/PgUp/PgDn and Insert/Delete are dropped as unmapped (bhumi 1.3.0's own note). Pointer is
+still stubbed on Linux.
+
+### Added — `scripts/qemu-sendkey.py`
+
+A stimulus/capture step kept separate from `qemu-screendump.py` on purpose: input verification needs a
+strictly ordered wait → press → react → read, and folding it into the dumper would make "did the
+picture change" and "did the key arrive" share one failure mode.
+⚠ Holds each key 300 ms. evdev is edge-driven so it lacks the poll-sampling defect agnos measured
+(0-of-9 keys at QEMU's ~100 ms default, because a USB HID keyboard reports STATE ON POLL), but a
+generous hold costs nothing and keeps the harness honest against both input paths.
+
+⭐ **The operator action was not a blocker after all** — M6-B4 was recorded as needing the dev user in
+the `input` group. True for a host run; irrelevant in the guest, whose init is PID 1.
+
+### Changed — `[deps.bhumi]` 1.2.1 → **1.3.0**
+
 ## [0.13.4] - 2026-08-12 — the Linux desktop hosts a real client, launched by itself
 
 ⭐⭐⭐ **A real setu client window on the Linux desktop, in QEMU** — `setu-surface` (present_probe's
