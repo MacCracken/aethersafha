@@ -191,7 +191,9 @@ scans them out.**
   - ⭐ New `--frames N`, where **`--frames 0` runs until quit**. Default unchanged (400/3).
   - ⭐ **Verified: `--clients` with two clients now exits 95 on Linux**, both reaped at exit.
 - **B2 — a host pixel oracle.** ⚠ Still wanted even though B3 landed: a PPM can be diffed and a screen
-  cannot, and CI has no framebuffer. `--ppm <path>` dumping `bhumi_backend_fb(be)` as P6. ~30 lines; the dumper
+  cannot, and CI has no framebuffer. ⭐ Partly served now by `scripts/qemu-linux-desktop.sh`, whose
+  screendump IS an external pixel oracle — but it needs QEMU, so an in-process `--ppm` is still the
+  cheaper gate for a unit-level check. `--ppm <path>` dumping `bhumi_backend_fb(be)` as P6. ~30 lines; the dumper
   is already written twice in this repo (`programs/setu_serve_probe.cyr:32`, `setu_demo_probe.cyr:15`).
   This is what makes B3/B4 verifiable rather than hopeful, and it is worth having *even after* scanout
   lands, because a file can be diffed and a screen cannot.
@@ -218,14 +220,25 @@ scans them out.**
   RCtrl/RAlt/Meta, Home/End/PgUp/PgDn and Insert/Delete all need a second table.
 - **B5 — host client launch.** Today a client must be started by hand in another shell. `plp_spawn`
   (`programs/puka_launch_probe.cyr:34-45`) already proves the fork+execve-then-accept shape on the host.
-- **B6 — one rendezvous path, ecosystem-wide.** ⛔ There are currently **three defaults across four
-  repos**: aethersafha binds `/tmp/aethersafha-setu.sock` (`src/main.cyr`), crab hardcodes the same
-  (`crab/src/main.cyr:178`, so crab connects today), while setu's default — used by `present_probe` and by
-  puka whenever `$SETU_SOCKET` is unset — is `/tmp/setu-display.sock` (`setu/src/client.cyr:58`).
-  ⛔ And three files still tell readers *"the path is ADVISORY and always was — setu ignores it"*
-  (`puka/.../window_setu.cyr:31`, `crab/src/main.cyr:168`, `src/setu_server.cyr:15-19`), which has been
-  **false since setu 0.8.4**: `setu_un_path` (`setu/src/client.cyr:97-101`) honours the caller's path and
-  `$SETU_SOCKET` is a working override.
+- **B6 — one rendezvous path, ecosystem-wide.** ⚠ **A LATENT HAZARD, NOT A LIVE BREAK — corrected
+  2026-08-12 after this entry got it wrong twice.** It claimed "three defaults across four repos" with
+  setu's clients on a different socket. **False.** All four spell the SAME literal
+  `/tmp/aethersafha-setu.sock` independently: `src/main.cyr`, `crab/src/main.cyr:178`,
+  `puka/.../window_setu.cyr:58`, and setu's own `programs/present_probe.cyr:100`. Verified end to end
+  with **no symlink**: `--clients` + two `present_probe`s returns **95**.
+  ⛔ **The evidence that produced the wrong diagnosis was an early `-111` (ECONNREFUSED), which was the
+  compositor having already EXITED** — the host run was 142 ms at the time — not a path mismatch. A
+  symlink "fixed" it only coincidentally, because the probe was dialling the real path all along.
+  ⇒ **Before blaming a rendezvous, check the socket still exists.** The listener now prints its path
+  for exactly this reason.
+  **The real item**: one literal duplicated in four files, plus a fifth answer nothing reaches
+  (`SETU_UNIX_PATH = "/tmp/setu-display.sock"`, `setu/src/client.cyr:58`). The fix belongs in setu —
+  teach `setu_un_path` the `$SETU_SOCKET` override so `0` means "ask setu" — and then all four callers
+  pass 0 together. ⛔ It is NOT a one-line change here: binding setu's default while three clients still
+  dial the literal makes every client fail ENOENT (measured). Needs a setu tag ⇒ operator action.
+  ⛔ Separately true and worth fixing: three files still tell readers *"the path is ADVISORY and always
+  was — setu ignores it"* (`puka/.../window_setu.cyr:31`, `crab/src/main.cyr:168`,
+  `src/setu_server.cyr:15-19`), **false since setu 0.8.4** — `setu_un_path` honours the caller's path.
 - **B7 — client-side Linux gaps**, handed to the owning repos: puka's `PUKA_SHELL = "/bin/agnsh"` is a
   compile-time constant with no env override and its `pty_spawn` returns the fork pid before knowing
   execve succeeded; crab's `readdir`/`stat` and its whole input loop are agnos-only, so it presents once

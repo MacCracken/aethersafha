@@ -453,6 +453,39 @@ fn ae_flag_int(flag, dflt): i64 {
     return dflt;
 }
 
+#ifndef CYRIUS_TARGET_AGNOS
+# Launch a setu client as a detached child. -> pid, or -1.
+#
+# ⭐ THE LINUX COUNTERPART OF THE agnos MINT/ENDOW/SPAWN BLOCK (M6-B5). agnos hands the child a channel
+# end it is BORN holding; Linux has a listener, so the child just connects back — the same
+# launch-then-connect shape, and `programs/puka_launch_probe.cyr:34-45` already proved it on this
+# target. Until now the host arm launched NOTHING: `--clients` could only reach exit 95 if somebody
+# started two clients by hand in another shell, which is not a probe, it is a two-person job.
+#
+# ⛔ fork+execve, not `app_spawn_detached` — `src/apps.cyr` is in no build graph on either target
+# (0 callers repo-wide), so reaching its launcher means pulling a 976-line module and its stdlib
+# fallout into the compositor for six lines of process code. If apps.cyr is ever linked, this should
+# collapse into `app_launch_terminal`; the ⚠ in state.md tracks that.
+# ⚠ The child inherits the listening fd (setu_listen sets no CLOEXEC). Harmless while clients are
+# short-lived children of a compositor that outlives them, but it means a client keeps the socket
+# node alive if the compositor dies first — a reason to prefer CLOEXEC in setu eventually.
+fn ae_spawn_client(path): i64 {
+    var cargv = alloc(16);
+    store64(cargv + 0, path);
+    store64(cargv + 8, 0);
+    var pid = sys_fork();
+    if (pid < 0) { return 0 - 1; }
+    if (pid == 0) {
+        sys_execve(path, cargv, 0);
+        # ⚠ Only reachable when execve FAILED — a missing or non-executable client. Exiting 127 (the
+        # shell's "command not found") rather than 0 keeps a bad path distinguishable from a client
+        # that ran and chose to quit.
+        sys_exit(127);
+    }
+    return pid;
+}
+#endif
+
 fn main(): i64 {
     alloc_init();
     kashi_font_init();   # populate the VGA 8x16 glyph tables (kashi font-data core)
@@ -553,7 +586,24 @@ fn main(): i64 {
     # `#97` channel end, and the Linux host now listens on **AF_UNIX / SOCK_SEQPACKET** — a local,
     # connected, RECORD transport with the same semantics as the band, and with filesystem permissions
     # as the access control loopback:7700 never had.
-    var setu_path = "/tmp/aethersafha-setu.sock";   # AF_UNIX rendezvous (Linux); unused on agnos
+    # The AF_UNIX rendezvous (Linux); unused on agnos, which has no listener at all.
+    # ⚠ `$SETU_SOCKET` overrides, which is what lets two compositors share a box. puka already honours
+    # the same variable with the same fallback (`puka/.../window_setu.cyr:57-58`).
+    #
+    # ⛔⛔ THIS LITERAL IS DUPLICATED IN FOUR REPOS AND THAT IS THE OPEN ITEM (M6-B6), not a live break.
+    # aethersafha (here), `crab/src/main.cyr:178`, `puka/.../window_setu.cyr:58` and setu's own
+    # `programs/present_probe.cyr:100` each spell `/tmp/aethersafha-setu.sock` independently. They
+    # currently AGREE, so nothing is broken today; the hazard is that four files must be edited in step
+    # for that to stay true, and the protocol's own default (`SETU_UNIX_PATH = "/tmp/setu-display.sock"`,
+    # `setu/src/client.cyr:58`) is a fifth answer that nothing passes 0 to reach.
+    # ⚠ THE FIX IS NOT A ONE-LINE CHANGE HERE, AND TRYING IT THAT WAY BREAKS THE DESKTOP: binding
+    # setu's default while three clients still dial the literal makes every client fail with ENOENT.
+    # It has to land in setu (teach `setu_un_path` the env override, so `0` means "ask setu") and in
+    # all four callers together, which needs a setu tag — an operator action. Recorded, not attempted.
+    # ⛔ And do NOT re-derive it from a failed connect: an early `-111` here was the compositor having
+    # already EXITED (the host run was 142 ms), not a path mismatch. Check the socket exists first.
+    var setu_path = getenv("SETU_SOCKET");
+    if (setu_path == 0) { setu_path = "/tmp/aethersafha-setu.sock"; }
     var setu_sfd = 0 - 1;
     # ⭐⭐ BITE 7: ON agnos THE COMPOSITOR NO LONGER LISTENS. There is no socket, no port, no accept.
     # A listener is a NAMESPACE, and a namespace is the thing the channel band deletes: `tcp_listen`
@@ -565,7 +615,15 @@ fn main(): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     setu_sfd = setu_srv_listen(setu_path);
     if (setu_sfd >= 0) {
-        println("aethersafha: setu listener up (AF_UNIX SOCK_SEQPACKET)");
+        # ⚠ NAME THE PATH, because a client that cannot connect gets a bare errno from setu and
+        # "which socket did each side actually pick" is otherwise unanswerable from either log. That
+        # ambiguity cost real time: a `-111` was read as a path mismatch when the compositor had simply
+        # already exited, and the wrong diagnosis then survived two more rounds.
+        # ⚠ `sys_write`, not `println` — `setu_path` is an i64 holding a cstring, and `println` on an
+        # untyped i64 prints the POINTER (measured: it emitted `17851195`).
+        println("aethersafha: setu listener up (AF_UNIX SOCK_SEQPACKET) at:");
+        sys_write(1, setu_path, strlen(setu_path));
+        sys_write(1, "\n", 1);
     }
     #endif
     # ⛔ A FAILED LISTEN USED TO PRINT NOTHING AT ALL, and that cost a burn's second run. The
@@ -579,6 +637,32 @@ fn main(): i64 {
         println_int(setu_sfd);
     }
     #endif
+    # ⭐ `--client PATH` (repeatable) — launch clients ourselves, so `--clients` is a ONE-COMMAND probe
+    # on Linux the way it already is on agnos. Spawned AFTER the listener is up, deliberately: the
+    # reverse order is a race the child loses by connecting to a socket that does not exist yet, and
+    # `puka_launch_probe.cyr:10-11` records that ordering for the same reason.
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (setu_sfd >= 0) {
+        var li = 1;
+        var ln = argc();
+        while (li < ln) {
+            if (streq(argv(li), "--client") == 1) {
+                if ((li + 1) < ln) {
+                    var cp = argv(li + 1);
+                    if (ae_spawn_client(cp) < 0) {
+                        ae_spawn_failed = 1;
+                        println("aethersafha: could NOT launch client:");
+                    }
+                    else { println("aethersafha: launched client:"); }
+                    sys_write(1, cp, strlen(cp));
+                    sys_write(1, "\n", 1);
+                }
+            }
+            li = li + 1;
+        }
+    }
+    #endif
+
     var setu_cap = 3;
     #ifndef CYRIUS_TARGET_AGNOS
     # ⛔ THE COMMENT THAT USED TO SIT HERE — "spin (render-paced) long enough to catch a client" — WAS

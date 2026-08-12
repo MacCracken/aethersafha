@@ -8,15 +8,15 @@
 # success while drawing nothing passes any self-check it writes itself).
 #
 # ⚠ There is no busybox on this box and no distro image is needed: `build/aethersafha` is a **static**
-# ELF64, so the entire guest userland is this file plus that binary. This init is ~120 lines of Cyrius
+# ELF64, so the entire guest userland is this file plus that binary. This init is ~160 lines of Cyrius
 # instead of a 200 MB rootfs, and it is sovereign — no foreign init, no shell.
 #
 # What PID 1 has to do here, and why each part is not optional:
 #   · mount /proc and /sys — bhumi's fbdev arm reads its geometry out of
 #     `/sys/class/graphics/fb0/{virtual_size,stride,bits_per_pixel}`. No sysfs, no geometry, and the
 #     compositor silently falls back to 1280x720 and reports nothing wrong.
-#     ⚠ /dev is NOT mounted here: the kernel is built `CONFIG_DEVTMPFS_MOUNT=y`, so it mounts devtmpfs
-#     on /dev itself before running init. Mounting it again would be harmless but dishonest.
+#   · mount devtmpfs on /dev — ⚠ `CONFIG_DEVTMPFS_MOUNT=y` does NOT cover an initramfs, so without
+#     this there is no `/dev/fb0` device node even though sysfs describes the framebuffer perfectly.
 #   · FORK, do not just execve — PID 1 exiting is a kernel panic. The parent reaps the compositor,
 #     prints its exit status (the `--clients` verdict ladder is read from exactly this number) and
 #     powers the machine off cleanly, so the harness gets a real exit rather than a timeout.
@@ -29,17 +29,6 @@ var QI_MS_SILENT = 32768;                 # MS_SILENT — quiet the "unknown opt
 var QI_RB_POWER_OFF = 0x4321FEDC;         # LINUX_REBOOT_CMD_POWER_OFF
 
 fn qi_say(s) { sys_write(1, s, strlen(s)); return 0; }
-
-# 1 if `flag` is among our arguments. ⚠ Only valid after args_init(), which needs /proc mounted.
-fn qi_has(flag): i64 {
-    var n = argc();
-    var i = 1;
-    while (i < n) {
-        if (streq(argv(i), flag) == 1) { return 1; }
-        i = i + 1;
-    }
-    return 0;
-}
 
 fn qi_num(n) {
     var b[24];
@@ -94,6 +83,15 @@ fn main(): i64 {
     # simultaneously "obviously present" and "absent". sysfs comes from the sysfs mount; the device NODE
     # comes from devtmpfs, and they are different mounts. Probe both or believe neither.
     if (sys_mount("devtmpfs", "/dev", "devtmpfs", QI_MS_SILENT, 0) < 0) { qi_say("qemu_init: WARN /dev mount failed\n"); }
+    # ⛔⛔ /dev/shm IS NOT OPTIONAL WHEN A CLIENT IS IN THE PICTURE, and its absence fails LATE and
+    # confusingly. setu's Linux shared buffer is a tmpfs file `/dev/shm/setu-buf-<id>`
+    # (`setu/src/buf.cyr:17,26`), so with no /dev/shm a client CONNECTS fine, completes the handshake,
+    # and only then dies on `buf_create failed` — the compositor logs `setu client connected` and never
+    # a presented surface, which reads like a protocol or compositor bug rather than a missing mount.
+    # ⚠ It must be mounted AFTER devtmpfs: /dev/shm is a directory inside the devtmpfs mount, so
+    # creating it first would put it in the initramfs's /dev and then be hidden by the mount over it.
+    sys_mkdir("/dev/shm", 0777);
+    if (sys_mount("tmpfs", "/dev/shm", "tmpfs", QI_MS_SILENT, 0) < 0) { qi_say("qemu_init: WARN /dev/shm mount failed\n"); }
 
     args_init();                          # AFTER /proc — see the ordering note above
 
@@ -111,85 +109,14 @@ fn main(): i64 {
     qi_cat("/sys/class/graphics/fb0/bits_per_pixel");
     qi_cat("/sys/class/graphics/fb0/name");
 
-    # ⭐ `--fbfill` — the DISCRIMINATOR between the two ways of getting bytes into /dev/fb0.
-    # bhumi's arm uses `mmap(MAP_SHARED)` + stores, which is correct on amdgpu (proven on iron: 64/64
-    # sentinel pixels through an independent fd). In this guest the driver is **simpledrmdrmfb**, whose
-    # fbdev emulation is a SHADOW buffer flushed by deferred I/O — so an mmap store may never reach
-    # scanout while every syscall still reports success. This mode writes the top half with `pwrite`
-    # and the bottom half through an `mmap`, in two different colours, so ONE screendump answers
-    # "which path works on this driver" instead of leaving it to inference.
-    # ⭐ `--fbmmap` — isolate the FLUSH, which `--fbfill` could not. That mode wrote the top half with
-    # `pwrite` and the bottom with `mmap` and showed BOTH, which read as "mmap works". It does not: the
-    # pwrite damaged the fbdev and the resulting flush copied the WHOLE shadow — carrying the mmap'd
-    # pixels with it. Two paths, one flush, one misleading pass.
-    # ⇒ Here BOTH halves are written by mmap and nothing else, with an `fsync` between them.
-    # `fb_deferred_io_fsync` is the documented flush for a deferred-I/O fbdev, so if that is the
-    # mechanism the TOP half appears and the BOTTOM (written after the last flush) does not.
-    if (qi_has("--fbmmap") == 1) {
-        var mfd = sys_open("/dev/fb0", 2, 0);
-        if (mfd < 0) { qi_say("qemu_init: fbmmap cannot open /dev/fb0\n"); sys_reboot(QI_RB_POWER_OFF); return 1; }
-        var mp = 5120;
-        var mrows = 800;
-        var mb = syscall(9, 0, mp * mrows, 3, 1, mfd, 0);
-        if (mb <= 0) { qi_say("qemu_init: fbmmap mmap FAILED\n"); sys_close(mfd); sys_reboot(QI_RB_POWER_OFF); return 1; }
-        var mr = 0;
-        var mx = 0;
-        while (mr < mrows / 2) {                                  # top: green, then fsync
-            mx = 0;
-            while (mx < mp / 4) { store32(mb + mr * mp + mx * 4, 0x0000FF00); mx = mx + 1; }
-            mr = mr + 1;
-        }
-        qi_say("qemu_init: fbmmap TOP written (green), now fsync -> ");
-        qi_num(sys_fsync(mfd));
-        qi_say("\n");
-        while (mr < mrows) {                                      # bottom: magenta, NO flush after
-            mx = 0;
-            while (mx < mp / 4) { store32(mb + mr * mp + mx * 4, 0x00FF00FF); mx = mx + 1; }
-            mr = mr + 1;
-        }
-        qi_say("qemu_init: fbmmap BOTTOM written (magenta), deliberately NOT flushed\n");
-        sys_close(mfd);
-        qi_say("qemu_init: holding the framebuffer for the screendump\n");
-        sleep_ms(12000);
-        qi_say("qemu_init: powering off\n");
-        sys_reboot(QI_RB_POWER_OFF);
-        return 0;
-    }
+    # ⚠ TWO DIAGNOSTIC MODES LIVED HERE AND ARE DELIBERATELY GONE (`--fbfill`, `--fbmmap`). They
+    # existed to isolate one defect and they did it: they proved that on a shadow-buffer fbdev an
+    # `mmap` store never reaches scanout while a `pwrite` does, which is what bhumi 1.2.1 fixed.
+    # ⛔ Retiring them is the point, not an oversight — a harness that keeps every probe it ever
+    # needed becomes a thing nobody can read. The FINDINGS live where they are load-bearing:
+    # bhumi `src/scanout.cyr` (at the pwrite that replaced the mapping), bhumi CHANGELOG 1.2.1, and
+    # the `console=tty0` / no-`quiet` note in `scripts/qemu-linux-desktop.sh`.
 
-    if (qi_has("--fbfill") == 1) {
-        var fd = sys_open("/dev/fb0", 2, 0);      # O_RDWR
-        if (fd < 0) { qi_say("qemu_init: fbfill cannot open /dev/fb0\n"); sys_reboot(QI_RB_POWER_OFF); return 1; }
-        var pitch = 5120;
-        var rows = 800;
-        var row = alloc(pitch);
-        # --- top half: pwrite, the path that always damages the fbdev explicitly
-        var x = 0;
-        while (x < pitch / 4) { store32(row + x * 4, 0x00FF0000); x = x + 1; }   # red
-        var r = 0;
-        while (r < rows / 2) { syscall(18, fd, row, pitch, r * pitch); r = r + 1; }
-        qi_say("qemu_init: fbfill wrote the TOP half with pwrite (red)\n");
-        # --- bottom half: mmap + stores, the path bhumi uses
-        var base = syscall(9, 0, pitch * rows, 3, 1, fd, 0);                     # PROT_RW, MAP_SHARED
-        if (base > 0) {
-            r = rows / 2;
-            while (r < rows) {
-                x = 0;
-                while (x < pitch / 4) { store32(base + r * pitch + x * 4, 0x000000FF); x = x + 1; }  # blue
-                r = r + 1;
-            }
-            qi_say("qemu_init: fbfill wrote the BOTTOM half with mmap (blue)\n");
-        }
-        if (base <= 0) { qi_say("qemu_init: fbfill mmap FAILED\n"); }
-        sys_close(fd);
-        qi_say("qemu_init: holding the framebuffer for the screendump\n");
-        sleep_ms(12000);
-        qi_say("qemu_init: powering off\n");
-        sys_reboot(QI_RB_POWER_OFF);
-        return 0;
-    }
-
-    # Hand the compositor whatever the harness passed us after `--`, so one initramfs serves
-    # `--frames N`, `--clients` and a bare desktop run without a rebuild.
     # ⭐ `--hold` IS CONSUMED HERE AND NOT FORWARDED, and it exists because of a real dead end:
     # a guest that draws and exits is UNPHOTOGRAPHABLE. bhumi's scanout-demo drew its bars and powered
     # the machine off **0.365 s** after boot, long before any screendump could connect — and the

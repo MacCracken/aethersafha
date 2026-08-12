@@ -27,7 +27,8 @@ OUT=${AE_QEMU_OUT:-build/qemu-linux}
 FRAMES=${AE_QEMU_FRAMES:-600}
 KERNEL=${AE_QEMU_KERNEL:-/boot/vmlinuz-linux}
 TIMEOUT=${AE_QEMU_TIMEOUT:-90}
-GUEST_ARGS=${*:---frames $FRAMES}
+SETU=${AE_QEMU_SETU:-../setu}
+GUEST_ARGS=${*:-}
 
 mkdir -p "$OUT"
 rm -f "$OUT"/serial.log "$OUT"/screen.ppm "$OUT"/screen.png
@@ -37,6 +38,17 @@ rm -f "$OUT"/serial.log "$OUT"/screen.ppm "$OUT"/screen.png
 echo "== building guest binaries (static, host target) =="
 cyrius build src/main.cyr           "$OUT/aethersafha" >/dev/null 2>&1 || { echo "compositor build failed"; exit 2; }
 cyrius build programs/qemu_init.cyr "$OUT/init"        >/dev/null 2>&1 || { echo "init build failed"; exit 2; }
+# ⭐ Stage a real setu CLIENT too, so the guest shows a hosted window and not just chrome. The
+# compositor launches it itself via `--client` (M6-B5); before that existed a client had to be started
+# by hand in another shell, which is impossible inside a one-shot guest.
+CLIENT_ARG=""
+if [ -d "$SETU" ] && (cd "$SETU" && cyrius build programs/present_probe.cyr "$ROOT/$OUT/present_probe" >/dev/null 2>&1); then
+    CLIENT_ARG="--client /present_probe"
+    echo "   staged setu present_probe as the guest client"
+else
+    echo "   ⚠ no setu at $SETU — the guest will run with NO client (chrome only)"
+fi
+[ -n "$GUEST_ARGS" ] || GUEST_ARGS="--frames $FRAMES $CLIENT_ARG"
 for b in "$OUT/aethersafha" "$OUT/init"; do
     file "$b" | grep -q 'statically linked' || { echo "$b is NOT static — the initramfs has no loader"; exit 2; }
 done
@@ -46,6 +58,7 @@ IRD=$(mktemp -d); trap 'rm -rf "$IRD"' EXIT
 mkdir -p "$IRD"/{proc,sys,dev}
 cp "$OUT/init" "$IRD/init"; cp "$OUT/aethersafha" "$IRD/aethersafha"
 chmod +x "$IRD/init" "$IRD/aethersafha"
+[ -f "$OUT/present_probe" ] && { cp "$OUT/present_probe" "$IRD/present_probe"; chmod +x "$IRD/present_probe"; }
 ( cd "$IRD" && find . -print0 | cpio --null -o --format=newc 2>/dev/null | gzip -1 ) > "$OUT/initramfs.gz"
 echo "   initramfs: $(stat -c%s "$OUT/initramfs.gz") bytes"
 
@@ -141,6 +154,18 @@ fi
 grep -q 'screen size read from the kernel' "$OUT/serial.log" 2>/dev/null \
     && echo "  ✅ compositor read geometry from the kernel (not its fallback)" \
     || echo "  ⚠  compositor used its built-in fallback — geometry did not come from the framebuffer"
+if grep -q 'setu client presented surface' "$OUT/serial.log" 2>/dev/null; then
+    echo "  ✅ a real setu client connected and presented a window"
+else
+    if grep -q 'launched client' "$OUT/serial.log" 2>/dev/null; then
+        echo "  ❌ a client was launched but never presented"
+        grep -q 'buf_create failed' "$OUT/serial.log" 2>/dev/null \
+            && echo "     — 'buf_create failed': the guest is missing /dev/shm, where setu's buffers live"
+        rc=1
+    else
+        echo "  ⚠  no client was launched this run (chrome only)"
+    fi
+fi
 
 if [ -f "$OUT/screen.ppm" ]; then
     if command -v magick >/dev/null || command -v convert >/dev/null; then

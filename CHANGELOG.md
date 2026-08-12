@@ -4,6 +4,54 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.13.4] - 2026-08-12 — the Linux desktop hosts a real client, launched by itself
+
+⭐⭐⭐ **A real setu client window on the Linux desktop, in QEMU** — `setu-surface` (present_probe's
+green grid and red animation band) composited beside the `echo (foreign)` mehman window, correctly
+z-ordered, with the compositor having **launched the client itself**. Non-black rose 0.225 → **0.289**;
+the harness now gates on `setu client presented surface` as well.
+
+### Added — `--client PATH` (repeatable), the Linux half of M6-B5
+
+The counterpart of the agnos mint/endow/spawn block: fork+execve after the listener is up (the reverse
+order is a race the child loses against a socket that does not exist yet). ⭐ `--clients` is now a
+**one-command** probe on Linux — measured, `--clients --client present_probe --client present_probe`
+returns **95** with nothing started by hand. That is also what lets a one-shot QEMU guest show a window
+at all: there is no second shell in there to start a client from.
+⛔ `src/apps.cyr` was deliberately NOT pulled into the build graph for this — it is linked on neither
+target, so reaching `app_launch_terminal` would drag a 976-line module and its stdlib fallout in for
+six lines of process code.
+⚠ The child inherits the listening fd (setu sets no CLOEXEC). Harmless for short-lived children of a
+longer-lived compositor, but it is a reason to want CLOEXEC in setu.
+
+### Fixed — the guest had no `/dev/shm`, and the symptom pointed at the wrong layer
+
+⛔ setu's Linux shared buffer is a tmpfs file `/dev/shm/setu-buf-<id>`. With no such mount the client
+**connects, completes the handshake, and only then dies** on `buf_create failed` — so the compositor
+logged `setu client connected` and never a presented surface, which reads as a protocol or compositor
+fault rather than a missing mount. ⚠ It must be mounted *after* devtmpfs, or the directory lands in the
+initramfs's `/dev` and is hidden by the mount over it. The harness now names this exact cause when it
+sees `buf_create failed`, instead of reporting an undifferentiated "never presented".
+
+### Changed — the listener names its socket, and `$SETU_SOCKET` is honoured
+
+⚠ `sys_write`, not `println`: `setu_path` is an i64 holding a cstring and `println` on an untyped i64
+prints the **pointer** (measured — it emitted `17851195`).
+
+### ⛔ CORRECTED — M6-B6 was described wrongly, twice, and the correction is the point
+
+The roadmap claimed *"three defaults across four repos"*, with setu's clients on a different socket.
+**False.** All four spell the same literal `/tmp/aethersafha-setu.sock` independently — this repo,
+`crab/src/main.cyr:178`, `puka/.../window_setu.cyr:58`, and setu's own `present_probe.cyr:100`.
+Verified with **no symlink**: `--clients` + two probes returns 95.
+⛔ The evidence behind the wrong diagnosis was an early `-111` (ECONNREFUSED) that was really the
+compositor having **already exited** — the host run was 142 ms at the time. A symlink appeared to fix
+it only coincidentally, because the probe was dialling the real path all along, and the bad diagnosis
+then survived two further retellings. ⇒ **Check the socket still exists before blaming a rendezvous.**
+⚠ B6 remains open as what it actually is: one literal duplicated in four files (a latent hazard, not a
+break), fixable only in setu plus all four callers together — which needs a setu tag.
+⛔ Attempting it one-sidedly here **broke every client with ENOENT**, and that was measured, not feared.
+
 ## [0.13.3] - 2026-08-12 — the Linux desktop, proven in QEMU, by an oracle it cannot influence
 
 ⭐⭐⭐ **The sovereign desktop runs on Linux inside a QEMU guest and was photographed doing it** — MUDRA
