@@ -4,6 +4,41 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.13.6] - 2026-08-12 — M6-B6 closed: one rendezvous, named by setu
+
+⭐ **The display socket is named in ONE place.** setu **0.8.5** makes `setu_un_path` resolve an explicit
+path → `$SETU_SOCKET` → `SETU_UNIX_PATH`, and all four callers now pass **0**: this compositor,
+`crab` 0.4.7, `puka` 0.6.12 and setu's own `present_probe`. The name is protocol-shaped
+(`/tmp/setu-display.sock`) because setu owns the wire.
+⭐ Verified both ways with no symlink: default → **exit 95**, `SETU_SOCKET=/tmp/ae-alt.sock` → **95**,
+with the server and both clients following the override.
+
+⛔ **What this replaces was a hazard, not a break** — four repos spelled the same literal and agreed.
+But `$SETU_SOCKET` worked for exactly **one client in three** (puka implemented it itself; crab and
+present_probe did not), which is the shape of a config that looks supported and mostly is not.
+
+### Fixed — spawned clients were given an EMPTY environment
+
+⛔⛔ `ae_spawn_client` passed `envp = 0`. With `SETU_SOCKET` set, the compositor bound the override and
+every client it launched still dialled the default — `--clients` answered **94** while the server log
+looked perfectly correct. ⇒ the child is now **told** where the compositor listens, via a hand-built
+`SETU_SOCKET=<resolved>` blob, exactly as the agnos arm announces `AGNOS_CHAN=<fd>` in its `#43` env
+blob. ⭐ That is strictly better than propagating the parent's environment: the child follows the
+**server**, rather than recomputing a default and happening to match. One variable only, so a
+compositor cannot leak its environment into a client.
+
+### Fixed — the listener's own log line SIGSEGV'd the compositor
+
+⛔ Passing `setu_path = 0` ("ask setu") left `sys_write(1, setu_path, strlen(setu_path))` dereferencing
+NULL — **exit 139** on the line whose entire job is to make the socket knowable. It now prints
+`setu_un_path(setu_path)`. ⚠ Caught in seconds because the E2E test runs the real binary; a log line
+exercised only by eye would have shipped.
+
+### Changed — `[deps.setu]` gains a `path` override, and 0.8.4 → **0.8.5**
+
+setu was the one dep declaring a tag with no `path`, so a local setu change could not be built against.
+⚠ The path-wins hazard applies as it does to every other dep: re-verify tag vs sibling VERSION at each cut.
+
 ## [0.13.5] - 2026-08-12 — a real keypress reaches the Linux desktop
 
 ⭐⭐ **Esc typed at the guest quits the compositor.** bhumi **1.3.0** adds the Linux evdev keyboard, and

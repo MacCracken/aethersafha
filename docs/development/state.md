@@ -8,7 +8,7 @@
 
 | Field | Value | Source |
 |---|---|---|
-| Version | **0.13.5** | [`VERSION`](../../VERSION) |
+| Version | **0.13.6** | [`VERSION`](../../VERSION) |
 | Cyrius pin | **6.5.20** — matches `cycc`; bumped from 6.5.13 on 2026-08-12 with `lib sync --full` (17 stdlib files) | `cyrius.cyml [package].cyrius` |
 | Modules / tests | 26 `src/*.cyr` · **23 `.tcyr` suites** | `ls` |
 | `--agnos` build | **GREEN** — 0.13.2 is **13,589,192 B · `7cfd4091`** at pin 6.5.20 (0.13.1 13,584,832 · 0.13.0 13,584,728). ⛔ **A SIZE DOES NOT IDENTIFY A BINARY** — 2026-08-12 **three distinct artifacts shared the old byte count** (`1b8b3c57` · staged `690160b9` · rebuild `a692279f`). Quote a **hash** beside every size. ⚠ The staged rootfs is now version- AND toolchain-stale (M6-A1) | `sha256sum` |
@@ -16,7 +16,7 @@
 | Backend | **bhumi 1.2.1** — ⭐⭐ **SCANOUT IS LIVE ON LINUX** (fbdev; bhumi ADR 0003). ⛔ 1.2.0's arm used `mmap` and displayed NOTHING on shadow-buffer fbdevs (`simpledrm`); 1.2.1 uses `pwrite`. **Found in QEMU — the dev box's amdgpu could not show it.** ⭐ **KEYBOARD LIVE on Linux** (bhumi 1.3.0, evdev; QEMU-proven usage 41, negative-controlled) — base plane only, evdev emits no 0xE0 prefix. Still stubbed: **pointer** (`_bhumi_ptrscan` → 0). GPU via the agnos ring-3 band `#82`-`#94` — **not** mabda; there is no `[deps.mabda]` | `bhumi/src/scanout.cyr` |
 | Substrates | ⭐⭐⭐ **LINUX HOSTS A REAL CLIENT WINDOW, PHOTOGRAPHED IN QEMU** (`scripts/qemu-linux-desktop.sh`; compositor launches the client itself via `--client`; non-black 0.289 vs a 0.011 splash null). Also on iron: `screen size read from the kernel / 2560 / 1440` where it read `1280 / 720` that morning. **fbdev first, DRM/KMS later.** Sequencing → `roadmap.md` **M6** | measured |
 
-**Deps** — ⭐ **ALL EIGHT VERIFIED AGAINST THEIR SIBLING `VERSION` AND A REAL GIT TAG, 2026-08-12**: **bhumi 1.2.1** · rupa 0.1.2 · agnostik 1.3.4 · agnodrm 1.5.0 · kashi 1.0.4 · mehman 1.0.1 · **kavach 3.11.10** · setu 0.8.4. Siblings: agnos **1.56.43** · puka **0.6.11** · crab **0.4.6**.
+**Deps** — ⭐ **ALL EIGHT VERIFIED AGAINST THEIR SIBLING `VERSION` AND A REAL GIT TAG, 2026-08-12**: **bhumi 1.2.1** · rupa 0.1.2 · agnostik 1.3.4 · agnodrm 1.5.0 · kashi 1.0.4 · mehman 1.0.1 · **kavach 3.11.10** · **setu 0.8.5** (now with a `path` override, like every other dep). Siblings: agnos **1.56.43** · puka **0.6.11** · crab **0.4.6**.
 ⛔ **The path WINS over the tag** — the vendored copy tracks the local checkout whatever the tag says, which is why a green build here does not prove the declared graph builds.
 
 ## Proven, and by what

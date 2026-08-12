@@ -469,14 +469,35 @@ fn ae_flag_int(flag, dflt): i64 {
 # ⚠ The child inherits the listening fd (setu_listen sets no CLOEXEC). Harmless while clients are
 # short-lived children of a compositor that outlives them, but it means a client keeps the socket
 # node alive if the compositor dies first — a reason to prefer CLOEXEC in setu eventually.
-fn ae_spawn_client(path): i64 {
+# ⭐⭐ `sock` IS ANNOUNCED TO THE CHILD, exactly as the agnos arm announces `AGNOS_CHAN=<fd>` in its
+# `#43` env blob. The child is TOLD where the compositor is listening rather than left to recompute
+# the same default — which is the difference between "both sides agree" and "both sides happen to
+# agree". ⛔ The first cut passed `envp = 0`, giving the child an EMPTY environment: with
+# `SETU_SOCKET=/tmp/ae-alt.sock` set, the compositor bound the override and every spawned client
+# still dialled the default, so `--clients` answered 93 while the server looked perfectly correct.
+# Measured, and it is the same shape as the agnos `AGNOS_CHAN` bug: an announcement that is not made.
+fn ae_spawn_client(path, sock): i64 {
     var cargv = alloc(16);
     store64(cargv + 0, path);
     store64(cargv + 8, 0);
+    # "SETU_SOCKET=<sock>\0" — one variable, deliberately: the child needs the rendezvous and nothing
+    # else, and a hand-built blob cannot leak the compositor's own environment into a client.
+    var eb = alloc(256);
+    var lit = "SETU_SOCKET=";
+    var w = 0;
+    while (w < 12) { store8(eb + w, load8(lit + w)); w = w + 1; }
+    var sl = strlen(sock);
+    if (sl > 200) { sl = 200; }
+    var k = 0;
+    while (k < sl) { store8(eb + w, load8(sock + k)); w = w + 1; k = k + 1; }
+    store8(eb + w, 0);
+    var cenv = alloc(16);
+    store64(cenv + 0, eb);
+    store64(cenv + 8, 0);
     var pid = sys_fork();
     if (pid < 0) { return 0 - 1; }
     if (pid == 0) {
-        sys_execve(path, cargv, 0);
+        sys_execve(path, cargv, cenv);
         # ⚠ Only reachable when execve FAILED — a missing or non-executable client. Exiting 127 (the
         # shell's "command not found") rather than 0 keeps a bad path distinguishable from a client
         # that ran and chose to quit.
@@ -586,24 +607,16 @@ fn main(): i64 {
     # `#97` channel end, and the Linux host now listens on **AF_UNIX / SOCK_SEQPACKET** — a local,
     # connected, RECORD transport with the same semantics as the band, and with filesystem permissions
     # as the access control loopback:7700 never had.
-    # The AF_UNIX rendezvous (Linux); unused on agnos, which has no listener at all.
-    # ⚠ `$SETU_SOCKET` overrides, which is what lets two compositors share a box. puka already honours
-    # the same variable with the same fallback (`puka/.../window_setu.cyr:57-58`).
-    #
-    # ⛔⛔ THIS LITERAL IS DUPLICATED IN FOUR REPOS AND THAT IS THE OPEN ITEM (M6-B6), not a live break.
-    # aethersafha (here), `crab/src/main.cyr:178`, `puka/.../window_setu.cyr:58` and setu's own
-    # `programs/present_probe.cyr:100` each spell `/tmp/aethersafha-setu.sock` independently. They
-    # currently AGREE, so nothing is broken today; the hazard is that four files must be edited in step
-    # for that to stay true, and the protocol's own default (`SETU_UNIX_PATH = "/tmp/setu-display.sock"`,
-    # `setu/src/client.cyr:58`) is a fifth answer that nothing passes 0 to reach.
-    # ⚠ THE FIX IS NOT A ONE-LINE CHANGE HERE, AND TRYING IT THAT WAY BREAKS THE DESKTOP: binding
-    # setu's default while three clients still dial the literal makes every client fail with ENOENT.
-    # It has to land in setu (teach `setu_un_path` the env override, so `0` means "ask setu") and in
-    # all four callers together, which needs a setu tag — an operator action. Recorded, not attempted.
-    # ⛔ And do NOT re-derive it from a failed connect: an early `-111` here was the compositor having
-    # already EXITED (the host run was 142 ms), not a path mismatch. Check the socket exists first.
-    var setu_path = getenv("SETU_SOCKET");
-    if (setu_path == 0) { setu_path = "/tmp/aethersafha-setu.sock"; }
+    # ⭐ 0 = ASK setu. Since setu 0.8.5 `setu_un_path` resolves an explicit path, then `$SETU_SOCKET`,
+    # then `SETU_UNIX_PATH` — so the rendezvous is named in ONE place, in the repo that owns the wire.
+    # ⛔ It used to be a literal here, and the same literal in `crab/src/main.cyr`,
+    # `puka/.../window_setu.cyr` and setu's own `present_probe.cyr`. Four spellings that happened to
+    # agree; the hazard was that all four had to be edited in step, and `$SETU_SOCKET` worked for
+    # exactly one of the three clients. All four now pass 0 (M6-B6 closed).
+    # ⚠ THEY MUST MOVE TOGETHER. Binding setu's default while clients still dial the old literal fails
+    # every connect with ENOENT — measured, when this was attempted one-sidedly.
+    # ⚠ Unused on agnos: there is no listener there at all.
+    var setu_path = 0;
     var setu_sfd = 0 - 1;
     # ⭐⭐ BITE 7: ON agnos THE COMPOSITOR NO LONGER LISTENS. There is no socket, no port, no accept.
     # A listener is a NAMESPACE, and a namespace is the thing the channel band deletes: `tcp_listen`
@@ -622,7 +635,14 @@ fn main(): i64 {
         # ⚠ `sys_write`, not `println` — `setu_path` is an i64 holding a cstring, and `println` on an
         # untyped i64 prints the POINTER (measured: it emitted `17851195`).
         println("aethersafha: setu listener up (AF_UNIX SOCK_SEQPACKET) at:");
-        sys_write(1, setu_path, strlen(setu_path));
+        # ⛔ PRINT THE **RESOLVED** PATH, NOT `setu_path`. Since we now pass 0 ("ask setu"),
+        # `strlen(setu_path)` is `strlen(0)` — a null deref that SIGSEGVs the compositor on the line
+        # whose whole job is to make the socket knowable. Caught immediately (exit 139) because the
+        # E2E test runs the real binary; a log line only exercised by eye would have shipped.
+        # ⚠ `sys_write`, not `println`: these are i64s holding cstrings and `println` on an untyped
+        # i64 prints the POINTER (measured — it emitted `17851195`).
+        var rpath = setu_un_path(setu_path);
+        sys_write(1, rpath, strlen(rpath));
         sys_write(1, "\n", 1);
     }
     #endif
@@ -649,7 +669,7 @@ fn main(): i64 {
             if (streq(argv(li), "--client") == 1) {
                 if ((li + 1) < ln) {
                     var cp = argv(li + 1);
-                    if (ae_spawn_client(cp) < 0) {
+                    if (ae_spawn_client(cp, setu_un_path(setu_path)) < 0) {
                         ae_spawn_failed = 1;
                         println("aethersafha: could NOT launch client:");
                     }

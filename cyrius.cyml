@@ -127,5 +127,9 @@ modules = ["dist/kavach.cyr"]
 # 0.5.0 — full key events (press + release); SETU_SURF_FULL_KEYS + the per-surface make/break
 #         forwarding this compositor honours.
 git = "https://github.com/MacCracken/setu.git"
-tag = "0.8.4"
+# ⚠ `path` added 2026-08-12 — setu was the ONE dep declaring a tag with no path override, which meant
+# a local setu change could not be built against at all. Every sibling dep here carries both. The
+# path-wins hazard applies as it does to the rest: re-verify tag vs sibling VERSION at each cut.
+path = "../setu"
+tag = "0.8.5"
 modules = ["dist/setu.cyr"]

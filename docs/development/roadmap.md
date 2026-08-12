@@ -227,25 +227,17 @@ scans them out.**
   RCtrl/RAlt/Meta, Home/End/PgUp/PgDn and Insert/Delete all need a second table.
 - **B5 — host client launch.** Today a client must be started by hand in another shell. `plp_spawn`
   (`programs/puka_launch_probe.cyr:34-45`) already proves the fork+execve-then-accept shape on the host.
-- **B6 — one rendezvous path, ecosystem-wide.** ⚠ **A LATENT HAZARD, NOT A LIVE BREAK — corrected
-  2026-08-12 after this entry got it wrong twice.** It claimed "three defaults across four repos" with
-  setu's clients on a different socket. **False.** All four spell the SAME literal
-  `/tmp/aethersafha-setu.sock` independently: `src/main.cyr`, `crab/src/main.cyr:178`,
-  `puka/.../window_setu.cyr:58`, and setu's own `programs/present_probe.cyr:100`. Verified end to end
-  with **no symlink**: `--clients` + two `present_probe`s returns **95**.
-  ⛔ **The evidence that produced the wrong diagnosis was an early `-111` (ECONNREFUSED), which was the
-  compositor having already EXITED** — the host run was 142 ms at the time — not a path mismatch. A
-  symlink "fixed" it only coincidentally, because the probe was dialling the real path all along.
-  ⇒ **Before blaming a rendezvous, check the socket still exists.** The listener now prints its path
-  for exactly this reason.
-  **The real item**: one literal duplicated in four files, plus a fifth answer nothing reaches
-  (`SETU_UNIX_PATH = "/tmp/setu-display.sock"`, `setu/src/client.cyr:58`). The fix belongs in setu —
-  teach `setu_un_path` the `$SETU_SOCKET` override so `0` means "ask setu" — and then all four callers
-  pass 0 together. ⛔ It is NOT a one-line change here: binding setu's default while three clients still
-  dial the literal makes every client fail ENOENT (measured). Needs a setu tag ⇒ operator action.
-  ⛔ Separately true and worth fixing: three files still tell readers *"the path is ADVISORY and always
-  was — setu ignores it"* (`puka/.../window_setu.cyr:31`, `crab/src/main.cyr:168`,
-  `src/setu_server.cyr:15-19`), **false since setu 0.8.4** — `setu_un_path` honours the caller's path.
+- **B6 ✅ CLOSED 0.13.6 / setu 0.8.5 — one rendezvous, named by setu.** `setu_un_path` resolves
+  explicit path → `$SETU_SOCKET` → `SETU_UNIX_PATH`; all four callers pass **0** (this repo,
+  crab 0.4.7, puka 0.6.12, setu's `present_probe`). Verified with no symlink: default **95**, override
+  **95**, server and both clients following it.
+  ⚠ **This entry was WRONG TWICE before it was right.** It claimed "three defaults across four repos";
+  in fact all four spelled the SAME literal and agreed — a hazard (four files editable out of step,
+  and `$SETU_SOCKET` honoured by one client in three), not a break. The evidence behind the bad
+  diagnosis was an early ECONNREFUSED that was really the compositor having already **exited**.
+  ⛔ Two real defects surfaced only by doing it: spawned clients were handed an **empty environment**
+  (server bound the override, clients dialled the default, verdict 94), and the new "ask setu" path
+  made the listener's own log line **SIGSEGV** on `strlen(0)`. Both were caught by running the binary.
 - **B7 — client-side Linux gaps**, handed to the owning repos: puka's `PUKA_SHELL = "/bin/agnsh"` is a
   compile-time constant with no env override and its `pty_spawn` returns the fork pid before knowing
   execve succeeded; crab's `readdir`/`stat` and its whole input loop are agnos-only, so it presents once

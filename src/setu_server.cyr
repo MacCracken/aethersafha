@@ -12,11 +12,12 @@
 # ⛔ The transport itself lives in the setu dep (materialized at lib/setu.cyr — hand edits there
 # are reverted on the next repin). Changing it is a setu tag bump, not an edit in this repo.
 #
-# setu OWNS the transport now (item 3b — CROSS-PLATFORM TCP loopback via the
-# cyrius `net.cyr` socket layer). This file DELEGATES to setu's `setu_listen` /
-# `setu_accept` / `setu_read_*` / `setu_send` (which handle the Linux BSD-socket
-# AND agnos kernel-TCP #47-57 paths, plus the agnos non-blocking-recv /
-# partial-send quirks). The earlier AF_UNIX path — Linux-only, fail-closed on
+# ⛔ DELETED 2026-08-12 — a paragraph here described the transport as "CROSS-PLATFORM TCP loopback via
+# the cyrius `net.cyr` socket layer" and "agnos kernel-TCP #47-57", and ended mid-clause. Both were
+# retracted three lines below by the banner that follows, so this file argued with itself. TCP is gone
+# from both targets: Linux is AF_UNIX/SOCK_SEQPACKET, agnos is the `#97` channel band.
+# ⚠ The rendezvous NAME is setu's, not this repo's (setu 0.8.5) — pass 0 and let `setu_un_path` resolve
+# `$SETU_SOCKET` then `SETU_UNIX_PATH`. The earlier AF_UNIX path — Linux-only, fail-closed on
 # ⭐ TCP IS GONE FROM BOTH TARGETS. agnos does not listen at all — clients are minted a channel and
 # spawned holding an endowed end. Linux listens on AF_UNIX/SOCK_SEQPACKET, the same record semantics
 # as the band. All fns stay `setu_srv_*`; the message→Window dispatch lives in setu_dispatch.cyr.
