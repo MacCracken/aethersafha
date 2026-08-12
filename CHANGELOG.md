@@ -4,6 +4,51 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.13.3] - 2026-08-12 — the Linux desktop, proven in QEMU, by an oracle it cannot influence
+
+⭐⭐⭐ **The sovereign desktop runs on Linux inside a QEMU guest and was photographed doing it** — MUDRA
+backdrop, shell status panel, a hosted `echo (foreign)` window with titlebar, traffic lights and cyan
+focus strip, and the centred cursor. `scripts/qemu-linux-desktop.sh`.
+
+⛔ **And the point of testing in a guest was not convenience.** It found a defect that the dev box
+structurally could not: bhumi 1.2.0's fbdev arm used `mmap`, which works on **amdgpu** and displays
+**nothing** on `simpledrm`. Fixed in **bhumi 1.2.1** (`pwrite`), repinned here. One machine was the
+blind spot — 1.2.0's oracle was already an external fd and still missed it, because the second reader
+went through the same shadow buffer.
+
+### Added — `scripts/qemu-linux-desktop.sh` + `programs/qemu_init.cyr`
+
+The guest userland is **two static binaries and nothing else**: a ~180-line Cyrius PID 1 that mounts
+/proc, /sys and devtmpfs, forks the compositor, reaps it and powers off — no busybox, no distro image.
+⭐ The oracle is QEMU's `screendump`, which reads the emulated VGA device's own memory: nothing
+aethersafha or bhumi can influence, so it cannot report a picture that is not there.
+
+### ⛔ Four ways this harness lied before it told the truth, all worth keeping
+
+- **The gate passed on the FIRMWARE SPLASH.** It required ">= 8 distinct colours"; OVMF's TianoCore
+  logo has **65**, and the run returned a confident "✅ DRAWN DESKTOP" for a photograph of it. A
+  colour count is blind to layout by construction — the same blindness `puka-terminal-test`'s pixel
+  count had to a staircase. ⇒ the gate is now the **non-black fraction**, calibrated on both arms:
+  splash **0.011**, desktop **0.225**, threshold 0.10. Negative-controlled — `--selftest` draws
+  nothing, measures 0.0015, and the harness **exits 1**.
+- **Dumping on a timer photographed nothing, then photographed the wrong thing.** A fixed 9 s sleep
+  missed entirely (the guest had already powered off at 1.3 s); syncing on `desktop up` fired *before*
+  the frame loop. ⇒ `--hold` makes PID 1 pause after the compositor exits and print a marker, so the
+  dump happens on an observable event and captures the last frame.
+- **`args_init()` before mounting /proc silently ate every argument.** It reads `/proc/self/cmdline`;
+  with no /proc, `argc()` is 0 forever, and the log read `exec /aethersafha with argc 1` while the
+  compositor ran its default 400-frame cap instead of the requested `--frames`.
+- **`CONFIG_DEVTMPFS_MOUNT=y` does not apply to an initramfs.** `/sys/class/graphics/fb0/*` read back
+  perfectly while `/dev/fb0` did not exist — the framebuffer was simultaneously "obviously present"
+  and "absent", because sysfs and the device node come from different mounts.
+
+⚠ **And a platform constraint, not a bug:** a shadow-buffer fbdev is flushed only while it is actively
+driven. `console=ttyS0` alone, or `quiet`, means fbcon never does its first draw and **even `pwrite`
+never reaches scanout**. Both measured with one variable changed. The guest cmdline needs
+`console=tty0` and no `quiet`; kernel text is harmless because the compositor repaints every pixel.
+
+### Changed — `[deps.bhumi]` 1.2.0 → **1.2.1**
+
 ## [0.13.2] - 2026-08-12 — the compositor draws on a Linux screen
 
 ⭐⭐⭐ **`aethersafha: screen size read from the kernel / 2560 / 1440`** — the same binary read

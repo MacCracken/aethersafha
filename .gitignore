@@ -33,3 +33,6 @@ tarpaulin-report.*
 .env.*
 *.pem
 *.key
+
+# QEMU Linux-desktop harness artifacts (initramfs, serial log, screendumps)
+build/qemu-linux/
