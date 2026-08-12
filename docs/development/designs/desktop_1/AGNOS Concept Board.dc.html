@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&family=Spectral:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+body { margin:0; background:#191A1C; }
+a { color:#9BA09B; } a:hover { color:#E6E8E6; }
+@keyframes agnosCaret { 0%,55% { opacity:1; } 56%,100% { opacity:0; } }
+@keyframes agnosPulse { 0%,100% { opacity:1; } 50% { opacity:.45; } }
+::selection { background:#37C97833; }
+</style>
+</helmet>
+
+<section style="display:flex; align-items:flex-start; gap:72px; padding:72px; background:#191A1C; min-width:max-content">
+
+  <!-- ============ BOARD INTRO ============ -->
+  <div style="width:250px; flex:none; position:sticky; top:72px; display:flex; flex-direction:column; gap:16px; font-family:'IBM Plex Mono',monospace; color:#9BA09B">
+    <div style="font:600 13px 'IBM Plex Mono',monospace; letter-spacing:.22em; color:#E6E8E6">AGNOS</div>
+    <div style="font-size:11px; line-height:1.7; letter-spacing:.02em">Desktop concept board.<br>Agents as first-class citizens · every action hash-chained · radically small.</div>
+    <div style="display:flex; flex-direction:column; gap:8px; font-size:11px; margin-top:8px">
+      <a href="#1a" style="text-decoration:none; border:1px solid #2E302E; padding:8px 10px; color:#9BA09B">1a — Sovereign minimal</a>
+      <a href="#1b" style="text-decoration:none; border:1px solid #2E302E; padding:8px 10px; color:#9BA09B">1b — Warm terminal</a>
+      <a href="#1c" style="text-decoration:none; border:1px solid #2E302E; padding:8px 10px; color:#9BA09B">1c — Paper ledger</a>
+    </div>
+    <div style="font-size:10px; line-height:1.7; color:#5C615C; margin-top:8px">The agnoshi launcher in <a href="#1a">1a</a> is live — type into it.</div>
+  </div>
+
+  <!-- ═══════════════════════ 1a SOVEREIGN MINIMAL ═══════════════════════ -->
+  <div id="1a" style="width:1080px; flex:none; display:flex; flex-direction:column; gap:20px; font-family:'IBM Plex Mono',monospace">
+    <div style="display:flex; align-items:baseline; gap:14px">
+      <div style="border:1px solid #37C978; color:#37C978; font:600 11px 'IBM Plex Mono',monospace; padding:3px 8px; letter-spacing:.1em">1a</div>
+      <div style="font:600 15px 'IBM Plex Mono',monospace; letter-spacing:.2em; color:#E6E8E6">SOVEREIGN MINIMAL</div>
+      <div style="font-size:11px; color:#9BA09B">green appears only when a signature verifies · radius 0 · feels like a signed artifact</div>
+    </div>
+
+    <!-- 1a DESKTOP -->
+    <div data-screen-label="1a Desktop" style="width:1080px; height:640px; position:relative; overflow:hidden; background:#101110; border:1px solid #2E302E; background-image:linear-gradient(#151615 1px, transparent 1px), linear-gradient(90deg, #151615 1px, transparent 1px); background-size:48px 48px">
+      <!-- top bar -->
+      <div style="height:28px; background:#161716; border-bottom:1px solid #2E302E; display:flex; align-items:center; justify-content:space-between; padding:0 12px; font-size:11px; color:#9BA09B">
+        <div style="display:flex; align-items:center; gap:14px">
+          <span style="color:#E6E8E6; font-weight:600; letter-spacing:.14em">AGNOS</span>
+          <span>workspace/main</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:16px">
+          <div style="display:flex; align-items:center; gap:7px; border:1px solid #2E302E; padding:2px 8px; background:#101110">
+            <span style="width:6px; height:6px; background:#37C978; display:inline-block; animation:agnosPulse 2.4s infinite"></span>
+            <span style="color:#E6E8E6">2 AGENTS</span>
+            <span style="color:#5C615C">|</span>
+            <span style="color:#37C978">CHAIN ✓</span>
+            <span style="color:#5C615C">#a41f…9c</span>
+          </div>
+          <span>14:32</span>
+        </div>
+      </div>
+
+      <!-- audit popover -->
+      <div style="position:absolute; top:34px; right:12px; width:330px; background:#161716; border:1px solid #2E302E; font-size:10px">
+        <div style="padding:8px 10px; border-bottom:1px solid #2E302E; display:flex; justify-content:space-between; color:#9BA09B; letter-spacing:.1em">
+          <span style="color:#E6E8E6; font-weight:600">AUDIT TRAIL</span><span>hash-chained</span>
+        </div>
+        <div style="display:flex; gap:10px; padding:7px 10px; border-bottom:1px solid #202220"><span style="color:#5C615C">14:31:52</span><span style="color:#E6E8E6; width:70px">yeoman-0</span><span style="color:#9BA09B; flex:1">read ~/notes (34 files)</span><span style="color:#37C978">✓</span></div>
+        <div style="display:flex; gap:10px; padding:7px 10px; border-bottom:1px solid #202220"><span style="color:#5C615C">14:31:07</span><span style="color:#E6E8E6; width:70px">yeoman-0</span><span style="color:#9BA09B; flex:1">wrote index → mneme</span><span style="color:#37C978">✓</span></div>
+        <div style="display:flex; gap:10px; padding:7px 10px; border-bottom:1px solid #202220"><span style="color:#5C615C">14:29:41</span><span style="color:#E6E8E6; width:70px">you</span><span style="color:#9BA09B; flex:1">opened nazar</span><span style="color:#37C978">✓</span></div>
+        <div style="display:flex; gap:10px; padding:7px 10px"><span style="color:#5C615C">14:28:12</span><span style="color:#E6E8E6; width:70px">delta.svc</span><span style="color:#9BA09B; flex:1">fetch remote — held</span><span style="border:1px dashed #5C615C; color:#9BA09B; padding:0 4px">▢</span></div>
+        <div style="padding:7px 10px; border-top:1px solid #2E302E; color:#5C615C">verify full chain →</div>
+      </div>
+
+      <!-- Nazar window -->
+      <div style="position:absolute; top:64px; left:40px; width:600px; background:#141514; border:1px solid #3A3D3A">
+        <div style="height:30px; display:flex; align-items:center; gap:10px; padding:0 10px; border-bottom:1px solid #2E302E; font-size:11px">
+          <span style="width:8px; height:8px; border:1px solid #5C615C; display:inline-block"></span>
+          <span style="color:#E6E8E6; font-weight:600; letter-spacing:.1em">NAZAR</span>
+          <span style="color:#5C615C">system monitor</span>
+          <span style="flex:1"></span>
+          <span style="border:1px dashed #5C615C; color:#9BA09B; padding:1px 6px; font-size:10px">▢ SANDBOX</span>
+          <span style="color:#37C978; font-size:10px">✓ signed</span>
+        </div>
+        <div style="display:flex; gap:0; padding:10px 12px 4px; font-size:10px; color:#5C615C; letter-spacing:.08em">
+          <span style="width:170px">PROCESS</span><span style="width:110px">ACTOR</span><span style="width:70px">CPU</span><span style="width:170px">TOUCHING</span><span>SIG</span>
+        </div>
+        <div style="display:flex; padding:7px 12px; font-size:11px; border-top:1px solid #202220"><span style="width:170px; color:#E6E8E6">agnoshi</span><span style="width:110px; color:#9BA09B">you</span><span style="width:70px; color:#9BA09B">0.4%</span><span style="width:170px; color:#5C615C">—</span><span style="color:#37C978">✓</span></div>
+        <div style="display:flex; padding:7px 12px; font-size:11px; border-top:1px solid #202220; background:#181A18"><span style="width:170px; color:#E6E8E6">yeoman-0</span><span style="width:110px; color:#9BA09B">agent</span><span style="width:70px; color:#9BA09B">2.1%</span><span style="width:170px; color:#9BA09B">~/notes · mneme.db</span><span style="color:#37C978">✓</span></div>
+        <div style="display:flex; padding:7px 12px; font-size:11px; border-top:1px solid #202220"><span style="width:170px; color:#E6E8E6">jalwa</span><span style="width:110px; color:#9BA09B">you</span><span style="width:70px; color:#9BA09B">1.2%</span><span style="width:170px; color:#9BA09B">~/media/tsotsi.flac</span><span style="color:#37C978">✓</span></div>
+        <div style="display:flex; padding:7px 12px; font-size:11px; border-top:1px solid #202220"><span style="width:170px; color:#E6E8E6">delta.svc</span><span style="width:110px; color:#9BA09B">agent</span><span style="width:70px; color:#9BA09B">0.0%</span><span style="width:170px; color:#9BA09B">net.local (held)</span><span style="color:#9BA09B">○</span></div>
+        <div style="display:flex; align-items:flex-end; gap:3px; height:44px; margin:12px 12px 12px; border-bottom:1px solid #2E302E">
+          <div style="width:14px; height:20%; background:#2E302E"></div><div style="width:14px; height:35%; background:#2E302E"></div><div style="width:14px; height:28%; background:#2E302E"></div><div style="width:14px; height:60%; background:#3A3D3A"></div><div style="width:14px; height:44%; background:#2E302E"></div><div style="width:14px; height:72%; background:#3A3D3A"></div><div style="width:14px; height:38%; background:#2E302E"></div><div style="width:14px; height:26%; background:#2E302E"></div><div style="width:14px; height:52%; background:#3A3D3A"></div><div style="width:14px; height:31%; background:#2E302E"></div>
+        </div>
+      </div>
+
+      <!-- dock -->
+      <div style="position:absolute; bottom:14px; left:50%; transform:translateX(-50%); display:flex; gap:1px; border:1px solid #2E302E; background:#2E302E">
+        <div style="width:42px; height:42px; background:#161716; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#C9CDC9; fill:none; stroke-width:1.5"><path d="M12 3 L19 6 L19 11 C19 15.8 16.2 19.3 12 21 C7.8 19.3 5 15.8 5 11 L5 6 Z"></path><circle cx="12" cy="11" r="2.2"></circle></svg></div>
+        <div style="width:42px; height:42px; background:#161716; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#C9CDC9; fill:none; stroke-width:1.5"><path d="M12 4.5 L20 19.5 L4 19.5 Z"></path></svg></div>
+        <div style="width:42px; height:42px; background:#161716; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#C9CDC9; fill:none; stroke-width:1.5"><circle cx="12" cy="12" r="8.2"></circle><path d="M10 8.6 L16 12 L10 15.4 Z" style="fill:#C9CDC9; stroke:none"></path></svg></div>
+        <div style="width:42px; height:42px; background:#161716; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#C9CDC9; fill:none; stroke-width:1.5"><rect x="4" y="6.5" width="16" height="11"></rect><line x1="9.5" y1="6.5" x2="9.5" y2="17.5"></line><line x1="4" y1="14.5" x2="20" y2="14.5"></line></svg></div>
+        <div style="width:42px; height:42px; background:#161716; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#C9CDC9; fill:none; stroke-width:1.5"><line x1="5" y1="9" x2="5" y2="15"></line><line x1="8.5" y1="6" x2="8.5" y2="18"></line><line x1="12" y1="10" x2="12" y2="14"></line><line x1="15.5" y1="4.5" x2="15.5" y2="19.5"></line><line x1="19" y1="8" x2="19" y2="16"></line></svg></div>
+        <div style="width:42px; height:42px; background:#161716; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#C9CDC9; fill:none; stroke-width:1.5"><rect x="4.5" y="4.5" width="11" height="11"></rect><circle cx="15" cy="15" r="4.8"></circle></svg></div>
+        <div style="width:42px; height:42px; background:#161716; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#C9CDC9; fill:none; stroke-width:1.5"><rect x="5.5" y="4" width="13" height="16"></rect><line x1="8.5" y1="8.5" x2="15.5" y2="8.5"></line><line x1="8.5" y1="12" x2="15.5" y2="12"></line><line x1="8.5" y1="15.5" x2="13" y2="15.5"></line></svg></div>
+        <div style="width:42px; height:42px; background:#161716; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#C9CDC9; fill:none; stroke-width:1.5"><circle cx="12" cy="12" r="8.2"></circle><circle cx="12" cy="12" r="1.4"></circle><line x1="12" y1="12" x2="16.5" y2="8.5"></line></svg></div>
+      </div>
+    </div>
+
+    <!-- 1a LAUNCHER — INTERACTIVE -->
+    <div data-screen-label="1a Agnoshi launcher (interactive)" style="width:1080px; background:#141514; border:1px solid #2E302E">
+      <div style="display:flex; align-items:center; gap:12px; padding:12px 16px; border-bottom:1px solid #2E302E">
+        <span style="font:600 12px 'IBM Plex Mono',monospace; letter-spacing:.18em; color:#E6E8E6">AGNOSHI</span>
+        <span style="font-size:10px; color:#5C615C">natural-language shell · ⌘space</span>
+        <span style="flex:1"></span>
+        <sc-if value="{{ showHints }}" hint-placeholder-val="{{ true }}">
+          <span style="font-size:10px; color:#37C978; border:1px solid #37C97855; padding:2px 8px">LIVE — type below</span>
+        </sc-if>
+        <button onClick="{{ setTalk }}" style="padding:5px 14px; border:1px solid #2E302E; background:{{ talkBg }}; color:{{ talkFg }}; font:500 10px 'IBM Plex Mono',monospace; letter-spacing:.12em; cursor:pointer">TALK</button>
+        <button onClick="{{ setGrid }}" style="padding:5px 14px; border:1px solid #2E302E; background:{{ gridBg }}; color:{{ gridFg }}; font:500 10px 'IBM Plex Mono',monospace; letter-spacing:.12em; cursor:pointer">GRID</button>
+      </div>
+
+      <sc-if value="{{ isTalk }}" hint-placeholder-val="{{ true }}">
+        <div style="padding:20px 16px 8px; display:flex; align-items:center; gap:10px">
+          <span style="color:#37C978; font-size:16px">❯</span>
+          <input value="{{ query }}" onChange="{{ onQuery }}" onKeyDown="{{ onKey }}" placeholder="ask anything — try “trim the first 30s from yesterday’s recording”" style="flex:1; background:transparent; border:none; outline:none; color:#E6E8E6; font:400 15px 'IBM Plex Mono',monospace; caret-color:#37C978">
+          <span style="width:9px; height:18px; background:#37C978; animation:agnosCaret 1.2s infinite"></span>
+        </div>
+        <div style="margin:12px 16px; border:1px solid #2E302E; background:#101110">
+          <div style="padding:8px 12px; border-bottom:1px solid #202220; font-size:10px; color:#5C615C; letter-spacing:.12em">AGENT INTERPRETATION — NOTHING RUNS UNTIL YOU APPROVE</div>
+          <sc-if value="{{ noInterp }}" hint-placeholder-val="{{ true }}">
+            <div style="padding:18px 12px; font-size:11px; color:#5C615C">agnoshi shows its reading of your request here, signed, before anything executes.</div>
+          </sc-if>
+          <sc-if value="{{ hasInterp }}" hint-placeholder-val="{{ false }}">
+            <div style="padding:14px 12px; display:flex; flex-direction:column; gap:10px">
+              <div style="font-size:13px; color:#E6E8E6">{{ intentText }}</div>
+              <div style="display:flex; gap:16px; font-size:11px; color:#9BA09B">
+                <span>AGENT <span style="color:#E6E8E6">{{ agentName }}</span></span>
+                <span>APP <span style="color:#E6E8E6">{{ appName }}</span></span>
+              </div>
+              <div style="display:flex; gap:8px; flex-wrap:wrap">
+                <sc-for list="{{ scopes }}" as="s" hint-placeholder-count="2">
+                  <span style="border:1px solid #2E302E; color:#9BA09B; font-size:10px; padding:3px 8px">{{ s }}</span>
+                </sc-for>
+              </div>
+              <div style="display:flex; align-items:center; gap:12px">
+                <sc-if value="{{ planVerified }}" hint-placeholder-val="{{ true }}">
+                  <span style="color:#37C978; font-size:11px">✓ plan signed · yeoman chain #{{ planHash }}</span>
+                </sc-if>
+                <sc-if value="{{ destructive }}" hint-placeholder-val="{{ false }}">
+                  <span style="border:1px dashed #9BA09B; color:#E6E8E6; font-size:11px; padding:2px 8px">▢ SANDBOXED — destructive scope held for confirmation</span>
+                </sc-if>
+                <span style="flex:1"></span>
+                <button onClick="{{ runPlan }}" style="border:1px solid #37C978; background:transparent; color:#37C978; font:600 11px 'IBM Plex Mono',monospace; letter-spacing:.12em; padding:6px 16px; cursor:pointer" style-hover="background:#37C978; color:#101110">EXECUTE ⏎</button>
+              </div>
+            </div>
+          </sc-if>
+        </div>
+        <div style="margin:0 16px 16px; border:1px solid #2E302E">
+          <div style="padding:8px 12px; border-bottom:1px solid #202220; font-size:10px; color:#5C615C; letter-spacing:.12em">EVENT LOG — HASH-CHAINED</div>
+          <sc-for list="{{ log }}" as="e" hint-placeholder-count="3">
+            <div style="display:flex; gap:12px; padding:6px 12px; font-size:11px; border-bottom:1px solid #1B1C1B">
+              <span style="color:{{ e.c }}">{{ e.mark }}</span>
+              <span style="color:#5C615C">#{{ e.h }}</span>
+              <span style="color:#5C615C">{{ e.t }}</span>
+              <span style="color:#E6E8E6; width:90px">{{ e.who }}</span>
+              <span style="color:#9BA09B; flex:1">{{ e.txt }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isGrid }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:16px; display:grid; grid-template-columns:repeat(8, 1fr); gap:1px; background:#2E302E; border:1px solid #2E302E; margin:16px">
+          <div style="background:#141514; padding:16px 8px; display:flex; flex-direction:column; align-items:center; gap:10px"><svg width="24" height="24" style="stroke:#C9CDC9; fill:none; stroke-width:1.5"><path d="M12 3 L19 6 L19 11 C19 15.8 16.2 19.3 12 21 C7.8 19.3 5 15.8 5 11 L5 6 Z"></path><circle cx="12" cy="11" r="2.2"></circle></svg><span style="font-size:9px; color:#9BA09B; letter-spacing:.08em">SECUREYEOMAN</span></div>
+          <div style="background:#141514; padding:16px 8px; display:flex; flex-direction:column; align-items:center; gap:10px"><svg width="24" height="24" style="stroke:#C9CDC9; fill:none; stroke-width:1.5"><path d="M12 4.5 L20 19.5 L4 19.5 Z"></path></svg><span style="font-size:9px; color:#9BA09B; letter-spacing:.08em">DELTA</span></div>
+          <div style="background:#141514; padding:16px 8px; display:flex; flex-direction:column; align-items:center; gap:10px"><svg width="24" height="24" style="stroke:#C9CDC9; fill:none; stroke-width:1.5"><circle cx="12" cy="12" r="8.2"></circle><path d="M10 8.6 L16 12 L10 15.4 Z" style="fill:#C9CDC9; stroke:none"></path></svg><span style="font-size:9px; color:#9BA09B; letter-spacing:.08em">JALWA</span></div>
+          <div style="background:#141514; padding:16px 8px; display:flex; flex-direction:column; align-items:center; gap:10px"><svg width="24" height="24" style="stroke:#C9CDC9; fill:none; stroke-width:1.5"><rect x="4" y="6.5" width="16" height="11"></rect><line x1="9.5" y1="6.5" x2="9.5" y2="17.5"></line><line x1="4" y1="14.5" x2="20" y2="14.5"></line></svg><span style="font-size:9px; color:#9BA09B; letter-spacing:.08em">TAZAMA</span></div>
+          <div style="background:#141514; padding:16px 8px; display:flex; flex-direction:column; align-items:center; gap:10px"><svg width="24" height="24" style="stroke:#C9CDC9; fill:none; stroke-width:1.5"><line x1="5" y1="9" x2="5" y2="15"></line><line x1="8.5" y1="6" x2="8.5" y2="18"></line><line x1="12" y1="10" x2="12" y2="14"></line><line x1="15.5" y1="4.5" x2="15.5" y2="19.5"></line><line x1="19" y1="8" x2="19" y2="16"></line></svg><span style="font-size:9px; color:#9BA09B; letter-spacing:.08em">SHRUTI</span></div>
+          <div style="background:#141514; padding:16px 8px; display:flex; flex-direction:column; align-items:center; gap:10px"><svg width="24" height="24" style="stroke:#C9CDC9; fill:none; stroke-width:1.5"><rect x="4.5" y="4.5" width="11" height="11"></rect><circle cx="15" cy="15" r="4.8"></circle></svg><span style="font-size:9px; color:#9BA09B; letter-spacing:.08em">RASA</span></div>
+          <div style="background:#141514; padding:16px 8px; display:flex; flex-direction:column; align-items:center; gap:10px"><svg width="24" height="24" style="stroke:#C9CDC9; fill:none; stroke-width:1.5"><rect x="5.5" y="4" width="13" height="16"></rect><line x1="8.5" y1="8.5" x2="15.5" y2="8.5"></line><line x1="8.5" y1="12" x2="15.5" y2="12"></line><line x1="8.5" y1="15.5" x2="13" y2="15.5"></line></svg><span style="font-size:9px; color:#9BA09B; letter-spacing:.08em">MNEME</span></div>
+          <div style="background:#141514; padding:16px 8px; display:flex; flex-direction:column; align-items:center; gap:10px"><svg width="24" height="24" style="stroke:#C9CDC9; fill:none; stroke-width:1.5"><circle cx="12" cy="12" r="8.2"></circle><circle cx="12" cy="12" r="1.4"></circle><line x1="12" y1="12" x2="16.5" y2="8.5"></line></svg><span style="font-size:9px; color:#9BA09B; letter-spacing:.08em">NAZAR</span></div>
+        </div>
+        <div style="padding:0 16px 14px; font-size:10px; color:#5C615C">grid is the fallback — all eight apps, signed builds only. TALK returns to the shell.</div>
+      </sc-if>
+    </div>
+
+    <!-- 1a ICONS -->
+    <div data-screen-label="1a Icon family" style="width:1080px; background:#141514; border:1px solid #2E302E; padding:16px; display:flex; gap:24px; align-items:flex-start">
+      <div style="flex:none; display:flex; flex-direction:column; gap:8px">
+        <div style="font-size:10px; color:#5C615C; letter-spacing:.12em">ICON GRID — 24PX</div>
+        <div style="width:96px; height:96px; position:relative; border:1px solid #2E302E; background-image:linear-gradient(#232523 1px, transparent 1px), linear-gradient(90deg, #232523 1px, transparent 1px); background-size:16px 16px">
+          <div style="position:absolute; inset:16px; border:1px dashed #3A3D3A"></div>
+          <div style="position:absolute; inset:8px; border:1px dashed #2E302E; border-radius:50%"></div>
+          <div style="position:absolute; left:47px; top:0; bottom:0; width:1px; background:#2E302E"></div>
+          <div style="position:absolute; top:47px; left:0; right:0; height:1px; background:#2E302E"></div>
+        </div>
+        <div style="font-size:9px; color:#5C615C; line-height:1.6">live area 20px<br>stroke 1.5px · butt caps<br>fills: play glyph only</div>
+      </div>
+      <div style="display:grid; grid-template-columns:repeat(8,1fr); gap:1px; background:#2E302E; border:1px solid #2E302E; flex:1">
+        <div style="background:#101110; height:104px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px"><svg width="24" height="24" style="stroke:#E6E8E6; fill:none; stroke-width:1.5; transform:scale(1.7)"><path d="M12 3 L19 6 L19 11 C19 15.8 16.2 19.3 12 21 C7.8 19.3 5 15.8 5 11 L5 6 Z"></path><circle cx="12" cy="11" r="2.2"></circle></svg><span style="font-size:9px; color:#5C615C; letter-spacing:.06em">SECUREYEOMAN</span></div>
+        <div style="background:#101110; height:104px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px"><svg width="24" height="24" style="stroke:#E6E8E6; fill:none; stroke-width:1.5; transform:scale(1.7)"><path d="M12 4.5 L20 19.5 L4 19.5 Z"></path></svg><span style="font-size:9px; color:#5C615C; letter-spacing:.06em">DELTA</span></div>
+        <div style="background:#101110; height:104px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px"><svg width="24" height="24" style="stroke:#E6E8E6; fill:none; stroke-width:1.5; transform:scale(1.7)"><circle cx="12" cy="12" r="8.2"></circle><path d="M10 8.6 L16 12 L10 15.4 Z" style="fill:#E6E8E6; stroke:none"></path></svg><span style="font-size:9px; color:#5C615C; letter-spacing:.06em">JALWA</span></div>
+        <div style="background:#101110; height:104px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px"><svg width="24" height="24" style="stroke:#E6E8E6; fill:none; stroke-width:1.5; transform:scale(1.7)"><rect x="4" y="6.5" width="16" height="11"></rect><line x1="9.5" y1="6.5" x2="9.5" y2="17.5"></line><line x1="4" y1="14.5" x2="20" y2="14.5"></line></svg><span style="font-size:9px; color:#5C615C; letter-spacing:.06em">TAZAMA</span></div>
+        <div style="background:#101110; height:104px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px"><svg width="24" height="24" style="stroke:#E6E8E6; fill:none; stroke-width:1.5; transform:scale(1.7)"><line x1="5" y1="9" x2="5" y2="15"></line><line x1="8.5" y1="6" x2="8.5" y2="18"></line><line x1="12" y1="10" x2="12" y2="14"></line><line x1="15.5" y1="4.5" x2="15.5" y2="19.5"></line><line x1="19" y1="8" x2="19" y2="16"></line></svg><span style="font-size:9px; color:#5C615C; letter-spacing:.06em">SHRUTI</span></div>
+        <div style="background:#101110; height:104px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px"><svg width="24" height="24" style="stroke:#E6E8E6; fill:none; stroke-width:1.5; transform:scale(1.7)"><rect x="4.5" y="4.5" width="11" height="11"></rect><circle cx="15" cy="15" r="4.8"></circle></svg><span style="font-size:9px; color:#5C615C; letter-spacing:.06em">RASA</span></div>
+        <div style="background:#101110; height:104px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px"><svg width="24" height="24" style="stroke:#E6E8E6; fill:none; stroke-width:1.5; transform:scale(1.7)"><rect x="5.5" y="4" width="13" height="16"></rect><line x1="8.5" y1="8.5" x2="15.5" y2="8.5"></line><line x1="8.5" y1="12" x2="15.5" y2="12"></line><line x1="8.5" y1="15.5" x2="13" y2="15.5"></line></svg><span style="font-size:9px; color:#5C615C; letter-spacing:.06em">MNEME</span></div>
+        <div style="background:#101110; height:104px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px"><svg width="24" height="24" style="stroke:#E6E8E6; fill:none; stroke-width:1.5; transform:scale(1.7)"><circle cx="12" cy="12" r="8.2"></circle><circle cx="12" cy="12" r="1.4"></circle><line x1="12" y1="12" x2="16.5" y2="8.5"></line></svg><span style="font-size:9px; color:#5C615C; letter-spacing:.06em">NAZAR</span></div>
+      </div>
+    </div>
+
+    <!-- 1a ANNOTATIONS -->
+    <sc-if value="{{ showAnnotations }}" hint-placeholder-val="{{ true }}">
+      <div data-screen-label="1a Annotations" style="width:1080px; border:1px dashed #3A3D3A; padding:18px; display:grid; grid-template-columns:1fr 1fr; gap:18px 32px; font-size:11px; line-height:1.7; color:#9BA09B">
+        <div><span style="color:#37C978; letter-spacing:.12em">TYPE</span><br>IBM Plex Mono 500/600 for UI, labels, data (10–15px, tabular figures). IBM Plex Sans only for long prose. Letter-spacing .08–.2em on labels.</div>
+        <div><span style="color:#37C978; letter-spacing:.12em">SPACING / RADIUS</span><br>4px base → 8 / 12 / 16 / 24 / 48. Radius 0 everywhere. 1px solid borders, no shadows, no gradients. Separation by hairline, never by elevation.</div>
+        <div><span style="color:#37C978; letter-spacing:.12em">ICON GRID</span><br>24px cell, 20px live area, 1.5px stroke, butt caps, 0.5px optical snap. One filled shape max per glyph (Jalwa’s play mark).</div>
+        <div><span style="color:#37C978; letter-spacing:.12em">ACCENT SEMANTICS</span><br><span style="color:#37C978">#37C978</span> = signature verified — never used decoratively. Unverified = hollow ○, gray. Sandboxed = 1px dashed border + ▢. Danger = inverse video (light on dark block), not red.</div>
+        <div style="grid-column:1 / -1">
+          <span style="color:#37C978; letter-spacing:.12em">NOTIFICATIONS — AGENT VS HUMAN</span>
+          <div style="display:flex; gap:16px; margin-top:10px">
+            <div style="flex:1; border:1px solid #2E302E; background:#141514; padding:10px 12px; display:flex; gap:10px; align-items:baseline"><span style="width:8px; height:8px; background:#9BA09B; flex:none; align-self:center"></span><span style="color:#5C615C">#8b02</span><span style="color:#E6E8E6">yeoman-0</span><span style="color:#9BA09B; flex:1">finished indexing — 34 files → mneme</span><span style="color:#37C978">✓</span></div>
+            <div style="flex:1; border:1px solid #2E302E; background:#141514; padding:10px 12px; display:flex; gap:10px; align-items:center"><span style="width:8px; height:8px; background:#9BA09B; border-radius:50%; flex:none"></span><span style="color:#E6E8E6; font-family:'IBM Plex Sans',sans-serif">Amara</span><span style="color:#9BA09B; flex:1; font-family:'IBM Plex Sans',sans-serif">“review the draft when you’re free”</span></div>
+          </div>
+          <div style="margin-top:8px; font-size:10px; color:#5C615C">agents: mono type, square marker, hash chip, verification tick · humans: sans type, round marker, no hash — provenance readable before content.</div>
+        </div>
+      </div>
+    </sc-if>
+  </div>
+
+  <!-- ═══════════════════════ 1b WARM TERMINAL ═══════════════════════ -->
+  <div id="1b" style="width:1080px; flex:none; display:flex; flex-direction:column; gap:20px; font-family:'JetBrains Mono',monospace">
+    <div style="display:flex; align-items:baseline; gap:14px">
+      <div style="border:1px solid #E5A552; color:#E5A552; font:600 11px 'JetBrains Mono',monospace; padding:3px 8px; letter-spacing:.1em; border-radius:4px">1b</div>
+      <div style="font:600 15px 'JetBrains Mono',monospace; letter-spacing:.2em; color:#EFE3CD">WARM TERMINAL</div>
+      <div style="font-size:11px; color:#A79A85">amber on warm gray · restrained glow · a descendant of serious workstation UIs</div>
+    </div>
+
+    <!-- 1b DESKTOP -->
+    <div data-screen-label="1b Desktop" style="width:1080px; height:640px; position:relative; overflow:hidden; background:#1C1815; border:1px solid #3D362E; border-radius:8px; background-image:radial-gradient(ellipse 900px 500px at 50% 110%, #241E18 0%, transparent 70%)">
+      <div style="height:30px; display:flex; align-items:center; justify-content:space-between; padding:0 14px; font-size:11px; color:#A79A85; border-bottom:1px solid #2E2822">
+        <div style="display:flex; align-items:center; gap:14px"><span style="color:#E5A552; font-weight:700; letter-spacing:.14em; text-shadow:0 0 10px rgba(229,165,82,.35)">agnos</span><span>anga · main</span></div>
+        <div style="display:flex; align-items:center; gap:14px">
+          <div style="display:flex; align-items:center; gap:8px; background:#241F1A; border:1px solid #3D362E; border-radius:20px; padding:2px 10px">
+            <span style="width:6px; height:6px; border-radius:50%; background:#A3C58F; display:inline-block; animation:agnosPulse 2.4s infinite"></span>
+            <span style="color:#EFE3CD">2 agents</span>
+            <span style="color:#5C5347">·</span>
+            <span style="color:#A3C58F">chain ok</span>
+          </div>
+          <span>14:32</span>
+        </div>
+      </div>
+
+      <!-- Delta window -->
+      <div style="position:absolute; top:66px; left:46px; width:620px; background:#221D18; border:1px solid #3D362E; border-radius:8px; box-shadow:0 12px 40px rgba(0,0,0,.4)">
+        <div style="height:32px; display:flex; align-items:center; gap:10px; padding:0 12px; border-bottom:1px solid #2E2822; font-size:11px">
+          <span style="color:#EFE3CD; font-weight:700; letter-spacing:.1em">delta</span>
+          <span style="color:#5C5347">/</span><span style="color:#A79A85">agnos/core</span>
+          <span style="flex:1"></span>
+          <span style="border:1px dashed #E5A552; color:#E5A552; padding:1px 8px; font-size:10px; border-radius:10px">sandbox: net.local</span>
+          <span style="color:#A3C58F; font-size:10px">✓ signed</span>
+        </div>
+        <div style="padding:10px 12px 4px; font-size:10px; color:#5C5347; letter-spacing:.08em">branch main · 4 commits today · all signatures verified</div>
+        <div style="display:flex; gap:12px; padding:8px 12px; font-size:11px; border-top:1px solid #2E2822"><span style="color:#E5A552">9c2e41f</span><span style="color:#EFE3CD; flex:1">sched: idle agents park at 0 cpu</span><span style="color:#A79A85">amara</span><span style="color:#A3C58F">✓</span></div>
+        <div style="display:flex; gap:12px; padding:8px 12px; font-size:11px; border-top:1px solid #2E2822; background:#262019"><span style="color:#E5A552">4b7d902</span><span style="color:#EFE3CD; flex:1">mneme: dedupe index shards</span><span style="color:#A79A85">yeoman-0 ⚙</span><span style="color:#A3C58F">✓</span></div>
+        <div style="display:flex; gap:12px; padding:8px 12px; font-size:11px; border-top:1px solid #2E2822"><span style="color:#E5A552">e01a6c8</span><span style="color:#EFE3CD; flex:1">jalwa: gapless flac</span><span style="color:#A79A85">amara</span><span style="color:#A3C58F">✓</span></div>
+        <div style="display:flex; gap:12px; padding:8px 12px; font-size:11px; border-top:1px solid #2E2822"><span style="color:#E5A552">77f10b3</span><span style="color:#A79A85; flex:1">vendor sync — signature pending</span><span style="color:#A79A85">delta.svc ⚙</span><span style="color:#A79A85">○</span></div>
+        <div style="padding:8px 12px; border-top:1px solid #2E2822; font-size:10px; color:#5C5347">⚙ = committed by an agent, on your behalf, in its own sandbox</div>
+      </div>
+
+      <!-- presence tray, bottom right -->
+      <div style="position:absolute; bottom:14px; right:14px; width:250px; background:#241F1A; border:1px solid #3D362E; border-radius:8px; font-size:10px">
+        <div style="padding:7px 10px; border-bottom:1px solid #2E2822; color:#A79A85; letter-spacing:.1em; display:flex; justify-content:space-between"><span style="color:#EFE3CD">agents</span><span style="color:#A3C58F">audit →</span></div>
+        <div style="display:flex; gap:8px; padding:6px 10px; align-items:center"><span style="width:6px; height:6px; border-radius:50%; background:#A3C58F"></span><span style="color:#EFE3CD">yeoman-0</span><span style="color:#5C5347; flex:1">~/notes</span><span style="color:#A3C58F">✓</span></div>
+        <div style="display:flex; gap:8px; padding:6px 10px; align-items:center"><span style="width:6px; height:6px; border-radius:50%; border:1px dashed #E5A552"></span><span style="color:#EFE3CD">delta.svc</span><span style="color:#5C5347; flex:1">net.local — held</span><span style="color:#E5A552">▢</span></div>
+      </div>
+
+      <!-- dock -->
+      <div style="position:absolute; bottom:14px; left:50%; transform:translateX(-50%); display:flex; gap:6px; background:#241F1A; border:1px solid #3D362E; border-radius:12px; padding:6px">
+        <div style="width:40px; height:40px; border-radius:8px; background:#2C251E; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#E5A552; fill:none; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round"><path d="M12 3 L19 6 L19 11 C19 15.8 16.2 19.3 12 21 C7.8 19.3 5 15.8 5 11 L5 6 Z"></path><circle cx="12" cy="11" r="2.2"></circle></svg></div>
+        <div style="width:40px; height:40px; border-radius:8px; background:#2C251E; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#E5A552; fill:none; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round"><path d="M12 4.5 L20 19.5 L4 19.5 Z"></path></svg></div>
+        <div style="width:40px; height:40px; border-radius:8px; background:#2C251E; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#E5A552; fill:none; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round"><circle cx="12" cy="12" r="8.2"></circle><path d="M10 8.6 L16 12 L10 15.4 Z" style="fill:#E5A552; stroke:none"></path></svg></div>
+        <div style="width:40px; height:40px; border-radius:8px; background:#2C251E; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#E5A552; fill:none; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round"><rect x="4" y="6.5" width="16" height="11" rx="2"></rect><line x1="9.5" y1="6.5" x2="9.5" y2="17.5"></line><line x1="4" y1="14.5" x2="20" y2="14.5"></line></svg></div>
+        <div style="width:40px; height:40px; border-radius:8px; background:#2C251E; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#E5A552; fill:none; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round"><line x1="5" y1="9" x2="5" y2="15"></line><line x1="8.5" y1="6" x2="8.5" y2="18"></line><line x1="12" y1="10" x2="12" y2="14"></line><line x1="15.5" y1="4.5" x2="15.5" y2="19.5"></line><line x1="19" y1="8" x2="19" y2="16"></line></svg></div>
+        <div style="width:40px; height:40px; border-radius:8px; background:#2C251E; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#E5A552; fill:none; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round"><rect x="4.5" y="4.5" width="11" height="11" rx="2"></rect><circle cx="15" cy="15" r="4.8"></circle></svg></div>
+        <div style="width:40px; height:40px; border-radius:8px; background:#2C251E; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#E5A552; fill:none; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round"><rect x="5.5" y="4" width="13" height="16" rx="2"></rect><line x1="8.5" y1="8.5" x2="15.5" y2="8.5"></line><line x1="8.5" y1="12" x2="15.5" y2="12"></line><line x1="8.5" y1="15.5" x2="13" y2="15.5"></line></svg></div>
+        <div style="width:40px; height:40px; border-radius:8px; background:#2C251E; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#E5A552; fill:none; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round"><circle cx="12" cy="12" r="8.2"></circle><circle cx="12" cy="12" r="1.4"></circle><line x1="12" y1="12" x2="16.5" y2="8.5"></line></svg></div>
+      </div>
+    </div>
+
+    <!-- 1b LAUNCHER — two states -->
+    <div style="display:flex; gap:20px">
+      <div data-screen-label="1b Agnoshi talk state" style="flex:1; background:#221D18; border:1px solid #3D362E; border-radius:8px; overflow:hidden">
+        <div style="padding:10px 14px; border-bottom:1px solid #2E2822; display:flex; justify-content:space-between; font-size:10px; color:#A79A85"><span style="color:#E5A552; letter-spacing:.14em; font-weight:700">agnoshi</span><span>state 1 — conversation</span></div>
+        <div style="padding:16px 14px; display:flex; flex-direction:column; gap:12px; font-size:12px">
+          <div style="color:#EFE3CD"><span style="color:#E5A552">❯</span> pull yesterday’s screen recording and cut the first 30 seconds</div>
+          <div style="border:1px solid #3D362E; border-radius:6px; background:#1C1815; padding:12px">
+            <div style="font-size:10px; color:#5C5347; letter-spacing:.1em; margin-bottom:8px">tazama.svc proposes — nothing runs yet</div>
+            <div style="color:#A79A85; line-height:1.8">1 · locate <span style="color:#EFE3CD">screen-2026-07-09.mkv</span> (mneme index)<br>2 · open trim session at 00:30 → end</div>
+            <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap">
+              <span style="border:1px solid #3D362E; border-radius:10px; color:#A79A85; font-size:10px; padding:2px 8px">read · ~/video</span>
+              <span style="border:1px solid #3D362E; border-radius:10px; color:#A79A85; font-size:10px; padding:2px 8px">write · ~/video/drafts</span>
+            </div>
+            <div style="display:flex; align-items:center; gap:10px; margin-top:12px">
+              <span style="color:#A3C58F; font-size:11px">✓ signature verified · sandboxed fs</span>
+              <span style="flex:1"></span>
+              <span style="border:1px solid #E5A552; color:#E5A552; border-radius:6px; font-size:11px; padding:4px 12px">approve ⏎</span>
+              <span style="color:#5C5347; font-size:11px">refine…</span>
+            </div>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px; color:#5C5347"><span style="color:#E5A552">❯</span><span style="width:8px; height:15px; background:#E5A552; animation:agnosCaret 1.2s infinite; box-shadow:0 0 8px rgba(229,165,82,.5)"></span></div>
+        </div>
+      </div>
+      <div data-screen-label="1b Agnoshi grid state" style="flex:1; background:#221D18; border:1px solid #3D362E; border-radius:8px; overflow:hidden">
+        <div style="padding:10px 14px; border-bottom:1px solid #2E2822; display:flex; justify-content:space-between; font-size:10px; color:#A79A85"><span style="color:#E5A552; letter-spacing:.14em; font-weight:700">agnoshi</span><span>state 2 — grid fallback (tab)</span></div>
+        <div style="padding:16px 14px">
+          <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:10px">
+            <div style="background:#2C251E; border-radius:10px; padding:14px 6px; display:flex; flex-direction:column; align-items:center; gap:8px"><svg width="24" height="24" style="stroke:#E5A552; fill:none; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round"><path d="M12 3 L19 6 L19 11 C19 15.8 16.2 19.3 12 21 C7.8 19.3 5 15.8 5 11 L5 6 Z"></path><circle cx="12" cy="11" r="2.2"></circle></svg><span style="font-size:9px; color:#A79A85">secureyeoman</span></div>
+            <div style="background:#2C251E; border-radius:10px; padding:14px 6px; display:flex; flex-direction:column; align-items:center; gap:8px"><svg width="24" height="24" style="stroke:#E5A552; fill:none; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round"><path d="M12 4.5 L20 19.5 L4 19.5 Z"></path></svg><span style="font-size:9px; color:#A79A85">delta</span></div>
+            <div style="background:#2C251E; border-radius:10px; padding:14px 6px; display:flex; flex-direction:column; align-items:center; gap:8px"><svg width="24" height="24" style="stroke:#E5A552; fill:none; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round"><circle cx="12" cy="12" r="8.2"></circle><path d="M10 8.6 L16 12 L10 15.4 Z" style="fill:#E5A552; stroke:none"></path></svg><span style="font-size:9px; color:#A79A85">jalwa</span></div>
+            <div style="background:#2C251E; border-radius:10px; padding:14px 6px; display:flex; flex-direction:column; align-items:center; gap:8px"><svg width="24" height="24" style="stroke:#E5A552; fill:none; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round"><rect x="4" y="6.5" width="16" height="11" rx="2"></rect><line x1="9.5" y1="6.5" x2="9.5" y2="17.5"></line><line x1="4" y1="14.5" x2="20" y2="14.5"></line></svg><span style="font-size:9px; color:#A79A85">tazama</span></div>
+            <div style="background:#2C251E; border-radius:10px; padding:14px 6px; display:flex; flex-direction:column; align-items:center; gap:8px"><svg width="24" height="24" style="stroke:#E5A552; fill:none; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round"><line x1="5" y1="9" x2="5" y2="15"></line><line x1="8.5" y1="6" x2="8.5" y2="18"></line><line x1="12" y1="10" x2="12" y2="14"></line><line x1="15.5" y1="4.5" x2="15.5" y2="19.5"></line><line x1="19" y1="8" x2="19" y2="16"></line></svg><span style="font-size:9px; color:#A79A85">shruti</span></div>
+            <div style="background:#2C251E; border-radius:10px; padding:14px 6px; display:flex; flex-direction:column; align-items:center; gap:8px"><svg width="24" height="24" style="stroke:#E5A552; fill:none; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round"><rect x="4.5" y="4.5" width="11" height="11" rx="2"></rect><circle cx="15" cy="15" r="4.8"></circle></svg><span style="font-size:9px; color:#A79A85">rasa</span></div>
+            <div style="background:#2C251E; border-radius:10px; padding:14px 6px; display:flex; flex-direction:column; align-items:center; gap:8px"><svg width="24" height="24" style="stroke:#E5A552; fill:none; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round"><rect x="5.5" y="4" width="13" height="16" rx="2"></rect><line x1="8.5" y1="8.5" x2="15.5" y2="8.5"></line><line x1="8.5" y1="12" x2="15.5" y2="12"></line><line x1="8.5" y1="15.5" x2="13" y2="15.5"></line></svg><span style="font-size:9px; color:#A79A85">mneme</span></div>
+            <div style="background:#2C251E; border-radius:10px; padding:14px 6px; display:flex; flex-direction:column; align-items:center; gap:8px"><svg width="24" height="24" style="stroke:#E5A552; fill:none; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round"><circle cx="12" cy="12" r="8.2"></circle><circle cx="12" cy="12" r="1.4"></circle><line x1="12" y1="12" x2="16.5" y2="8.5"></line></svg><span style="font-size:9px; color:#A79A85">nazar</span></div>
+          </div>
+          <div style="margin-top:12px; font-size:10px; color:#5C5347">tab toggles grid · typing anything returns to conversation</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 1b ANNOTATIONS -->
+    <sc-if value="{{ showAnnotations }}" hint-placeholder-val="{{ true }}">
+      <div data-screen-label="1b Annotations" style="width:1080px; border:1px dashed #3D362E; border-radius:8px; padding:18px; display:grid; grid-template-columns:1fr 1fr; gap:18px 32px; font-size:11px; line-height:1.7; color:#A79A85">
+        <div><span style="color:#E5A552; letter-spacing:.12em">type</span><br>JetBrains Mono throughout — 400 body, 700 identifiers (10–15px). No second family: hierarchy from weight, color temperature, and case.</div>
+        <div><span style="color:#E5A552; letter-spacing:.12em">spacing / radius</span><br>4px base → 8 / 12 / 16 / 24. Radius 6px surfaces, 8px windows, 10–20px pills. One soft shadow tier for windows only. Glow budget: cursor + wordmark, nothing else.</div>
+        <div><span style="color:#E5A552; letter-spacing:.12em">icon grid</span><br>Same 24px family as <a href="#1a">1a</a>, but round caps/joins and rx 2 on rects — warmth from terminals, not new geometry.</div>
+        <div><span style="color:#E5A552; letter-spacing:.12em">accent semantics</span><br>amber <span style="color:#E5A552">#E5A552</span> = attention / awaiting-you. sage <span style="color:#A3C58F">#A3C58F</span> = verified. dashed amber = sandboxed / held. gray ○ = unverified. Verified is never amber — “needs you” and “safe” must never share a hue.</div>
+        <div style="grid-column:1 / -1">
+          <span style="color:#E5A552; letter-spacing:.12em">notifications — agent vs human</span>
+          <div style="display:flex; gap:16px; margin-top:10px">
+            <div style="flex:1; border:1px solid #3D362E; border-radius:6px; background:#221D18; padding:10px 12px; display:flex; gap:10px; align-items:baseline"><span style="color:#E5A552">❯</span><span style="color:#EFE3CD">tazama.svc</span><span style="color:#A79A85; flex:1">trim ready for review — draft-04.mkv</span><span style="color:#5C5347">#4b7d</span><span style="color:#A3C58F">✓</span></div>
+            <div style="flex:1; border:1px solid #3D362E; border-radius:6px; background:#221D18; padding:10px 12px; display:flex; gap:10px; align-items:center"><span style="width:18px; height:18px; border-radius:50%; background:#3D362E; color:#EFE3CD; font-size:9px; display:flex; align-items:center; justify-content:center">AM</span><span style="color:#EFE3CD">amara</span><span style="color:#A79A85; flex:1">“call when the mix is done?”</span></div>
+          </div>
+          <div style="margin-top:8px; font-size:10px; color:#5C5347">agents: ❯ prompt glyph + hash + tick · humans: avatar chip, no hash. Agent toasts queue silently; human toasts may chime.</div>
+        </div>
+      </div>
+    </sc-if>
+  </div>
+
+  <!-- ═══════════════════════ 1c PAPER LEDGER ═══════════════════════ -->
+  <div id="1c" style="width:1080px; flex:none; display:flex; flex-direction:column; gap:20px; font-family:'Spectral',serif">
+    <div style="display:flex; align-items:baseline; gap:14px">
+      <div style="border:1px solid #B04A32; color:#B04A32; font:600 11px 'IBM Plex Mono',monospace; padding:3px 8px; letter-spacing:.1em">1c</div>
+      <div style="font:600 16px 'Spectral',serif; letter-spacing:.14em; color:#F0EDE4">PAPER LEDGER</div>
+      <div style="font:400 11px 'IBM Plex Mono',monospace; color:#9BA09B">ink on off-white · thin rules and stamps · the audit log as identity</div>
+    </div>
+
+    <!-- 1c DESKTOP -->
+    <div data-screen-label="1c Desktop" style="width:1080px; height:640px; position:relative; overflow:hidden; background:#F5F2EA; border:1px solid #D9D2C2">
+      <div style="height:32px; display:flex; align-items:center; justify-content:space-between; padding:0 16px; border-bottom:1px solid #D9D2C2; background:#FCFAF4">
+        <div style="display:flex; align-items:baseline; gap:14px"><span style="font:600 13px 'Spectral',serif; letter-spacing:.18em; color:#211E19">AGNOS</span><span style="font:400 10px 'IBM Plex Mono',monospace; color:#6E675B">folio · main</span></div>
+        <div style="display:flex; align-items:center; gap:14px; font:400 10px 'IBM Plex Mono',monospace; color:#6E675B">
+          <span>2 agents at work</span><span style="color:#33684C">chain intact ✓</span><span>14:32</span>
+        </div>
+      </div>
+
+      <!-- ledger strip, right edge -->
+      <div style="position:absolute; top:32px; right:0; bottom:0; width:190px; background:#FCFAF4; border-left:1px solid #D9D2C2; font:400 9px 'IBM Plex Mono',monospace; color:#6E675B">
+        <div style="padding:10px 12px; border-bottom:1px solid #D9D2C2; display:flex; justify-content:space-between; letter-spacing:.12em"><span style="color:#211E19; font-weight:500">LEDGER</span><span style="animation:agnosPulse 2.4s infinite">● live</span></div>
+        <div style="padding:8px 12px; border-bottom:1px solid #EAE4D6; line-height:1.7">14:31:52 · yeoman-0<br><span style="color:#211E19">read ~/notes · 34 files</span><br>#c41f9a2e <span style="color:#33684C">✓</span></div>
+        <div style="padding:8px 12px; border-bottom:1px solid #EAE4D6; line-height:1.7">14:31:07 · yeoman-0<br><span style="color:#211E19">wrote index → mneme</span><br>#8b02de11 <span style="color:#33684C">✓</span></div>
+        <div style="padding:8px 12px; border-bottom:1px solid #EAE4D6; line-height:1.7; position:relative">14:28:12 · delta.svc<br><span style="color:#211E19">fetch remote</span><br>#77f10b39
+          <span style="position:absolute; right:8px; top:10px; width:34px; height:34px; border:1.5px solid #B04A32; border-radius:50%; color:#B04A32; font-size:7px; display:flex; align-items:center; justify-content:center; transform:rotate(-12deg); letter-spacing:.05em">HELD</span>
+        </div>
+        <div style="padding:8px 12px; border-bottom:1px solid #EAE4D6; line-height:1.7">14:26:40 · you<br><span style="color:#211E19">opened mneme / field notes</span><br>#5d90aa17 <span style="color:#33684C">✓</span></div>
+        <div style="position:absolute; bottom:0; left:0; right:0; padding:10px 12px; border-top:1px solid #D9D2C2; color:#33684C">every row hash-chained ✓<br><span style="color:#6E675B">click any row → full proof</span></div>
+      </div>
+
+      <!-- Mneme window -->
+      <div style="position:absolute; top:70px; left:48px; width:560px; background:#FCFAF4; border:1px solid #C9C1AE; box-shadow:2px 2px 0 #E3DCCB">
+        <div style="height:34px; display:flex; align-items:center; gap:12px; padding:0 14px; border-bottom:1px solid #D9D2C2">
+          <span style="font:600 12px 'Spectral',serif; letter-spacing:.14em; color:#211E19">MNEME</span>
+          <span style="font:400 10px 'IBM Plex Mono',monospace; color:#6E675B">notebook / field notes</span>
+          <span style="flex:1"></span>
+          <span style="font:400 9px 'IBM Plex Mono',monospace; color:#6E675B; border:1px dashed #B04A32; padding:1px 6px">SANDBOX ▢</span>
+          <span style="font:400 9px 'IBM Plex Mono',monospace; color:#33684C">SEALED ✓</span>
+        </div>
+        <div style="padding:18px 22px; display:flex; gap:18px">
+          <div style="flex:1; font:400 13px 'Spectral',serif; color:#211E19; line-height:1.8">
+            <div style="font-weight:600; font-size:15px; margin-bottom:6px">On self-hosting the toolchain</div>
+            The whole system should be rebuildable from source on the machine it runs on, by its owner, in an afternoon. Anything that can’t be is a dependency we don’t control — and a signature we can’t make.
+            <div style="border-top:1px solid #EAE4D6; margin-top:14px; padding-top:8px; font:400 9px 'IBM Plex Mono',monospace; color:#6E675B">entry #5d90aa17 · sealed 14:26 · linked from yeoman-0’s index <span style="color:#33684C">✓</span></div>
+          </div>
+          <div style="width:120px; flex:none; border-left:1px solid #EAE4D6; padding-left:12px; font:italic 400 10px 'Spectral',serif; color:#6E675B; line-height:1.7">yeoman-0 suggests: link to “radically small” note from Tuesday? <span style="font-style:normal; font-family:'IBM Plex Mono',monospace; font-size:8px; color:#33684C">agent · ✓</span></div>
+        </div>
+      </div>
+
+      <!-- dock as index tabs, bottom -->
+      <div style="position:absolute; bottom:0; left:48px; display:flex; gap:2px">
+        <div style="width:56px; height:44px; background:#FCFAF4; border:1px solid #D9D2C2; border-bottom:none; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#211E19; fill:none; stroke-width:1.2"><path d="M12 3 L19 6 L19 11 C19 15.8 16.2 19.3 12 21 C7.8 19.3 5 15.8 5 11 L5 6 Z"></path><circle cx="12" cy="11" r="2.2"></circle></svg></div>
+        <div style="width:56px; height:44px; background:#FCFAF4; border:1px solid #D9D2C2; border-bottom:none; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#211E19; fill:none; stroke-width:1.2"><path d="M12 4.5 L20 19.5 L4 19.5 Z"></path></svg></div>
+        <div style="width:56px; height:44px; background:#FCFAF4; border:1px solid #D9D2C2; border-bottom:none; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#211E19; fill:none; stroke-width:1.2"><circle cx="12" cy="12" r="8.2"></circle><path d="M10 8.6 L16 12 L10 15.4 Z"></path></svg></div>
+        <div style="width:56px; height:44px; background:#FCFAF4; border:1px solid #D9D2C2; border-bottom:none; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#211E19; fill:none; stroke-width:1.2"><rect x="4" y="6.5" width="16" height="11"></rect><line x1="9.5" y1="6.5" x2="9.5" y2="17.5"></line><line x1="4" y1="14.5" x2="20" y2="14.5"></line></svg></div>
+        <div style="width:56px; height:44px; background:#FCFAF4; border:1px solid #D9D2C2; border-bottom:none; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#211E19; fill:none; stroke-width:1.2"><line x1="5" y1="9" x2="5" y2="15"></line><line x1="8.5" y1="6" x2="8.5" y2="18"></line><line x1="12" y1="10" x2="12" y2="14"></line><line x1="15.5" y1="4.5" x2="15.5" y2="19.5"></line><line x1="19" y1="8" x2="19" y2="16"></line></svg></div>
+        <div style="width:56px; height:44px; background:#FCFAF4; border:1px solid #D9D2C2; border-bottom:none; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#211E19; fill:none; stroke-width:1.2"><rect x="4.5" y="4.5" width="11" height="11"></rect><circle cx="15" cy="15" r="4.8"></circle></svg></div>
+        <div style="width:56px; height:44px; background:#FCFAF4; border:1px solid #D9D2C2; border-bottom:none; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#211E19; fill:none; stroke-width:1.2"><rect x="5.5" y="4" width="13" height="16"></rect><line x1="8.5" y1="8.5" x2="15.5" y2="8.5"></line><line x1="8.5" y1="12" x2="15.5" y2="12"></line><line x1="8.5" y1="15.5" x2="13" y2="15.5"></line></svg></div>
+        <div style="width:56px; height:44px; background:#FCFAF4; border:1px solid #D9D2C2; border-bottom:none; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#211E19; fill:none; stroke-width:1.2"><circle cx="12" cy="12" r="8.2"></circle><circle cx="12" cy="12" r="1.4"></circle><line x1="12" y1="12" x2="16.5" y2="8.5"></line></svg></div>
+      </div>
+    </div>
+
+    <!-- 1c LAUNCHER — two states -->
+    <div style="display:flex; gap:20px">
+      <div data-screen-label="1c Agnoshi talk state" style="flex:1; background:#FCFAF4; border:1px solid #D9D2C2">
+        <div style="padding:10px 16px; border-bottom:1px solid #D9D2C2; display:flex; justify-content:space-between; font:400 10px 'IBM Plex Mono',monospace; color:#6E675B"><span style="color:#211E19; letter-spacing:.14em; font-weight:500">AGNOSHI</span><span>state 1 — entry & proposed ledger line</span></div>
+        <div style="padding:18px 20px">
+          <div style="font:italic 400 15px 'Spectral',serif; color:#211E19; border-bottom:1px solid #211E19; padding-bottom:8px">file these receipts under march and total them<span style="display:inline-block; width:8px; height:16px; background:#211E19; margin-left:4px; vertical-align:text-bottom; animation:agnosCaret 1.2s infinite"></span></div>
+          <div style="margin-top:14px; border:1px solid #D9D2C2; position:relative">
+            <div style="padding:8px 12px; border-bottom:1px solid #EAE4D6; font:400 9px 'IBM Plex Mono',monospace; color:#6E675B; letter-spacing:.12em">PROPOSED ENTRY — UNSEALED UNTIL YOU APPROVE</div>
+            <div style="display:flex; padding:8px 12px; font:400 11px 'IBM Plex Mono',monospace; border-bottom:1px solid #EAE4D6"><span style="width:90px; color:#6E675B">actor</span><span style="color:#211E19">yeoman-0 → rasa.svc, mneme.svc</span></div>
+            <div style="display:flex; padding:8px 12px; font:400 11px 'IBM Plex Mono',monospace; border-bottom:1px solid #EAE4D6"><span style="width:90px; color:#6E675B">action</span><span style="color:#211E19">ocr 12 receipts · file → ledgers/march · sum</span></div>
+            <div style="display:flex; padding:8px 12px; font:400 11px 'IBM Plex Mono',monospace"><span style="width:90px; color:#6E675B">scope</span><span style="color:#211E19">read ~/scans · write ledgers/march</span></div>
+            <div style="position:absolute; right:14px; bottom:44px; width:64px; height:64px; border:1.5px dashed #B04A32; border-radius:50%; color:#B04A32; font:500 8px 'IBM Plex Mono',monospace; display:flex; align-items:center; justify-content:center; text-align:center; transform:rotate(-14deg); letter-spacing:.08em">AWAITING<br>SEAL</div>
+            <div style="display:flex; gap:14px; align-items:center; padding:10px 12px; border-top:1px solid #D9D2C2">
+              <span style="border:1px solid #211E19; background:#211E19; color:#F5F2EA; font:500 10px 'IBM Plex Mono',monospace; letter-spacing:.1em; padding:5px 14px">SEAL &amp; EXECUTE</span>
+              <span style="font:400 10px 'IBM Plex Mono',monospace; color:#6E675B">amend…</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div data-screen-label="1c Agnoshi grid state" style="flex:1; background:#FCFAF4; border:1px solid #D9D2C2">
+        <div style="padding:10px 16px; border-bottom:1px solid #D9D2C2; display:flex; justify-content:space-between; font:400 10px 'IBM Plex Mono',monospace; color:#6E675B"><span style="color:#211E19; letter-spacing:.14em; font-weight:500">AGNOSHI</span><span>state 2 — index (grid fallback)</span></div>
+        <div style="padding:18px 20px; display:grid; grid-template-columns:repeat(4,1fr); gap:12px">
+          <div style="border:1px solid #D9D2C2; padding:14px 6px 10px; display:flex; flex-direction:column; align-items:center; gap:8px"><span style="width:40px; height:40px; border:1px solid #211E19; border-radius:50%; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#211E19; fill:none; stroke-width:1.2; transform:scale(.8)"><path d="M12 3 L19 6 L19 11 C19 15.8 16.2 19.3 12 21 C7.8 19.3 5 15.8 5 11 L5 6 Z"></path><circle cx="12" cy="11" r="2.2"></circle></svg></span><span style="font:400 9px 'IBM Plex Mono',monospace; color:#6E675B">secureyeoman</span></div>
+          <div style="border:1px solid #D9D2C2; padding:14px 6px 10px; display:flex; flex-direction:column; align-items:center; gap:8px"><span style="width:40px; height:40px; border:1px solid #211E19; border-radius:50%; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#211E19; fill:none; stroke-width:1.2; transform:scale(.8)"><path d="M12 4.5 L20 19.5 L4 19.5 Z"></path></svg></span><span style="font:400 9px 'IBM Plex Mono',monospace; color:#6E675B">delta</span></div>
+          <div style="border:1px solid #D9D2C2; padding:14px 6px 10px; display:flex; flex-direction:column; align-items:center; gap:8px"><span style="width:40px; height:40px; border:1px solid #211E19; border-radius:50%; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#211E19; fill:none; stroke-width:1.2; transform:scale(.8)"><circle cx="12" cy="12" r="8.2"></circle><path d="M10 8.6 L16 12 L10 15.4 Z"></path></svg></span><span style="font:400 9px 'IBM Plex Mono',monospace; color:#6E675B">jalwa</span></div>
+          <div style="border:1px solid #D9D2C2; padding:14px 6px 10px; display:flex; flex-direction:column; align-items:center; gap:8px"><span style="width:40px; height:40px; border:1px solid #211E19; border-radius:50%; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#211E19; fill:none; stroke-width:1.2; transform:scale(.8)"><rect x="4" y="6.5" width="16" height="11"></rect><line x1="9.5" y1="6.5" x2="9.5" y2="17.5"></line><line x1="4" y1="14.5" x2="20" y2="14.5"></line></svg></span><span style="font:400 9px 'IBM Plex Mono',monospace; color:#6E675B">tazama</span></div>
+          <div style="border:1px solid #D9D2C2; padding:14px 6px 10px; display:flex; flex-direction:column; align-items:center; gap:8px"><span style="width:40px; height:40px; border:1px solid #211E19; border-radius:50%; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#211E19; fill:none; stroke-width:1.2; transform:scale(.8)"><line x1="5" y1="9" x2="5" y2="15"></line><line x1="8.5" y1="6" x2="8.5" y2="18"></line><line x1="12" y1="10" x2="12" y2="14"></line><line x1="15.5" y1="4.5" x2="15.5" y2="19.5"></line><line x1="19" y1="8" x2="19" y2="16"></line></svg></span><span style="font:400 9px 'IBM Plex Mono',monospace; color:#6E675B">shruti</span></div>
+          <div style="border:1px solid #D9D2C2; padding:14px 6px 10px; display:flex; flex-direction:column; align-items:center; gap:8px"><span style="width:40px; height:40px; border:1px solid #211E19; border-radius:50%; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#211E19; fill:none; stroke-width:1.2; transform:scale(.8)"><rect x="4.5" y="4.5" width="11" height="11"></rect><circle cx="15" cy="15" r="4.8"></circle></svg></span><span style="font:400 9px 'IBM Plex Mono',monospace; color:#6E675B">rasa</span></div>
+          <div style="border:1px solid #D9D2C2; padding:14px 6px 10px; display:flex; flex-direction:column; align-items:center; gap:8px"><span style="width:40px; height:40px; border:1px solid #211E19; border-radius:50%; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#211E19; fill:none; stroke-width:1.2; transform:scale(.8)"><rect x="5.5" y="4" width="13" height="16"></rect><line x1="8.5" y1="8.5" x2="15.5" y2="8.5"></line><line x1="8.5" y1="12" x2="15.5" y2="12"></line><line x1="8.5" y1="15.5" x2="13" y2="15.5"></line></svg></span><span style="font:400 9px 'IBM Plex Mono',monospace; color:#6E675B">mneme</span></div>
+          <div style="border:1px solid #D9D2C2; padding:14px 6px 10px; display:flex; flex-direction:column; align-items:center; gap:8px"><span style="width:40px; height:40px; border:1px solid #211E19; border-radius:50%; display:flex; align-items:center; justify-content:center"><svg width="24" height="24" style="stroke:#211E19; fill:none; stroke-width:1.2; transform:scale(.8)"><circle cx="12" cy="12" r="8.2"></circle><circle cx="12" cy="12" r="1.4"></circle><line x1="12" y1="12" x2="16.5" y2="8.5"></line></svg></span><span style="font:400 9px 'IBM Plex Mono',monospace; color:#6E675B">nazar</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 1c ANNOTATIONS -->
+    <sc-if value="{{ showAnnotations }}" hint-placeholder-val="{{ true }}">
+      <div data-screen-label="1c Annotations" style="width:1080px; border:1px dashed #6E675B; padding:18px; display:grid; grid-template-columns:1fr 1fr; gap:18px 32px; font:400 11px 'IBM Plex Mono',monospace; line-height:1.7; color:#9BA09B; background:#20211F">
+        <div><span style="color:#B04A32; letter-spacing:.12em">TYPE</span><br>Spectral 400/600 for content and window titles (13–16px); IBM Plex Mono for everything the ledger touches — hashes, timestamps, scopes, stamps (8–11px).</div>
+        <div><span style="color:#B04A32; letter-spacing:.12em">SPACING / RADIUS</span><br>6px base → 12 / 18 / 24. Radius 0; circles only for stamps and notary marks. Hairline rules 1px #D9D2C2, heavy rule 1px ink for signature lines. Shadow = 2px offset print, not blur.</div>
+        <div><span style="color:#B04A32; letter-spacing:.12em">ICON GRID</span><br>Same 24px geometry, 1.2px single-weight strokes, no fills at all — glyphs sit in a 40px thin-circle notary ring in launcher and index contexts.</div>
+        <div><span style="color:#B04A32; letter-spacing:.12em">ACCENT SEMANTICS</span><br>green ink <span style="color:#33684C">#33684C</span> = sealed / verified. oxide red <span style="color:#B04A32">#B04A32</span> = stamp for held / awaiting-seal / sandbox boundary. pencil gray = unverified. Black ink itself is neutral — trust reads from stamps, not text color.</div>
+        <div style="grid-column:1 / -1">
+          <span style="color:#B04A32; letter-spacing:.12em">NOTIFICATIONS — AGENT VS HUMAN</span>
+          <div style="display:flex; gap:16px; margin-top:10px">
+            <div style="flex:1; background:#FCFAF4; border:1px solid #D9D2C2; padding:10px 12px; display:flex; gap:10px; align-items:baseline; color:#6E675B; font-size:10px"><span>14:33 · rasa.svc</span><span style="color:#211E19; flex:1">12 receipts filed → ledgers/march · total 8,412</span><span style="color:#33684C">#e01a ✓</span></div>
+            <div style="flex:1; background:#FCFAF4; border:1px solid #D9D2C2; padding:10px 12px; display:flex; gap:10px; align-items:baseline"><span style="font:italic 400 12px 'Spectral',serif; color:#211E19; flex:1">“lunch thursday?” — Amara</span></div>
+          </div>
+          <div style="margin-top:8px; font-size:10px; color:#6E675B">agents write ledger lines: mono, timestamped, hashed, sealed. humans write notes: italic serif, signed with an em-dash — correspondence vs. bookkeeping.</div>
+        </div>
+      </div>
+    </sc-if>
+  </div>
+
+</section>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{
+  &quot;showAnnotations&quot;: { &quot;editor&quot;: &quot;boolean&quot;, &quot;default&quot;: true, &quot;tsType&quot;: &quot;boolean&quot;, &quot;section&quot;: &quot;Board&quot; },
+  &quot;showHints&quot;: { &quot;editor&quot;: &quot;boolean&quot;, &quot;default&quot;: true, &quot;tsType&quot;: &quot;boolean&quot;, &quot;section&quot;: &quot;Board&quot; }
+}">
+class Component extends DCLogic {
+  state = {
+    mode: 'talk',
+    query: '',
+    log: [
+      { h: 'c41f9a2e', t: '14:31:52', who: 'yeoman-0', txt: 'read ~/notes (34 files)', c: '#37C978', mark: '✓' },
+      { h: '8b02de11', t: '14:31:07', who: 'yeoman-0', txt: 'wrote index → mneme', c: '#37C978', mark: '✓' },
+      { h: '77f10b39', t: '14:28:12', who: 'delta.svc', txt: 'fetch remote — held at sandbox boundary', c: '#9BA09B', mark: '▢' }
+    ]
+  };
+
+  interpret(q) {
+    const s = (q || '').trim();
+    if (s.length < 3) return null;
+    const t = s.toLowerCase();
+    let app = 'SecureYeoman', agent = 'yeoman-0', verb = 'Plan & route request';
+    let scopes = ['read · workspace index'];
+    if (/(play|music|song|album|listen|queue)/.test(t)) {
+      app = 'Jalwa'; agent = 'jalwa.svc'; verb = 'Queue media'; scopes = ['read · ~/media'];
+    } else if (/(trim|cut|clip|video|footage|recording|edit.*video)/.test(t)) {
+      app = 'Tazama'; agent = 'tazama.svc'; verb = 'Open trim session'; scopes = ['read · ~/video', 'write · ~/video/drafts'];
+    } else if (/(mix|track|synth|beat|audio|record)/.test(t)) {
+      app = 'Shruti'; agent = 'shruti.svc'; verb = 'Open session'; scopes = ['read · ~/audio', 'write · ~/audio/sessions'];
+    } else if (/(photo|image|crop|resize|export.*png)/.test(t)) {
+      app = 'Rasa'; agent = 'rasa.svc'; verb = 'Open image batch'; scopes = ['read · ~/pictures', 'write · ~/pictures/out'];
+    } else if (/(cpu|memory|process|slow|monitor|hog)/.test(t)) {
+      app = 'Nazar'; agent = 'nazar.svc'; verb = 'Inspect system state'; scopes = ['read · proc metrics'];
+    } else if (/(commit|repo|push|merge|branch|code|diff)/.test(t)) {
+      app = 'Delta'; agent = 'delta.svc'; verb = 'Prepare repo action'; scopes = ['read · repos', 'net.local (held)'];
+    } else if (/(note|remember|find|search|what|when|where|who|yesterday)/.test(t)) {
+      app = 'Mneme'; agent = 'mneme.svc'; verb = 'Query knowledge base'; scopes = ['read · knowledge graph'];
+    }
+    const destructive = /(delete|remove|erase|wipe|kill|uninstall|purge)/.test(t);
+    if (destructive) scopes = scopes.concat(['write · DESTRUCTIVE — held']);
+    return { app, agent, verb, scopes, destructive, intent: verb + ' — “' + s + '”' };
+  }
+
+  hash() { return (Math.random().toString(16).slice(2, 10) + '00000000').slice(0, 8); }
+
+  run(it) {
+    const now = new Date();
+    const t = now.toTimeString().slice(0, 8);
+    const entry = it.destructive
+      ? { h: this.hash(), t: t, who: it.agent, txt: it.verb + ' — held for confirmation', c: '#9BA09B', mark: '▢' }
+      : { h: this.hash(), t: t, who: it.agent, txt: it.verb + ' — “' + this.state.query.trim() + '”', c: '#37C978', mark: '✓' };
+    this.setState(function (s) { return { log: [entry].concat(s.log).slice(0, 6), query: '' }; });
+  }
+
+  renderVals() {
+    const mode = this.state.mode;
+    const it = this.interpret(this.state.query);
+    const self = this;
+    return {
+      isTalk: mode === 'talk',
+      isGrid: mode === 'grid',
+      talkBg: mode === 'talk' ? '#E6E8E6' : 'transparent',
+      talkFg: mode === 'talk' ? '#111211' : '#9BA09B',
+      gridBg: mode === 'grid' ? '#E6E8E6' : 'transparent',
+      gridFg: mode === 'grid' ? '#111211' : '#9BA09B',
+      setTalk: function () { self.setState({ mode: 'talk' }); },
+      setGrid: function () { self.setState({ mode: 'grid' }); },
+      query: this.state.query,
+      onQuery: function (e) { self.setState({ query: e.target.value }); },
+      onKey: function (e) { if (e.key === 'Enter') { var p = self.interpret(self.state.query); if (p) self.run(p); } },
+      hasInterp: !!it,
+      noInterp: !it,
+      intentText: it ? it.intent : '',
+      agentName: it ? it.agent : '',
+      appName: it ? it.app : '',
+      scopes: it ? it.scopes : [],
+      destructive: it ? it.destructive : false,
+      planVerified: it ? !it.destructive : false,
+      planHash: it ? 'f2' + Math.min(99, this.state.query.length * 7) : '',
+      runPlan: function () { var p = self.interpret(self.state.query); if (p) self.run(p); },
+      log: this.state.log,
+      showAnnotations: this.props.showAnnotations ?? true,
+      showHints: this.props.showHints ?? true
+    };
+  }
+}
+</script>
+</body>
+</html>

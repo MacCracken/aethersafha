@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous">
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;600;700&family=Share+Tech+Mono&family=Space+Grotesk:wght@400;500;700&family=Archivo+Black&family=Archivo:wght@400;600&family=VT323&family=Manrope:wght@200;300;400;600&family=Unbounded:wght@400;600&family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+body { margin:0; background:#0E0E12; }
+a { color:#8E93A3; } a:hover { color:#EDEFF5; }
+@keyframes xCaret { 0%,55% { opacity:1; } 56%,100% { opacity:0; } }
+@keyframes xPulse { 0%,100% { opacity:1; } 50% { opacity:.4; } }
+@keyframes xStream { 0% { background-position:0 0; } 100% { background-position:200px 0; } }
+@keyframes xMote { 0%,100% { transform:translate(0,0); opacity:.9; } 50% { transform:translate(6px,-10px); opacity:.4; } }
+@keyframes xSheen { 0% { transform:rotate(0deg); } 100% { transform:rotate(360deg); } }
+@keyframes xLedger { 0% { transform:translateY(0); } 100% { transform:translateY(-50%); } }
+</style>
+</helmet>
+
+<section style="padding:72px; background:#0E0E12; display:flex; flex-direction:column; gap:64px; min-width:max-content">
+
+  <!-- INTRO -->
+  <div style="display:flex; align-items:baseline; gap:24px; font-family:'IBM Plex Mono',monospace">
+    <div style="font:700 20px 'Space Grotesk',sans-serif; letter-spacing:.18em; color:#EDEFF5">AGNOS — AESTHETIC EXPLORATIONS</div>
+    <div style="font-size:11px; color:#8E93A3">divergent inspiration pass · atmosphere over consistency · launchers in <a href="#2a">2a</a> and <a href="#2e">2e</a> are live — type into them</div>
+    <div style="display:flex; gap:8px; font-size:11px">
+      <a href="#2a" style="text-decoration:none; border:1px solid #2A2B33; padding:4px 10px">2a neon</a>
+      <a href="#2b" style="text-decoration:none; border:1px solid #2A2B33; padding:4px 10px">2b solarpunk</a>
+      <a href="#2c" style="text-decoration:none; border:1px solid #2A2B33; padding:4px 10px">2c cassette</a>
+      <a href="#2d" style="text-decoration:none; border:1px solid #2A2B33; padding:4px 10px">2d ghost</a>
+      <a href="#2e" style="text-decoration:none; border:1px solid #2A2B33; padding:4px 10px">2e brutalist</a>
+      <a href="#2f" style="text-decoration:none; border:1px solid #2A2B33; padding:4px 10px">2f y2k</a>
+      <a href="#2g" style="text-decoration:none; border:1px solid #2A2B33; padding:4px 10px">2g hybrids</a>
+    </div>
+  </div>
+
+  <div style="display:grid; grid-template-columns:repeat(2, 1120px); gap:64px 56px">
+
+  <!-- ════════ 2a NEON SOVEREIGNTY — INTERACTIVE ════════ -->
+  <div id="2a" style="display:flex; flex-direction:column; gap:14px; font-family:'Chakra Petch',sans-serif">
+    <div style="display:flex; align-items:baseline; gap:12px">
+      <span style="border:1px solid #23E5FF; color:#23E5FF; font:700 11px 'Share Tech Mono',monospace; padding:3px 8px">2a</span>
+      <span style="font:700 15px 'Chakra Petch',sans-serif; letter-spacing:.2em; color:#EDEFF5">NEON SOVEREIGNTY</span>
+      <span style="font:400 11px 'Share Tech Mono',monospace; color:#8E93A3">thesis — trust is a signal you can see moving.</span>
+      <span style="font:400 10px 'Share Tech Mono',monospace; color:#23E5FF; border:1px solid #23E5FF44; padding:2px 8px">LIVE</span>
+    </div>
+    <div data-screen-label="2a Desktop" style="width:1120px; height:580px; position:relative; overflow:hidden; background:radial-gradient(ellipse 900px 500px at 30% 110%, #14082B 0%, #07080D 60%); border:1px solid #1C1D26">
+      <div style="position:absolute; inset:0; background:repeating-linear-gradient(0deg, transparent 0 3px, rgba(0,0,0,.28) 3px 4px); pointer-events:none; z-index:5"></div>
+      <div style="height:30px; display:flex; align-items:center; justify-content:space-between; padding:0 14px; font:400 11px 'Share Tech Mono',monospace; color:#8E93A3; border-bottom:1px solid #1C1D26; position:relative; z-index:2">
+        <span style="color:#FF2E88; text-shadow:0 0 12px #FF2E8880; letter-spacing:.2em">AGNOS//</span>
+        <div style="display:flex; gap:16px; align-items:center">
+          <span style="color:#23E5FF; text-shadow:0 0 10px #23E5FF66">◈ 2 AGENTS STREAMING</span>
+          <span style="color:#23E5FF">SIG:VERIFIED</span><span>14:32</span>
+        </div>
+      </div>
+      <!-- Delta window with data-stream edges -->
+      <div style="position:absolute; top:62px; left:48px; width:600px; background:#0A0B12EE; border:1px solid #23E5FF55; box-shadow:0 0 32px #23E5FF22, inset 0 0 60px #14082B; z-index:2">
+        <div style="height:3px; background:repeating-linear-gradient(90deg, #23E5FF 0 24px, transparent 24px 48px); animation:xStream 3s linear infinite; opacity:.8"></div>
+        <div style="height:32px; display:flex; align-items:center; gap:10px; padding:0 12px; border-bottom:1px solid #1C1D26; font:400 11px 'Share Tech Mono',monospace">
+          <span style="color:#EDEFF5; letter-spacing:.14em">DELTA</span><span style="color:#4A4E5E">agnos/core</span>
+          <span style="flex:1"></span>
+          <span style="color:#FF2E88; text-shadow:0 0 8px #FF2E8866">▢ SANDBOX</span>
+          <span style="color:#23E5FF; text-shadow:0 0 8px #23E5FF66">✓ SEALED</span>
+        </div>
+        <div style="display:flex; gap:12px; padding:9px 12px; font:400 11px 'Share Tech Mono',monospace; border-bottom:1px solid #14151C"><span style="color:#23E5FF">9c2e41f</span><span style="color:#EDEFF5; flex:1">sched: idle agents park at 0 cpu</span><span style="color:#8E93A3">amara</span><span style="color:#23E5FF">✓</span></div>
+        <div style="display:flex; gap:12px; padding:9px 12px; font:400 11px 'Share Tech Mono',monospace; border-bottom:1px solid #14151C; background:#10121C"><span style="color:#23E5FF">4b7d902</span><span style="color:#EDEFF5; flex:1">mneme: dedupe index shards</span><span style="color:#FF2E88">yeoman-0</span><span style="color:#23E5FF">✓</span></div>
+        <div style="display:flex; gap:12px; padding:9px 12px; font:400 11px 'Share Tech Mono',monospace"><span style="color:#23E5FF">77f10b3</span><span style="color:#8E93A3; flex:1">vendor sync — held at boundary</span><span style="color:#FF2E88">delta.svc</span><span style="color:#8E93A3">○</span></div>
+        <div style="height:3px; background:repeating-linear-gradient(90deg, #FF2E88 0 24px, transparent 24px 48px); animation:xStream 4s linear infinite reverse; opacity:.5"></div>
+      </div>
+      <!-- HUD launcher — interactive -->
+      <div style="position:absolute; left:50%; bottom:120px; transform:translateX(-50%); width:640px; z-index:3">
+        <div style="border:1px solid #23E5FF88; background:#07080DF2; box-shadow:0 0 40px #23E5FF33; padding:14px 16px">
+          <div style="display:flex; align-items:center; gap:10px">
+            <span style="color:#FF2E88; font:400 15px 'Share Tech Mono',monospace; text-shadow:0 0 10px #FF2E8899">»</span>
+            <input value="{{ qa }}" onChange="{{ onQa }}" onKeyDown="{{ onKeyA }}" placeholder="speak to the system" style="flex:1; background:transparent; border:none; outline:none; color:#EDEFF5; font:400 14px 'Share Tech Mono',monospace; caret-color:#23E5FF; text-shadow:0 0 8px #23E5FF44">
+            <span style="width:9px; height:17px; background:#23E5FF; box-shadow:0 0 12px #23E5FF; animation:xCaret 1.1s infinite"></span>
+          </div>
+          <div style="margin-top:10px; border-top:1px solid #1C1D26; padding-top:9px; font:400 11px 'Share Tech Mono',monospace; display:flex; gap:14px; align-items:center">
+            <span style="color:#4A4E5E">INTERPRET</span>
+            <span style="color:#8E93A3; flex:1">{{ interpA }}</span>
+            <sc-if value="{{ hasA }}" hint-placeholder-val="{{ false }}">
+              <span style="color:#23E5FF; text-shadow:0 0 8px #23E5FF66">✓sig</span>
+              <span style="border:1px solid #FF2E88; color:#FF2E88; padding:2px 10px; cursor:pointer; text-shadow:0 0 8px #FF2E8866" onClick="{{ runA }}">EXECUTE⏎</span>
+            </sc-if>
+          </div>
+          <sc-for list="{{ logA }}" as="e" hint-placeholder-count="1">
+            <div style="font:400 10px 'Share Tech Mono',monospace; color:#4A4E5E; margin-top:6px">#{{ e.h }} · {{ e.who }} · <span style="color:#8E93A3">{{ e.txt }}</span> <span style="color:#23E5FF">✓</span></div>
+          </sc-for>
+        </div>
+      </div>
+      <!-- dock -->
+      <div style="position:absolute; bottom:16px; left:50%; transform:translateX(-50%); display:flex; gap:14px; z-index:3">
+        <svg width="30" height="30" viewBox="0 0 24 24" style="stroke:#23E5FF; fill:none; stroke-width:1.2; filter:drop-shadow(0 0 5px #23E5FF)"><path d="M12 3 L19 6 L19 11 C19 15.8 16.2 19.3 12 21 C7.8 19.3 5 15.8 5 11 L5 6 Z"></path><circle cx="12" cy="11" r="2.2"></circle></svg>
+        <svg width="30" height="30" viewBox="0 0 24 24" style="stroke:#FF2E88; fill:none; stroke-width:1.2; filter:drop-shadow(0 0 5px #FF2E88)"><path d="M12 4.5 L20 19.5 L4 19.5 Z"></path></svg>
+        <svg width="30" height="30" viewBox="0 0 24 24" style="stroke:#23E5FF; fill:none; stroke-width:1.2; filter:drop-shadow(0 0 5px #23E5FF)"><circle cx="12" cy="12" r="8.2"></circle><path d="M10 8.6 L16 12 L10 15.4 Z"></path></svg>
+        <svg width="30" height="30" viewBox="0 0 24 24" style="stroke:#FF2E88; fill:none; stroke-width:1.2; filter:drop-shadow(0 0 5px #FF2E88)"><rect x="4" y="6.5" width="16" height="11"></rect><line x1="9.5" y1="6.5" x2="9.5" y2="17.5"></line><line x1="4" y1="14.5" x2="20" y2="14.5"></line></svg>
+        <svg width="30" height="30" viewBox="0 0 24 24" style="stroke:#23E5FF; fill:none; stroke-width:1.2; filter:drop-shadow(0 0 5px #23E5FF)"><rect x="5.5" y="4" width="13" height="16"></rect><line x1="8.5" y1="8.5" x2="15.5" y2="8.5"></line><line x1="8.5" y1="12" x2="15.5" y2="12"></line></svg>
+        <svg width="30" height="30" viewBox="0 0 24 24" style="stroke:#FF2E88; fill:none; stroke-width:1.2; filter:drop-shadow(0 0 5px #FF2E88)"><circle cx="12" cy="12" r="8.2"></circle><line x1="12" y1="12" x2="16.5" y2="8.5"></line><circle cx="12" cy="12" r="1.4"></circle></svg>
+      </div>
+    </div>
+    <div style="display:flex; gap:20px; align-items:center; font:400 10px 'Share Tech Mono',monospace; color:#8E93A3">
+      <div style="display:flex"><span style="width:34px; height:20px; background:#07080D; border:1px solid #2A2B33"></span><span style="width:34px; height:20px; background:#14082B"></span><span style="width:34px; height:20px; background:#FF2E88"></span><span style="width:34px; height:20px; background:#23E5FF"></span><span style="width:34px; height:20px; background:#EDEFF5"></span></div>
+      <span>TYPE — Chakra Petch (display) + Share Tech Mono (everything else)</span>
+      <span style="color:#4A4E5E">|</span>
+      <span>TRUST — a cyan seal that literally glows only while the signature chain is intact; magenta is agency-in-motion, never safety. Streams on window edges are agent I/O.</span>
+    </div>
+  </div>
+
+  <!-- ════════ 2b SOLARPUNK TERMINAL ════════ -->
+  <div id="2b" style="display:flex; flex-direction:column; gap:14px; font-family:'Space Grotesk',sans-serif">
+    <div style="display:flex; align-items:baseline; gap:12px">
+      <span style="border:1px solid #E0B04C; color:#E0B04C; font:700 11px 'IBM Plex Mono',monospace; padding:3px 8px; border-radius:10px">2b</span>
+      <span style="font:700 15px 'Space Grotesk',sans-serif; letter-spacing:.16em; color:#EDEFF5">SOLARPUNK TERMINAL</span>
+      <span style="font:400 11px 'IBM Plex Mono',monospace; color:#8E93A3">thesis — a computer you tend, and that tends back.</span>
+    </div>
+    <div data-screen-label="2b Desktop" style="width:1120px; height:580px; position:relative; overflow:hidden; border-radius:14px; background:radial-gradient(ellipse 700px 420px at 75% 0%, #E0B04C33 0%, transparent 55%), radial-gradient(ellipse 900px 600px at 20% 100%, #16402A 0%, #0C2418 65%); border:1px solid #24513A">
+      <svg width="1120" height="580" style="position:absolute; inset:0; opacity:.16"><path d="M-20 480 C 240 380 320 520 560 430 C 800 340 880 500 1140 380" style="stroke:#7FBF8E; fill:none; stroke-width:1.5"></path><path d="M-20 540 C 260 460 400 570 660 500 C 900 440 980 560 1140 470" style="stroke:#7FBF8E; fill:none; stroke-width:1"></path><path d="M120 580 C 160 480 140 420 200 340 M200 340 C 230 300 280 290 330 300 M200 340 C 170 300 160 260 180 210" style="stroke:#E0B04C; fill:none; stroke-width:1.2"></path></svg>
+      <span style="position:absolute; left:610px; top:210px; width:5px; height:5px; border-radius:50%; background:#FFD98A; box-shadow:0 0 10px #FFD98A; animation:xMote 4s infinite"></span>
+      <span style="position:absolute; left:660px; top:250px; width:4px; height:4px; border-radius:50%; background:#FFD98A; box-shadow:0 0 8px #FFD98A; animation:xMote 5s infinite 1s"></span>
+      <span style="position:absolute; left:585px; top:265px; width:3px; height:3px; border-radius:50%; background:#FFD98A; box-shadow:0 0 8px #FFD98A; animation:xMote 4.5s infinite .5s"></span>
+      <div style="height:32px; display:flex; align-items:center; justify-content:space-between; padding:0 16px; font:400 11px 'IBM Plex Mono',monospace; color:#9DC4A8">
+        <span style="color:#EDEFF5; font:600 12px 'Space Grotesk',sans-serif; letter-spacing:.14em">agnos</span>
+        <div style="display:flex; gap:14px; align-items:center"><span style="color:#FFD98A">✺ 2 agents gathered at mneme</span><span style="color:#7FBF8E">rooted ✓</span><span>14:32</span></div>
+      </div>
+      <!-- Mneme window: organic chrome -->
+      <div style="position:absolute; top:64px; left:390px; width:560px; background:#10301FE8; border:1px solid #2E6A46; border-radius:18px 18px 18px 4px; backdrop-filter:blur(4px)">
+        <div style="height:34px; display:flex; align-items:center; gap:10px; padding:0 14px; border-bottom:1px solid #24513A; font:400 11px 'IBM Plex Mono',monospace">
+          <span style="color:#EDEFF5; font:600 12px 'Space Grotesk',sans-serif">Mneme</span><span style="color:#5E8A6D">garden of notes</span>
+          <span style="flex:1"></span>
+          <span style="border:1px dashed #E0B04C; color:#E0B04C; border-radius:10px; padding:1px 8px; font-size:9px">grafted · sandbox</span>
+          <span style="color:#7FBF8E; font-size:10px">✿ pollinated ✓</span>
+        </div>
+        <div style="padding:14px 16px; font:400 13px 'Space Grotesk',sans-serif; color:#D7E8DC; line-height:1.7">Rainwater catchment notes — yeoman-0 cross-linked 6 entries while you slept; each link carries its pollen seal.
+          <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap">
+            <span style="border:1px solid #2E6A46; border-radius:12px; color:#9DC4A8; font-size:11px; padding:3px 10px">catchment ✓</span>
+            <span style="border:1px solid #2E6A46; border-radius:12px; color:#9DC4A8; font-size:11px; padding:3px 10px">greywater ✓</span>
+            <span style="border:1px solid #2E6A46; border-radius:12px; color:#9DC4A8; font-size:11px; padding:3px 10px">soil-ph ✓</span>
+          </div>
+        </div>
+      </div>
+      <!-- launcher: speak to the grove -->
+      <div style="position:absolute; left:50%; bottom:96px; transform:translateX(-50%); width:560px; background:#0C2418F0; border:1px solid #2E6A46; border-radius:24px; padding:12px 18px; display:flex; align-items:center; gap:12px">
+        <span style="width:10px; height:10px; border-radius:50%; background:#FFD98A; box-shadow:0 0 10px #FFD98A; animation:xPulse 2.5s infinite"></span>
+        <span style="font:400 13px 'Space Grotesk',sans-serif; color:#9DC4A8; flex:1">tell the grove what you need — “shade the seedbeds when it passes 30°”</span>
+        <span style="font:400 10px 'IBM Plex Mono',monospace; color:#5E8A6D">agents listen ↵</span>
+      </div>
+      <div style="position:absolute; bottom:20px; left:50%; transform:translateX(-50%); display:flex; gap:18px">
+        <svg width="28" height="28" viewBox="0 0 24 24" style="stroke:#9DC4A8; fill:none; stroke-width:1.4; stroke-linecap:round; stroke-linejoin:round"><path d="M12 3 L19 6 L19 11 C19 15.8 16.2 19.3 12 21 C7.8 19.3 5 15.8 5 11 L5 6 Z"></path><path d="M12 8 C 12 11 12 13 12 15 M12 11 C 10.5 10 9.5 9 9 7.5 M12 13 C 13.5 12 14.5 11 15 9.5"></path></svg>
+        <svg width="28" height="28" viewBox="0 0 24 24" style="stroke:#9DC4A8; fill:none; stroke-width:1.4; stroke-linecap:round; stroke-linejoin:round"><path d="M12 4.5 C 15 9.5 17.5 14.5 20 19.5 L4 19.5 C 6.5 14.5 9 9.5 12 4.5 Z M12 10 L12 19.5"></path></svg>
+        <svg width="28" height="28" viewBox="0 0 24 24" style="stroke:#9DC4A8; fill:none; stroke-width:1.4; stroke-linecap:round; stroke-linejoin:round"><circle cx="12" cy="12" r="8.2"></circle><path d="M10 8.6 C 12.5 9.6 14 10.8 16 12 C 14 13.2 12.5 14.4 10 15.4 Z"></path></svg>
+        <svg width="28" height="28" viewBox="0 0 24 24" style="stroke:#9DC4A8; fill:none; stroke-width:1.4; stroke-linecap:round; stroke-linejoin:round"><rect x="4" y="6.5" width="16" height="11" rx="4"></rect><path d="M9.5 6.5 C 9.5 10 9.5 14 9.5 17.5"></path></svg>
+        <svg width="28" height="28" viewBox="0 0 24 24" style="stroke:#9DC4A8; fill:none; stroke-width:1.4; stroke-linecap:round; stroke-linejoin:round"><rect x="5.5" y="4" width="13" height="16" rx="4"></rect><path d="M8.5 9 C 11 8.5 13 8.5 15.5 9 M8.5 12.5 C 11 12 13 12 15.5 12.5"></path></svg>
+        <svg width="28" height="28" viewBox="0 0 24 24" style="stroke:#9DC4A8; fill:none; stroke-width:1.4; stroke-linecap:round; stroke-linejoin:round"><circle cx="12" cy="12" r="8.2"></circle><path d="M12 12 C 14 10.8 15.2 9.7 16.5 8.5"></path><circle cx="12" cy="12" r="1.4"></circle></svg>
+      </div>
+    </div>
+    <div style="display:flex; gap:20px; align-items:center; font:400 10px 'IBM Plex Mono',monospace; color:#8E93A3">
+      <div style="display:flex; border-radius:10px; overflow:hidden"><span style="width:34px; height:20px; background:#0C2418"></span><span style="width:34px; height:20px; background:#16402A"></span><span style="width:34px; height:20px; background:#7FBF8E"></span><span style="width:34px; height:20px; background:#E0B04C"></span><span style="width:34px; height:20px; background:#FFD98A"></span></div>
+      <span>TYPE — Space Grotesk (voice) + IBM Plex Mono (roots/data)</span>
+      <span style="color:#4A4E5E">|</span>
+      <span>TRUST — the pollen seal ✿: gold motes settle on verified work; unverified work simply attracts no fireflies. Sandboxes are “grafts” with dashed gold rings.</span>
+    </div>
+  </div>
+
+  <!-- ════════ 2c CASSETTE FUTURISM ════════ -->
+  <div id="2c" style="display:flex; flex-direction:column; gap:14px; font-family:'Archivo',sans-serif">
+    <div style="display:flex; align-items:baseline; gap:12px">
+      <span style="border:1px solid #E8630A; color:#E8630A; font:700 11px 'IBM Plex Mono',monospace; padding:3px 8px">2c</span>
+      <span style="font:700 15px 'Archivo',sans-serif; letter-spacing:.16em; color:#EDEFF5">CASSETTE FUTURISM / NASA-PUNK</span>
+      <span style="font:400 11px 'IBM Plex Mono',monospace; color:#8E93A3">thesis — mission-grade software you could kick and it would keep flying.</span>
+    </div>
+    <div data-screen-label="2c Desktop" style="width:1120px; height:580px; position:relative; overflow:hidden; background:#C9BFA8; border:1px solid #8F8570">
+      <div style="height:38px; background:#D8CFBB; border-bottom:2px solid #8F8570; display:flex; align-items:center; justify-content:space-between; padding:0 16px">
+        <div style="display:flex; align-items:center; gap:12px">
+          <span style="font:700 13px 'Archivo',sans-serif; letter-spacing:.22em; color:#3A342A">AGNOS</span>
+          <span style="font:400 10px 'IBM Plex Mono',monospace; color:#6E6552">FLIGHT DECK · MAIN</span>
+        </div>
+        <!-- physical readout strip -->
+        <div style="display:flex; align-items:center; gap:10px; background:#2A2620; border:2px solid #8F8570; border-radius:4px; padding:3px 10px; box-shadow:inset 0 2px 5px rgba(0,0,0,.6)">
+          <span style="font:400 15px 'VT323',monospace; color:#5BE06A; letter-spacing:.1em">AGENTS:02  CHAIN:OK  SBX:HELD-1</span>
+          <span style="width:8px; height:8px; border-radius:50%; background:#5BE06A; box-shadow:0 0 6px #5BE06A; animation:xPulse 2s infinite"></span>
+          <span style="width:8px; height:8px; border-radius:50%; background:#E8630A; box-shadow:0 0 6px #E8630A"></span>
+        </div>
+      </div>
+      <!-- Nazar window: riveted panel -->
+      <div style="position:absolute; top:70px; left:52px; width:590px; background:#D8CFBB; border:2px solid #8F8570; border-radius:8px; box-shadow:3px 4px 0 rgba(58,52,42,.35)">
+        <span style="position:absolute; left:7px; top:7px; width:7px; height:7px; border-radius:50%; background:radial-gradient(circle at 35% 35%, #F2ECDD, #8F8570)"></span>
+        <span style="position:absolute; right:7px; top:7px; width:7px; height:7px; border-radius:50%; background:radial-gradient(circle at 35% 35%, #F2ECDD, #8F8570)"></span>
+        <span style="position:absolute; left:7px; bottom:7px; width:7px; height:7px; border-radius:50%; background:radial-gradient(circle at 35% 35%, #F2ECDD, #8F8570)"></span>
+        <span style="position:absolute; right:7px; bottom:7px; width:7px; height:7px; border-radius:50%; background:radial-gradient(circle at 35% 35%, #F2ECDD, #8F8570)"></span>
+        <div style="height:36px; display:flex; align-items:center; gap:12px; padding:0 20px; border-bottom:2px solid #8F8570">
+          <span style="font:700 12px 'Archivo',sans-serif; letter-spacing:.18em; color:#3A342A">NAZAR — SYS MONITOR</span>
+          <span style="flex:1"></span>
+          <span style="font:400 9px 'IBM Plex Mono',monospace; color:#6E6552">MODULE 07-B</span>
+          <span style="background:#E8630A; color:#FFF6E8; font:700 9px 'Archivo',sans-serif; letter-spacing:.12em; padding:2px 8px; border-radius:3px">SBX ARMED</span>
+          <span style="background:#3E7A46; color:#FFF6E8; font:700 9px 'Archivo',sans-serif; letter-spacing:.12em; padding:2px 8px; border-radius:3px">SIG GO</span>
+        </div>
+        <div style="display:flex; gap:16px; padding:16px 20px">
+          <div style="flex:1; background:#2A2620; border:2px solid #8F8570; border-radius:6px; padding:12px; box-shadow:inset 0 3px 8px rgba(0,0,0,.6)">
+            <div style="font:400 16px 'VT323',monospace; color:#5BE06A; line-height:1.55">YEOMAN-0   CPU 02.1  ~/NOTES      GO<br>AGNOSHI    CPU 00.4  --           GO<br>JALWA      CPU 01.2  TSOTSI.FLAC  GO<br>DELTA.SVC  CPU 00.0  NET.LOCAL  <span style="color:#FFB03A">HOLD</span></div>
+          </div>
+          <div style="width:150px; display:flex; flex-direction:column; gap:10px">
+            <div style="display:flex; align-items:center; justify-content:space-between"><span style="font:400 9px 'IBM Plex Mono',monospace; color:#6E6552">AGENT NET</span><span style="width:34px; height:16px; background:#3A342A; border-radius:8px; position:relative"><span style="position:absolute; right:2px; top:2px; width:12px; height:12px; border-radius:50%; background:#D8CFBB"></span></span></div>
+            <div style="display:flex; align-items:center; justify-content:space-between"><span style="font:400 9px 'IBM Plex Mono',monospace; color:#6E6552">AUTO-EXEC</span><span style="width:34px; height:16px; background:#8F8570; border-radius:8px; position:relative"><span style="position:absolute; left:2px; top:2px; width:12px; height:12px; border-radius:50%; background:#F2ECDD"></span></span></div>
+            <div style="display:flex; align-items:center; justify-content:space-between"><span style="font:400 9px 'IBM Plex Mono',monospace; color:#6E6552">AUDIT TAPE</span><span style="width:34px; height:16px; background:#3A342A; border-radius:8px; position:relative"><span style="position:absolute; right:2px; top:2px; width:12px; height:12px; border-radius:50%; background:#D8CFBB"></span></span></div>
+            <div style="margin-top:4px; border:2px solid #8F8570; border-radius:4px; text-align:center; font:700 10px 'Archivo',sans-serif; color:#3A342A; padding:6px; letter-spacing:.14em; background:#F2ECDD">DUMP LOG ⏏</div>
+          </div>
+        </div>
+      </div>
+      <!-- CRT launcher overlay -->
+      <div style="position:absolute; right:56px; top:110px; width:360px; background:#0F1C12; border:6px solid #D8CFBB; outline:2px solid #8F8570; border-radius:26px; box-shadow:inset 0 0 40px rgba(0,0,0,.85), 3px 4px 0 rgba(58,52,42,.35); padding:20px 22px">
+        <div style="font:400 17px 'VT323',monospace; color:#5BE06A; line-height:1.6; text-shadow:0 0 6px #5BE06A66">AGNOSHI READY_<br><span style="color:#8FCF96">&gt; warm up shruti, pull tuesday’s take</span><br><br>INTERPRET:<br>SHRUTI.SVC · OPEN SESSION<br>SCOPE: READ ~/AUDIO<br>SIG <span style="background:#5BE06A; color:#0F1C12; padding:0 4px">VERIFIED</span> · AWAIT GO/NO-GO<span style="display:inline-block; width:9px; height:14px; background:#5BE06A; margin-left:5px; animation:xCaret 1s infinite"></span></div>
+      </div>
+      <!-- dock: mission patches -->
+      <div style="position:absolute; bottom:16px; left:50%; transform:translateX(-50%); display:flex; gap:12px">
+        <span style="width:46px; height:46px; border-radius:50%; background:#F2ECDD; border:3px double #3A342A; display:flex; align-items:center; justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" style="stroke:#E8630A; fill:none; stroke-width:2"><path d="M12 3 L19 6 L19 11 C19 15.8 16.2 19.3 12 21 C7.8 19.3 5 15.8 5 11 L5 6 Z"></path></svg></span>
+        <span style="width:46px; height:46px; border-radius:50%; background:#F2ECDD; border:3px double #3A342A; display:flex; align-items:center; justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" style="stroke:#E8630A; fill:none; stroke-width:2"><path d="M12 4.5 L20 19.5 L4 19.5 Z"></path></svg></span>
+        <span style="width:46px; height:46px; border-radius:50%; background:#F2ECDD; border:3px double #3A342A; display:flex; align-items:center; justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" style="stroke:#E8630A; fill:none; stroke-width:2"><circle cx="12" cy="12" r="8"></circle><path d="M10 9 L15 12 L10 15 Z" style="fill:#E8630A; stroke:none"></path></svg></span>
+        <span style="width:46px; height:46px; border-radius:50%; background:#F2ECDD; border:3px double #3A342A; display:flex; align-items:center; justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" style="stroke:#E8630A; fill:none; stroke-width:2"><rect x="4" y="7" width="16" height="10"></rect><line x1="9.5" y1="7" x2="9.5" y2="17"></line></svg></span>
+        <span style="width:46px; height:46px; border-radius:50%; background:#F2ECDD; border:3px double #3A342A; display:flex; align-items:center; justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" style="stroke:#E8630A; fill:none; stroke-width:2"><rect x="6" y="4" width="12" height="16"></rect><line x1="9" y1="9" x2="15" y2="9"></line><line x1="9" y1="12.5" x2="15" y2="12.5"></line></svg></span>
+        <span style="width:46px; height:46px; border-radius:50%; background:#F2ECDD; border:3px double #3A342A; display:flex; align-items:center; justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" style="stroke:#E8630A; fill:none; stroke-width:2"><circle cx="12" cy="12" r="8"></circle><line x1="12" y1="12" x2="16.5" y2="8.5"></line></svg></span>
+      </div>
+    </div>
+    <div style="display:flex; gap:20px; align-items:center; font:400 10px 'IBM Plex Mono',monospace; color:#8E93A3">
+      <div style="display:flex"><span style="width:34px; height:20px; background:#D8CFBB"></span><span style="width:34px; height:20px; background:#8F8570"></span><span style="width:34px; height:20px; background:#E8630A"></span><span style="width:34px; height:20px; background:#3A342A"></span><span style="width:34px; height:20px; background:#5BE06A"></span></div>
+      <span>TYPE — Archivo 700 (panel labels) + VT323 (phosphor readouts)</span>
+      <span style="color:#4A4E5E">|</span>
+      <span>TRUST — GO/NO-GO physicality: verified = green LED + “SIG GO” plate; sandbox = orange “SBX ARMED” plate; nothing executes without a GO. Trust is a switch state, not a color wash.</span>
+    </div>
+  </div>
+
+  <!-- ════════ 2d GHOST GLASS ════════ -->
+  <div id="2d" style="display:flex; flex-direction:column; gap:14px; font-family:'Manrope',sans-serif">
+    <div style="display:flex; align-items:baseline; gap:12px">
+      <span style="border:1px solid #8E93A3; color:#C9CDDA; font:700 11px 'IBM Plex Mono',monospace; padding:3px 8px">2d</span>
+      <span style="font:600 15px 'Manrope',sans-serif; letter-spacing:.3em; color:#EDEFF5">GHOST GLASS</span>
+      <span style="font:400 11px 'IBM Plex Mono',monospace; color:#8E93A3">thesis — the OS is a presence, not a surface; attention is the only chrome.</span>
+    </div>
+    <div data-screen-label="2d Desktop" style="width:1120px; height:580px; position:relative; overflow:hidden; background:linear-gradient(160deg, #14161D 0%, #1A1E2A 45%, #10131B 100%); border:1px solid #23262F">
+      <div style="position:absolute; inset:0; background:radial-gradient(ellipse 500px 300px at 62% 38%, rgba(160,180,255,.07), transparent 70%)"></div>
+      <!-- whisper status: fades where attention goes -->
+      <div style="position:absolute; top:26px; right:34px; font:300 11px 'Manrope',sans-serif; color:rgba(201,205,218,.55); letter-spacing:.28em">TWO AGENTS · CHAIN INTACT · 14:32</div>
+      <!-- Jalwa: nearly invisible pane -->
+      <div style="position:absolute; top:150px; left:310px; width:500px; padding:1px; background:linear-gradient(120deg, rgba(190,205,255,.35), rgba(190,205,255,.04) 30%, rgba(190,205,255,.04) 70%, rgba(190,205,255,.25)); border-radius:2px">
+        <div style="background:rgba(20,23,32,.55); backdrop-filter:blur(10px); padding:26px 30px">
+          <div style="display:flex; justify-content:space-between; align-items:baseline">
+            <span style="font:200 22px 'Manrope',sans-serif; color:#EDEFF5; letter-spacing:.12em">Tsotsi — Side B</span>
+            <span style="font:300 10px 'Manrope',sans-serif; color:rgba(201,205,218,.5); letter-spacing:.24em">JALWA · SEALED ✓</span>
+          </div>
+          <div style="margin-top:22px; height:1px; background:linear-gradient(90deg, rgba(190,205,255,.6) 0 38%, rgba(190,205,255,.12) 38%)"></div>
+          <div style="display:flex; justify-content:space-between; margin-top:10px; font:300 10px 'Manrope',sans-serif; color:rgba(201,205,218,.45); letter-spacing:.2em"><span>14:07</span><span>◁ ‖ ▷</span><span>−22:41</span></div>
+        </div>
+      </div>
+      <!-- launcher: whisper ribbon -->
+      <div style="position:absolute; left:50%; bottom:150px; transform:translateX(-50%); width:620px; text-align:center">
+        <div style="font:300 15px 'Manrope',sans-serif; color:rgba(237,239,245,.85); letter-spacing:.08em">lower the lights and keep playing until I sleep<span style="display:inline-block; width:1px; height:16px; background:rgba(190,205,255,.9); margin-left:3px; vertical-align:middle; animation:xCaret 1.4s infinite"></span></div>
+        <div style="margin-top:9px; height:1px; background:linear-gradient(90deg, transparent, rgba(190,205,255,.5), transparent)"></div>
+        <div style="margin-top:9px; font:300 10px 'Manrope',sans-serif; color:rgba(201,205,218,.5); letter-spacing:.26em">JALWA.SVC WILL FADE VOLUME OVER 40 MIN · SEALED ✓ · RETURN TO CONFIRM</div>
+      </div>
+      <!-- icons: refractions, no containers -->
+      <div style="position:absolute; bottom:34px; left:50%; transform:translateX(-50%); display:flex; gap:34px; opacity:.85">
+        <svg width="26" height="26" viewBox="0 0 24 24" style="stroke:rgba(210,220,255,.8); fill:none; stroke-width:.9"><path d="M12 3 L19 6 L19 11 C19 15.8 16.2 19.3 12 21 C7.8 19.3 5 15.8 5 11 L5 6 Z"></path><path d="M12 3 L12 21" style="opacity:.35"></path></svg>
+        <svg width="26" height="26" viewBox="0 0 24 24" style="stroke:rgba(210,220,255,.8); fill:none; stroke-width:.9"><path d="M12 4.5 L20 19.5 L4 19.5 Z"></path><path d="M12 4.5 L12 19.5" style="opacity:.35"></path></svg>
+        <svg width="26" height="26" viewBox="0 0 24 24" style="stroke:rgba(210,220,255,.8); fill:none; stroke-width:.9"><circle cx="12" cy="12" r="8.2"></circle><path d="M10 8.6 L16 12 L10 15.4" style="opacity:.6"></path></svg>
+        <svg width="26" height="26" viewBox="0 0 24 24" style="stroke:rgba(210,220,255,.8); fill:none; stroke-width:.9"><rect x="4" y="6.5" width="16" height="11"></rect><line x1="4" y1="17.5" x2="20" y2="6.5" style="opacity:.35"></line></svg>
+        <svg width="26" height="26" viewBox="0 0 24 24" style="stroke:rgba(210,220,255,.8); fill:none; stroke-width:.9"><rect x="5.5" y="4" width="13" height="16"></rect><line x1="5.5" y1="20" x2="18.5" y2="4" style="opacity:.35"></line></svg>
+        <svg width="26" height="26" viewBox="0 0 24 24" style="stroke:rgba(210,220,255,.8); fill:none; stroke-width:.9"><circle cx="12" cy="12" r="8.2"></circle><line x1="12" y1="12" x2="16.5" y2="8.5" style="opacity:.6"></line></svg>
+      </div>
+    </div>
+    <div style="display:flex; gap:20px; align-items:center; font:400 10px 'IBM Plex Mono',monospace; color:#8E93A3">
+      <div style="display:flex"><span style="width:34px; height:20px; background:#14161D"></span><span style="width:34px; height:20px; background:#1A1E2A"></span><span style="width:34px; height:20px; background:#3A415A"></span><span style="width:34px; height:20px; background:#BECDFF"></span><span style="width:34px; height:20px; background:#EDEFF5"></span></div>
+      <span>TYPE — Manrope 200–300 only; letter-spacing does the hierarchy work</span>
+      <span style="color:#4A4E5E">|</span>
+      <span>TRUST — verification is luminance: a sealed pane’s hairline edge holds steady light; an unverified pane’s edge goes dark and won’t brighten. No badge — the glass itself testifies.</span>
+    </div>
+  </div>
+
+  <!-- ════════ 2e BRUTALIST DATACORE — INTERACTIVE ════════ -->
+  <div id="2e" style="display:flex; flex-direction:column; gap:14px; font-family:'Space Grotesk',sans-serif">
+    <div style="display:flex; align-items:baseline; gap:12px">
+      <span style="border:1px solid #E02020; color:#E02020; font:700 11px 'IBM Plex Mono',monospace; padding:3px 8px">2e</span>
+      <span style="font:700 15px 'Archivo Black',sans-serif; letter-spacing:.14em; color:#EDEFF5">BRUTALIST DATACORE</span>
+      <span style="font:400 11px 'IBM Plex Mono',monospace; color:#8E93A3">thesis — the audit log is the monument; hide nothing.</span>
+      <span style="font:400 10px 'IBM Plex Mono',monospace; color:#E02020; border:1px solid #E0202066; padding:2px 8px">LIVE</span>
+    </div>
+    <div data-screen-label="2e Desktop" style="width:1120px; height:580px; position:relative; overflow:hidden; background:#F2F0EB; border:1px solid #111; background-image:linear-gradient(#11111108 1px, transparent 1px), linear-gradient(90deg, #11111108 1px, transparent 1px); background-size:80px 80px">
+      <div style="position:absolute; top:-30px; left:24px; font:400 170px 'Archivo Black',sans-serif; color:#111; letter-spacing:-.04em; line-height:1">AGNOS</div>
+      <div style="position:absolute; top:150px; left:28px; font:400 12px 'IBM Plex Mono',monospace; color:#111; letter-spacing:.3em">SELF-HOSTED / SIGNED / SMALL — 14:32 — 2 AGENTS WORKING IN THE OPEN</div>
+      <!-- giant scrolling ledger -->
+      <div style="position:absolute; top:0; right:0; bottom:0; width:330px; background:#111; overflow:hidden">
+        <div style="padding:14px 18px; border-bottom:4px solid #E02020; font:400 13px 'Archivo Black',sans-serif; color:#F2F0EB; letter-spacing:.2em; position:relative; z-index:1; background:#111">THE LEDGER</div>
+        <div style="position:absolute; top:48px; left:0; right:0; bottom:0; overflow:hidden">
+        <div style="animation:xLedger 18s linear infinite">
+          <div style="padding:12px 18px; border-bottom:1px solid #333; font:400 11px 'IBM Plex Mono',monospace; color:#F2F0EB; line-height:1.8">14:31:52 YEOMAN-0<br><span style="font:400 15px 'Archivo Black',sans-serif">READ ~/NOTES ×34</span><br>#C41F9A2E ✓</div>
+          <div style="padding:12px 18px; border-bottom:1px solid #333; font:400 11px 'IBM Plex Mono',monospace; color:#F2F0EB; line-height:1.8">14:31:07 YEOMAN-0<br><span style="font:400 15px 'Archivo Black',sans-serif">WROTE → MNEME</span><br>#8B02DE11 ✓</div>
+          <div style="padding:12px 18px; border-bottom:1px solid #333; font:400 11px 'IBM Plex Mono',monospace; color:#888; line-height:1.8">14:28:12 DELTA.SVC<br><span style="font:400 15px 'Archivo Black',sans-serif; color:#E02020">FETCH — HELD</span><br>#77F10B39 ▢</div>
+          <div style="padding:12px 18px; border-bottom:1px solid #333; font:400 11px 'IBM Plex Mono',monospace; color:#F2F0EB; line-height:1.8">14:26:40 YOU<br><span style="font:400 15px 'Archivo Black',sans-serif">OPENED MNEME</span><br>#5D90AA17 ✓</div>
+          <div style="padding:12px 18px; border-bottom:1px solid #333; font:400 11px 'IBM Plex Mono',monospace; color:#F2F0EB; line-height:1.8">14:31:52 YEOMAN-0<br><span style="font:400 15px 'Archivo Black',sans-serif">READ ~/NOTES ×34</span><br>#C41F9A2E ✓</div>
+          <div style="padding:12px 18px; border-bottom:1px solid #333; font:400 11px 'IBM Plex Mono',monospace; color:#F2F0EB; line-height:1.8">14:31:07 YEOMAN-0<br><span style="font:400 15px 'Archivo Black',sans-serif">WROTE → MNEME</span><br>#8B02DE11 ✓</div>
+          <div style="padding:12px 18px; border-bottom:1px solid #333; font:400 11px 'IBM Plex Mono',monospace; color:#888; line-height:1.8">14:28:12 DELTA.SVC<br><span style="font:400 15px 'Archivo Black',sans-serif; color:#E02020">FETCH — HELD</span><br>#77F10B39 ▢</div>
+          <div style="padding:12px 18px; border-bottom:1px solid #333; font:400 11px 'IBM Plex Mono',monospace; color:#F2F0EB; line-height:1.8">14:26:40 YOU<br><span style="font:400 15px 'Archivo Black',sans-serif">OPENED MNEME</span><br>#5D90AA17 ✓</div>
+        </div>
+        </div>
+      </div>
+      <!-- concrete slab window -->
+      <div style="position:absolute; top:200px; left:28px; width:420px; background:#D9D6CE; border:3px solid #111; box-shadow:10px 10px 0 #111">
+        <div style="display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:3px solid #111">
+          <span style="font:400 14px 'Archivo Black',sans-serif; color:#111; letter-spacing:.1em">DELTA</span>
+          <span style="flex:1"></span>
+          <span style="font:400 9px 'IBM Plex Mono',monospace; background:#111; color:#F2F0EB; padding:2px 8px">SIG ✓</span>
+          <span style="font:400 9px 'IBM Plex Mono',monospace; border:2px dashed #E02020; color:#E02020; padding:1px 7px">SBX</span>
+        </div>
+        <div style="padding:14px; font:400 11px 'IBM Plex Mono',monospace; color:#111; line-height:2">9C2E41F SCHED: IDLE AGENTS → 0 CPU ✓<br>4B7D902 MNEME: DEDUPE SHARDS <span style="background:#111; color:#F2F0EB; padding:0 5px">AGENT</span> ✓<br>77F10B3 VENDOR SYNC <span style="color:#E02020">STOP — UNSIGNED</span></div>
+      </div>
+      <!-- launcher: giant type input — interactive -->
+      <div style="position:absolute; left:28px; bottom:26px; width:730px">
+        <div style="font:400 11px 'IBM Plex Mono',monospace; color:#111; letter-spacing:.3em; margin-bottom:6px">AGNOSHI — SAY IT PLAINLY</div>
+        <div style="border:3px solid #111; background:#F2F0EB; display:flex; align-items:center">
+          <input value="{{ qe }}" onChange="{{ onQe }}" onKeyDown="{{ onKeyE }}" placeholder="TYPE HERE" style="flex:1; background:transparent; border:none; outline:none; color:#111; font:400 26px 'Archivo Black',sans-serif; padding:12px 16px; letter-spacing:-.01em; text-transform:uppercase; caret-color:#E02020">
+          <sc-if value="{{ hasE }}" hint-placeholder-val="{{ false }}">
+            <span onClick="{{ runE }}" style="background:#E02020; color:#F2F0EB; font:400 15px 'Archivo Black',sans-serif; padding:16px 20px; cursor:pointer; letter-spacing:.08em">RUN⏎</span>
+          </sc-if>
+        </div>
+        <div style="margin-top:6px; font:400 12px 'IBM Plex Mono',monospace; color:#111; min-height:18px"><span style="color:#E02020">INTERPRET →</span> {{ interpE }}</div>
+        <sc-for list="{{ logE }}" as="e" hint-placeholder-count="1">
+          <div style="margin-top:4px; font:400 11px 'IBM Plex Mono',monospace; color:#555">#{{ e.h }} {{ e.who }} — {{ e.txt }} ✓</div>
+        </sc-for>
+      </div>
+      <!-- stencil icons -->
+      <div style="position:absolute; top:200px; left:480px; display:grid; grid-template-columns:repeat(3, 52px); gap:10px">
+        <span style="width:52px; height:52px; background:#111; display:flex; align-items:center; justify-content:center"><svg width="26" height="26" viewBox="0 0 24 24" style="stroke:#F2F0EB; fill:none; stroke-width:2.4"><path d="M12 3 L19 6 L19 11 C19 15.8 16.2 19.3 12 21 C7.8 19.3 5 15.8 5 11 L5 6 Z"></path></svg></span>
+        <span style="width:52px; height:52px; background:#111; display:flex; align-items:center; justify-content:center"><svg width="26" height="26" viewBox="0 0 24 24" style="stroke:#F2F0EB; fill:none; stroke-width:2.4"><path d="M12 4.5 L20 19.5 L4 19.5 Z"></path></svg></span>
+        <span style="width:52px; height:52px; background:#111; display:flex; align-items:center; justify-content:center"><svg width="26" height="26" viewBox="0 0 24 24" style="fill:#F2F0EB"><path d="M8 6 L18 12 L8 18 Z"></path></svg></span>
+        <span style="width:52px; height:52px; background:#111; display:flex; align-items:center; justify-content:center"><svg width="26" height="26" viewBox="0 0 24 24" style="stroke:#F2F0EB; fill:none; stroke-width:2.4"><rect x="4" y="7" width="16" height="10"></rect><line x1="9.5" y1="7" x2="9.5" y2="17"></line></svg></span>
+        <span style="width:52px; height:52px; background:#111; display:flex; align-items:center; justify-content:center"><svg width="26" height="26" viewBox="0 0 24 24" style="stroke:#F2F0EB; fill:none; stroke-width:2.4"><rect x="6" y="4" width="12" height="16"></rect><line x1="9" y1="9.5" x2="15" y2="9.5"></line><line x1="9" y1="13" x2="15" y2="13"></line></svg></span>
+        <span style="width:52px; height:52px; background:#111; display:flex; align-items:center; justify-content:center"><svg width="26" height="26" viewBox="0 0 24 24" style="stroke:#F2F0EB; fill:none; stroke-width:2.4"><circle cx="12" cy="12" r="8"></circle><line x1="12" y1="12" x2="16.5" y2="8.5"></line></svg></span>
+      </div>
+    </div>
+    <div style="display:flex; gap:20px; align-items:center; font:400 10px 'IBM Plex Mono',monospace; color:#8E93A3">
+      <div style="display:flex"><span style="width:34px; height:20px; background:#F2F0EB; border:1px solid #333"></span><span style="width:34px; height:20px; background:#D9D6CE"></span><span style="width:34px; height:20px; background:#111"></span><span style="width:34px; height:20px; background:#E02020"></span><span style="width:34px; height:20px; background:#888"></span></div>
+      <span>TYPE — Archivo Black (interface as signage) + IBM Plex Mono (record)</span>
+      <span style="color:#4A4E5E">|</span>
+      <span>TRUST — verification is the default black ink of the monument; anything unverified is printed in signal red and physically STOPPED. The ledger scrolls in public, floor to ceiling.</span>
+    </div>
+  </div>
+
+  <!-- ════════ 2f Y2K CHROME REVIVAL ════════ -->
+  <div id="2f" style="display:flex; flex-direction:column; gap:14px; font-family:'Space Grotesk',sans-serif">
+    <div style="display:flex; align-items:baseline; gap:12px">
+      <span style="border:1px solid #7FD4FF; color:#7FD4FF; font:700 11px 'IBM Plex Mono',monospace; padding:3px 8px; border-radius:12px">2f</span>
+      <span style="font:600 15px 'Unbounded',sans-serif; letter-spacing:.1em; color:#EDEFF5">Y2K CHROME REVIVAL</span>
+      <span style="font:400 11px 'IBM Plex Mono',monospace; color:#8E93A3">thesis — the future used to be fun; your agents can be too.</span>
+    </div>
+    <div data-screen-label="2f Desktop" style="width:1120px; height:580px; position:relative; overflow:hidden; border-radius:22px; background:linear-gradient(150deg, #B8C6E8 0%, #DDE7F5 30%, #C9E8E2 55%, #E8D9EE 80%, #C4D2F0 100%); border:1px solid #9FB0D6">
+      <div style="position:absolute; inset:0; background:radial-gradient(ellipse 600px 200px at 50% -60px, rgba(255,255,255,.9), transparent 70%)"></div>
+      <div style="height:36px; display:flex; align-items:center; justify-content:space-between; padding:0 20px; font:600 11px 'Space Grotesk',sans-serif; color:#2E3A5C; position:relative">
+        <span style="font:600 13px 'Unbounded',sans-serif; background:linear-gradient(90deg,#5C7CDB,#48B8A8,#B36CC8); -webkit-background-clip:text; background-clip:text; color:transparent">agnos</span>
+        <div style="display:flex; align-items:center; gap:10px; background:rgba(255,255,255,.55); border:1px solid rgba(255,255,255,.9); border-radius:20px; padding:3px 12px; box-shadow:inset 0 1px 0 #fff, 0 2px 6px rgba(46,58,92,.15)">
+          <span style="width:8px; height:8px; border-radius:50%; background:radial-gradient(circle at 35% 30%, #B8FFD9, #22B573); animation:xPulse 2.4s infinite"></span>
+          <span>2 agents · chain ✓</span><span style="color:#7A86A8">14:32</span>
+        </div>
+      </div>
+      <!-- Rasa window: aqua glass -->
+      <div style="position:absolute; top:70px; left:60px; width:560px; border-radius:18px; background:rgba(255,255,255,.5); border:1px solid rgba(255,255,255,.95); box-shadow:0 14px 40px rgba(46,58,92,.22), inset 0 1px 0 #fff; backdrop-filter:blur(8px); overflow:hidden">
+        <div style="height:38px; display:flex; align-items:center; gap:10px; padding:0 14px; background:linear-gradient(180deg, rgba(255,255,255,.95), rgba(255,255,255,.35)); border-bottom:1px solid rgba(160,175,210,.5)">
+          <span style="width:13px; height:13px; border-radius:50%; background:radial-gradient(circle at 35% 30%, #FFD9D9, #E0645C)"></span>
+          <span style="width:13px; height:13px; border-radius:50%; background:radial-gradient(circle at 35% 30%, #FFF3C9, #E8B23A)"></span>
+          <span style="width:13px; height:13px; border-radius:50%; background:radial-gradient(circle at 35% 30%, #D9FFE3, #3FA860)"></span>
+          <span style="font:600 12px 'Space Grotesk',sans-serif; color:#2E3A5C; margin-left:6px">Rasa — postcard.png</span>
+          <span style="flex:1"></span>
+          <span style="font:600 9px 'Space Grotesk',sans-serif; color:#2E3A5C; background:linear-gradient(180deg,#F3F7FF,#C9D6F0); border:1px solid #fff; border-radius:12px; padding:2px 10px; box-shadow:0 1px 3px rgba(46,58,92,.2)">◈ sealed ✓</span>
+        </div>
+        <div style="padding:18px; display:flex; gap:14px">
+          <div style="flex:1; height:150px; border-radius:12px; background:linear-gradient(135deg,#DDE7F5,#C9E8E2 50%,#E8D9EE); border:1px solid #fff; box-shadow:inset 0 2px 8px rgba(46,58,92,.12); display:flex; align-items:center; justify-content:center; font:400 11px 'IBM Plex Mono',monospace; color:#7A86A8">canvas</div>
+          <div style="width:130px; display:flex; flex-direction:column; gap:8px">
+            <span style="border-radius:14px; background:linear-gradient(180deg,#FFFFFF,#D3DEF5); border:1px solid #fff; box-shadow:0 2px 5px rgba(46,58,92,.18), inset 0 1px 0 #fff; font:600 11px 'Space Grotesk',sans-serif; color:#2E3A5C; text-align:center; padding:7px">✨ enhance</span>
+            <span style="border-radius:14px; background:linear-gradient(180deg,#FFFFFF,#D3DEF5); border:1px solid #fff; box-shadow:0 2px 5px rgba(46,58,92,.18), inset 0 1px 0 #fff; font:600 11px 'Space Grotesk',sans-serif; color:#2E3A5C; text-align:center; padding:7px">crop</span>
+            <span style="border-radius:14px; background:linear-gradient(180deg,#FFFFFF,#D3DEF5); border:1px solid #fff; box-shadow:0 2px 5px rgba(46,58,92,.18), inset 0 1px 0 #fff; font:600 11px 'Space Grotesk',sans-serif; color:#2E3A5C; text-align:center; padding:7px">ask rasa.svc →</span>
+          </div>
+        </div>
+      </div>
+      <!-- chrome orb launcher unfolding -->
+      <div style="position:absolute; right:90px; top:120px; display:flex; flex-direction:column; align-items:center; gap:14px">
+        <div style="width:110px; height:110px; border-radius:50%; background:radial-gradient(circle at 32% 28%, #FFFFFF 0%, #D7E2F2 25%, #8FA3C8 55%, #5C6E96 75%, #C9D6EE 100%); box-shadow:0 16px 40px rgba(46,58,92,.35), inset 0 2px 6px #fff; position:relative; overflow:hidden">
+          <span style="position:absolute; inset:-30%; background:conic-gradient(from 0deg, transparent 0 70%, rgba(255,255,255,.55) 78%, transparent 86%); animation:xSheen 7s linear infinite"></span>
+        </div>
+        <div style="width:300px; border-radius:20px; background:rgba(255,255,255,.6); border:1px solid rgba(255,255,255,.95); box-shadow:0 10px 30px rgba(46,58,92,.2), inset 0 1px 0 #fff; backdrop-filter:blur(8px); padding:14px 16px">
+          <div style="font:600 12px 'Space Grotesk',sans-serif; color:#2E3A5C">“make the postcard sparkle a bit ✨”</div>
+          <div style="margin-top:8px; border-radius:12px; background:rgba(255,255,255,.7); border:1px solid #fff; padding:9px 12px; font:400 10px 'IBM Plex Mono',monospace; color:#2E3A5C; line-height:1.7">rasa.svc → subtle bloom + grain<br>scope: this file only · <span style="color:#22B573">sealed ✓</span></div>
+          <div style="margin-top:9px; display:flex; gap:8px">
+            <span style="flex:1; text-align:center; border-radius:12px; background:linear-gradient(180deg,#B8FFD9,#5CD79A); border:1px solid #fff; font:600 11px 'Space Grotesk',sans-serif; color:#14532D; padding:6px; box-shadow:0 2px 5px rgba(46,58,92,.2)">do it</span>
+            <span style="flex:1; text-align:center; border-radius:12px; background:linear-gradient(180deg,#FFFFFF,#D3DEF5); border:1px solid #fff; font:600 11px 'Space Grotesk',sans-serif; color:#2E3A5C; padding:6px">tweak…</span>
+          </div>
+        </div>
+      </div>
+      <!-- dock: jewels -->
+      <div style="position:absolute; bottom:18px; left:50%; transform:translateX(-50%); display:flex; gap:14px; background:rgba(255,255,255,.45); border:1px solid rgba(255,255,255,.9); border-radius:26px; padding:10px 18px; box-shadow:0 8px 24px rgba(46,58,92,.2), inset 0 1px 0 #fff">
+        <span style="width:44px; height:44px; border-radius:14px; background:radial-gradient(circle at 32% 26%, #EAF2FF, #7FA3E8 60%, #4A66A8); box-shadow:0 3px 8px rgba(46,58,92,.3), inset 0 1px 2px #fff; display:flex; align-items:center; justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" style="stroke:#fff; fill:none; stroke-width:2; stroke-linecap:round; stroke-linejoin:round"><path d="M12 3 L19 6 L19 11 C19 15.8 16.2 19.3 12 21 C7.8 19.3 5 15.8 5 11 L5 6 Z"></path></svg></span>
+        <span style="width:44px; height:44px; border-radius:14px; background:radial-gradient(circle at 32% 26%, #FFF0EA, #E8A57F 60%, #B36842); box-shadow:0 3px 8px rgba(46,58,92,.3), inset 0 1px 2px #fff; display:flex; align-items:center; justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" style="stroke:#fff; fill:none; stroke-width:2; stroke-linecap:round; stroke-linejoin:round"><path d="M12 4.5 L20 19.5 L4 19.5 Z"></path></svg></span>
+        <span style="width:44px; height:44px; border-radius:14px; background:radial-gradient(circle at 32% 26%, #EAFFF4, #6CD9A3 60%, #2E8A5C); box-shadow:0 3px 8px rgba(46,58,92,.3), inset 0 1px 2px #fff; display:flex; align-items:center; justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" style="fill:#fff"><path d="M9 7 L17 12 L9 17 Z"></path></svg></span>
+        <span style="width:44px; height:44px; border-radius:14px; background:radial-gradient(circle at 32% 26%, #F4EAFF, #B58AE0 60%, #7A4FA8); box-shadow:0 3px 8px rgba(46,58,92,.3), inset 0 1px 2px #fff; display:flex; align-items:center; justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" style="stroke:#fff; fill:none; stroke-width:2; stroke-linecap:round; stroke-linejoin:round"><rect x="4" y="7" width="16" height="10" rx="3"></rect><line x1="9.5" y1="7" x2="9.5" y2="17"></line></svg></span>
+        <span style="width:44px; height:44px; border-radius:14px; background:radial-gradient(circle at 32% 26%, #FFFBEA, #E8CF6C 60%, #A8862E); box-shadow:0 3px 8px rgba(46,58,92,.3), inset 0 1px 2px #fff; display:flex; align-items:center; justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" style="stroke:#fff; fill:none; stroke-width:2; stroke-linecap:round; stroke-linejoin:round"><rect x="6" y="4" width="12" height="16" rx="3"></rect><line x1="9" y1="9.5" x2="15" y2="9.5"></line><line x1="9" y1="13" x2="15" y2="13"></line></svg></span>
+        <span style="width:44px; height:44px; border-radius:14px; background:radial-gradient(circle at 32% 26%, #EAFBFF, #6CC4E0 60%, #2E7A99); box-shadow:0 3px 8px rgba(46,58,92,.3), inset 0 1px 2px #fff; display:flex; align-items:center; justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" style="stroke:#fff; fill:none; stroke-width:2; stroke-linecap:round; stroke-linejoin:round"><circle cx="12" cy="12" r="8"></circle><line x1="12" y1="12" x2="16.5" y2="8.5"></line></svg></span>
+      </div>
+    </div>
+    <div style="display:flex; gap:20px; align-items:center; font:400 10px 'IBM Plex Mono',monospace; color:#8E93A3">
+      <div style="display:flex; border-radius:10px; overflow:hidden"><span style="width:34px; height:20px; background:#DDE7F5"></span><span style="width:34px; height:20px; background:#8FA3C8"></span><span style="width:34px; height:20px; background:#B36CC8"></span><span style="width:34px; height:20px; background:#48B8A8"></span><span style="width:34px; height:20px; background:#22B573"></span></div>
+      <span>TYPE — Unbounded (wordmark) + Space Grotesk (UI) + Plex Mono (receipts)</span>
+      <span style="color:#4A4E5E">|</span>
+      <span>TRUST — the holographic seal ◈: a chrome sticker that shifts hue when sealed; unsealed work gets a matte gray sticker that refuses to shine. Sandboxes are bubbles — literally.</span>
+    </div>
+  </div>
+
+  </div>
+
+  <!-- ════════ 2g MIX & MATCH ════════ -->
+  <div id="2g" style="width:2296px; box-sizing:border-box; border:1px dashed #3A3C48; padding:28px; display:flex; gap:28px; font-family:'IBM Plex Mono',monospace">
+    <div style="width:200px; flex:none">
+      <div style="font:700 14px 'Space Grotesk',sans-serif; letter-spacing:.18em; color:#EDEFF5">MIX &amp; MATCH</div>
+      <div style="font-size:11px; color:#8E93A3; line-height:1.7; margin-top:8px">three hybrids worth a full pass</div>
+    </div>
+    <div style="flex:1; border:1px solid #2A2B33; padding:18px; background:#13141A">
+      <div style="font:600 13px 'Space Grotesk',sans-serif; color:#EDEFF5">QUIET MONUMENT — <a href="#2d">2d</a> × <a href="#2e">2e</a></div>
+      <div style="font-size:11px; color:#8E93A3; line-height:1.8; margin-top:8px">Ghost-glass surfaces and whisper launcher, but the audit ledger keeps brutalist scale and pride — a translucent OS with one monumental, always-visible column of record. Trust = luminous edge + printed hash.</div>
+    </div>
+    <div style="flex:1; border:1px solid #2A2B33; padding:18px; background:#13141A">
+      <div style="font:600 13px 'Space Grotesk',sans-serif; color:#EDEFF5">FIELD STATION — <a href="#2b">2b</a> × <a href="#2c">2c</a></div>
+      <div style="font-size:11px; color:#8E93A3; line-height:1.8; margin-top:8px">Solarpunk palette and pollen-seal trust language on cassette-futurist hardware chrome: toggle switches, GO/NO-GO plates, phosphor readouts in green-gold. Agents as instruments you can physically arm and disarm.</div>
+    </div>
+    <div style="flex:1; border:1px solid #2A2B33; padding:18px; background:#13141A">
+      <div style="font:600 13px 'Space Grotesk',sans-serif; color:#EDEFF5">SIGNAL MINIMAL — <a href="#2a">2a</a> × turn-1 sovereign</div>
+      <div style="font-size:11px; color:#8E93A3; line-height:1.8; margin-top:8px">The concept board’s sovereign-minimal discipline with neon’s one idea kept at 10%: agent I/O as a single moving cyan hairline on window edges. All glow removed except the verification seal itself.</div>
+    </div>
+  </div>
+
+</section>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  state = { qa: '', qe: '', logA: [], logE: [] };
+
+  interpret(q) {
+    const s = (q || '').trim();
+    if (s.length < 3) return null;
+    const t = s.toLowerCase();
+    let agent = 'yeoman-0', app = 'SecureYeoman', verb = 'plan & route request', scope = 'read · workspace index';
+    if (/(play|music|song|album|listen|queue|volume)/.test(t)) { agent = 'jalwa.svc'; app = 'Jalwa'; verb = 'queue media'; scope = 'read · ~/media'; }
+    else if (/(trim|cut|clip|video|footage|recording)/.test(t)) { agent = 'tazama.svc'; app = 'Tazama'; verb = 'open trim session'; scope = 'read ~/video · write ~/video/drafts'; }
+    else if (/(mix|track|synth|beat|audio|record)/.test(t)) { agent = 'shruti.svc'; app = 'Shruti'; verb = 'open session'; scope = 'read ~/audio'; }
+    else if (/(photo|image|crop|resize|sparkle|png)/.test(t)) { agent = 'rasa.svc'; app = 'Rasa'; verb = 'open image batch'; scope = 'read ~/pictures'; }
+    else if (/(cpu|memory|process|slow|monitor|hog)/.test(t)) { agent = 'nazar.svc'; app = 'Nazar'; verb = 'inspect system state'; scope = 'read · proc metrics'; }
+    else if (/(commit|repo|push|merge|branch|code|diff)/.test(t)) { agent = 'delta.svc'; app = 'Delta'; verb = 'prepare repo action'; scope = 'read repos · net.local (held)'; }
+    else if (/(note|remember|find|search|what|when|where|yesterday)/.test(t)) { agent = 'mneme.svc'; app = 'Mneme'; verb = 'query knowledge base'; scope = 'read · knowledge graph'; }
+    const destructive = /(delete|remove|erase|wipe|kill|uninstall|purge)/.test(t);
+    return { agent, app, verb, scope, destructive };
+  }
+
+  hash() { return (Math.random().toString(16).slice(2, 10) + '00000000').slice(0, 8); }
+
+  runFor(which) {
+    const q = which === 'a' ? this.state.qa : this.state.qe;
+    const it = this.interpret(q);
+    if (!it) return;
+    const entry = { h: this.hash(), who: it.agent, txt: it.destructive ? it.verb + ' — HELD (destructive scope)' : it.verb + ' — “' + q.trim() + '”' };
+    this.setState(function (s) {
+      return which === 'a'
+        ? { logA: [entry].concat(s.logA).slice(0, 3), qa: '' }
+        : { logE: [entry].concat(s.logE).slice(0, 3), qe: '' };
+    });
+  }
+
+  describe(it) {
+    if (!it) return 'awaiting input — the agent states its reading before anything runs';
+    return it.agent + ' · ' + it.verb + ' · ' + it.scope + (it.destructive ? ' · DESTRUCTIVE — WILL HOLD' : ' · sig verified');
+  }
+
+  renderVals() {
+    const self = this;
+    const ia = this.interpret(this.state.qa);
+    const ie = this.interpret(this.state.qe);
+    return {
+      qa: this.state.qa,
+      onQa: function (e) { self.setState({ qa: e.target.value }); },
+      onKeyA: function (e) { if (e.key === 'Enter') self.runFor('a'); },
+      runA: function () { self.runFor('a'); },
+      hasA: !!ia,
+      interpA: this.describe(ia),
+      logA: this.state.logA,
+      qe: this.state.qe,
+      onQe: function (e) { self.setState({ qe: e.target.value }); },
+      onKeyE: function (e) { if (e.key === 'Enter') self.runFor('e'); },
+      runE: function () { self.runFor('e'); },
+      hasE: !!ie,
+      interpE: this.describe(ie).toUpperCase(),
+      logE: this.state.logE
+    };
+  }
+}
+</script>
+</body>
+</html>
