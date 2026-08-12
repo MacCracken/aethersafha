@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — the host arm gets a clock, and stops quitting on the first frame
+## [0.13.1] - 2026-08-12 — the host arm gets a clock, and stops quitting on the first frame
 
 ⭐⭐ **Linux is now a declared display target** (operator, 2026-08-12), superseding bhumi's ADR 0001 and the
 three-substrate matrix in `planning/desktop.md:53-57` that assigned Linux the logic-only role. Backend

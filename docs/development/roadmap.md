@@ -178,7 +178,7 @@ SOCK_SEQPACKET wire, the shared-buffer handoff, `CREATE_SURFACE → ATTACH_BUF �
 composite, chrome, damage band and exit teardown all run. **The pixels are correct and in RAM; nothing
 scans them out.**
 
-- **B1 ✅ DONE 0.14.0-dev — the host session is real.** Three defects, all in `src/main.cyr`, all found by
+- **B1 ✅ DONE 0.13.1 — the host session is real.** Three defects, all in `src/main.cyr`, all found by
   running the binary rather than reading it:
   - `ae_now_ms()` returned **0** on the host arm, so the host build had *no timing diagnostics at all* —
     the 30 s budget never bound, the 5 s progress line never printed, and every elapsed readout was 0.

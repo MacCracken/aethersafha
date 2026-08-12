@@ -8,11 +8,11 @@
 
 | Field | Value | Source |
 |---|---|---|
-| Version | **0.13.0** | [`VERSION`](../../VERSION) |
+| Version | **0.13.1** | [`VERSION`](../../VERSION) |
 | Cyrius pin | **6.5.20** — matches `cycc`; bumped from 6.5.13 on 2026-08-12 with `lib sync --full` (17 stdlib files) | `cyrius.cyml [package].cyrius` |
 | Modules / tests | 26 `src/*.cyr` · **23 `.tcyr` suites** | `ls` |
-| `--agnos` build | **GREEN**, **13,584,832 B** at pin 6.5.20 (was 13,584,728 at 6.5.13; +104 B is the toolchain bump). ⛔ **A SIZE DOES NOT IDENTIFY A BINARY** — measured 2026-08-12, **three distinct artifacts shared the old byte count**: `build/aethersafha_agnos` `1b8b3c57`, staged `rootfs/bin/aethersafha` `690160b9`, a fresh rebuild `a692279f`. Quote a **hash** beside every size; the staged rootfs is now also toolchain-stale (M6-A1) | `sha256sum` |
-| Host (Linux) build | **GREEN**, 23/23 suites. ⭐ `--clients` reaches **exit 95** with two clients since 0.14.0-dev — it was structurally unreachable before (`running = 0` on first present) | measured |
+| `--agnos` build | **GREEN** — 0.13.1 is **13,584,832 B · `c00d9d6b`** at pin 6.5.20 (13,584,728 at 6.5.13; +104 B is the toolchain). ⛔ **A SIZE DOES NOT IDENTIFY A BINARY** — 2026-08-12 **three distinct artifacts shared the old byte count** (`1b8b3c57` · staged `690160b9` · rebuild `a692279f`). Quote a **hash** beside every size. ⚠ The staged rootfs is now version- AND toolchain-stale (M6-A1) | `sha256sum` |
+| Host (Linux) build | **GREEN**, 23/23 suites. ⭐ `--clients` reaches **exit 95** with two clients since **0.13.1** — it was structurally unreachable before (`running = 0` on first present) | measured |
 | Backend | **bhumi** 1.1.5 — scanout + input + pointer **on agnos only**; the Linux arms of `_bhumi_kfbinfo`/`_bhumi_kblit`/`_bhumi_kbscan`/`_bhumi_ptrscan` are `-1`/`0` stubs. GPU via the agnos ring-3 band `#82`-`#94` — **not** mabda; there is no `[deps.mabda]` | `bhumi/src/scanout.cyr:67-71` |
 | Substrates | ⭐⭐ **LINUX IS A DECLARED DISPLAY TARGET** (operator 2026-08-12), superseding bhumi ADR 0001 and `planning/desktop.md:53-57`. **fbdev first, DRM/KMS later.** Sequencing → `roadmap.md` **M6** | operator |
 
