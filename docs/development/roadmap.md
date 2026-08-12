@@ -110,7 +110,7 @@ symbols), each compiling + smoke-tested. Driven by the parity workflow.
 - Remaining: consume mehman 1.0.0's per-ABI `guest`/`shim` modules; real XRGB pixel
   fidelity beyond the stdout-as-framebuffer MVP (mehman ADR 0004).
 
-### M6 — Userland desktop: the arc comes home, and Linux becomes a real target (v0.14.0+) — 🚧 OPEN 2026-08-12
+### M6 — Userland desktop: the arc comes home, and Linux becomes a real target (v0.13.1+) — 🚧 OPEN 2026-08-12
 
 > ⛔ **THIS MILESTONE EXISTED BY NAME IN ANOTHER REPO BEFORE IT EXISTED HERE, AND THAT COST A SESSION.**
 > agnos closed the desktop arc at **1.56.42** and handed all forward work to *"aethersafha's own
@@ -190,12 +190,20 @@ scans them out.**
     (measured). `--clients` now runs unbounded and its own three terminators govern.
   - ⭐ New `--frames N`, where **`--frames 0` runs until quit**. Default unchanged (400/3).
   - ⭐ **Verified: `--clients` with two clients now exits 95 on Linux**, both reaped at exit.
-- **B2 — a host pixel oracle.** `--ppm <path>` dumping `bhumi_backend_fb(be)` as P6. ~30 lines; the dumper
+- **B2 — a host pixel oracle.** ⚠ Still wanted even though B3 landed: a PPM can be diffed and a screen
+  cannot, and CI has no framebuffer. `--ppm <path>` dumping `bhumi_backend_fb(be)` as P6. ~30 lines; the dumper
   is already written twice in this repo (`programs/setu_serve_probe.cyr:32`, `setu_demo_probe.cyr:15`).
   This is what makes B3/B4 verifiable rather than hopeful, and it is worth having *even after* scanout
   lands, because a file can be diffed and a screen cannot.
-- **B3 — bhumi's Linux output arm** (fbdev): `_bhumi_kfbinfo` and `_bhumi_kblit` at
-  `bhumi/src/scanout.cyr:70-71`. Geometry needs **no ioctl** — `/sys/class/graphics/fb0/{virtual_size,
+- **B3 ✅ DONE — bhumi 1.2.0, 2026-08-12. THE COMPOSITOR DRAWS ON A LINUX SCREEN.** `_bhumi_kfbinfo` /
+  `_bhumi_kblit` are real (bhumi ADR 0003). Measured: `screen size read from the kernel / 2560 / 1440`,
+  where the same binary read `1280 / 720` from the fallback that morning. **aethersafha needed no
+  compositor change** — `bhumi_backend_present` was already called every frame on the host arm.
+  ⛔ Two traps avoided by measurement, both silent-failure shaped: the stdlib's `mmap_file_rw` passes
+  **MAP_PRIVATE** (writes succeed, nothing reaches the screen), and `memcpy` is a **byte loop**
+  (14.7 M iterations per 2560x1440 present). ⭐ Proven by an **external** oracle — a second fd, because a
+  readback through bhumi's own mapping would pass under MAP_PRIVATE.
+  Original scope, kept for the DRM/KMS successor: Geometry needs **no ioctl** — `/sys/class/graphics/fb0/{virtual_size,
   stride,bits_per_pixel}` fills the existing 24-byte struct exactly, and `amdgpudrmfb` reports BGRX,
   which *is* `BhumiFb`'s store order, so a raw blit is colour-correct. `cyr_mmap`/`mmap_file_rw` already
   exist in `lib/mmap.cyr`. ⚠ bhumi's `[deps].stdlib` must gain `mmap` + `fs`. ⚠ Guard must be **three-way**:
@@ -223,8 +231,37 @@ scans them out.**
   execve succeeded; crab's `readdir`/`stat` and its whole input loop are agnos-only, so it presents once
   with empty panes and exits.
 
+#### M6-C — Desktop surface: the thing a person actually looks at
+
+Substrate-independent — these are compositor features, and every one lands on agnos and Linux at once
+because they sit above the bhumi seam. The visual language is already argued in
+[`planning/desktop-design-ideas.md`](planning/desktop-design-ideas.md), which set its own activation
+condition (*"when aethersafha's compositor window actually opens, this page is the brief"*) and **has
+fired** — it is a brief now, not an idea log.
+
+- **C1 — WALLPAPER.** ⭐ The desktop currently draws a flat themed backdrop and nothing else; the
+  backdrop is the largest single surface on screen and the most-seen pixel in the system.
+  - **C1a — a wallpaper layer at all.** A backdrop that is a *source* rather than a constant: solid,
+    gradient, or an image buffer, owned by the compositor beneath every window, damage-tracked like
+    any other surface. This is the load-bearing bite — without a layer, a shader has nowhere to draw.
+    ⚠ Interacts with `AE-0a`: the clear is currently ~48% of a GPU frame and a wallpaper REPLACES the
+    clear rather than adding to it, so this is not automatically a cost. Measure, do not assume.
+  - **C1b — generative / shader wallpapers.** The concept from the design brief: **computed per frame,
+    not asset-streamed** — the wallpaper *is* a small program, not a stored image. On agnos this is the
+    ring-3 GPU band (`#92` ops); on Linux it is the CPU path until a Linux GPU story exists.
+    ⛔ **NOT via mabda** — `desktop-design-ideas.md` calls a shader wallpaper "a mabda surface", which
+    is the same false claim [corrected here on 2026-08-01](#-corrected-2026-08-01--gpu-acceleration-is-not-out-of-scope-and-it-does-not-go-through-mabda)
+    and left uncorrected in that doc for ten weeks because nothing linked the two. Fix it there when C1b lands.
+  - **C1c — authoring + format.** The open question the design brief names and does not answer: how is a
+    wallpaper expressed and shipped sovereignly — a Cyrius source compiled in, a data file, a shader
+    artifact? ⚠ Decide this BEFORE C1b, or the first shader becomes the format by accident.
+- **C2 — a system motion language** (design brief §2). A "the system is working" vocabulary the
+  compositor OWNS and apps inherit, rather than every app shipping its own spinner. Open question is the
+  boundary: what the compositor grants vs what an app may override.
+
 **M6 exit criteria** — a Linux desktop that opens on a real screen, hosts a real client window, takes
-real keyboard and pointer input, and quits cleanly; **and** the agnos debt list closed with A4 burned.
+real keyboard and pointer input, draws a wallpaper, and quits cleanly; **and** the agnos debt list
+closed with A4 burned.
 
 ## Backlog
 

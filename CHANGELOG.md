@@ -4,6 +4,54 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.13.2] - 2026-08-12 — the compositor draws on a Linux screen
+
+⭐⭐⭐ **`aethersafha: screen size read from the kernel / 2560 / 1440`** — the same binary read
+`1280 / 720` out of its built-in fallback this morning. **bhumi 1.2.0** landed the Linux fbdev scanout
+arm (bhumi ADR 0003), so every layer of this compositor now reaches a real screen on a second substrate.
+
+⛔ **No compositor change was needed to get pixels, and that is the point.** `bhumi_backend_present` was
+already called every frame on the host arm; nothing above the device seam was ever broken. The whole
+Linux desktop was blocked on two functions in another repo that returned -1. What follows is the
+follow-up work that becoming a real display target *created*.
+
+### Changed — `[deps.bhumi]` 1.1.5 → **1.2.0**
+
+Verified a real tag on a clean tree before bumping, per the rule the kavach entry twelve lines below
+already documents. 23/23 suites, both targets build.
+
+### Fixed — three claims the Linux arm falsified the moment it landed
+
+- ⛔ **`ae_query_geometry`'s banner said "`bhumi_output_query` is agnos-only and answers -1, so the Linux
+  dev build is unaffected."** False as of bhumi 1.2.0 — it now reads real geometry from sysfs. ⚠ And the
+  correction matters beyond the wording: the Linux arm is now subject to the *same* hazard the rest of
+  that comment documents for agnos, where laying out to the wrong width shows as a desktop occupying one
+  corner of the screen rather than as an error.
+- ⛔ **`bhumi_output_format_ok` had ZERO call sites in this repo**, while bhumi's own module banner says
+  callers must verify byte order before presenting. Free while agnos was the only target (archaemenid
+  reports BGRX, which *is* `BhumiFb`'s store order, so the raw blit was correct as much by luck as by
+  design). An fbdev console reporting **RGBX** would render every frame with red and blue swapped,
+  silently, on a path where nothing returns an error. ⇒ checked once at geometry time and **named**.
+  ⚠ Report, don't refuse: a colour-swapped desktop is still usable, and the conversion belongs in bhumi
+  (its ADR 0001 deferred an RGBX swizzle for exactly this case).
+- ⛔⛔ **The present return code was discarded.** Defensible while the host arm was a compile-time -1 —
+  every host run "failed" and that was the expected answer. Now it is the **only** thing separating a
+  compositor painting a screen from one running a full frame loop into a void: both reach `frame loop
+  ok`, both exit 0, both look identical in the log. That is precisely the 0.12.0 leaked-listener shape —
+  healthy-looking output from a structurally incapable run.
+
+### Added — a latched scanout-refused report, negative-controlled in both directions
+
+⚠ Latched, not per-frame: a refusing backend refuses *every* frame, and 95,439 identical lines is how a
+real signal gets scrolled past. `BHUMI_SEAT_DENIED` (-2) is distinguished from a device failure (-1)
+because they point at different repos — the seat gate versus the framebuffer under it.
+
+⭐ **Proven reachable, which is the part this arc keeps paying for.** `strings` finding a literal proves
+it was compiled, never that it can run — the F1-F4 mover flew to hardware as dead code on exactly that
+reasoning. So the instrument was driven both ways: with `/dev/fb0` hidden in a private mount namespace it
+prints `scanout refused — no framebuffer; this run is drawing to nothing / -1` **and** falls back to
+1280x720; with the framebuffer present it is silent and reads 2560x1440.
+
 ## [0.13.1] - 2026-08-12 — the host arm gets a clock, and stops quitting on the first frame
 
 ⭐⭐ **Linux is now a declared display target** (operator, 2026-08-12), superseding bhumi's ADR 0001 and the

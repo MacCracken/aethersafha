@@ -8,18 +8,16 @@
 
 | Field | Value | Source |
 |---|---|---|
-| Version | **0.13.1** | [`VERSION`](../../VERSION) |
+| Version | **0.13.2** | [`VERSION`](../../VERSION) |
 | Cyrius pin | **6.5.20** — matches `cycc`; bumped from 6.5.13 on 2026-08-12 with `lib sync --full` (17 stdlib files) | `cyrius.cyml [package].cyrius` |
 | Modules / tests | 26 `src/*.cyr` · **23 `.tcyr` suites** | `ls` |
-| `--agnos` build | **GREEN** — 0.13.1 is **13,584,832 B · `c00d9d6b`** at pin 6.5.20 (13,584,728 at 6.5.13; +104 B is the toolchain). ⛔ **A SIZE DOES NOT IDENTIFY A BINARY** — 2026-08-12 **three distinct artifacts shared the old byte count** (`1b8b3c57` · staged `690160b9` · rebuild `a692279f`). Quote a **hash** beside every size. ⚠ The staged rootfs is now version- AND toolchain-stale (M6-A1) | `sha256sum` |
-| Host (Linux) build | **GREEN**, 23/23 suites. ⭐ `--clients` reaches **exit 95** with two clients since **0.13.1** — it was structurally unreachable before (`running = 0` on first present) | measured |
-| Backend | **bhumi** 1.1.5 — scanout + input + pointer **on agnos only**; the Linux arms of `_bhumi_kfbinfo`/`_bhumi_kblit`/`_bhumi_kbscan`/`_bhumi_ptrscan` are `-1`/`0` stubs. GPU via the agnos ring-3 band `#82`-`#94` — **not** mabda; there is no `[deps.mabda]` | `bhumi/src/scanout.cyr:67-71` |
-| Substrates | ⭐⭐ **LINUX IS A DECLARED DISPLAY TARGET** (operator 2026-08-12), superseding bhumi ADR 0001 and `planning/desktop.md:53-57`. **fbdev first, DRM/KMS later.** Sequencing → `roadmap.md` **M6** | operator |
+| `--agnos` build | **GREEN** — 0.13.2 is **13,589,192 B · `7cfd4091`** at pin 6.5.20 (0.13.1 13,584,832 · 0.13.0 13,584,728). ⛔ **A SIZE DOES NOT IDENTIFY A BINARY** — 2026-08-12 **three distinct artifacts shared the old byte count** (`1b8b3c57` · staged `690160b9` · rebuild `a692279f`). Quote a **hash** beside every size. ⚠ The staged rootfs is now version- AND toolchain-stale (M6-A1) | `sha256sum` |
+| Host (Linux) build | **GREEN**, 23/23 suites. ⭐ `--clients` reaches **exit 95** with two clients since **0.13.1** — it was structurally unreachable before (`running = 0` on first present). ⭐ 0.13.2 adds a **latched scanout-refused report**, negative-controlled: with `/dev/fb0` hidden it prints `drawing to nothing / -1`, with it present it is silent | measured |
+| Backend | **bhumi 1.2.0** — ⭐⭐ **SCANOUT IS LIVE ON LINUX** (fbdev; bhumi ADR 0003), so this row's old "on agnos only … the Linux arms are stubs" is retired. Still stubbed on Linux: **input** (`_bhumi_kbscan`/`_bhumi_ptrscan` → 0, M6-B4, needs the `input` group). GPU via the agnos ring-3 band `#82`-`#94` — **not** mabda; there is no `[deps.mabda]` | `bhumi/src/scanout.cyr` |
+| Substrates | ⭐⭐⭐ **LINUX DRAWS ON A REAL SCREEN** (2026-08-12). Measured: `screen size read from the kernel / 2560 / 1440` where it read `1280 / 720` from the fallback that morning. **fbdev first, DRM/KMS later.** Sequencing → `roadmap.md` **M6** | measured |
 
-**Deps** — ⭐ **ALL EIGHT VERIFIED AGAINST THEIR SIBLING `VERSION` AND A REAL GIT TAG, 2026-08-12**: bhumi 1.1.5 · rupa 0.1.2 · agnostik 1.3.4 · agnodrm 1.5.0 · kashi 1.0.4 · mehman 1.0.1 · **kavach 3.11.10** · setu 0.8.4. Siblings: agnos **1.56.43** · puka **0.6.11** · crab **0.4.6**.
-⛔ **The path WINS over the tag** — the vendored copy tracks the local checkout whatever the tag says, which is
-why this repo's `--agnos` build broke for a week with no change here, and why a green build here does not prove
-the declared graph builds.
+**Deps** — ⭐ **ALL EIGHT VERIFIED AGAINST THEIR SIBLING `VERSION` AND A REAL GIT TAG, 2026-08-12**: **bhumi 1.2.0** · rupa 0.1.2 · agnostik 1.3.4 · agnodrm 1.5.0 · kashi 1.0.4 · mehman 1.0.1 · **kavach 3.11.10** · setu 0.8.4. Siblings: agnos **1.56.43** · puka **0.6.11** · crab **0.4.6**.
+⛔ **The path WINS over the tag** — the vendored copy tracks the local checkout whatever the tag says, which is why a green build here does not prove the declared graph builds.
 
 ## Proven, and by what
 
@@ -42,8 +40,9 @@ the declared graph builds.
   for two cuts. Manifest bumped to **3.11.10** (verified a real tag on a clean tree), pin **6.5.13 → 6.5.20**,
   `lib sync --full` (17 files), `deps` relocked. Shadow-lib and pin-drift warnings both gone; 23/23 green on
   both targets. ⚠ The mechanism is unchanged — **re-verify tag vs sibling `VERSION` at every cut**.
-- ⚠ **bhumi ships a stale header at its own tag**: `bhumi/dist/bhumi.cyr` is committed reading
-  `# Version: 1.1.4` at tag **1.1.5** (its working tree has the fix, uncommitted). A bhumi-side commit.
+- ✅ **CLOSED — bhumi 1.2.0, 2026-08-12.** Tag 1.1.5 shipped `dist/bhumi.cyr` stamped `# Version: 1.1.4`, so
+  consumers of the published bundle read the wrong version. ⚠ **A dist header is only as fresh as the last
+  `cyrius distlib` before the tag** — regenerate AT the cut.
 - ⚠ **A compositor that WEDGES still writes no log.** `gpu_release_pid`'s `/klug.txt` spill (0.13.0,
   iron-proven) hangs off scanout-owner *exit*, so it covers a crash and a quit but not a hang — which is
   exactly how the 08-09 burn produced zero evidence. Watchdog or periodic spill; a design call, not a patch.

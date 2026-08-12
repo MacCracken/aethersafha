@@ -62,6 +62,10 @@ var ae_spawn_failed = 0;
 # names the layer that failed. [[feedback_instrument_discipline]]
 var ae_inp_poll = 0;
 var ae_inp_denied = 0;
+# One-shot latch for a REFUSED scanout. See the present call site in the frame loop: until bhumi 1.2.0
+# the host arm returned -1 unconditionally, so a discarded return code cost nothing; now it is the only
+# thing that separates "compositing to a screen" from "running a full frame loop into a void".
+var ae_present_bad = 0;
 var ae_inp_down = 0;
 var ae_inp_tab = 0;
 var ae_inp_fwd = 0;
@@ -152,8 +156,14 @@ enum AeConfig {
 # on this box the pitch in pixels (832) EXCEEDS the visible width (800). Laying out to caps would
 # push chrome into the invisible gutter — the same class of mistake one register removed.
 #
-# ⚠ Returns the fallback on any host build (bhumi_output_query is agnos-only and answers -1), so
-# the Linux dev build is unaffected.
+# ⛔ THIS LINE SAID "Returns the fallback on any host build (bhumi_output_query is agnos-only and
+# answers -1), so the Linux dev build is unaffected." FALSE since bhumi 1.2.0. Linux is a real
+# display target now (bhumi ADR 0003): `bhumi_output_query` reads real geometry out of sysfs, so the
+# host build gets the panel's true size — measured 2560x1440 here, where it used to take the
+# 1280x720 fallback. ⚠ That makes the Linux arm subject to the SAME hazard this whole comment
+# documents for agnos: layout must follow fbinfo's width, and a wrong answer shows as a desktop
+# occupying one corner of the screen rather than as an error.
+# ⚠ macOS/Windows still answer -1 and still take the fallback, deliberately.
 var ae_geom_w = 0;
 var ae_geom_h = 0;
 # 1 = the numbers above came from the kernel; 0 = they are AE_FALLBACK_*. See the print in main.
@@ -183,6 +193,20 @@ fn ae_query_geometry(): i64 {
     # be drawn into. Keep the fallback rather than trust a degenerate reading.
     if (w < 64) { return 0; }
     if (h < 64) { return 0; }
+    # ⛔⛔ THE CHANNEL ORDER WAS NEVER CHECKED, AND `bhumi_output_format_ok` HAD ZERO CALL SITES IN THIS
+    # REPO — while bhumi's own module banner says callers must verify byte order before presenting.
+    # It cost nothing while agnos was the only scanout target (archaemenid reports BGRX, which IS
+    # BhumiFb's store order, so the raw blit is correct by luck as much as by design). bhumi 1.2.0 makes
+    # Linux a real target, and an fbdev console that reports **RGBX** would render every frame with red
+    # and blue swapped — a wrong picture, silently, on a path where nothing returns an error.
+    # ⚠ Report, do not refuse: a colour-swapped desktop is still a usable desktop and still worth
+    # looking at, whereas refusing to start would turn a cosmetic defect into no desktop at all. The
+    # conversion itself belongs in bhumi (its ADR 0001 deferred an RGBX swizzle for exactly this case),
+    # so the honest thing here is to NAME it once and carry on.
+    if (bhumi_output_format_ok(&info) == 0) {
+        println("aethersafha: WARNING the display reports RGBX, not BGRX — red and blue will be swapped");
+        println_int(bhumi_fbinfo_pxformat(&info));
+    }
     ae_geom_w = w;
     ae_geom_h = h;
     ae_geom_asked = 1;
@@ -1015,7 +1039,30 @@ fn main(): i64 {
             # once with #84. Returns 0 on any refusal (no GPU, an off-screen window, a failed blit) and
             # we fall through to the untouched CPU present — so QEMU and every non-AMD box are unaffected.
             if (ae_gpu_present_frame(comp, fb) == 0) {
-                bhumi_backend_present(be, now);
+                # ⛔⛔ THIS RETURN CODE USED TO BE DISCARDED, AND THAT STOPPED BEING FREE AT bhumi 1.2.0.
+                # It was defensible while the host arm was a compile-time -1: every host run "failed" to
+                # present and that was the expected, uninteresting answer. Now Linux scans out for real,
+                # so this value is the ONLY thing separating a compositor painting a screen from one
+                # running a full frame loop into a void — and both look identical in the log, both reach
+                # `frame loop ok`, and both exit 0. That is the exact shape of the 0.12.0 leaked-listener
+                # failure: healthy-looking output from a structurally incapable run.
+                # ⚠ Latched, not per-frame: a refusing backend refuses every frame, and 95,439 identical
+                # lines is how a real signal gets scrolled past. BHUMI_SEAT_DENIED (-2) is distinguished
+                # from a device failure (-1) because they point at different repos — the seat gate here
+                # versus the framebuffer underneath it.
+                var prc = bhumi_backend_present(be, now);
+                if (prc != 0) {
+                    if (ae_present_bad == 0) {
+                        ae_present_bad = 1;
+                        if (prc == BHUMI_SEAT_DENIED) {
+                            println("aethersafha: scanout DENIED by the seat — this run is drawing to nothing");
+                        }
+                        if (prc != BHUMI_SEAT_DENIED) {
+                            println("aethersafha: scanout refused — no framebuffer; this run is drawing to nothing");
+                        }
+                        println_int(prc);
+                    }
+                }
             }
             # agnos: cede the CPU each frame so the spawned setu client (puka, a
             # spawn_path background proc) is scheduled to connect + present. The
