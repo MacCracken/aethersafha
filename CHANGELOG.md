@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.13.8] - 2026-08-12 — the Linux keyboard is whole
+
+⭐ **Arrows, Home/End/PgUp/PgDn, Insert/Delete, RCtrl/RAlt, Meta and Menu reach the compositor** —
+bhumi **1.4.1**. All of them were silently dropped since the Linux keyboard landed. Verified in QEMU:
+`up left home delete esc` logged usages **82 80 74 76 41**, exactly HID Up/Left/Home/Delete/Esc.
+
+⛔ **The gap existed because the base plane worked TOO well.** Linux `KEY_*` base codes ARE Set-1 make
+codes, so the base plane needed no translation at all — and that free win is what made the extended
+plane easy to overlook. Set-1 encodes those keys as a 0xE0 **prefix** plus a byte and bhumi's table was
+keyed on the byte, while evdev emits one flat number and never a prefix, so the table could not match
+on this arm no matter what was pressed. ⇒ a second table keyed on evdev's own numbering.
+
+⚠ M6-B4's "base plane only" caveat is now retired; the Linux keyboard is complete for ordinary use.
+
+### Changed — `[deps.bhumi]` 1.4.0 → **1.4.1**
+
 ## [0.13.7] - 2026-08-12 — M6-B4 closed: the Linux desktop takes mouse AND keyboard
 
 ⭐⭐ **`pointer motion received -- the cursor is live`, `pointer button click routed`, `quit on a key

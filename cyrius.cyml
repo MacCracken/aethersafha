@@ -35,7 +35,7 @@ stdlib = [
 [deps.bhumi]
 git = "https://github.com/MacCracken/bhumi.git"
 path = "../bhumi"
-tag = "1.4.0"
+tag = "1.4.1"
 modules = ["dist/bhumi.cyr"]
 
 # --- Desktop theme-token core: rupa (रूप — form / appearance). The ONE source of

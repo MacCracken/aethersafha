@@ -218,10 +218,10 @@ scans them out.**
   ⭐ **The operator action was never a blocker for development** — this item was recorded as needing the
   dev user in the `input` group; the guest's init is PID 1, so evdev is readable there. Still required
   to run on the host.
-  ⛔ **Base plane only.** evdev emits no 0xE0 prefix (`KEY_UP` is 103, not `E0 48`), so arrows,
-  RCtrl/RAlt/Meta, Home/End/PgUp/PgDn and Insert/Delete are dropped as unmapped — a second table keyed
-  on evdev's own numbering is the remaining work, and it is the one thing standing between this and a
-  usable keyboard.
+  ⭐ **Extended plane CLOSED too (bhumi 1.4.1 / 0.13.8)** — arrows, Home/End/PgUp/PgDn, Ins/Del,
+  RCtrl/RAlt, Meta and Menu all arrive (QEMU: usages 82/80/74/76/41). ⛔ The gap existed because the
+  base plane worked for free — Linux `KEY_*` base codes ARE Set-1 make codes — while the extended plane
+  is 0xE0-prefixed in Set-1 and flat in evdev, so bhumi's existing table could never match here.
   ⚠ On Linux both streams share one fd and a read consumes, so bhumi drains ONCE and splits; and its
   device scan latched twice before it was right (see bhumi 1.4.0). Unplug is still unhandled.
 - **B5 — host client launch.** Today a client must be started by hand in another shell. `plp_spawn`
