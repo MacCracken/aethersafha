@@ -29,6 +29,9 @@ stdlib = [
     "tls", "tls_native", "tls_native_conn", "tls_native_ctx", "tls_native_lowlevel",
     "tls_native_hs12", "tls_native_hs13", "tls_native_keysched",
     "sha1", "keccak", "sigil", "sakshi",
+    # chitra (image decode) → sankoch's zlib_decompress for PNG IDAT inflate; sankoch's
+    # _sankoch_lock/_unlock wrap mutex_lock/mutex_unlock, hence "thread".
+    "sankoch", "thread",
 ]
 
 # --- Platform backend: DRM/KMS + libinput + logind → output/input/seat.
@@ -99,6 +102,18 @@ path = "../kavach"
 # a real tag on a clean kavach tree, so the declared graph is now fetchable and matches the vendored copy.
 tag = "3.11.10"
 modules = ["dist/kavach.cyr"]
+
+# --- Image decode: chitra (चित्र — image / picture). Pure-Cyrius CPU raster decoder — PNG (all bit
+# depths + Adam7) and JPEG (baseline, YCbCr, 4:4:4/4:2:2/4:2:0) → canonical RGBA8. This is what makes a
+# WALLPAPER A FILE.
+# ⛔ Do NOT hand-roll a decoder here. One was written for the C1a follow-on before this dep was found,
+# covering a strict subset (8-bit, RGB/RGBA, no Adam7) — a maintained sibling already did all of it and
+# more. Deleted rather than kept as a "lighter" path.
+[deps.chitra]
+git = "https://github.com/MacCracken/chitra.git"
+path = "../chitra"
+tag = "0.3.0"
+modules = ["dist/chitra.cyr"]
 
 # --- DISPLAY plane contract: setu (सेतु — bridge). The dhancha client ↔ this
 # compositor wire — pure message TYPES + wire CODEC (pixel/input/surface

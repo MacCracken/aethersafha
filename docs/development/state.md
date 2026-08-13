@@ -8,7 +8,7 @@
 
 | Field | Value | Source |
 |---|---|---|
-| Version | **0.15.0** | [`VERSION`](../../VERSION) |
+| Version | **0.16.0** | [`VERSION`](../../VERSION) |
 | Cyrius pin | **6.5.20** — matches `cycc`; bumped from 6.5.13 on 2026-08-12 with `lib sync --full` (17 stdlib files) | `cyrius.cyml [package].cyrius` |
 | Modules / tests | 27 `src/*.cyr` · **23 `.tcyr` suites** | `ls` |
 | `--agnos` build | **GREEN** — 0.13.2 is **13,589,192 B · `7cfd4091`** at pin 6.5.20 (0.13.1 13,584,832 · 0.13.0 13,584,728). ⛔ **A SIZE DOES NOT IDENTIFY A BINARY** — 2026-08-12 **three distinct artifacts shared the old byte count** (`1b8b3c57` · staged `690160b9` · rebuild `a692279f`). Quote a **hash** beside every size. ⚠ The staged rootfs is now version- AND toolchain-stale (M6-A1) | `sha256sum` |

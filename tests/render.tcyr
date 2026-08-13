@@ -877,6 +877,22 @@ fn main() {
 
     return assert_summary();
 
+    # ----- wallpaper: image scaling (M6-C1, pure) -----------------
+    # ⛔ The first cut of the wallpaper layer had NO image kind at all — it was a colour source with a
+    # "row-uniform, never varies in x" doctrine, which is meaningless for a file. These pin the scaler.
+    test_group("wallpaper — nearest-neighbour scaling");
+    assert_eq(wp_src_index(0, 1280, 640), 0,   "dest 0 -> src 0");
+    assert_eq(wp_src_index(1279, 1280, 640), 639, "last dest column -> LAST src column, not past it");
+    assert_eq(wp_src_index(640, 1280, 640), 320, "midpoint halves on a 2x upscale");
+    assert_eq(wp_src_index(0, 640, 1280), 0,   "downscale: dest 0 -> src 0");
+    assert_eq(wp_src_index(639, 640, 1280), 1278, "downscale: last dest -> in range");
+    # ⚠ Clamping is the assertion that matters: an off-by-one samples past the buffer on the final
+    # row/column, which reads as a torn edge rather than as an error.
+    assert_eq(wp_src_index(9999, 100, 50), 49, "past the end clamps to the last source index");
+    assert_eq(wp_src_index(-5, 100, 50), 0,    "negative clamps to 0");
+    assert_eq(wp_src_index(5, 0, 50), 0,       "zero dest extent is not a divide by zero");
+    assert_eq(wp_src_index(5, 100, 0), 0,      "zero source extent is safe");
+
     # ----- window opacity (M6-C3) --------------------------------
     test_group("render — per-window opacity");
     # ⛔ THE DEFAULT MUST BE 255. An opacity field in zero-initialised memory means INVISIBLE, so a

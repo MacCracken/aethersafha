@@ -4,6 +4,52 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.0] - 2026-08-13 — a wallpaper is a FILE
+
+⛔⛔ **0.14.0 SHIPPED THE WRONG FEATURE, and it had a convincing rationale.** The wallpaper layer landed
+as a *colour source* — solid and vertical-gradient — under a doctrine that "the colour may depend on
+`y`, never on `x`", justified by keeping the `AE-0a` band a flat row run. That constraint is correct
+for a gradient and **meaningless for a wallpaper, because an image varies in both axes.** It came from
+reading the design brief's "generative / shader wallpapers" idea log as the spec instead of asking what
+a wallpaper is. The doctrine is retired; solid and gradient survive as cheap special cases.
+
+⭐⭐ **`--wallpaper <file>` loads a PNG or JPEG.** Verified in QEMU with a 1280x800 **16-bit** PNG, and
+on the host with both PNG and JPEG.
+
+### ⛔ And the decoder was already written — in a sibling repo
+
+A PNG decoder was hand-rolled here first, covering a strict subset (8-bit only, RGB/RGBA only, no
+Adam7). **`chitra` 0.3.0 already does all of it and more**: PNG at every bit depth including Adam7, and
+baseline JPEG with YCbCr 4:4:4/4:2:2/4:2:0, into canonical RGBA8. ⚠ The test file that proved this is
+**16-bit**, which the hand-rolled version would have refused. Deleted rather than kept as a "lighter
+path"; `[deps.chitra]` added, with `sankoch` + `thread` joining `[deps].stdlib` for its inflate.
+
+### Added
+
+- `wp_load_file(path)` — read, decode via chitra, repack RGBA8 → XRGB8888 once (not per frame).
+  ⚠ Alpha is **discarded deliberately**: the wallpaper is the bottom layer, so there is nothing beneath
+  it for an alpha to blend against and honouring it would only darken the image against black. A
+  translucent wallpaper is a different feature from a translucent window.
+- `wp_pixel(x, y, fw, fh)` + `wp_src_index` — nearest-neighbour scale to the screen. 9 assertions, and
+  the ones that matter are the clamps: an off-by-one samples past the buffer on the final row/column,
+  which reads as a torn edge rather than an error.
+- ⚠ A failed load **names itself** and falls back to the theme — silence would be indistinguishable
+  from "no wallpaper was asked for".
+- ⚠ Reads to EOF rather than trusting one `sys_read`: a short read on a large file is normal, and
+  treating it as the whole file truncates the last chunk and surfaces as a decode error blaming the
+  wrong thing.
+
+### ⭐ The GPU route for an image wallpaper is already proven, and it is NOT mabda
+
+A decoded wallpaper is just a full-screen surface, so it takes the **same path a client surface takes**:
+an `#86 shm_create_gpu` slot then `#87 gpu_blit_shm` into the back buffer before the windows — which is
+`AE-2`, iron-proven for an opaque surface. No new kernel op, no shader, no driver stack.
+⛔ mabda is not involved and must not be re-proposed: its GPU surface rides **Linux's** driver stack
+while this band is the agnos kernel's own ring-3 `#82`-`#94` (roadmap, corrected 2026-08-01). The only
+thing mabda could have offered is decode acceleration, and decode is chitra's, on CPU.
+⚠ Not wired yet — the upload wants a persistent slot (16 system-wide, each rounded to a 2 MB page) and
+a re-upload only when the image or geometry changes. Next bite.
+
 ## [0.15.0] - 2026-08-13 — M6-C3: per-window opacity
 
 ⭐⭐ **Windows can be translucent.** `win_set_opacity(win, 0..255)` applies to chrome AND content — a

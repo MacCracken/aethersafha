@@ -449,6 +449,22 @@ fn ae_has_flag(flag): i64 {
 # ⚠ `atoi` answers 0 for a non-numeric argument, and 0 is meaningful here (`--frames 0` = run until
 # quit), so a typo'd count reads as "unbounded" rather than as an error. That is the safe direction
 # for a compositor — an operator who mistypes gets a desktop they can quit, not one that vanishes.
+# The string argument following `--flag`, or 0 when the flag is absent or is the LAST argument.
+# ⚠ Returns 0 rather than an empty string so a caller can distinguish "no value given" from "" — the
+# difference between `--wallpaper` (use the gradient) and a path that failed to load.
+fn ae_flag_str(flag): i64 {
+    var n = argc();
+    var i = 1;
+    while (i < n) {
+        if (streq(argv(i), flag) == 1) {
+            if ((i + 1) < n) { return argv(i + 1); }
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn ae_flag_int(flag, dflt): i64 {
     var n = argc();
     var i = 1;
@@ -552,9 +568,30 @@ fn main(): i64 {
         println("aethersafha: window opacity set (0-255):");
         println_int(win_default_opacity());
     }
+    # ⭐ `--wallpaper <file>` loads a PNG or JPEG through chitra. Bare `--wallpaper` keeps the gradient
+    # as a no-file fallback, which is what the C1a demo knob was.
     if (ae_has_flag("--wallpaper") == 1) {
-        wp_set_vgrad(0x0E1621, 0x2B1B3A);   # MUDRA-ish deep blue -> violet, top to bottom
-        println("aethersafha: wallpaper set — vertical gradient");
+        var wpf = ae_flag_str("--wallpaper");
+        if (wpf == 0) {
+            wp_set_vgrad(0x0E1621, 0x2B1B3A);
+            println("aethersafha: wallpaper — vertical gradient (no file given)");
+        }
+        else {
+            var wrc = wp_load_file(wpf);
+            if (wrc == 0) {
+                println("aethersafha: wallpaper loaded, then w and h:");
+                sys_write(1, wpf, strlen(wpf)); sys_write(1, "\n", 1);
+                println_int(wp_image_width());
+                println_int(wp_image_height());
+            }
+            # ⚠ NAME THE FAILURE. A wallpaper that fails to load leaves the themed backdrop, which is
+            # indistinguishable from "no wallpaper was asked for" unless the run says so.
+            if (wrc != 0) {
+                println("aethersafha: wallpaper FAILED to load (rc), falling back to the theme:");
+                println_int(wrc);
+                sys_write(1, wpf, strlen(wpf)); sys_write(1, "\n", 1);
+            }
+        }
     }
 
     ae_query_geometry();

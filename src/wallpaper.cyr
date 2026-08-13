@@ -6,15 +6,24 @@
 # was no layer at all and no place a second colour could exist. This introduces the layer and keeps the
 # default byte-identical to what shipped.
 #
-# ⭐⭐ THE COST MODEL IS THE DESIGN CONSTRAINT, NOT AN AFTERTHOUGHT. `AE-0a` measured the clear at
-# **3.83 ms of a 6.40 ms GPU frame — 60%** at 2560x1440, and cut it to a damage band. A wallpaper
-# REPLACES that clear, it does not add to it, so it starts from a budget that already exists — but only
-# if it keeps the band's shape. `rend_clear_band` is fast because a full-width band is ONE contiguous
-# run (1.093 ns/px; going through `fill_rect` cost 23% more in per-row overhead alone).
-# ⇒ **Every source here is ROW-UNIFORM: the colour may depend on `y`, never on `x`.** That keeps a band
-# fill a sequence of flat row runs instead of a per-pixel evaluation, so a gradient costs the same
-# stores as a solid and differs only by one add per row. A source that varies along x is a different
-# performance class and belongs with the shader work (C1b), not here.
+# ⛔⛔ THE FIRST CUT OF THIS FILE BUILT THE WRONG THING, and the wrong thing had a very convincing
+# rationale. It shipped as a *colour source* — solid and vertical-gradient — under a doctrine that
+# "the colour may depend on `y`, never on `x`", justified by keeping the `AE-0a` band a flat row run
+# (1.093 ns/px; going through `fill_rect` cost 23% more in per-row overhead alone). That constraint is
+# right for a gradient and **meaningless for a wallpaper, because an image varies in both axes.**
+# ⇒ The doctrine is retired. It came from reading the design brief's "generative / shader wallpapers"
+# idea log as the spec instead of asking what a wallpaper IS: **a file you load and put on the screen.**
+# Solid and gradient survive as cheap special cases; IMAGE is the point.
+#
+# ⭐ THE COST ARGUMENT SURVIVES INTACT, and it is why this is affordable: `AE-0a` measured the clear at
+# **3.83 ms of a 6.40 ms GPU frame — 60%** at 2560x1440. A wallpaper REPLACES that clear rather than
+# adding to it, and the damage band still governs how many pixels are touched. An image costs a load
+# per pixel where a solid costs none, but it is bounded by the same band.
+#
+# ⛔ DECODING IS chitra'S JOB, NOT OURS. `[deps.chitra]` is a pure-Cyrius CPU raster decoder — PNG at
+# every bit depth including Adam7, and baseline JPEG with YCbCr subsampling — returning canonical
+# RGBA8. A hand-rolled PNG decoder was written here before that dep was found and covered a strict
+# subset of it; it was deleted, not kept as a "lighter path".
 #
 # ⚠ NOT a client surface and not a window. The wallpaper is compositor-owned, sits beneath every
 # window, and is drawn by the same band the clear used — so it inherits `AE-0a`'s damage tracking for
@@ -23,6 +32,28 @@
 enum AeWallpaperKind {
     AE_WP_SOLID = 0;   # one colour — byte-identical to the pre-C1a backdrop
     AE_WP_VGRAD = 1;   # vertical gradient, `c0` at the top row to `c1` at the bottom
+    AE_WP_IMAGE = 2;   # a decoded file, scaled to the screen
+}
+
+# Decoded wallpaper image: XRGB8888, `ae_wp_iw` x `ae_wp_ih`.
+var ae_wp_img = 0;
+var ae_wp_iw  = 0;
+var ae_wp_ih  = 0;
+
+fn wp_image(): i64        { return ae_wp_img; }
+fn wp_image_width(): i64  { return ae_wp_iw; }
+fn wp_image_height(): i64 { return ae_wp_ih; }
+
+# Nearest-neighbour source index for destination column/row. PURE and host-testable — the whole
+# scaling policy is these two lines, and an off-by-one here samples past the image on the last
+# row/column, which reads as a torn edge rather than as an error.
+fn wp_src_index(d, dn, sn): i64 {
+    if (dn <= 0) { return 0; }
+    if (sn <= 0) { return 0; }
+    var i = (d * sn) / dn;
+    if (i < 0) { i = 0; }
+    if (i > (sn - 1)) { i = sn - 1; }
+    return i;
 }
 
 var ae_wp_kind = 0;
@@ -96,8 +127,21 @@ fn wp_lerp8(a, b, y, h): i64 {
 # reason a unit test can cover the wallpaper without a framebuffer.
 # ⚠ Clamps rather than wrapping: a caller asking past the last row gets the last row's colour, which is
 # what a band overrunning by a pixel should see.
+# The pixel at (x, y) of an `fw` x `fh` screen. ⚠ This — not `wp_row_color` — is the real source API
+# now; `wp_row_color` remains for the row-uniform kinds and for the tests that pin their maths.
+fn wp_pixel(x, y, fw, fh): i64 {
+    if (ae_wp_kind == AeWallpaperKind.AE_WP_IMAGE) {
+        if (ae_wp_img == 0) { return ae_wp_c0; }
+        var sx = wp_src_index(x, fw, ae_wp_iw);
+        var sy = wp_src_index(y, fh, ae_wp_ih);
+        return load32(ae_wp_img + (sy * ae_wp_iw + sx) * 4);
+    }
+    return wp_row_color(y, fh);
+}
+
 fn wp_row_color(y, h): i64 {
     if (ae_wp_kind == AeWallpaperKind.AE_WP_SOLID) { return ae_wp_c0; }
+    if (ae_wp_kind == AeWallpaperKind.AE_WP_IMAGE) { return ae_wp_c0; }
     var yy = y;
     if (yy < 0) { yy = 0; }
     if (h > 0) { if (yy > (h - 1)) { yy = h - 1; } }
@@ -118,11 +162,75 @@ fn wp_fill_band(fb, y, h, fh): i64 {
     if (ae_wp_kind == AeWallpaperKind.AE_WP_SOLID) {
         return rend_clear_band(fb, y, h, ae_wp_c0);
     }
+    var fw = bhumi_fb_width(fb);
+    if (ae_wp_kind == AeWallpaperKind.AE_WP_IMAGE) {
+        if (ae_wp_img == 0) { return rend_clear_band(fb, y, h, ae_wp_c0); }
+        var iy = 0;
+        while (iy < h) {
+            var ix = 0;
+            while (ix < fw) {
+                bhumi_fb_set(fb, ix, y + iy, wp_pixel(ix, y + iy, fw, fh));
+                ix = ix + 1;
+            }
+            iy = iy + 1;
+        }
+        return 0;
+    }
     var r = 0;
     while (r < h) {
         rend_clear_band(fb, y + r, 1, wp_row_color(y + r, fh));
         r = r + 1;
     }
+    return 0;
+}
+
+# Load a wallpaper from a PNG or JPEG file. -> 0 on success, negative on failure.
+# ⚠ chitra returns canonical **RGBA8**; the framebuffer is XRGB8888, so the channels are repacked once
+# here rather than per frame. Alpha is DISCARDED deliberately: the wallpaper is the bottom layer, so
+# there is nothing beneath it for an alpha to blend against and honouring it would only darken the
+# image against black. A translucent wallpaper is a different feature from a translucent window.
+fn wp_load_file(path): i64 {
+    var fd = sys_open(path, 0, 0);
+    if (fd < 0) { return 0 - 1; }
+    var cap = 16777216;                       # 16 MB — a desktop wallpaper, not a photo library
+    var src = alloc(cap);
+    if (src == 0) { sys_close(fd); return 0 - 2; }
+    # ⚠ Read to EOF. One `sys_read` returning short is normal on a large file, and treating it as the
+    # whole file truncates the last chunk — which surfaces as a decode error naming the wrong cause.
+    var got = 0;
+    var n = 1;
+    while (n > 0) {
+        n = sys_read(fd, src + got, cap - got);
+        if (n > 0) { got = got + n; }
+        if (got >= cap) { n = 0; }
+    }
+    sys_close(fd);
+    if (got <= 0) { return 0 - 3; }
+    var err = alloc(8);
+    store64(err, 0);
+    var img = chitra_image_decode(src, got, err);
+    if (img == 0) { return 0 - 4; }
+    var iw = chitra_image_width(img);
+    var ih = chitra_image_height(img);
+    if (iw <= 0) { return 0 - 5; }
+    if (ih <= 0) { return 0 - 5; }
+    var rgba = chitra_image_pixels(img);
+    var pix = alloc(iw * ih * 4);
+    if (pix == 0) { return 0 - 2; }
+    var i = 0;
+    var np = iw * ih;
+    while (i < np) {
+        var sp = rgba + i * 4;
+        store32(pix + i * 4, ((load8(sp) & 0xFF) << 16) | ((load8(sp + 1) & 0xFF) << 8) | (load8(sp + 2) & 0xFF));
+        i = i + 1;
+    }
+    chitra_image_free(img);
+    ae_wp_track = 0;
+    ae_wp_kind = AeWallpaperKind.AE_WP_IMAGE;
+    ae_wp_img = pix;
+    ae_wp_iw = iw;
+    ae_wp_ih = ih;
+    ae_wp_serial = ae_wp_serial + 1;
     return 0;
 }
 
@@ -146,3 +254,13 @@ fn wp_gpu_expressible(): i64 {
     if (ae_wp_kind == AeWallpaperKind.AE_WP_SOLID) { return 1; }
     return 0;
 }
+
+# ⭐⭐ THE GPU ROUTE FOR AN IMAGE WALLPAPER IS ALREADY PROVEN, AND IT IS NOT mabda.
+# A decoded wallpaper is just a full-screen surface, so it takes the SAME path a client surface takes:
+# an `#86 shm_create_gpu` slot, then `#87 gpu_blit_shm` into the back buffer before the windows — which
+# is `AE-2`, iron-proven for an opaque surface. No new kernel op, no shader, no driver stack.
+# ⛔ mabda is NOT involved and must not be re-proposed: its GPU surface rides Linux's driver stack,
+# while this band is the agnos kernel's own ring-3 `#82`-`#94` (roadmap, corrected 2026-08-01). The
+# only thing mabda could ever have offered here is decode acceleration, and decode is chitra's on CPU.
+# ⚠ Not wired yet — the upload wants a persistent slot (16 system-wide, each rounded to a 2 MB page) and
+# a re-upload only when the image or the geometry changes. That is the next bite, not a line here.

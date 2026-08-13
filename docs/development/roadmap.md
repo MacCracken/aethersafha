@@ -258,7 +258,10 @@ fired** — it is a brief now, not an idea log.
 
 - **C1 — WALLPAPER.** ⭐ The desktop currently draws a flat themed backdrop and nothing else; the
   backdrop is the largest single surface on screen and the most-seen pixel in the system.
-  - **C1a ✅ DONE 0.14.0 — `src/wallpaper.cyr`.** Row-uniform sources (solid, vertical gradient) drawn
+  - **C1a ✅ DONE 0.14.0, CORRECTED 0.16.0 — `src/wallpaper.cyr`.** ⛔ 0.14.0 built a COLOUR SOURCE, not a
+    wallpaper: solid + gradient under a "never varies in x" doctrine that is meaningless for an image.
+    0.16.0 makes it a FILE (PNG/JPEG via `[deps.chitra]`) and retires the doctrine.
+    Original entry: Row-uniform sources (solid, vertical gradient) drawn
     through the same `AE-0a` band the clear used, with a serial so a wallpaper change invalidates the
     band honestly. QEMU-verified: row 799 samples exactly `c1`. ⛔ Non-solid demotes the GPU frame
     (latched + named) because `#88` fills one colour and `AE-9` is all-or-nothing. Original scope: A backdrop that is a *source* rather than a constant: solid,
@@ -272,9 +275,13 @@ fired** — it is a brief now, not an idea log.
     ⛔ **NOT via mabda** — `desktop-design-ideas.md` calls a shader wallpaper "a mabda surface", which
     is the same false claim [corrected here on 2026-08-01](#-corrected-2026-08-01--gpu-acceleration-is-not-out-of-scope-and-it-does-not-go-through-mabda)
     and left uncorrected in that doc for ten weeks because nothing linked the two. Fix it there when C1b lands.
-  - **C1c — authoring + format.** The open question the design brief names and does not answer: how is a
-    wallpaper expressed and shipped sovereignly — a Cyrius source compiled in, a data file, a shader
-    artifact? ⚠ Decide this BEFORE C1b, or the first shader becomes the format by accident.
+  - **C1c ✅ ANSWERED 0.16.0 — the format is PNG and JPEG, and the question was mis-framed.** It asked
+    how a wallpaper is "expressed and shipped sovereignly — a Cyrius source, a data file, a shader
+    artifact?" ⛔ A wallpaper is a **file**, and the sovereign decoder already existed (`chitra`).
+    ⚠ The shader-artifact option was never real on agnos anyway: `#92` exposes a **fixed op list**
+    (`GPU_OP_SUPPORTED`), not programmable shaders — there is no upload-a-shader op to author for.
+    C1b's "generative" wallpapers therefore mean *a Cyrius generator compiled in*, which needs no
+    format at all, and it does not block anything.
 - **C3 🚧 CPU PATH DONE 0.15.0 — per-window opacity, chrome and content.** Verified in QEMU against a
   null: at 255/150/60 the window pixels move monotonically toward the wallpaper while a pixel OUTSIDE
   the window is byte-identical at all three. ⛔ **Still owed: the agnos GPU route**, which needs a kernel
