@@ -57,7 +57,11 @@ enum WinOff {
     W_PY    = 112;
     W_PW    = 120;
     W_PH    = 128;
-    W_SZ    = 136;
+    # ⭐ M6-C3: per-window opacity, 0..255 (255 = opaque). A LEVEL the compositor applies, distinct from
+    # W_PREMUL, which describes the per-pixel alpha the CLIENT authored. The two multiply: a
+    # premultiplied surface at 50% window opacity is that surface's own alpha scaled by 128.
+    W_OPACITY = 136;
+    W_SZ    = 144;
 }
 
 # win_new(id, x, y, w, h, title_cstr) -> *Window (0 on OOM)
@@ -82,6 +86,10 @@ fn win_new(id, x, y, w, h, title): i64 {
     # ORDINARY OPAQUE surface down the `#92` blend path, where its zero alpha byte then makes it an
     # additive ghost — a wrong picture with no error anywhere.
     store64(p + W_PREMUL, 0);
+    # ⛔ DEFAULT 255, NOT 0. Zeroed memory means "invisible" for an opacity field, so a window created
+    # before anyone sets one would vanish. Every other slot here is zero-init and this is the one that
+    # cannot be — the same class as the W_PREMUL slot that was missed above.
+    store64(p + W_OPACITY, ae_win_default_opacity);
     store64(p + W_PX, 0 - 1);
     store64(p + W_PY, 0 - 1);
     store64(p + W_PW, 0);
@@ -167,6 +175,31 @@ fn win_set_cfd(p, fd) { store64(p + W_CFD, fd); return 0; }
 fn win_keymode(p) { return load64(p + W_KEYMODE); }
 
 # @public — SETU_SURF_PREMULTIPLIED opt-in (see W_PREMUL).
+# The opacity every NEW window starts at. ⚠ A default rather than a per-call argument because windows
+# are created deep in `setu_dispatch` when a client presents, and threading an opacity through the
+# protocol path to set a compositor-side preference would be the wrong seam entirely.
+var ae_win_default_opacity = 255;
+fn win_default_opacity(): i64 { return ae_win_default_opacity; }
+fn win_set_default_opacity(a): i64 {
+    var v = a;
+    if (v < 0) { v = 0; }
+    if (v > 255) { v = 255; }
+    ae_win_default_opacity = v;
+    return 0;
+}
+
+fn win_opacity(win): i64 { return load64(win + W_OPACITY); }
+# Clamped on the way in: an out-of-range opacity is a caller bug, and silently storing 300 would make
+# `rend_blend`'s `255 - a` negative and wrap the arithmetic into garbage rather than erroring.
+fn win_set_opacity(win, a): i64 {
+    var v = a;
+    if (v < 0) { v = 0; }
+    if (v > 255) { v = 255; }
+    store64(win + W_OPACITY, v);
+    return 0;
+}
+fn win_translucent(win): i64 { if (win_opacity(win) < 255) { return 1; } return 0; }
+
 fn win_premul(win): i64 { return load64(win + W_PREMUL); }
 fn win_set_premul(win, v): i64 { store64(win + W_PREMUL, v); return 0; }
 fn win_set_keymode(p, m) { store64(p + W_KEYMODE, m); return 0; }

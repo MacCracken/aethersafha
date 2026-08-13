@@ -41,7 +41,8 @@ var ae_gpu_blend  = 0;    # 1 = gpu_shader_op#92 is usable (caps bit3) — selec
 # printing per frame. ⛔ Both are printed, because "no line" must not be the signal for either case.
 var ae_gpu_blend_seen = 0;
 var ae_gpu_fallback_seen = 0;
-var ae_gpu_wp_demote = 0;   # latch: named the non-solid-wallpaper demotion once (M6-C1a)
+var ae_gpu_wp_demote = 0;
+var ae_gpu_op_demote = 0;   # latch: named the translucent-window demotion once (M6-C3)   # latch: named the non-solid-wallpaper demotion once (M6-C1a)
 
 # gpu_caps#89 flag bits (kernel: syscall.cyr gpu_caps_sys).
 var AE_GPU_CAP_PRESENT  = 1;    # bit0 — a GPU is bound
@@ -364,6 +365,28 @@ fn ae_gpu_frame_plan(comp, fb): i64 {
     # ⚠ LATCHED AND LOUD. Silence here is indistinguishable from a wallpaper that simply failed to
     # paint, and this arc has already paid for that shape twice. The gradient-as-N-`#88`-bands route is
     # the C1b follow-on that removes the demotion.
+    # ⛔ A TRANSLUCENT WINDOW DEMOTES THE FRAME, same reason as a non-solid wallpaper (M6-C3):
+    # `#88 gpu_fill_rect` writes a flat colour with no read-modify-write, and `#92` op 0x01 blends the
+    # per-pixel alpha the CLIENT authored — its op record has nowhere to put a compositor-applied
+    # uniform α (`op / src_id / wh / dstxy`, and the kernel REJECTS a non-zero reserved dword). So a
+    # window opacity is not expressible on this band at all today; that is a kernel ask, not a
+    # renderer change. See roadmap M6-C3.
+    var wv = comp_windows(comp);
+    var wi = 0;
+    var wn = vec_len(wv);
+    while (wi < wn) {
+        var ww = vec_get(wv, wi);
+        if (ww != 0) {
+            if (win_translucent(ww) == 1) {
+                if (ae_gpu_op_demote == 0) {
+                    ae_gpu_op_demote = 1;
+                    println("aethersafha: GPU frame DEMOTED — a window is translucent and #92 has no opacity field; CPU path for the run");
+                }
+                return 0;
+            }
+        }
+        wi = wi + 1;
+    }
     if (wp_gpu_expressible() == 0) {
         if (ae_gpu_wp_demote == 0) {
             ae_gpu_wp_demote = 1;

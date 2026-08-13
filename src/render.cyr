@@ -54,6 +54,38 @@ enum Deco {
 # writes, which for a rectangle is exactly a clipped rectangle — and `bhumi_fb_set` remains the
 # right call for genuinely scattered single pixels. Uses only bhumi's PUBLIC accessors, so this
 # needs no change to bhumi and no tag bump.
+# fill_rect_a: fill with `color` at opacity `a` (0..255), blending against what is already there.
+# ⭐ M6-C3. `a == 255` delegates to `fill_rect` UNCHANGED — including its `#88` GPU enqueue — so an
+# opaque window costs exactly what it did before and the common path is untouched.
+# ⛔ NO GPU ENQUEUE FOR THE TRANSLUCENT CASE, and that is not laziness: `#88 gpu_fill_rect` writes a
+# flat colour with no read-modify-write, so it cannot blend. `ae_gpu_frame_plan` demotes a frame that
+# contains a translucent window for the same reason a non-solid wallpaper demotes it — `AE-9` deleted
+# the `#39` blit, so there is no CPU layer left to mix into a GPU frame.
+fn fill_rect_a(fb, x, y, w, h, color, a): i64 {
+    if (a >= 255) { return fill_rect(fb, x, y, w, h, color); }
+    if (a <= 0) { return 0; }
+    var x0 = x;
+    var y0 = y;
+    var x1 = x + w;
+    var y1 = y + h;
+    if (x0 < 0) { x0 = 0; }
+    if (y0 < 0) { y0 = 0; }
+    var fw = bhumi_fb_width(fb);
+    var fh = bhumi_fb_height(fb);
+    if (x1 > fw) { x1 = fw; }
+    if (y1 > fh) { y1 = fh; }
+    var yy = y0;
+    while (yy < y1) {
+        var xx = x0;
+        while (xx < x1) {
+            bhumi_fb_set(fb, xx, yy, rend_blend(bhumi_fb_get(fb, xx, yy), color, a));
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    return 0;
+}
+
 fn fill_rect(fb, x, y, w, h, color): i64 {
     # ⭐ `AE-9`: on a GPU frame every chrome rect goes to `#88 gpu_fill_rect` instead of a CPU store loop.
     # ⛔ Decided by `ae_chrome_on_gpu()`, which is a per-FRAME answer — a half-migrated frame has the `#39`
@@ -591,14 +623,17 @@ fn render_window(fb, win, focused): i64 {
     # (`blit_rect(... win_body_y, w, h)`) — the theme body was 30 px shorter than the surface drawn over
     # it. Invisible while a client covered it, and 30 px short on the compositor's own clientless window.
     # `win_h` is the CONTENT height; see the convention note in src/window.cyr.
-    fill_rect(fb, x, win_body_y(win), w, h, ae_bhumi(rupa_theme_widget(th)));
+    # ⭐ M6-C3: the window's opacity applies to its CHROME as well as its content — a "translucent
+    # window" that kept an opaque titlebar and border would look like a rendering fault, not a setting.
+    var wa = win_opacity(win);
+    fill_rect_a(fb, x, win_body_y(win), w, h, ae_bhumi(rupa_theme_widget(th)), wa);
     # titlebar: panel when idle, raised (widget) when focused
     var tb = ae_bhumi(rupa_theme_panel(th));
     if (focused == 1) { tb = ae_bhumi(rupa_theme_widget(th)); }
-    fill_rect(fb, x, y, w, TITLEBAR_H, tb);
+    fill_rect_a(fb, x, y, w, TITLEBAR_H, tb, wa);
     # a focused window gets a 2px accent seal-strip along the titlebar's lower edge
     # (the theme's ONE bold hue = "this window is active/verified")
-    if (focused == 1) { fill_rect(fb, x, win_body_y(win) - 2, w, 2, ae_bhumi(rupa_theme_accent(th))); }
+    if (focused == 1) { fill_rect_a(fb, x, win_body_y(win) - 2, w, 2, ae_bhumi(rupa_theme_accent(th)), wa); }
     # title text — primary ink when focused, muted otherwise
     var tc = ae_bhumi(rupa_theme_mute(th));
     if (focused == 1) { tc = ae_bhumi(rupa_theme_ink(th)); }

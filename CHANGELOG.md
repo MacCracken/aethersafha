@@ -4,6 +4,46 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.15.0] - 2026-08-13 — M6-C3: per-window opacity
+
+⭐⭐ **Windows can be translucent.** `win_set_opacity(win, 0..255)` applies to chrome AND content — a
+"translucent window" that kept an opaque titlebar would read as a rendering fault, not a setting.
+`--opacity N` sets the default for windows created afterwards.
+
+⭐ **Verified against a NULL, not by eye.** Three QEMU runs at 255 / 150 / 60 over the gradient
+wallpaper, sampling identical coordinates:
+
+| sample | 255 | 150 | 60 |
+|---|---|---|---|
+| inside the window | `1B1E24` | `1A1D24` | `171A24` |
+| **outside** it | `151727` | `151727` | `151727` |
+
+Window pixels move monotonically toward the wallpaper; the outside pixel is **byte-identical** across
+all three, so the effect is scoped to windows and is not a global tint. ⚠ Two inside samples also
+diverge at 60 (`171A24` vs `1B1A24`) — that is the gradient showing through at different rows, which is
+the property that distinguishes real blending from a flat tint.
+
+### ⛔ It DEMOTES the GPU frame, and that is a kernel limit, not a shortcut
+
+`#88 gpu_fill_rect` writes a flat colour with no read-modify-write, and `#92` op 0x01 blends the
+per-pixel alpha the **client** authored — its op record is `op / src_id / wh / dstxy` and the kernel
+**rejects a non-zero reserved dword**, so there is nowhere to put a compositor-applied uniform α.
+Window opacity is therefore not expressible on the band at all today. `AE-9` deleted the `#39` blit, so
+a GPU frame has no CPU layer to mix into and the whole frame must fall back. **Latched and named**, for
+the same reason the wallpaper demotion is: silence would look exactly like opacity that failed to
+apply. ⇒ The kernel ask (an α dword or a new op) is roadmap M6-C3.
+
+### ⚠ Two traps in a field that lives in zeroed memory
+
+- **Default 255, not 0.** An opacity slot in zero-init memory means *invisible*, so a window created
+  before anyone set one would silently vanish — the same class as the `W_PREMUL` slot once missed in
+  `win_new`.
+- **Clamped on the way in.** `rend_blend` computes `255 - a`; a stored 300 makes that negative and
+  wraps the arithmetic into garbage rather than erroring.
+
+⭐ `fill_rect_a(..., 255)` delegates to `fill_rect` unchanged — including its `#88` GPU enqueue — so an
+opaque window costs exactly what it did before and the common path is untouched.
+
 ## [0.14.1] - 2026-08-13 — two agnos-track items: stop probing by trial, and make AE-M readable
 
 ### A3 — `#89` byte +28 is CONSUMED: the `#92` op-support mask

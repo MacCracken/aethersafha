@@ -542,6 +542,16 @@ fn main(): i64 {
     # layer is unfalsifiable: solid is byte-identical to the old backdrop, so a broken layer and a
     # working one look the same. ⚠ Deliberately a demo knob, not the configuration story — C1c owes
     # the authoring format, and picking one here by accident is exactly what that item warns against.
+    # ⭐ `--opacity N` (0..255) — M6-C3. Applies to every window created afterwards, chrome included.
+    # ⚠ On agnos this DEMOTES the frame to the CPU path: `#92` op 0x01 blends the alpha the client
+    # authored and its op record has nowhere for a compositor-applied uniform α. The demotion is named
+    # once in the log; see roadmap M6-C3 for the kernel ask that removes it.
+    if (ae_has_flag("--opacity") == 1) {
+        var opa = ae_flag_int("--opacity", 255);
+        win_set_default_opacity(opa);
+        println("aethersafha: window opacity set (0-255):");
+        println_int(win_default_opacity());
+    }
     if (ae_has_flag("--wallpaper") == 1) {
         wp_set_vgrad(0x0E1621, 0x2B1B3A);   # MUDRA-ish deep blue -> violet, top to bottom
         println("aethersafha: wallpaper set — vertical gradient");

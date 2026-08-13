@@ -275,7 +275,11 @@ fired** — it is a brief now, not an idea log.
   - **C1c — authoring + format.** The open question the design brief names and does not answer: how is a
     wallpaper expressed and shipped sovereignly — a Cyrius source compiled in, a data file, a shader
     artifact? ⚠ Decide this BEFORE C1b, or the first shader becomes the format by accident.
-- **C3 — WINDOW TRANSLUCENCY / PER-WINDOW OPACITY.** ⚠ Wanted (operator, 2026-08-12). Recorded with its
+- **C3 🚧 CPU PATH DONE 0.15.0 — per-window opacity, chrome and content.** Verified in QEMU against a
+  null: at 255/150/60 the window pixels move monotonically toward the wallpaper while a pixel OUTSIDE
+  the window is byte-identical at all three. ⛔ **Still owed: the agnos GPU route**, which needs a kernel
+  α dword — see below; today a translucent window demotes the frame (latched + named).
+  Original analysis (all still true): Recorded with its
   constraints measured, because the obvious reading — "the blend already ships, so this is a render
   tweak" — is wrong on the target that matters.
   - ⭐ **What already exists**: `#92` op 0x01 does real premultiplied src-over on the shader cores

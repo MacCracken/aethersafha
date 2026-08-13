@@ -876,6 +876,49 @@ fn main() {
     ae_gpu_frame_ok = 1;
 
     return assert_summary();
+
+    # ----- window opacity (M6-C3) --------------------------------
+    test_group("render — per-window opacity");
+    # ⛔ THE DEFAULT MUST BE 255. An opacity field in zero-initialised memory means INVISIBLE, so a
+    # window created before anyone sets one would silently vanish — the same class as the W_PREMUL slot
+    # that was once missed in win_new.
+    var ow = win_new(9, 0, 0, 40, 40, "op");
+    assert_eq(win_opacity(ow), 255, "a new window is opaque by default");
+    assert_eq(win_translucent(ow), 0, "  ...and not translucent");
+    win_set_opacity(ow, 128);
+    assert_eq(win_opacity(ow), 128, "opacity round-trips");
+    assert_eq(win_translucent(ow), 1, "  ...and now reads translucent");
+    # Clamped, because `rend_blend` computes `255 - a` and a stored 300 would wrap into garbage.
+    win_set_opacity(ow, 300);
+    assert_eq(win_opacity(ow), 255, "over-range clamps to 255");
+    win_set_opacity(ow, -5);
+    assert_eq(win_opacity(ow), 0, "under-range clamps to 0");
+
+    test_group("render — fill_rect_a blending");
+    var ofb = bhumi_fb_new(4, 4);
+    bhumi_fb_clear(ofb, 0x000000);
+    fill_rect_a(ofb, 0, 0, 4, 4, 0xFFFFFF, 255);
+    assert_eq(bhumi_fb_get(ofb, 1, 1), 0xFFFFFF, "a=255 is an opaque fill");
+    bhumi_fb_clear(ofb, 0x000000);
+    fill_rect_a(ofb, 0, 0, 4, 4, 0xFFFFFF, 128);
+    # 255*128/255 = 128 -> 0x80 on every channel, over black.
+    assert_eq(bhumi_fb_get(ofb, 1, 1), 0x808080, "a=128 blends white over black to mid grey");
+    bhumi_fb_clear(ofb, 0x000000);
+    fill_rect_a(ofb, 0, 0, 4, 4, 0xFFFFFF, 0);
+    assert_eq(bhumi_fb_get(ofb, 1, 1), 0x000000, "a=0 draws nothing at all");
+    # ⚠ Blending READS the destination, so it must compose with whatever is under it — that is the whole
+    # point, and it is what makes a translucent window show the wallpaper rather than a flat tint.
+    bhumi_fb_clear(ofb, 0x204060);
+    fill_rect_a(ofb, 0, 0, 4, 4, 0x000000, 128);
+    assert_eq(bhumi_fb_get(ofb, 1, 1), 0x102030, "black at 50% halves the existing pixel");
+
+    test_group("render — the default applies to new windows");
+    win_set_default_opacity(200);
+    var ow2 = win_new(10, 0, 0, 10, 10, "op2");
+    assert_eq(win_opacity(ow2), 200, "a new window takes the default");
+    win_set_default_opacity(255);
+    var ow3 = win_new(11, 0, 0, 10, 10, "op3");
+    assert_eq(win_opacity(ow3), 255, "and follows it back to opaque");
 }
 
 var exit_code = main();
