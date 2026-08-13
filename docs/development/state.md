@@ -8,7 +8,7 @@
 
 | Field | Value | Source |
 |---|---|---|
-| Version | **0.14.0** | [`VERSION`](../../VERSION) |
+| Version | **0.14.1** | [`VERSION`](../../VERSION) |
 | Cyrius pin | **6.5.20** — matches `cycc`; bumped from 6.5.13 on 2026-08-12 with `lib sync --full` (17 stdlib files) | `cyrius.cyml [package].cyrius` |
 | Modules / tests | 27 `src/*.cyr` · **23 `.tcyr` suites** | `ls` |
 | `--agnos` build | **GREEN** — 0.13.2 is **13,589,192 B · `7cfd4091`** at pin 6.5.20 (0.13.1 13,584,832 · 0.13.0 13,584,728). ⛔ **A SIZE DOES NOT IDENTIFY A BINARY** — 2026-08-12 **three distinct artifacts shared the old byte count** (`1b8b3c57` · staged `690160b9` · rebuild `a692279f`). Quote a **hash** beside every size. ⚠ The staged rootfs is now version- AND toolchain-stale (M6-A1) | `sha256sum` |
@@ -28,9 +28,8 @@
 
 > ⛔ **CLOSED — a falsified premise left under "Open" gets re-derived as work.** ~~`#92` premultiplied never
 > runs~~ · ~~`#88`/op 0x03 unconsumed~~ · ~~no pointer on iron~~ · ~~damage blit needs `union(cur, prev)`~~.
-> ⚠ **Unconsumed list CORRECTED 2026-08-12**: `#89` **+0..+24 ARE read** (`gpu.cyr:108-113`) — only **byte
-> +28**, the `#92` op-support mask, is not, so the desktop still probes ops by calling and reading the error
-> (M6-A3). `#90` has a live consumer (`gpu.cyr:915`). ⛔ `#91` and batched `#92` are **falsified, not pending**.
+> ⚠ **Unconsumed list CORRECTED 2026-08-12**: `#89` **+0..+24 ARE read** (`gpu.cyr:108-113`) — **byte +28** (the `#92` op-support
+> mask) is CONSUMED as of 0.14.1 — the desktop no longer probes ops by calling and reading the error. `#90` has a live consumer (`gpu.cyr:915`). ⛔ `#91` and batched `#92` are **falsified, not pending**.
 - **`src/apps.cyr`/`screen_capture.cyr`/`screen_recording.cyr` are in NO build graph** — not "DCE'd on agnos by
   reachability" as this said; `src/main.cyr` never includes them, 0 callers repo-wide. `app_launch_terminal`
   should route to `sys_spawn_path` #43 *if* ever linked — M6-B5 is the first reason to.

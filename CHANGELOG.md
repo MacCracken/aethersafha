@@ -4,6 +4,42 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.14.1] - 2026-08-13 — two agnos-track items: stop probing by trial, and make AE-M readable
+
+### A3 — `#89` byte +28 is CONSUMED: the `#92` op-support mask
+
+⛔⛔ This compositor read caps `+0..+24` and stopped, then discovered which `#92` ops existed **by
+issuing one and reading the error** — the exact shape `#86` already proved wrong. The kernel publishes
+a bitmask at `+28` (bit N = op code N, `GPU_OP_SUPPORTED = 0x1FF1F`, `agnos syscall.cyr:4294`)
+precisely so a caller need not probe by trial.
+
+⚠ **caps bit3 answers a DIFFERENT question** — "will `#92` run at all", i.e. is the dispatch envelope
+proven on this boot. A kernel can have that and still not implement the op you want, so **both** gates
+are now required: bit3 AND the op bit. Op 0x01 (blend, `AE-6`) and op 0x03 (glyph, `AE-8`) are gated
+separately, and a kernel offering one but not the other was previously discoverable only mid-frame,
+per window, forever.
+⭐ A missing op 0x03 now falls back to the CPU glyph path silently-by-design (that fallback is what
+`AE-8` kept so a glyph refusal never costs the frame), and the mask is **printed** at probe time —
+"which ops did the kernel offer" was unanswerable after the fact.
+⚠ Decoding is a pure `ae_gpu_op_supported(mask, op)`, split out for the same reason
+`_bhumi_fbinfo_rc` is: a caps-decoding mistake should never need hardware to find. 10 assertions,
+including blend-only and glyph-only masks.
+
+### A2 — a window action now says whether a CLICK or a KEY produced it
+
+⛔ `AE-M` is the only unburned rung, and its BUTTON path was **un-adjudicable from a capture**: min/max
+route through `input_apply` identically whether they came from F5/F6 or a titlebar click, and neither
+printed a line. The 2026-08-10 iron burn saw usages 62/63 with the operator's eye as the only oracle —
+the "a burn that cannot distinguish its own failure modes" shape this arc keeps paying for.
+
+⇒ `input_apply_from(..., src)` records action + source; `main` prints one line at the click site.
+⚠ **Recorded, not printed from the leaf module**: printing there would make 44 unit assertions noisy
+and put the log line where a burn cannot control it. Recording lets a test assert the taxonomy with no
+output at all.
+⛔ **The key path had to be tagged too**, and that is the load-bearing test: without it
+`input_last_src()` would report a STALE BUTTON from an earlier action and a capture would claim a click
+that never happened — worse than no instrument, because it is confidently wrong.
+
 ## [0.14.0] - 2026-08-12 — M6-C1a: the backdrop is a LAYER
 
 ⭐⭐ **`src/wallpaper.cyr`** — the desktop backdrop is a *source* instead of a single `bg` i64. Verified

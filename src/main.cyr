@@ -362,8 +362,16 @@ fn ae_pointer_event(comp, ev, frame): i64 {
                 # were inert. Worse than absent: a control that ignores you reads as a broken desktop.
                 # ⚠ The actions already existed (F5/F6 drive them); this is wiring, not new behaviour, and
                 # it routes through `input_apply` so click and key take the identical path.
-                if (hit == Deco.DECO_MAX) { input_apply(comp, InputAction.IA_MAXIMIZE_FOCUSED, ae_geom_w, ae_geom_h - TITLEBAR_H); closed = 1; }
-                if (hit == Deco.DECO_MIN) { input_apply(comp, InputAction.IA_MINIMIZE_FOCUSED, ae_geom_w, ae_geom_h - TITLEBAR_H); closed = 1; }
+                # ⚠ `input_apply_from` records the SOURCE so the line below can say "button". Without it
+                # a titlebar click and an F5/F6 keypress are the same three log lines, which is why the
+                # 2026-08-10 burn could not corroborate the button path at all (A2).
+                if (hit == Deco.DECO_MAX) { input_apply_from(comp, InputAction.IA_MAXIMIZE_FOCUSED, ae_geom_w, ae_geom_h - TITLEBAR_H, IA_SRC_BUTTON); closed = 1; }
+                if (hit == Deco.DECO_MIN) { input_apply_from(comp, InputAction.IA_MINIMIZE_FOCUSED, ae_geom_w, ae_geom_h - TITLEBAR_H, IA_SRC_BUTTON); closed = 1; }
+                if (closed == 1) {
+                    println("aethersafha: window action applied — action id, then source (1=key 2=button):");
+                    println_int(input_last_action());
+                    println_int(input_last_src());
+                }
                 if (hit == Deco.DECO_TITLEBAR) {
                     ae_ptr_drag = 1;
                     ae_ptr_drag_id = win_id(win);

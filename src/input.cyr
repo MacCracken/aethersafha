@@ -239,6 +239,29 @@ fn input_btn_released(t): i64 { if ((t & 2) != 0) { return 1; } return 0; }
 #
 # ⚠ `bound_w` / `bound_h` are the usable screen extent for a moved window (height already reduced by
 # reserved chrome). They are only consulted by the move actions; every other action ignores them.
+# ⭐⭐ `A2` — WHAT WAS APPLIED, AND WHETHER A CLICK OR A KEY DID IT.
+# ⛔ `AE-M` is the only unburned rung and its BUTTON path was un-adjudicable from a capture: min/max
+# route through here identically whether they came from F5/F6 or from a titlebar click, and neither
+# printed a line. The 2026-08-10 iron burn saw usages 62/63 and the operator's eye was the only oracle
+# for whether the buttons worked at all — exactly the "a burn that cannot distinguish its own failure
+# modes" shape this arc has paid for repeatedly.
+# ⚠ RECORDED, NOT PRINTED. A leaf module that prints makes 44 unit assertions noisy and puts the log
+# line where the burn cannot control it; recording lets `main` emit one line at the right moment AND
+# lets a test assert the taxonomy with no output at all.
+var IA_SRC_KEY    = 1;
+var IA_SRC_BUTTON = 2;
+var ae_ia_last_action = 0 - 1;
+var ae_ia_last_src    = 0;
+
+fn input_last_action(): i64 { return ae_ia_last_action; }
+fn input_last_src(): i64    { return ae_ia_last_src; }
+
+fn input_apply_from(comp, action, bound_w, bound_h, src): i64 {
+    ae_ia_last_action = action;
+    ae_ia_last_src = src;
+    return input_apply(comp, action, bound_w, bound_h);
+}
+
 fn input_apply(comp, action, bound_w, bound_h): i64 {
     if (action == InputAction.IA_FOCUS_NEXT) {
         var n = comp_count(comp);
@@ -290,6 +313,8 @@ fn input_apply(comp, action, bound_w, bound_h): i64 {
 # TAB advanced focus by two. Both were invisible on iron because nothing logs a double action.
 fn input_handle(comp, ev, bound_w, bound_h): i64 {
     var action = input_map(ev);
-    input_apply(comp, action, bound_w, bound_h);
+    # ⚠ The KEY path, tagged as such — this is the other half of A2. Both sources now record, so
+    # `input_last_src()` is never stale from a previous action of the opposite kind.
+    input_apply_from(comp, action, bound_w, bound_h, IA_SRC_KEY);
     return action;
 }

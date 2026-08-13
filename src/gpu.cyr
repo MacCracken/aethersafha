@@ -53,6 +53,24 @@ var AE_GPU_CAP_CARVEOUT = 4;    # bit2 — a GPU carveout exists, so #86 slots c
 # `GPO_E_DISPATCH`: re-clear with `#85` and **do not present**. A compositor that ignores this bit cannot know
 # which recovery it owes — the kernel's own caps comment says so — and until now this one ignored it.
 var AE_GPU_CAP_BATCHED  = 16;
+# ⭐⭐ `#89` BYTE +28 — THE `#92` OP-SUPPORT MASK, bit N = op code N (kernel `syscall.cyr:4294`,
+# `GPU_OP_SUPPORTED = 0x1FF1F`). Until now this compositor read bytes +0..+24 and STOPPED, then
+# discovered which `#92` ops existed **by issuing one and reading the error** — the exact shape `#86`
+# already proved wrong, and the reason the kernel publishes a bitmask at all is so a caller need not
+# probe by trial. ⚠ Caps bit3 (SHADER) answers a DIFFERENT question: "will `#92` run at all". A kernel
+# can have the dispatch envelope proven and still not implement the op you want; both gates are needed.
+var AE_GPU_OPBIT_BLEND = 2;     # 1 << 0x01 — GPU_OP_BLEND_RECT, the premultiplied route (AE-6)
+var AE_GPU_OPBIT_GLYPH = 8;     # 1 << 0x03 — GPU_OP_GLYPH_1BPP, chrome text on the shader cores (AE-8)
+var ae_gpu_op_mask = 0;
+var ae_gpu_glyph_op = 0;        # 1 = op 0x03 is advertised by the kernel
+
+# PURE, host-testable: is op `op` advertised in `mask`? Split out for the same reason
+# `_bhumi_fbinfo_rc` is — a caps-decoding mistake should never need hardware to find.
+fn ae_gpu_op_supported(mask, op): i64 {
+    if ((mask & (1 << op)) != 0) { return 1; }
+    return 0;
+}
+
 var AE_GPU_CAP_SHADER   = 8;    # bit3 — SHADER COMPOSITING available, i.e. gpu_shader_op#92 will actually
 # run. Mirrors the kernel's own gate: #92 refuses with E_UNPROVEN unless
 # the dispatch envelope was proven on THIS boot.
@@ -112,6 +130,7 @@ fn ae_gpu_probe(): i64 {
     ae_gpu_shm_max      = load32(&caps + 16) & 0xFFFFFFFF;
     ae_gpu_shm_free     = load32(&caps + 20) & 0xFFFFFFFF;
     ae_gpu_shm_slot_max = load32(&caps + 24) & 0xFFFFFFFF;
+    ae_gpu_op_mask      = load32(&caps + 28) & 0xFFFFFFFF;
     if ((flags & AE_GPU_CAP_BATCHED) != 0) { ae_gpu_batched = 1; }
     # ⚠ NAME THE MISSING BIT, and print the whole flags word — which bit is absent is the difference
     # between "this box has no GPU" and "the previous compositor left the band disarmed".
@@ -134,7 +153,19 @@ fn ae_gpu_probe(): i64 {
     # bit3 is a SEPARATE capability from bit0-2: a GPU can serve opaque #87 blits while the shader
     # compositing envelope is unproven. Opaque windows still go hardware; only the premultiplied ones
     # need this.
-    if ((flags & AE_GPU_CAP_SHADER) != 0) { ae_gpu_blend = 1; }
+    # ⛔ BOTH GATES, NOT EITHER. caps bit3 says `#92` dispatch is proven on this boot; the op mask says
+    # THIS OP exists. A kernel with the envelope proven and op 0x01 absent would previously have been
+    # discovered by a failed blend mid-frame, per window, forever.
+    if ((flags & AE_GPU_CAP_SHADER) != 0) {
+        if (ae_gpu_op_supported(ae_gpu_op_mask, 1) == 1) { ae_gpu_blend = 1; }
+        if (ae_gpu_op_supported(ae_gpu_op_mask, 3) == 1) { ae_gpu_glyph_op = 1; }
+    }
+    # ⚠ Say what was advertised. A blank desktop with no explanation is the failure mode this band has
+    # produced most often, and "which ops did the kernel offer" is unanswerable after the fact.
+    println("aethersafha: #92 op-support mask, then blend/glyph usable:");
+    println_int(ae_gpu_op_mask);
+    println_int(ae_gpu_blend);
+    println_int(ae_gpu_glyph_op);
     # ⚠ STATE THE BUDGET RATHER THAN DISCOVERING IT BY FAILING. The glyph path needs one `#86` slot and each
     # client surface needs one; there are only `shm_max` in the whole system and `shm_create` rounds every
     # request up to a 2 MB page. Printing the free count at probe time means a later "no slot for glyphs"
@@ -206,6 +237,7 @@ fn ae_gpu_active(): i64 {
 fn ae_gpu_demote(): i64 {
     ae_gpu_mode = 0;
     ae_gpu_blend = 0;
+    ae_gpu_glyph_op = 0;
     ae_gpu_frame_ok = 0;
     return 0;
 }
@@ -565,6 +597,9 @@ fn ae_gpu_batch_recover(): i64 {
 fn ae_gpu_glyph_ensure_slot(): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     if (ae_gpu_text_fail == 1) { return 0; }
+    # ⚠ The kernel does not advertise op 0x03 — do not issue it. Chrome text falls back to the CPU
+    # glyph path, which `AE-8` kept precisely so a glyph refusal never costs the frame.
+    if (ae_gpu_glyph_op == 0) { return 0; }
     if (ae_gpu_glyph_slot != 0) { return 1; }
     var cap = ae_text_bytes(AE_TEXT_CHARS);
     var sl = sys_shm_create_gpu(cap);
@@ -588,6 +623,9 @@ fn ae_gpu_emit_text(): i64 {
     var n = ae_text_count();
     if (n == 0) { return 0; }
     if (ae_gpu_text_fail == 1) { return 0; }
+    # ⚠ The kernel does not advertise op 0x03 — do not issue it. Chrome text falls back to the CPU
+    # glyph path, which `AE-8` kept precisely so a glyph refusal never costs the frame.
+    if (ae_gpu_glyph_op == 0) { return 0; }
     if (ae_gpu_glyph_ensure_slot() == 0) { return 0; }
     var emitted = 0;
     var i = 0;

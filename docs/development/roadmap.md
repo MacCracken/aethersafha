@@ -133,11 +133,17 @@ work, it is the bill:
   (`1b8b3c57`), the staged `agnos/build/rootfs/bin/aethersafha` (`690160b9`), and a fresh local rebuild
   (`a692279f`). A burn scheduled today flashes an unknown one. Rebuild, restage, re-measure, and quote a
   **hash** beside every size from now on.
-- **A2 — instrument the min/max button path.** `AE-M` is the only unburned rung, and its button path is
+- **A2 ✅ DONE 0.14.1 — the min/max button path names itself.** `input_apply_from(..., src)` records
+  action + source and `main` prints one line at the click site. ⚠ Recorded rather than printed from the
+  leaf module, so 44 unit assertions stay quiet and a test can assert the taxonomy with no output.
+  ⛔ The KEY path had to be tagged too, or `input_last_src()` reports a stale BUTTON and a capture
+  claims a click that never happened — confidently wrong is worse than absent. Original note: `AE-M` is the only unburned rung, and its button path is
   un-adjudicable from a capture: `input_apply` (`src/input.cyr:242-278`) prints nothing for either the
   button or the F5/F6 key, so the two are indistinguishable in the serial and the operator's eye is the
   only oracle. This arc has been burned by exactly that shape twice. Then it rides the next burn.
-- **A3 — consume `#89` byte +28** (the `#92` op-support mask) in `ae_gpu_probe` and route op dispatch off
+- **A3 ✅ DONE 0.14.1 — `#89` byte +28 consumed.** Both gates now required (caps bit3 = "`#92` runs at
+  all" AND the op bit = "this op exists"); op 0x01 and 0x03 gated separately; the mask is printed at
+  probe time; decoding is a pure `ae_gpu_op_supported(mask, op)` with 10 assertions. Original note: (the `#92` op-support mask) in `ae_gpu_probe` and route op dispatch off
   it, instead of discovering support by calling and reading the error.
 - **A4 🔴 — one iron burn with the USB mouse attached**, closing agnos tracker H3 and H5 in one boot with
   the media-key stimulus **declared in advance**. H5 is a real defect if it fails: the kernel issues
@@ -355,7 +361,8 @@ survived in three live documents at once (here, `parity-plan.md` "Bite H", and a
   - **`#89` byte +28 — the `#92` op-support mask.** `src/gpu.cyr:107-113` reads +0..+24 and stops, so
     the desktop still discovers op support by *calling and reading the error* — the exact shape `#86`
     already proved wrong. The kernel documents the bitmask at `agnos/kernel/core/syscall.cyr:4294`
-    precisely so a caller need not probe by trial. **This one is worth doing** (M6-A3).
+    precisely so a caller need not probe by trial. ✅ **DONE 0.14.1** — consumed; the desktop no longer
+    discovers op support by issuing one and reading the error.
   - **`#91 gpu_blit_bb`** — ⛔ *falsified* for this architecture, not merely unbuilt. Every window here
     is a live client surface re-composited every frame, so the pixels a `#91` copy would move are
     rewritten from the client's buffer anyway. See `planning/desktop.md:396-405`. Do not re-derive it.

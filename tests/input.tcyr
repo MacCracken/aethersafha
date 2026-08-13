@@ -286,6 +286,31 @@ fn main() {
     assert_eq(believed, 0, "sequence: believed up again, so the next click is not swallowed");
 
     return assert_summary();
+
+    # ----- input.cyr — action provenance (A2) ---------------------
+    # ⛔ `AE-M`'s BUTTON path was un-adjudicable from a burn capture: min/max route identically whether
+    # a titlebar click or F5/F6 produced them, and neither printed a line. The source is recorded now,
+    # so a capture can say WHICH produced the action — and this asserts the taxonomy with no output.
+    test_group("input.cyr — action provenance");
+    var pc = comp_new();
+    comp_create_window(pc, 10, 10, 200, 120, "prov");
+    comp_focus(pc, 0);
+
+    input_apply_from(pc, InputAction.IA_MAXIMIZE_FOCUSED, 800, 600, IA_SRC_BUTTON);
+    assert_eq(input_last_action(), InputAction.IA_MAXIMIZE_FOCUSED, "button maximize records the action");
+    assert_eq(input_last_src(), IA_SRC_BUTTON, "  ...and records BUTTON as the source");
+
+    input_apply_from(pc, InputAction.IA_MINIMIZE_FOCUSED, 800, 600, IA_SRC_KEY);
+    assert_eq(input_last_action(), InputAction.IA_MINIMIZE_FOCUSED, "key minimize records the action");
+    assert_eq(input_last_src(), IA_SRC_KEY, "  ...and records KEY as the source");
+
+    # ⛔ THE LOAD-BEARING ONE: the key path must tag itself too, or `input_last_src()` reports a STALE
+    # BUTTON from an earlier action and a capture claims a click that never happened — worse than no
+    # instrument, because it is confidently wrong.
+    input_apply_from(pc, InputAction.IA_MAXIMIZE_FOCUSED, 800, 600, IA_SRC_BUTTON);
+    input_handle(pc, bhumi_key_event(1, BHUMI_HID_TAB), 800, 600);
+    assert_eq(input_last_src(), IA_SRC_KEY, "a key action CLEARS a previously recorded button source");
+    assert_neq(IA_SRC_KEY, IA_SRC_BUTTON, "the two sources are distinguishable");
 }
 
 var ec = main();
