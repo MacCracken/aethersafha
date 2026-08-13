@@ -4,6 +4,55 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.14.0] - 2026-08-12 — M6-C1a: the backdrop is a LAYER
+
+⭐⭐ **`src/wallpaper.cyr`** — the desktop backdrop is a *source* instead of a single `bg` i64. Verified
+in QEMU with a vertical gradient beneath both windows; sampled rows are monotonic in all three channels
+and row 799 reads **2B1B3A**, exactly `c1`, which is the endpoint the unit test asserts.
+
+⭐ **This is the load-bearing bite of the wallpaper work.** Everything the design brief wants —
+gradients, shader wallpapers, "computed per frame, not asset-streamed" — needed somewhere to draw, and
+until now there was no layer and no place a second colour could exist.
+
+### The cost model IS the design, not an afterthought
+
+⛔ `AE-0a` measured the clear at **3.83 ms of a 6.40 ms GPU frame (60%)** and cut it to a damage band.
+A wallpaper **replaces** that clear rather than adding to it — but only if it keeps the band's shape,
+and `rend_clear_band` is fast because a full-width band is ONE contiguous run (1.093 ns/px; going
+through `fill_rect` cost 23% more in per-row overhead alone).
+⇒ **Every source is ROW-UNIFORM: colour may depend on `y`, never on `x`.** A gradient then costs the
+same stores as a solid and differs by one add per row. An x-varying source is a different performance
+class and belongs with C1b. ⚠ SOLID takes the original code path unchanged, so the default cannot regress.
+
+### ⛔ Three ways this could have silently undone AE-0a, all closed
+
+- **Tracking must not bump the serial when the colour is unchanged.** The layer follows the theme until
+  something sets a wallpaper explicitly (otherwise the desktop boots black — the backdrop used to be
+  read from rupa every frame). Bumping unconditionally would invalidate the band **every frame**,
+  repaint the whole screen forever, and undo the entire saving with no visible symptom. Compare, then set.
+- **A wallpaper change is invisible to the `bg` compare.** Two gradients can share a top colour, so the
+  source carries a serial; without it, switching wallpapers would repaint only the rows a window
+  happened to be moving in.
+- **The two invalidation gates must be sampled together.** Written as sequential
+  `if (x != last) { last = x; return 0; }` gates, each CONSUMES a frame on first sight — the `bg` gate
+  returns before the wallpaper gate stores its baseline, so priming took two frames and the first band
+  arrived late. ⭐ `render.tcyr`'s existing "idle: a band IS computed" caught this immediately.
+
+### ⛔ A non-solid wallpaper DEMOTES the GPU frame, loudly
+
+`AE-9` routes the clear through `#88 gpu_fill_rect`, which fills ONE colour, and is all-or-nothing (the
+`#39` blit is gone, so there is no CPU layer to mix in). Compositing windows on the GPU over a backdrop
+the GPU cannot draw would show chrome on a stale void. The demotion is **latched and named** — silence
+would be indistinguishable from a wallpaper that failed to paint, a shape this arc has paid for twice.
+⚠ A gradient IS expressible as ~64 stacked `#88` bands; that is C1b and removes the demotion.
+
+### Added — `--wallpaper`, and 22 assertions
+
+A demo knob, not the configuration story — **C1c owes the authoring format**, and choosing one here by
+accident is exactly what that item warns against. Tests cover the pure source: endpoints (an off-by-one
+in the `h - 1` divisor makes the bottom row *nearly* `c1` — invisible by eye, and a band repainting the
+last row would then disagree with a full repaint), clamping, serial behaviour and GPU expressibility.
+
 ## [0.13.8] - 2026-08-12 — the Linux keyboard is whole
 
 ⭐ **Arrows, Home/End/PgUp/PgDn, Insert/Delete, RCtrl/RAlt, Meta and Menu reach the compositor** —

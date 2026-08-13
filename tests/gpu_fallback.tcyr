@@ -34,6 +34,7 @@ include "src/theme.cyr"
 include "src/cursor.cyr"   # gpu.cyr's cursor emit packs this bitmap
 include "src/render.cyr"
 include "src/gpu.cyr"
+include "src/wallpaper.cyr"   # rend_band_compute reads wp_serial(); gpu frame plan reads wp_gpu_expressible()
 
 # Sentinels. ⚠ Deliberately not black, not white, not any rupa token, and not a value any
 # fill_rect in the chrome path emits — so "the sentinel is present" cannot be satisfied by

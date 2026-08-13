@@ -1,0 +1,148 @@
+# wallpaper.cyr — the desktop backdrop as a SOURCE rather than a constant (M6-C1a).
+#
+# ⭐ WHY THIS IS THE LOAD-BEARING BITE OF THE WALLPAPER WORK. Everything the design brief wants —
+# gradients, shader wallpapers, "computed per frame, not asset-streamed" — needs somewhere to draw.
+# Until now the backdrop was a single `bg` i64 handed to `bhumi_fb_clear` / `rend_clear_band`, so there
+# was no layer at all and no place a second colour could exist. This introduces the layer and keeps the
+# default byte-identical to what shipped.
+#
+# ⭐⭐ THE COST MODEL IS THE DESIGN CONSTRAINT, NOT AN AFTERTHOUGHT. `AE-0a` measured the clear at
+# **3.83 ms of a 6.40 ms GPU frame — 60%** at 2560x1440, and cut it to a damage band. A wallpaper
+# REPLACES that clear, it does not add to it, so it starts from a budget that already exists — but only
+# if it keeps the band's shape. `rend_clear_band` is fast because a full-width band is ONE contiguous
+# run (1.093 ns/px; going through `fill_rect` cost 23% more in per-row overhead alone).
+# ⇒ **Every source here is ROW-UNIFORM: the colour may depend on `y`, never on `x`.** That keeps a band
+# fill a sequence of flat row runs instead of a per-pixel evaluation, so a gradient costs the same
+# stores as a solid and differs only by one add per row. A source that varies along x is a different
+# performance class and belongs with the shader work (C1b), not here.
+#
+# ⚠ NOT a client surface and not a window. The wallpaper is compositor-owned, sits beneath every
+# window, and is drawn by the same band the clear used — so it inherits `AE-0a`'s damage tracking for
+# free rather than needing its own.
+
+enum AeWallpaperKind {
+    AE_WP_SOLID = 0;   # one colour — byte-identical to the pre-C1a backdrop
+    AE_WP_VGRAD = 1;   # vertical gradient, `c0` at the top row to `c1` at the bottom
+}
+
+var ae_wp_kind = 0;
+var ae_wp_c0   = 0;
+var ae_wp_c1   = 0;
+# ⛔ THE SERIAL IS WHAT KEEPS THE DAMAGE MODEL HONEST. `rend_band_compute` refuses to band a frame when
+# the background changed, because a theme switch damages every pixel without moving a window — it
+# detects that by comparing the `bg` i64 against the last one. A wallpaper cannot be compared that way:
+# two different gradients can share a top colour. So every mutation bumps this, and the band check reads
+# it. Without it, switching wallpapers would repaint only the rows a window happened to be moving in.
+var ae_wp_serial = 0;
+# ⛔ TRACKING IS ON BY DEFAULT, AND WITHOUT IT THE DESKTOP BOOTS BLACK. The backdrop used to be read
+# from rupa every frame (`rupa_theme_bg`); turning it into a layer means the layer has to be told what
+# colour to be, and an uninitialised source is 0 = black. So the layer FOLLOWS the theme until someone
+# sets a wallpaper explicitly, which preserves the pre-C1a behaviour exactly — including repainting on
+# a theme switch — and makes an explicit wallpaper an override rather than a race with the theme.
+var ae_wp_track = 1;
+
+# Follow the theme's background while no explicit wallpaper is set.
+# ⛔⛔ THE SERIAL MUST ONLY MOVE WHEN THE COLOUR ACTUALLY CHANGES. Bumping it unconditionally here would
+# invalidate the damage band EVERY FRAME — `rend_band_compute` would refuse to band, every frame would
+# repaint the whole screen, and `AE-0a`'s 3.83 ms -> 2.46 ms saving would be silently undone by a
+# feature whose entire cost argument is that it REPLACES the clear. Compare first, then set.
+fn wp_track_theme(bg): i64 {
+    if (ae_wp_track == 0) { return 0; }
+    if (ae_wp_kind == AeWallpaperKind.AE_WP_SOLID) { if (ae_wp_c0 == bg) { return 0; } }
+    ae_wp_kind = AeWallpaperKind.AE_WP_SOLID;
+    ae_wp_c0 = bg;
+    ae_wp_c1 = bg;
+    ae_wp_serial = ae_wp_serial + 1;
+    return 1;
+}
+
+fn wp_tracking(): i64 { return ae_wp_track; }
+fn wp_kind(): i64   { return ae_wp_kind; }
+fn wp_serial(): i64 { return ae_wp_serial; }
+
+# The colour of the TOP row — what a caller needs when it wants one representative colour (the GPU
+# solid-fill path, and the `bg` argument the chrome still themes against).
+fn wp_base_color(): i64 { return ae_wp_c0; }
+
+fn wp_set_solid(color): i64 {
+    ae_wp_track = 0;                       # explicit choice wins over the theme from here on
+    ae_wp_kind = AeWallpaperKind.AE_WP_SOLID;
+    ae_wp_c0 = color;
+    ae_wp_c1 = color;
+    ae_wp_serial = ae_wp_serial + 1;
+    return 0;
+}
+
+fn wp_set_vgrad(top, bottom): i64 {
+    ae_wp_track = 0;
+    ae_wp_kind = AeWallpaperKind.AE_WP_VGRAD;
+    ae_wp_c0 = top;
+    ae_wp_c1 = bottom;
+    ae_wp_serial = ae_wp_serial + 1;
+    return 0;
+}
+
+# Interpolate one 8-bit channel of an XRGB8888 pair at `y` of `h` rows. PURE and host-testable.
+# ⚠ Integer maths on purpose: no floats in this renderer, and a rounding difference here is invisible
+# against an 8-bit channel. `h <= 1` returns the top colour rather than dividing by zero.
+fn wp_lerp8(a, b, y, h): i64 {
+    if (h <= 1) { return a & 0xFF; }
+    var lo = a & 0xFF;
+    var hi = b & 0xFF;
+    return lo + (((hi - lo) * y) / (h - 1));
+}
+
+# The packed XRGB colour for row `y` of an `h`-row screen. PURE — this is the whole source, and the
+# reason a unit test can cover the wallpaper without a framebuffer.
+# ⚠ Clamps rather than wrapping: a caller asking past the last row gets the last row's colour, which is
+# what a band overrunning by a pixel should see.
+fn wp_row_color(y, h): i64 {
+    if (ae_wp_kind == AeWallpaperKind.AE_WP_SOLID) { return ae_wp_c0; }
+    var yy = y;
+    if (yy < 0) { yy = 0; }
+    if (h > 0) { if (yy > (h - 1)) { yy = h - 1; } }
+    var r = wp_lerp8(ae_wp_c0 >> 16, ae_wp_c1 >> 16, yy, h);
+    var g = wp_lerp8(ae_wp_c0 >> 8,  ae_wp_c1 >> 8,  yy, h);
+    var b = wp_lerp8(ae_wp_c0,       ae_wp_c1,       yy, h);
+    return ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
+}
+
+# Paint rows [y, y+h) of `fb` from the source. `fh` is the FULL screen height — the gradient is defined
+# over the whole desktop, not over the band, or a damage band would show a different gradient than a
+# full repaint of the same pixels.
+# ⭐ SOLID TAKES THE ORIGINAL PATH UNCHANGED, which is why the default cannot regress: it is the same
+# single `rend_clear_band` call the pre-C1a code made.
+fn wp_fill_band(fb, y, h, fh): i64 {
+    if (fb == 0) { return 0 - 1; }
+    if (h <= 0) { return 0; }
+    if (ae_wp_kind == AeWallpaperKind.AE_WP_SOLID) {
+        return rend_clear_band(fb, y, h, ae_wp_c0);
+    }
+    var r = 0;
+    while (r < h) {
+        rend_clear_band(fb, y + r, 1, wp_row_color(y + r, fh));
+        r = r + 1;
+    }
+    return 0;
+}
+
+# Paint the whole framebuffer from the source — the no-band path.
+fn wp_fill_all(fb, fw, fh): i64 {
+    if (fb == 0) { return 0 - 1; }
+    if (ae_wp_kind == AeWallpaperKind.AE_WP_SOLID) { return bhumi_fb_clear(fb, ae_wp_c0); }
+    return wp_fill_band(fb, 0, fh, fh);
+}
+
+# ⛔⛔ CAN THE GPU DRAW THIS AS ONE OP? `#88 gpu_fill_rect` fills a rect with ONE colour, and `AE-9`
+# routes the whole clear through it — so a SOLID wallpaper is free on that path and anything else is
+# not expressible as a single fill.
+# ⚠ A vertical gradient IS expressible as N stacked `#88` rects, and that is the C1b follow-on — at
+# 1440 rows a per-row decomposition would be 1440 syscalls, but ~64 bands of ~22 rows is visually smooth
+# and cheap. Not attempted here: C1a is the layer, and shipping a half-measure on the GPU path would
+# make the first measurement of it meaningless.
+# ⇒ Until then a non-solid wallpaper must DEMOTE the frame to the CPU path, and say so — silence here
+# would look exactly like a wallpaper that failed to draw.
+fn wp_gpu_expressible(): i64 {
+    if (ae_wp_kind == AeWallpaperKind.AE_WP_SOLID) { return 1; }
+    return 0;
+}

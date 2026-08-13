@@ -107,6 +107,9 @@ fn render_desktop(d, fb): i64 {
     # ⛔ BEFORE the clear. Damage is computed from each window's PREVIOUS rect, and the stamp that
     # overwrites it happens at the END of this function. The background goes in because a theme switch
     # damages every pixel without moving a window (see rend_band_compute).
+    # ⚠ BEFORE `rend_frame_damage`, which reads the wallpaper serial to decide whether it may band.
+    # A theme switch has to be visible to that check on the SAME frame it happens.
+    wp_track_theme(bg);
     rend_frame_damage(comp, fb, bg);
     # ⭐⭐ `AE-0a`: CLEAR THE BAND, NOT THE SCREEN. This was the single biggest cost in the frame —
     # measured 3.83 ms of a 6.40 ms GPU frame, **60%**, at 2560x1440. It is already an optimal scalar
@@ -117,10 +120,15 @@ fn render_desktop(d, fb): i64 {
     # ⛔ NO BAND MEANS THE WHOLE SCREEN, and that fallback is load-bearing rather than defensive: it is
     # what runs when the trackers were never allocated (every unit test), and on the frame after a theme
     # switch. A band of height 0 is different and correct — nothing changed in two frames.
+    # ⭐ M6-C1a: THE BACKDROP IS A SOURCE NOW. These two calls used to be `rend_clear_band(..., bg)` and
+    # `bhumi_fb_clear(fb, bg)` — one colour, no layer, nowhere for a gradient or a shader to exist.
+    # ⚠ A wallpaper REPLACES the clear rather than adding to it, so the `AE-0a` band still governs how
+    # many pixels are touched and the default (SOLID) takes the identical code path it always did.
+    var fbh = bhumi_fb_height(fb);
     if (rend_band_valid() == 1) {
-        if (rend_band_h() > 0) { rend_clear_band(fb, rend_band_y(), rend_band_h(), bg); }
+        if (rend_band_h() > 0) { wp_fill_band(fb, rend_band_y(), rend_band_h(), fbh); }
     }
-    if (rend_band_valid() == 0) { bhumi_fb_clear(fb, bg); }
+    if (rend_band_valid() == 0) { wp_fill_all(fb, bhumi_fb_width(fb), fbh); }
     var v = comp_windows(comp);
     var n = vec_len(v);
     var i = 0;

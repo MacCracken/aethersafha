@@ -5,6 +5,11 @@
 include "src/geom.cyr"
 include "src/window.cyr"
 include "src/compositor.cyr"
+include "lib/bhumi.cyr"
+include "src/theme.cyr"
+include "src/cursor.cyr"
+include "src/render.cyr"
+include "src/wallpaper.cyr"   # M6-C1a: the backdrop source under test below
 
 fn main() {
     alloc_init();
@@ -75,6 +80,48 @@ fn main() {
     assert_eq(comp_window_at(c3, 5, 5), 0, "point outside returns 0");
 
     return assert_summary();
+
+    # ----- wallpaper.cyr — the backdrop source (M6-C1a, pure) -----
+    test_group("wallpaper.cyr — row source");
+    wp_set_solid(0x123456);
+    assert_eq(wp_kind(), 0, "solid kind");
+    assert_eq(wp_row_color(0, 100),  0x123456, "solid: row 0");
+    assert_eq(wp_row_color(99, 100), 0x123456, "solid: last row identical");
+    assert_eq(wp_tracking(), 0, "an explicit set stops tracking the theme");
+
+    wp_set_vgrad(0x000000, 0xFFFFFF);
+    assert_eq(wp_kind(), 1, "vgrad kind");
+    assert_eq(wp_row_color(0, 100),  0x000000, "vgrad: top row is c0 exactly");
+    assert_eq(wp_row_color(99, 100), 0xFFFFFF, "vgrad: bottom row is c1 exactly");
+    # ⛔ The endpoints are the assertion that matters. An off-by-one in the `h - 1` divisor makes the
+    # bottom row NEARLY c1 — invisible by eye, and it means a damage band repainting the last row
+    # paints a different colour than a full repaint of the same pixel.
+    assert_eq(wp_row_color(50, 100), 0x808080, "vgrad: midpoint interpolates all three channels");
+    assert_eq(wp_row_color(-5, 100), 0x000000, "vgrad: clamps below");
+    assert_eq(wp_row_color(999, 100), 0xFFFFFF, "vgrad: clamps above");
+    assert_eq(wp_lerp8(0, 255, 0, 1), 0, "lerp: h<=1 returns the low end, no divide by zero");
+
+    test_group("wallpaper.cyr — serial + theme tracking");
+    var s0 = wp_serial();
+    wp_set_vgrad(0x111111, 0x222222);
+    assert(wp_serial() > s0, "a mutation bumps the serial");
+    # ⛔⛔ THE LOAD-BEARING ONE: tracking must NOT bump the serial when the colour is unchanged, or the
+    # damage band is invalidated every frame and AE-0a's saving is silently undone.
+    wp_set_solid(0x334455);
+    ae_wp_track = 1;
+    var s1 = wp_serial();
+    wp_track_theme(0x334455);
+    assert_eq(wp_serial(), s1, "tracking the SAME colour does not bump the serial");
+    wp_track_theme(0x667788);
+    assert(wp_serial() > s1, "tracking a NEW colour does bump it");
+    assert_eq(wp_row_color(0, 10), 0x667788, "tracking updated the source");
+
+    test_group("wallpaper.cyr — GPU expressibility");
+    wp_set_solid(0x010203);
+    assert_eq(wp_gpu_expressible(), 1, "a solid IS one #88 fill");
+    wp_set_vgrad(0x010203, 0x040506);
+    assert_eq(wp_gpu_expressible(), 0, "a gradient is NOT — the frame must demote");
+    wp_set_solid(0x0E1621);   # leave the suite in a sane state
 }
 
 var exit_code = main();

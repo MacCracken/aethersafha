@@ -9,6 +9,7 @@ include "src/compositor.cyr"
 include "src/theme.cyr"        # ae_bhumi — render_window packs its colours through it
 include "src/cursor.cyr"      # render_cursor draws this bitmap; cursor.tcyr owns the shape itself
 include "src/render.cyr"
+include "src/wallpaper.cyr"   # rend_band_compute reads wp_serial(); gpu frame plan reads wp_gpu_expressible()
 # ⚠ The cursor lives in input.cyr (`input_ptr_x/y`) and render.cyr calls it — a forward function
 # reference, legal in Cyrius and exactly what the real include chain does. The test must carry the
 # same set or it fails to link on functions the production build resolves fine.
@@ -82,6 +83,11 @@ fn main() {
     ae_frame_dmg = rend_dmg_new();
     ae_prev_dmg = rend_dmg_new();
     ae_last_bg = 0x121218;                       # pretend a frame already cleared to this
+    # ⚠ AND the wallpaper serial, for the same reason (M6-C1a): `rend_band_compute` refuses to band
+    # when EITHER the bg or the wallpaper changed since the last frame, so faking "a frame already
+    # rendered" means priming both halves of that state. Priming only `ae_last_bg` made the very first
+    # compute look like a wallpaper change and cost a frame.
+    ae_last_wp = wp_serial();
 
     # A band with neither tracker valid: nothing changed in two frames. VALID with height 0 — a real
     # result, not a failure. ⛔ Conflating it with "no band" would clear the whole screen every idle frame.

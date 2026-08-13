@@ -16,6 +16,7 @@ include "src/theme.cyr"          # sovereign desktop theme tokens (MUDRA / SHANT
 include "src/cursor.cyr"      # pointer bitmap: shape + clipping + 1bpp packing (pure) — before render
 include "src/render.cyr"
 include "src/gpu.cyr"           # hardware compositing on agnos (#87 + #84) — after render.cyr for TITLEBAR_H
+include "src/wallpaper.cyr"     # the backdrop as a SOURCE (M6-C1a) — after render.cyr for rend_clear_band
 include "src/input.cyr"
 # Leaf subsystems + the desktop aggregate that wires them into the compositor.
 include "src/theme_bridge.cyr"
@@ -529,6 +530,14 @@ fn main(): i64 {
     if (ae_has_flag("--clients") == 1) { ae_probe = 1; }
 
     println("aethersafha: AI-augmented AGNOS compositor (Cyrius port)");
+    # ⭐ `--wallpaper grad` — exercise the C1a layer. Without a way to SET a non-default source the
+    # layer is unfalsifiable: solid is byte-identical to the old backdrop, so a broken layer and a
+    # working one look the same. ⚠ Deliberately a demo knob, not the configuration story — C1c owes
+    # the authoring format, and picking one here by accident is exactly what that item warns against.
+    if (ae_has_flag("--wallpaper") == 1) {
+        wp_set_vgrad(0x0E1621, 0x2B1B3A);   # MUDRA-ish deep blue -> violet, top to bottom
+        println("aethersafha: wallpaper set — vertical gradient");
+    }
 
     ae_query_geometry();
     var be = ae_backend_open(ae_geom_w, ae_geom_h);

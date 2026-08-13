@@ -41,6 +41,7 @@ var ae_gpu_blend  = 0;    # 1 = gpu_shader_op#92 is usable (caps bit3) — selec
 # printing per frame. ⛔ Both are printed, because "no line" must not be the signal for either case.
 var ae_gpu_blend_seen = 0;
 var ae_gpu_fallback_seen = 0;
+var ae_gpu_wp_demote = 0;   # latch: named the non-solid-wallpaper demotion once (M6-C1a)
 
 # gpu_caps#89 flag bits (kernel: syscall.cyr gpu_caps_sys).
 var AE_GPU_CAP_PRESENT  = 1;    # bit0 — a GPU is bound
@@ -323,6 +324,21 @@ fn ae_gpu_frame_plan(comp, fb): i64 {
     #endif
     if (ae_gpu_mode != 1) { return 0; }
     if (fb == 0) { return 0; }
+    # ⛔⛔ A NON-SOLID WALLPAPER DEMOTES THE WHOLE FRAME (M6-C1a). `AE-9` routes the clear through
+    # `#88 gpu_fill_rect`, which fills ONE colour — a gradient is not expressible as one op, and
+    # `AE-9` is all-or-nothing by construction (the `#39` blit is gone, so there is no CPU layer left
+    # to mix in). Compositing the windows on the GPU over a backdrop the GPU cannot draw would show
+    # chrome on a stale or black void.
+    # ⚠ LATCHED AND LOUD. Silence here is indistinguishable from a wallpaper that simply failed to
+    # paint, and this arc has already paid for that shape twice. The gradient-as-N-`#88`-bands route is
+    # the C1b follow-on that removes the demotion.
+    if (wp_gpu_expressible() == 0) {
+        if (ae_gpu_wp_demote == 0) {
+            ae_gpu_wp_demote = 1;
+            println("aethersafha: GPU frame DEMOTED — this wallpaper is not one #88 fill; CPU path for the run");
+        }
+        return 0;
+    }
     var fw = bhumi_fb_width(fb);
     var fh = bhumi_fb_height(fb);
     if (fw < 1) { return 0; }

@@ -8,9 +8,9 @@
 
 | Field | Value | Source |
 |---|---|---|
-| Version | **0.13.8** | [`VERSION`](../../VERSION) |
+| Version | **0.14.0** | [`VERSION`](../../VERSION) |
 | Cyrius pin | **6.5.20** — matches `cycc`; bumped from 6.5.13 on 2026-08-12 with `lib sync --full` (17 stdlib files) | `cyrius.cyml [package].cyrius` |
-| Modules / tests | 26 `src/*.cyr` · **23 `.tcyr` suites** | `ls` |
+| Modules / tests | 27 `src/*.cyr` · **23 `.tcyr` suites** | `ls` |
 | `--agnos` build | **GREEN** — 0.13.2 is **13,589,192 B · `7cfd4091`** at pin 6.5.20 (0.13.1 13,584,832 · 0.13.0 13,584,728). ⛔ **A SIZE DOES NOT IDENTIFY A BINARY** — 2026-08-12 **three distinct artifacts shared the old byte count** (`1b8b3c57` · staged `690160b9` · rebuild `a692279f`). Quote a **hash** beside every size. ⚠ The staged rootfs is now version- AND toolchain-stale (M6-A1) | `sha256sum` |
 | Host (Linux) build | **GREEN**, 23/23 suites. ⭐ `--clients` reaches **exit 95** with two clients since **0.13.1** — it was structurally unreachable before (`running = 0` on first present). ⭐ 0.13.2 adds a **latched scanout-refused report**, negative-controlled: with `/dev/fb0` hidden it prints `drawing to nothing / -1`, with it present it is silent | measured |
 | Backend | **bhumi 1.2.1** — ⭐⭐ **SCANOUT IS LIVE ON LINUX** (fbdev; bhumi ADR 0003). ⛔ 1.2.0's arm used `mmap` and displayed NOTHING on shadow-buffer fbdevs (`simpledrm`); 1.2.1 uses `pwrite`. **Found in QEMU — the dev box's amdgpu could not show it.** ⭐⭐ **KEYBOARD + POINTER LIVE on Linux** (bhumi **1.4.1**, evdev, one shared drain; QEMU-proven — cursor moved by exactly the injected delta, click routed, and usages 82/80/74/76/41 for Up/Left/Home/Del/Esc). ⭐ Extended keys included — a second table keyed on evdev's flat numbering, since Set-1's 0xE0-prefixed one cannot match here. GPU via the agnos ring-3 band `#82`-`#94` — **not** mabda; there is no `[deps.mabda]` | `bhumi/src/scanout.cyr` |

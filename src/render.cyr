@@ -247,6 +247,7 @@ var ae_band_h = 0;
 # without moving a single window, so a band-limited clear would leave the old colour everywhere outside
 # the band — a stale desktop that no window rect can explain. -1 = no frame has been cleared yet.
 var ae_last_bg = 0 - 1;
+var ae_last_wp = 0 - 1;   # last-seen wallpaper serial; see rend_band_compute
 
 # ⭐ THE FRAME PLAN — the single place "is this a GPU frame?" is decided.
 # Written once per frame by ae_gpu_frame_plan (gpu.cyr) BEFORE anything is rendered; read by
@@ -333,8 +334,25 @@ fn rend_band_compute(fh, bg): i64 {
     ae_band_h = 0;
     if (ae_frame_dmg == 0) { return 0; }
     if (ae_prev_dmg == 0) { return 0; }
-    # A background change damages every pixel, so refuse to band this frame at all.
-    if (bg != ae_last_bg) { ae_last_bg = bg; return 0; }
+    # A background change damages every pixel, so refuse to band this frame at all — and so does a
+    # WALLPAPER change, which the `bg` compare cannot see (M6-C1a): two different gradients can share a
+    # top colour, so comparing one i64 would band a frame in which every pixel changed, repainting only
+    # the rows a window happened to be moving in and leaving the rest of the old wallpaper on screen.
+    #
+    # ⛔⛔ BOTH ARE SAMPLED AND STORED BEFORE EITHER CAN RETURN, AND THAT IS NOT STYLE. Written as two
+    # sequential `if (x != last) { last = x; return 0; }` gates, each one CONSUMES A FRAME on first
+    # sight: the `bg` gate returns before the wallpaper gate ever stores its baseline, so priming took
+    # two frames instead of one and the first real band arrived a frame late. `render.tcyr`'s
+    # "idle: a band IS computed" caught it immediately — the failure was a THIRD call being needed.
+    # ⇒ One sample, one store, one decision. Adding a third invalidation source later must follow this
+    # shape, not append another early-returning gate.
+    var wps = wp_serial();
+    var stale = 0;
+    if (bg != ae_last_bg) { stale = 1; }
+    if (wps != ae_last_wp) { stale = 1; }
+    ae_last_bg = bg;
+    ae_last_wp = wps;
+    if (stale == 1) { return 0; }
     var y0 = fh;
     var y1 = 0;
     if (rend_dmg_valid(ae_frame_dmg) == 1) {

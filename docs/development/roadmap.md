@@ -252,7 +252,10 @@ fired** — it is a brief now, not an idea log.
 
 - **C1 — WALLPAPER.** ⭐ The desktop currently draws a flat themed backdrop and nothing else; the
   backdrop is the largest single surface on screen and the most-seen pixel in the system.
-  - **C1a — a wallpaper layer at all.** A backdrop that is a *source* rather than a constant: solid,
+  - **C1a ✅ DONE 0.14.0 — `src/wallpaper.cyr`.** Row-uniform sources (solid, vertical gradient) drawn
+    through the same `AE-0a` band the clear used, with a serial so a wallpaper change invalidates the
+    band honestly. QEMU-verified: row 799 samples exactly `c1`. ⛔ Non-solid demotes the GPU frame
+    (latched + named) because `#88` fills one colour and `AE-9` is all-or-nothing. Original scope: A backdrop that is a *source* rather than a constant: solid,
     gradient, or an image buffer, owned by the compositor beneath every window, damage-tracked like
     any other surface. This is the load-bearing bite — without a layer, a shader has nowhere to draw.
     ⚠ Interacts with `AE-0a`: the clear is currently ~48% of a GPU frame and a wallpaper REPLACES the
@@ -266,6 +269,34 @@ fired** — it is a brief now, not an idea log.
   - **C1c — authoring + format.** The open question the design brief names and does not answer: how is a
     wallpaper expressed and shipped sovereignly — a Cyrius source compiled in, a data file, a shader
     artifact? ⚠ Decide this BEFORE C1b, or the first shader becomes the format by accident.
+- **C3 — WINDOW TRANSLUCENCY / PER-WINDOW OPACITY.** ⚠ Wanted (operator, 2026-08-12). Recorded with its
+  constraints measured, because the obvious reading — "the blend already ships, so this is a render
+  tweak" — is wrong on the target that matters.
+  - ⭐ **What already exists**: `#92` op 0x01 does real premultiplied src-over on the shader cores
+    (`out = src + dst*(1 - a/255)`), iron-proven as `AE-6`, and the CPU path already has
+    `rend_blend(dst, src, a)` (`src/render.cyr:191`, Rust-parity). So the *blending* is solved.
+  - ⛔⛔ **BUT PER-WINDOW OPACITY IS NOT EXPRESSIBLE IN THE `#92` ABI.** The op record is
+    `op / src_id / wh / dstxy` and **"every dword the op does not define MUST be zero — the kernel
+    REJECTS a non-zero reserved field"** (`src/gpu.cyr:376-390`). There is nowhere to put an opacity
+    scalar. What ships today blends **per-pixel alpha the CLIENT authored**; a compositor-applied
+    uniform α over an arbitrary surface is a different operation and the kernel cannot be asked for it.
+    ⇒ This is an **agnos KERNEL item** (a dword in the op record, or a new `#92` op), not userland work.
+    Do not start it as a renderer change.
+  - ⛔ **Premultiplied makes the naive fix wrong.** Applying α to a premultiplied surface means scaling
+    **colour AND alpha** by α. Scaling alpha alone yields an over-bright composite — the same class as
+    the alpha-0 additive ghost recorded in `planning/desktop.md:352-356`, and just as silent.
+  - ⛔ **The perf cliff is the real cost, and it is structural.** `AE-9` deleted the `#39` chrome blit:
+    on a GPU frame there is no CPU layer left to copy, so a CPU-blended window cannot be mixed into one.
+    A single translucent window would therefore force the **entire frame** back to the CPU path —
+    measured 6.40 ms → 10.58 ms at 2560x1440. Opacity is not a per-window cost, it is a per-frame one.
+  - ⇒ **Sequencing.** (a) Do it on the **CPU path first** — Linux has no GPU path at all, so there is no
+    cliff there and `rend_blend` is already the primitive; that makes the feature real and testable on
+    one substrate. (b) File the `#92` opacity dword as a kernel ask on the agnos side. (c) Only then
+    wire the agnos GPU route. ⚠ Until (b) lands, an opacity-bearing window on agnos must either demote
+    the frame **loudly** (a latched log line, not silence) or be refused — decide which before shipping.
+  - ⚠ Decide the SURFACE of the knob too: whole-window (chrome + content) vs content-only. Chrome is
+    compositor-drawn and trivially fadeable; the client surface is the part with the ABI problem.
+
 - **C2 — a system motion language** (design brief §2). A "the system is working" vocabulary the
   compositor OWNS and apps inherit, rather than every app shipping its own spinner. Open question is the
   boundary: what the compositor grants vs what an app may override.
