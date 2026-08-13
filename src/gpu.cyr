@@ -42,7 +42,101 @@ var ae_gpu_blend  = 0;    # 1 = gpu_shader_op#92 is usable (caps bit3) — selec
 var ae_gpu_blend_seen = 0;
 var ae_gpu_fallback_seen = 0;
 var ae_gpu_wp_demote = 0;
-var ae_gpu_op_demote = 0;   # latch: named the translucent-window demotion once (M6-C3)   # latch: named the non-solid-wallpaper demotion once (M6-C1a)
+var ae_gpu_op_demote = 0;
+
+# ⭐⭐ THE WALLPAPER ON THE GPU — `#86` slot + `#87 gpu_blit_shm`, the SAME path a client surface takes
+# (`AE-2`, iron-proven for an opaque surface). No new kernel op, no shader, no driver stack.
+# ⛔ mabda is NOT involved: its GPU surface rides Linux's driver stack while this band is the agnos
+# kernel's own ring-3 `#82`-`#94` (roadmap, corrected 2026-08-01). Decode is chitra's, on CPU.
+# ⛔⛔ AND IT ONLY FITS AT SOME GEOMETRIES, WHICH IS A HARD KERNEL LIMIT, NOT A TUNABLE. A `#86` slot is
+# capped at **2 MB** (`SHM_MAX_SIZE = 2097152`, 16 slots system-wide). A full-screen XRGB wallpaper is
+# `w*h*4`, so: 800x600 = 1,920,000 -> **FITS**, and that is archaemenid's actual scanout geometry.
+# 1280x800 = 4,096,000 and 2560x1440 = 14,745,600 -> do NOT. Tiling across slots was considered and
+# rejected: 8 slots for a 1440p wallpaper is half the system's supply held permanently, and re-uploading
+# strips per frame moves more bytes through the CPU than the CPU blit it replaces.
+# ⇒ Gated on the caps-reported `shm_slot_max` at RUNTIME, never on an assumed number, and a wallpaper
+# that does not fit demotes the frame with its size named.
+var ae_gpu_wp_slot = 0;
+var ae_gpu_wp_buf  = 0;
+var ae_gpu_wp_ser  = 0 - 1;   # wallpaper serial the slot was filled from
+var ae_gpu_wp_w    = 0;       # geometry the slot was scaled to
+var ae_gpu_wp_h    = 0;
+var ae_gpu_wp_fail = 0;       # latched: too big, no slot, or a failed write
+var ae_gpu_wp_ready = 0;      # 1 = this frame's wallpaper is staged and will be blitted by #87
+
+fn ae_gpu_wp_on(): i64 { return ae_gpu_wp_ready; }
+
+# PURE: does a `fw` x `fh` XRGB wallpaper fit one `#86` slot of `slot_max` bytes? -> 1 / 0.
+# ⭐ Split out for the same reason `_bhumi_fbinfo_rc` and `ae_gpu_op_supported` are: this is the whole
+# decision, it is arithmetic, and it is the only part of the `#87` wallpaper path a machine without an
+# AMD GPU can execute at all. QEMU exposes no AMD PCI device, so `gpu_find` never matches and every
+# branch below this is dead there — a burn is the only thing that runs them.
+# ⚠ `slot_max <= 0` is "the kernel told us nothing", which must NOT read as "fits".
+fn ae_gpu_wp_fits(fw, fh, slot_max): i64 {
+    if (fw <= 0) { return 0; }
+    if (fh <= 0) { return 0; }
+    if (slot_max <= 0) { return 0; }
+    if ((fw * fh * 4) > slot_max) { return 0; }
+    return 1;
+}
+
+# Stage the wallpaper into its `#86` slot at the current geometry. -> 1 ready, 0 not.
+fn ae_gpu_wp_ensure(fw, fh): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (ae_gpu_wp_fail == 1) { return 0; }
+    if (wp_kind() != 2) { return 0; }            # AE_WP_IMAGE only — solid is #88, gradient is neither
+    var need = fw * fh * 4;
+    # ⚠ Ask the kernel's number, do not hardcode 2 MB: `shm_slot_max` is caps +24 and a later kernel
+    # raising the cap should light this up with no edit here.
+    if (ae_gpu_wp_fits(fw, fh, ae_gpu_shm_slot_max) == 0) {
+        ae_gpu_wp_fail = 1;
+        println("aethersafha: wallpaper too large for one #86 slot (bytes needed, then slot max):");
+        println_int(need);
+        println_int(ae_gpu_shm_slot_max);
+        return 0;
+    }
+    if (ae_gpu_wp_slot == 0) {
+        var sl = sys_shm_create_gpu(need);
+        if (sl < 1) {
+            ae_gpu_wp_fail = 1;
+            println("aethersafha: no graphics-visible slot for the wallpaper -- CPU path");
+            return 0;
+        }
+        ae_gpu_wp_slot = sl;
+        ae_gpu_wp_buf = alloc(need);
+        if (ae_gpu_wp_buf == 0) { ae_gpu_wp_fail = 1; return 0; }
+    }
+    # ⭐ RE-UPLOAD ONLY WHEN IT CHANGED. The scale is a full-screen per-pixel loop and the `#86` write
+    # copies the whole buffer — doing that every frame would cost far more than the CPU blit this
+    # replaces. Serial covers a new wallpaper; the geometry pair covers a mode change.
+    if (ae_gpu_wp_ser == wp_serial()) {
+        if (ae_gpu_wp_w == fw) { if (ae_gpu_wp_h == fh) { return 1; } }
+    }
+    var y = 0;
+    while (y < fh) {
+        var x = 0;
+        while (x < fw) {
+            store32(ae_gpu_wp_buf + (y * fw + x) * 4, wp_pixel(x, y, fw, fh));
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    if (sys_shm_write(ae_gpu_wp_slot, ae_gpu_wp_buf, need) != 0) {
+        ae_gpu_wp_fail = 1;
+        println("aethersafha: #86 write refused for the wallpaper -- CPU path");
+        return 0;
+    }
+    ae_gpu_wp_ser = wp_serial();
+    ae_gpu_wp_w = fw;
+    ae_gpu_wp_h = fh;
+    println("aethersafha: wallpaper staged in a #86 slot for #87, bytes:");
+    println_int(need);
+    return 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+}   # latch: named the translucent-window demotion once (M6-C3)   # latch: named the non-solid-wallpaper demotion once (M6-C1a)
 
 # gpu_caps#89 flag bits (kernel: syscall.cyr gpu_caps_sys).
 var AE_GPU_CAP_PRESENT  = 1;    # bit0 — a GPU is bound
@@ -387,12 +481,23 @@ fn ae_gpu_frame_plan(comp, fb): i64 {
         }
         wi = wi + 1;
     }
+    # ⭐ An IMAGE wallpaper is expressible via `#87` when it fits a slot — try to stage it, and only
+    # fall through to the demotion when it cannot be. `ae_gpu_wp_ready` is read by `wp_fill_band` so
+    # the CPU never paints a backdrop the GPU is about to blit over.
+    ae_gpu_wp_ready = 0;
+    if (wp_kind() == 2) {
+        # ⚠ Read the geometry here rather than using `fw`/`fh` — this gate runs BEFORE they are
+        # declared below, and hoisting them would reorder the cheap early-outs above it.
+        if (ae_gpu_wp_ensure(bhumi_fb_width(fb), bhumi_fb_height(fb)) == 1) { ae_gpu_wp_ready = 1; }
+    }
+    if (ae_gpu_wp_ready == 0) {
     if (wp_gpu_expressible() == 0) {
         if (ae_gpu_wp_demote == 0) {
             ae_gpu_wp_demote = 1;
             println("aethersafha: GPU frame DEMOTED — this wallpaper is not one #88 fill; CPU path for the run");
         }
         return 0;
+    }
     }
     var fw = bhumi_fb_width(fb);
     var fh = bhumi_fb_height(fb);
@@ -845,6 +950,15 @@ fn ae_gpu_present_frame(comp, fb): i64 {
     # Compositing it here would blit a surface with no chrome under it. A changed count means the
     # plan is stale: present on the CPU this frame and re-plan next.
     if (vec_len(comp_windows(comp)) != ae_gpu_plan_n) { return 0; }
+
+    # 0. ⭐ THE WALLPAPER, FIRST — it is the bottom layer, so it goes down before the chrome rects.
+    # ⚠ Ordering is the whole correctness here: `AE-9` makes the CLEAR the first `#88` rect in the
+    # queue, so a wallpaper blitted after the chrome flush would be painted over by that clear.
+    # `wp_fill_band` suppresses the clear enqueue whenever `ae_gpu_wp_on()` is 1, and this blit
+    # replaces it.
+    if (ae_gpu_wp_ready == 1) {
+        if (sys_gpu_blit_shm(ae_gpu_wp_slot, (fh << 16) | fw, 0) != 0) { ae_gpu_demote(); return 0; }
+    }
 
     # 1. Chrome layer -> back buffer, DEFERRED — ⭐⭐ NOW DAMAGE-LIMITED (`AE-0a`).
     #

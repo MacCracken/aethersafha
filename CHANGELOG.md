@@ -4,6 +4,51 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.1] - 2026-08-13 — the wallpaper rides `#87`, where it fits
+
+⭐ **The image wallpaper goes to the GPU by the same path a client surface already takes**: an
+`#86 shm_create_gpu` slot, then `#87 gpu_blit_shm` into the back buffer. That is `AE-2`, iron-proven
+for an opaque surface — no new kernel op, no shader, no driver stack, and **not mabda** (its GPU
+surface rides Linux's driver stack; this band is the agnos kernel's own ring-3 `#82`-`#94`).
+
+### ⛔⛔ It only fits at some geometries, and that is a kernel limit rather than a tunable
+
+A `#86` slot is capped at **2 MB** (`SHM_MAX_SIZE = 2097152`, 16 slots system-wide), so a full-screen
+XRGB wallpaper is `w*h*4` against that:
+
+| geometry | bytes | |
+|---|---|---|
+| **800x600** — archaemenid's actual scanout | 1,920,000 | **fits** |
+| 1280x800 | 4,096,000 | does not |
+| 2560x1440 | 14,745,600 | does not |
+
+⚠ Gated on the caps-reported `shm_slot_max` at **runtime**, never on an assumed 2 MB — a later kernel
+raising the cap lights this up with no edit here. A wallpaper that does not fit demotes with its size
+and the cap both named.
+⛔ **Tiling across slots was considered and rejected**: 8 slots for a 1440p wallpaper is half the
+system's supply held permanently, and re-uploading strips per frame moves more bytes through the CPU
+than the CPU blit it would replace.
+
+### ⚠ Ordering is the whole correctness of this
+
+`AE-9` makes the CLEAR the first `#88` rect in the queue, so a wallpaper blitted after the chrome flush
+would be painted over by it. The `#87` blit therefore runs **first**, and `wp_fill_band` suppresses its
+clear enqueue whenever the GPU is about to blit — otherwise the CPU would also paint a full-screen
+backdrop into a userland framebuffer that `AE-9` then discards, every frame.
+⭐ Re-upload happens only when the wallpaper serial or the geometry changes; the scale is a full-screen
+per-pixel loop and the `#86` write copies the whole buffer, so doing it per frame would cost more than
+the path it replaces.
+
+### ⛔ NOT VERIFIED, and structurally cannot be here
+
+QEMU exposes no AMD PCI device, so `gpu_find` never matches, `ae_gpu_probe` answers 0, and **every
+branch of this is dead in the harness**. It compiles `--agnos`, the Linux/CPU path is unchanged
+(23/23 + the QEMU desktop gate still green), and the only part a machine without an AMD GPU can execute
+is the arithmetic — factored into a pure `ae_gpu_wp_fits(fw, fh, slot_max)` with 9 assertions covering
+both sides of the exact boundary. ⚠ `slot_max <= 0` is asserted NOT to read as "fits": that value comes
+from a caps record that was never populated, and treating it as unlimited would turn a clean CPU
+fallback into a demotion mid-frame. **A burn is the only thing that runs the rest.**
+
 ## [0.16.0] - 2026-08-13 — a wallpaper is a FILE
 
 ⛔⛔ **0.14.0 SHIPPED THE WRONG FEATURE, and it had a convincing rationale.** The wallpaper layer landed

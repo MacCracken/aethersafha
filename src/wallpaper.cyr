@@ -165,6 +165,11 @@ fn wp_fill_band(fb, y, h, fh): i64 {
     var fw = bhumi_fb_width(fb);
     if (ae_wp_kind == AeWallpaperKind.AE_WP_IMAGE) {
         if (ae_wp_img == 0) { return rend_clear_band(fb, y, h, ae_wp_c0); }
+        # ⛔ THE GPU IS ABOUT TO BLIT THIS — do not also paint it on the CPU. `AE-9` deletes the `#39`
+        # blit on a GPU frame, so anything written into the userland framebuffer here is discarded
+        # work: a full-screen per-pixel loop thrown away every frame. The flag is set by the frame
+        # PLAN, which runs before render, so this is a decision already made rather than one guessed at.
+        if (ae_gpu_wp_on() == 1) { return 0; }
         var iy = 0;
         while (iy < h) {
             var ix = 0;
