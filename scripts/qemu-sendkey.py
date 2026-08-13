@@ -66,6 +66,26 @@ def main():
 
     time.sleep(settle)
     for k in keys:
+        # ⭐ `mouse:DX,DY` and `click` drive the POINTER through QEMU's own input layer
+        # (`input-send-event`), so the path under test is emulated device -> Linux evdev -> bhumi,
+        # not a shortcut into the consumer.
+        if k.startswith("mouse:"):
+            dx, dy = k[6:].split(",")
+            rpc(f, sock, "input-send-event", events=[
+                {"type": "rel", "data": {"axis": "x", "value": int(dx)}},
+                {"type": "rel", "data": {"axis": "y", "value": int(dy)}},
+            ])
+            print("qmp: moved", dx, dy)
+            time.sleep(0.3)
+            continue
+        if k == "click":
+            for down in (True, False):
+                rpc(f, sock, "input-send-event", events=[
+                    {"type": "btn", "data": {"down": down, "button": "left"}}])
+                time.sleep(0.15)
+            print("qmp: clicked")
+            time.sleep(0.3)
+            continue
         # ⚠ hold-time matters and is not cosmetic. agnos measured 0-of-9 keys delivered at QEMU's
         # ~100 ms default because a USB HID keyboard reports STATE ON POLL and a press+release inside
         # one frame never existed. evdev is edge-driven so it does not have that failure, but a

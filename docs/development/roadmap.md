@@ -212,19 +212,18 @@ scans them out.**
   `CYRIUS_TARGET_LINUX` *is* compiler-predefined (`cyrius/src/main.cyr:1099`), and bhumi today branches
   only on `#ifndef CYRIUS_TARGET_AGNOS`. ⚠ Only safe from a bare VT — on a box running a desktop, `/dev/fb0`
   is that desktop's framebuffer.
-- **B4 🚧 KEYBOARD DONE (bhumi 1.3.0), POINTER OPEN.** ⭐ Proven end to end in QEMU *through the
-  emulated input device*: QMP `send-key esc` → i8042 → `atkbd` → `/dev/input/event*` → bhumi → HID
-  usage **41**, ending an unbounded session at frame 2729; negative-controlled (no key → no quit).
-  ⭐ **The operator action turned out NOT to be a blocker for development** — the QEMU guest's init is
-  PID 1, so evdev is readable there with no group change. It is still required to run on the host.
+- **B4 ✅ CLOSED 0.13.7 / bhumi 1.4.0 — keyboard AND pointer.** One QEMU run delivered motion, a left
+  click and Esc through the *emulated USB devices*; the cursor moved by exactly the injected delta
+  (centre (640,400) + (400,300) → measured (1040,700)).
+  ⭐ **The operator action was never a blocker for development** — this item was recorded as needing the
+  dev user in the `input` group; the guest's init is PID 1, so evdev is readable there. Still required
+  to run on the host.
   ⛔ **Base plane only.** evdev emits no 0xE0 prefix (`KEY_UP` is 103, not `E0 48`), so arrows,
   RCtrl/RAlt/Meta, Home/End/PgUp/PgDn and Insert/Delete are dropped as unmapped — a second table keyed
-  on evdev's own numbering is the fix. **Pointer** (`_bhumi_ptrscan`) is still the `0` stub; its
-  `EV_REL`/button records arrive on nodes the keyboard arm already opens, so it is wiring, not plumbing.
-  Original note, still true for a host run: ⛔ **And the scancode table does not transfer wholesale**: Linux `KEY_*` base codes
-  are AT/XT Set-1 make codes so the base plane maps directly, but bhumi's extended table
-  (`src/kbscan.cyr:143-157`) is keyed on **0xE0-prefixed** codes, which **evdev never emits**. Arrows,
-  RCtrl/RAlt/Meta, Home/End/PgUp/PgDn and Insert/Delete all need a second table.
+  on evdev's own numbering is the remaining work, and it is the one thing standing between this and a
+  usable keyboard.
+  ⚠ On Linux both streams share one fd and a read consumes, so bhumi drains ONCE and splits; and its
+  device scan latched twice before it was right (see bhumi 1.4.0). Unplug is still unhandled.
 - **B5 — host client launch.** Today a client must be started by hand in another shell. `plp_spawn`
   (`programs/puka_launch_probe.cyr:34-45`) already proves the fork+execve-then-accept shape on the host.
 - **B6 ✅ CLOSED 0.13.6 / setu 0.8.5 — one rendezvous, named by setu.** `setu_un_path` resolves

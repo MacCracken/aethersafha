@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.13.7] - 2026-08-12 — M6-B4 closed: the Linux desktop takes mouse AND keyboard
+
+⭐⭐ **`pointer motion received -- the cursor is live`, `pointer button click routed`, `quit on a key
+usage 41`** — all three in one QEMU run, through the *emulated USB devices*: QMP → evdev → bhumi
+**1.4.0** → the compositor.
+⭐ **Quantitative, not impressionistic**: the cursor started centred at (640,400), the injected deltas
+summed to (+400,+300), and the screendump put it at **(1040,700)**. It moved by exactly the delta.
+
+### Added — pointer + click to `scripts/qemu-sendkey.py`
+
+`mouse:DX,DY` and `click` drive QEMU's `input-send-event`, so the path under test is emulated device →
+Linux evdev → bhumi, never a shortcut into the consumer.
+
+### ⛔ What the QEMU guest caught that the dev box could not — twice
+
+bhumi's evdev device scan **latched**, and each latch silently lost an entire input device:
+1. **Scan-once** — the first poll runs milliseconds after boot, before USB enumeration, so with a USB
+   keyboard the scan found nothing and never looked again. Invisible on the i8042 keyboard (present
+   from reset), so the bug surfaced only when the guest was given a *more realistic* device.
+2. **Retry-while-empty** — the obvious fix still failed the ordinary case: the mouse enumerated first,
+   the count rose above zero, the scan latched, and the keyboard was never opened. Measured precisely
+   that: motion arriving, Esc never.
+
+⚠ Neither is a compositor defect and both were fixed in bhumi — but they are the second and third
+findings this harness has produced that the host box was structurally incapable of showing, after the
+`mmap`-vs-`pwrite` scanout bug. A second machine keeps paying for itself.
+
+### Changed — `[deps.bhumi]` 1.3.0 → **1.4.0**
+
 ## [0.13.6] - 2026-08-12 — M6-B6 closed: one rendezvous, named by setu
 
 ⭐ **The display socket is named in ONE place.** setu **0.8.5** makes `setu_un_path` resolve an explicit
