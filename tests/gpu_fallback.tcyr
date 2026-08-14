@@ -255,6 +255,21 @@ fn main() {
     assert_eq(ae_gpu_alpha_ok(), 0, "bit 6 advertised but NO shader envelope -> still OFF");
     ae_gpu_blend = 0; ae_gpu_op_mask = 0;
 
+    # ⛔⛔ THE PLAN'S THIRD ANSWER IS RESET AT THE TOP, WITH THE OTHER TWO — and this asserts the
+    # PLACEMENT, which is the only part of it a host build can reach (`ae_gpu_frame_plan` short-circuits
+    # to 0 off agnos, so the window loop that SETS the flag is unreachable here; the burn is its oracle).
+    # ⚠ That is not a small property. `ae_gpu_wp_ready` was cleared 40 lines down, below an early
+    # `return 0`, and the consequence was an image-wallpaper session losing its wallpaper to a black
+    # desktop the moment a translucent window appeared. A per-frame answer that survives a frame is the
+    # same bug every time, so the reset is asserted rather than assumed.
+    test_group("gpu.cyr — the frame plan clears its per-frame answers before any early return");
+    ae_gpu_alpha_chrome = 1;
+    ae_gpu_wp_ready = 1;
+    ae_gpu_frame_plan(comp, fb);
+    assert_eq(ae_gpu_alpha_chrome, 0, "a stale alpha-chrome answer does not survive into the next frame");
+    assert_eq(ae_gpu_wp_ready, 0, "  nor does a stale wallpaper-staged answer");
+    assert_eq(ae_chrome_on_gpu(), 0, "  and with no GPU frame, chrome is not on the GPU either");
+
     test_group("gpu.cyr — wallpaper #86 slot budget (pure)");
     # 800x600x4 = 1,920,000 — archaemenid's actual scanout geometry, and it FITS.
     assert_eq(ae_gpu_wp_fits(800, 600, 2097152), 1, "800x600 fits one 2 MB slot");
@@ -272,4 +287,15 @@ fn main() {
     assert_eq(ae_gpu_wp_fits(800, 0, 2097152), 0, "zero height is not a fit");
     # A larger cap in a later kernel should light this up with no code edit.
     assert_eq(ae_gpu_wp_fits(1280, 800, 8388608), 1, "an 8 MB slot would fit 1280x800");
+
+    # ⛔⛔ THIS FILE HAD NO `assert_summary()` AND WAS THEREFORE NOT A GATE AT ALL.
+    # It was the only suite in tests/ missing it. Every assertion above ran, a failure printed its
+    # `FAIL:` line — and the run still exited **0**, so `cyrius test` stayed green and the sweep counted
+    # it as a pass. Measured, not inferred: flipping `ae_gpu_wp_fits(800,600,2097152)` to expect 0
+    # printed one FAIL and returned rc=0.
+    # ⚠ THE FILE THIS HAPPENED TO IS THE POINT. gpu_fallback.tcyr is the oracle for "the client's word
+    # reaches the screen whatever the GPU decided" — the one invariant an iron burn is expensive to
+    # re-derive. It has been unable to fail for as long as it has existed, alongside a dead `return 0;`
+    # that had already cost it 20 assertions.
+    return assert_summary();
 }

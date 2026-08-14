@@ -292,6 +292,22 @@ var ae_last_wp = 0 - 1;   # last-seen wallpaper serial; see rend_band_compute
 # is what tests/render.tcyr and tests/shell_render.tcyr rely on).
 var ae_gpu_frame_ok = 0;           # 1 = the GPU will composite this whole frame
 var ae_gpu_plan_n = 0;             # window count the plan was computed against (staleness guard)
+# ⛔⛔ 1 = THIS FRAME HAS A TRANSLUCENT WINDOW, SO ITS CHROME CANNOT GO ON THE GPU. Third member of the
+# plan, written in the same place and for the same reason; read by `ae_chrome_on_gpu()` below.
+#
+# ⛔ THE 1.56.44 IRON BURN IS WHY IT EXISTS, AND THE DEFECT WAS MINE. Narrowing the frame plan's
+# translucency demote let an `--opacity 128` desktop stay on the GPU — but `fill_rect_a` (:64) has NO
+# GPU route: it is a per-pixel read-modify-write into the USERLAND framebuffer and it never calls
+# `ae_rect_enqueue`. Everything else about that frame still behaved as if chrome were on the GPU,
+# including gpu.cyr's band decision, which zeroes the `#39` blit the moment ANY rect is queued — and the
+# three deco buttons (plain `fill_rect`) always are. ⇒ The window BODY fill, the TITLEBAR and the focus
+# accent strip were painted into a framebuffer nothing copied to screen. On iron: every window lost its
+# titlebar background at `--opacity 128` and kept it at `--opacity 255`.
+# ⭐ The mode this selects is COHERENT, not a fallback: chrome, glyphs and the backdrop go on the CPU and
+# ride the band blit, while the CLIENT SURFACES still composite on the GPU with `#92` op 0x06 — the
+# split the alpha op was built for, with the per-pixel work left on the shader cores.
+var ae_gpu_alpha_chrome = 0;
+fn ae_gpu_alpha_chrome_on(): i64 { return ae_gpu_alpha_chrome; }
 
 # Damage tracker — a per-frame dirty-rect bounding box (parity: DamageTracker).
 enum DmgOff {
@@ -942,6 +958,18 @@ fn ae_chrome_on_gpu(): i64 {
     # falls back to per-pixel drawing must drag chrome back with it, because the blit is the only thing
     # that carries per-pixel output to the panel.
     if (ae_cursor_gpu_ok != 1) { return 0; }
+    # ⛔⛔ AND A TRANSLUCENT WINDOW RETIRES CHROME FOR THE FRAME — the same trap as the three above, and
+    # the ONLY one of them that reached iron. `fill_rect_a` (:64) is a per-pixel read-modify-write with no
+    # `#88` route, so a window at opacity < 255 draws its body, titlebar and accent strip into the
+    # USERLAND framebuffer no matter what this returns. Answering 1 then skips the `#39` blit (gpu.cyr
+    # :1119 zeroes the band the moment any rect is queued, and the deco buttons always are) and those
+    # pixels never reach the panel. 1.56.44 burn: at `--opacity 128` every window lost its titlebar
+    # background and kept its buttons and title glyphs — the exact shape this file's banner predicted for
+    # text and for the cursor, from a fourth layer nobody had added to the list.
+    # ⚠ The CLIENT SURFACES stay on the GPU — `render_window` still skips its CPU composite on
+    # `ae_gpu_frame_ok`, which is unchanged — so `#92` op 0x06 keeps doing the per-pixel blend. Only the
+    # flat chrome comes back to the CPU, and the band blit carries it.
+    if (ae_gpu_alpha_chrome == 1) { return 0; }
     return ae_chrome_gpu_ok;
 }
 

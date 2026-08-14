@@ -5,6 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+### Verified on iron — per-window opacity composites on the GPU, agnos 1.56.44 burn
+
+⭐⭐ **`#92` op 0x06 `BLEND_ALPHA` ran on archaemenid.** `#89 gpu_caps` byte +28 reported `130911`
+(`0x1FF5F`, bit 6 set), `ae_gpu_alpha_ok()` answered 1, and both `--opacity 128` runs logged
+*"compositing a TRANSLUCENT client surface with #92 op 0x06 (uniform alpha)"* and completed —
+244 and 537 frames, `frame loop ok`, no `GPO_E_*`, no demote line. The crab window is visibly
+translucent in the operator's photographs and opaque at `--opacity 255`.
+
+⚠ **Scope, stated.** The burn shows the op DISPATCHES and produces a translucent window. It does not
+discriminate the rounding tie (`blend_alpha.s:59` — 5,905 reachable ties, RTNE vs half-away differ on
+3,010 outputs); nothing on screen distinguishes ±1 on a channel. That question stays open.
+
+### Fixed — a translucent window lost its titlebar, body fill and accent strip on the GPU frame
+
+⛔⛔ **The regression the same burn found, and it was mine.** Narrowing the frame plan's translucency
+demote let an `--opacity 128` desktop stay on the GPU. But `fill_rect_a` (`render.cyr:64`) has **no GPU
+route** — it is a per-pixel read-modify-write into the userland framebuffer and never calls
+`ae_rect_enqueue`. The rest of the frame still behaved as if chrome were on the GPU, including the band
+decision, which zeroes the `#39` blit the moment **any** rect is queued — and the three deco buttons
+(plain `fill_rect`) always are. ⇒ Body fill, titlebar and focus strip were painted into a framebuffer
+nothing copied to screen. On iron: every window lost its titlebar background at 128 and kept it at 255.
+
+⚠ **`ae_chrome_on_gpu()`'s own banner already stated the rule this broke** — *"any layer that falls back
+to per-pixel drawing must drag chrome back with it, because the blit is the only thing that carries
+per-pixel output to the panel"*. Text and the cursor were both on that list. `fill_rect_a` never was,
+because before the narrowing a translucent window demoted the whole frame and the case could not arise.
+
+⭐ **The fix is the frame plan's third answer.** `ae_gpu_alpha_chrome` joins `ae_gpu_frame_ok` and
+`ae_gpu_plan_n`: set when a translucent window is ADMITTED, and read by `ae_chrome_on_gpu()`. The mode it
+selects is coherent rather than a fallback — chrome, glyphs and the backdrop go on the CPU and ride the
+`#39` band blit, while the **client surfaces stay on the GPU** with op 0x06. ⚠ `#87`-staged wallpaper is
+suppressed in that mode: it and CPU chrome are mutually exclusive (`wp_fill_band` paints nothing when the
+GPU owns the backdrop, and the band blit would then copy an empty framebuffer over it — a black desktop).
+An image or gradient wallpaper plus a translucent window demotes the whole frame exactly as before.
+
+⚠ **A NON-premultiplied client surface is still composited opaque at any window opacity** — `#87` has no
+alpha and the CPU path's `blit_rect` never had one either, so both paths agree. Unchanged by this repair;
+naming it because the chrome around such a window now blends and its content does not.
+
+### Fixed — three test suites whose verdict never reached the caller
+
+⛔⛔ Found while writing the regression gate above, each measured rather than inferred:
+
+- **`tests/render.tcyr` returned from the middle of `main`.** Four groups below the `return
+  assert_summary();` — the wallpaper scaler, per-window opacity, `fill_rect_a` blending, and the
+  default-opacity assertions — had **never executed**. `fill_rect_a` is the function at the centre of the
+  regression above; the assertions pinning its blending were among the unreachable ones.
+- **`tests/gpu_fallback.tcyr` had no `assert_summary()` at all** — the only suite in `tests/` without one.
+  An injected failure printed its `FAIL:` line and the run still exited **0**. This is the oracle for
+  *"the client's word reaches the screen whatever the GPU decided"*, and it has been unable to fail for
+  as long as it has existed — alongside the dead `return 0;` that had already cost it 20 assertions.
+- **`tests/selftest.tcyr` ended `assert_summary(); return 0;`** — printed `N failed`, exited 0.
+
+⚠ Reviving the render groups surfaced two genuine defects in them: the `fill_rect_a` group inherited
+`ae_gpu_frame_ok = 1` from the group above and so measured the enqueue path rather than the blend, and
+`black at 50%` expected `0x102030` when `rend_blend` weights the destination by `255 - a` — 128 keeps
+127/255, giving `0x0F1F2F`. The renderer was right; the literal was wrong and had never run.
+
+**265 · 54 · 36** assertions in those three suites, all green, and a failure now returns non-zero.
+
+### Fixed — the log named op 0x01 on a frame composited by op 0x06
+
+⛔ The `ae_gpu_blend_seen` latch sat outside the per-window routing, so the 1.56.44 burn log printed
+*"compositing a client surface with #92 op 0x01 (shader blend)"* on a frame whose only blended surface
+went through op 0x06 — both lines, one op. These lines are this tree's record of which kernel path
+composited; one that names the wrong op is worse than none.
+
 ### Removed — 29 build artifacts from version control, ~280 MB
 
 `.gitignore` covered only `build/qemu-linux/`. Tracked under `build/` were **15 static binaries at

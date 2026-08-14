@@ -75,6 +75,11 @@ var ae_gpu_wp_ready = 0;      # 1 = this frame's wallpaper is staged and will be
 
 fn ae_gpu_wp_on(): i64 { return ae_gpu_wp_ready; }
 
+# ⚠ `ae_gpu_alpha_chrome` — the third member of the frame plan — is declared in render.cyr beside
+# `ae_gpu_frame_ok` and `ae_gpu_plan_n`, for the same forward-reference reason those two are. It is
+# WRITTEN below by `ae_gpu_frame_plan` and READ by `ae_chrome_on_gpu()`; its banner is at that
+# declaration, and `ae_chrome_on_gpu()`'s states what the 1.56.44 burn showed when it did not exist.
+
 # PURE: does a `fw` x `fh` XRGB wallpaper fit one `#86` slot of `slot_max` bytes? -> 1 / 0.
 # ⭐ Split out for the same reason `_bhumi_fbinfo_rc` and `ae_gpu_op_supported` are: this is the whole
 # decision, it is arithmetic, and it is the only part of the `#87` wallpaper path a machine without an
@@ -463,6 +468,8 @@ fn ae_gpu_frame_plan(comp, fb): i64 {
     # here and :495 had the same hole, which is exactly why the reset belongs with the frame's other
     # per-frame state and not beside the code that happens to set it.
     ae_gpu_wp_ready = 0;
+    # ⚠ Same rule, same place: a per-frame answer is reset where the frame's other per-frame state is.
+    ae_gpu_alpha_chrome = 0;
     # ⚠ OFF AGNOS THERE IS NO GPU FRAME, EVER — and saying so HERE is what fixes the bug. The old
     # code let the renderer believe hardware compositing was live on any build, then discovered at
     # present time that it was not. The plan is the single place that belief is formed.
@@ -519,7 +526,11 @@ fn ae_gpu_frame_plan(comp, fb): i64 {
             # but the emission is `#ifdef CYRIUS_TARGET_AGNOS` and the Linux harness cannot reach it. If
             # the burn shows floating title text over a neighbour's surface, THAT is the defect — revert
             # this narrowing first, not the alpha op.
-            if (win_translucent(ww) == 1) { if (ae_gpu_alpha_ok() == 1) { } else {
+            # ⛔⛔ AND THE BURN FOUND THE REST OF THE PRICE. Admitting a translucent window onto the GPU
+            # frame ALSO takes the chrome layer off it — `fill_rect_a` has no `#88` route, so a frame
+            # that keeps chrome on the GPU loses every alpha fill into a framebuffer the skipped `#39`
+            # blit never copies. See `ae_gpu_alpha_chrome`'s banner for the iron signature.
+            if (win_translucent(ww) == 1) { if (ae_gpu_alpha_ok() == 1) { ae_gpu_alpha_chrome = 1; } else {
                 if (ae_gpu_op_demote == 0) {
                     ae_gpu_op_demote = 1;
                     println("aethersafha: GPU frame DEMOTED — a translucent window; op 0x06 exists but is unadvertised (unburned) and the GPU frame cannot yet z-order overlapping windows");
@@ -533,10 +544,21 @@ fn ae_gpu_frame_plan(comp, fb): i64 {
     # fall through to the demotion when it cannot be. `ae_gpu_wp_ready` is read by `wp_fill_band` so
     # the CPU never paints a backdrop the GPU is about to blit over.
     ae_gpu_wp_ready = 0;
+    # ⛔⛔ NOT ON AN ALPHA-CHROME FRAME, AND THIS ONE IS A SILENT BLACK DESKTOP IF MISSED.
+    # `#87`-staged wallpaper and CPU chrome are mutually exclusive: `wp_fill_band` paints NOTHING when
+    # `ae_gpu_wp_on()` is 1 (the GPU is about to blit it), while the `#39` band blit — which an
+    # alpha-chrome frame needs and therefore runs — would copy that empty framebuffer straight over the
+    # wallpaper `:1055` just put down. ⇒ In this mode the CPU paints the backdrop like any other layer.
+    # ⚠ The expressibility gate below is left alone deliberately: an image or gradient wallpaper plus a
+    # translucent window still demotes the whole frame, exactly as it did before the narrowing. Carrying
+    # a non-`#88` backdrop on the band blit would work, but it is a WIDENING of the GPU path and does not
+    # belong in a repair.
+    if (ae_gpu_alpha_chrome == 0) {
     if (wp_kind() == 2) {
         # ⚠ Read the geometry here rather than using `fw`/`fh` — this gate runs BEFORE they are
         # declared below, and hoisting them would reorder the cheap early-outs above it.
         if (ae_gpu_wp_ensure(bhumi_fb_width(fb), bhumi_fb_height(fb)) == 1) { ae_gpu_wp_ready = 1; }
+    }
     }
     if (ae_gpu_wp_ready == 0) {
     if (wp_gpu_expressible() == 0) {
@@ -1205,9 +1227,16 @@ fn ae_gpu_present_frame(comp, fb): i64 {
                     ae_gpu_demote();
                     return 0;
                 }
+                # ⛔ SAY WHICH OP ACTUALLY RAN. This latch sat OUTSIDE the routing above, so the 1.56.44
+                # burn log printed *"compositing a client surface with #92 op 0x01"* on a frame where the
+                # only blended surface went through op 0x06 — both lines, one op. A log that names the
+                # wrong op is worse than no log: this tree reads these lines as the record of which
+                # kernel path composited, and op 0x01 was not it.
+                if (wa >= 255) {
                 if (ae_gpu_blend_seen == 0) {
                     ae_gpu_blend_seen = 1;
                     println("aethersafha: compositing a client surface with #92 op 0x01 (shader blend)");
+                }
                 }
             }
             if (use_blend == 0) {

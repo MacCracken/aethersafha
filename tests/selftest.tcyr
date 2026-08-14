@@ -195,6 +195,12 @@ fn main() {
     test_group("selftest driver — a build with no GPU band proves nothing and says so");
     assert_eq(ae_selftest(), 96, "the host arm reports 96, never 95");
 
-    assert_summary();
-    return 0;
+    # ⛔⛔ `assert_summary(); return 0;` MEANT THIS FILE COULD NOT FAIL, and the `return 0` was the whole
+    # of it: the summary PRINTED `N failed`, the run exited 0, and `cyrius test` counted a pass.
+    # Measured, not inferred — an injected `assert_eq(1, 0)` printed its FAIL line, printed
+    # `36 passed, 1 failed`, and returned rc=0.
+    # ⚠ Found alongside the same defect in gpu_fallback.tcyr (no summary at all) and the mid-`main`
+    # `return` in render.tcyr that left four groups unreachable. Three shapes, one class: a gate whose
+    # verdict never reaches the caller. The suite's own count is the verdict, so return it.
+    return assert_summary();
 }

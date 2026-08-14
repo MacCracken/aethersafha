@@ -21,6 +21,14 @@ fn t_gt_r(a, b): i64 {
     return 0;
 }
 
+# ⚠ Same shape and same reason as t_gt_r: the comparison is spelled as a statement so the suite does
+# not depend on a comparison being usable as a VALUE. "differs from the sentinel" is the whole of what
+# the chrome-route assertions need — the exact blended word is bhumi's business, not this test's.
+fn t_ne_r(a, b): i64 {
+    if (a == b) { return 0; }
+    return 1;
+}
+
 fn t_layer_count_r(layer): i64 {
     var n = 0;
     var y = 0;
@@ -1003,7 +1011,14 @@ fn main() {
     assert_eq(ae_chrome_on_gpu(), 0, "no GPU frame ⇒ never on the GPU");
     ae_gpu_frame_ok = 1;
 
-    return assert_summary();
+    # ⛔⛔ THE `return assert_summary()` USED TO BE HERE, AND EVERY GROUP BELOW IT WAS DEAD CODE.
+    # It compiled, it was listed in the suite, and `234 passed` looked like coverage — but the wallpaper
+    # scaler, per-window opacity, `fill_rect_a` and the default-opacity assertions had NEVER EXECUTED,
+    # because `main` returned before reaching them. ⚠ `fill_rect_a` is the function at the centre of the
+    # 1.56.44 chrome regression; the four assertions that pin its blending were among the unreachable
+    # ones. Same defect class as the `edgeasm`/`asmagree` gates that never compiled and the dead
+    # `return 0;` in tests/gpu_fallback.tcyr: a gate that cannot fail is not a gate.
+    # ⇒ The summary now returns from the BOTTOM of main, which is the only place it can be correct.
 
     # ----- wallpaper: image scaling (M6-C1, pure) -----------------
     # ⛔ The first cut of the wallpaper layer had NO image kind at all — it was a colour source with a
@@ -1039,6 +1054,13 @@ fn main() {
     assert_eq(win_opacity(ow), 0, "under-range clamps to 0");
 
     test_group("render — fill_rect_a blending");
+    # ⛔ THIS GROUP MEASURES THE CPU ARM, so say so instead of inheriting whatever the previous group
+    # left set. It was written before `AE-9` and never ran (see the dead-`return` note above), so it
+    # still assumed `fill_rect` always draws — but the retired-text group above leaves
+    # `ae_gpu_frame_ok = 1`, and on a GPU frame the a=255 arm ENQUEUES and writes no pixel at all. The
+    # revived group failed on exactly that. The blend arithmetic is the subject here; the routing has
+    # its own group.
+    ae_gpu_frame_ok = 0;
     var ofb = bhumi_fb_new(4, 4);
     bhumi_fb_clear(ofb, 0x000000);
     fill_rect_a(ofb, 0, 0, 4, 4, 0xFFFFFF, 255);
@@ -1054,7 +1076,81 @@ fn main() {
     # point, and it is what makes a translucent window show the wallpaper rather than a flat tint.
     bhumi_fb_clear(ofb, 0x204060);
     fill_rect_a(ofb, 0, 0, 4, 4, 0x000000, 128);
-    assert_eq(bhumi_fb_get(ofb, 1, 1), 0x102030, "black at 50% halves the existing pixel");
+    # ⚠ 0x0F1F2F, NOT 0x102030 — and the literal that said otherwise was wrong, not the renderer.
+    # `rend_blend` weights the destination by `255 - a`, so a = 128 keeps 127/255 of it, not 128/255:
+    # 32*127/255 = 15, 64*127/255 = 31, 96*127/255 = 47. The group's own white-over-black assertion
+    # already pins the other half (255*128/255 = 128 = 0x80) and agrees. ⛔ "a=128 is exactly half" is
+    # false for an integer blend over 0..255 and was only ever plausible because this never executed.
+    assert_eq(bhumi_fb_get(ofb, 1, 1), 0x0F1F2F, "black at a=128 keeps 127/255 of the existing pixel");
+
+    # ----- ⛔⛔ THE 1.56.44 IRON REGRESSION -----------------------------------------------------
+    # THE INVARIANT, and it is the one `ae_chrome_on_gpu()`'s banner already states: every chrome fill
+    # reaches the panel by EXACTLY ONE of two routes —
+    #   A. queued for `#88` (`ae_chrome_on_gpu() == 1`), or
+    #   B. written into the userland framebuffer and carried by the `#39` band blit (`... == 0`).
+    # A fill that takes NEITHER is lost, and `fill_rect_a` can only ever take route B: it is a per-pixel
+    # read-modify-write and has no `ae_rect_enqueue` call in it at all.
+    #
+    # ⛔ WHAT THE BURN SHOWED. `--opacity 128` on 1.56.44 put every window's body, titlebar and accent
+    # strip through `fill_rect_a` while the frame still believed chrome was on the GPU — so gpu.cyr
+    # zeroed the damage band (the three deco buttons are plain `fill_rect` and are always queued) and
+    # skipped the blit. Result on iron: every window lost its titlebar BACKGROUND and kept its buttons
+    # and its title glyphs, at 128 and not at 255. The fix is the frame plan's third answer.
+    test_group("render — a TRANSLUCENT window takes chrome off the GPU (1.56.44 iron regression)");
+    var afb = bhumi_fb_new(200, 120);
+    var ACS = 0x0B0C0D;          # a sentinel no chrome fill emits, so "untouched" is provable
+    ae_gpu_frame_ok = 1;
+    ae_chrome_gpu_ok = 1;
+    ae_text_gpu_ok = 1;
+    ae_cursor_gpu_ok = 1;
+    var aw = win_new(21, 10, 10, 100, 60, "chrome");
+
+    # --- route A: an OPAQUE window. `fill_rect_a(a=255)` delegates to `fill_rect`, which enqueues.
+    ae_gpu_alpha_chrome = 0;
+    win_set_opacity(aw, 255);
+    bhumi_fb_clear(afb, ACS);
+    ae_rect_reset();
+    ae_text_reset();
+    render_window(afb, aw, 1);
+    var abody = win_body_y(aw) + 5;
+    assert_eq(ae_chrome_on_gpu(), 1, "an OPAQUE window on a GPU frame keeps chrome on the GPU");
+    assert_eq(t_gt_r(ae_rect_count(), 0), 1, "  its chrome is QUEUED for #88");
+    assert_eq(bhumi_fb_get(afb, 12, abody), ACS, "  and NOTHING is written to the userland framebuffer");
+
+    # --- route B: a TRANSLUCENT window, with the plan's answer as ae_gpu_frame_plan now sets it.
+    ae_gpu_alpha_chrome = 1;
+    win_set_opacity(aw, 128);
+    bhumi_fb_clear(afb, ACS);
+    ae_rect_reset();
+    ae_text_reset();
+    render_window(afb, aw, 1);
+    assert_eq(ae_chrome_on_gpu(), 0, "a TRANSLUCENT window pulls chrome off the GPU, restoring the #39 blit");
+    assert_eq(ae_rect_count(), 0, "  so nothing is queued for #88 — the whole layer is on the CPU");
+    var apix = bhumi_fb_get(afb, 12, abody);
+    assert_eq(t_ne_r(apix, ACS), 1, "  the body fill IS in the framebuffer the blit will carry");
+    # ⚠ And it is BLENDED, not opaque — a route-B fill that came out at full strength would mean the
+    # alpha was dropped somewhere between the window and the pixel, which looks identical on this
+    # assertion's weaker form ("!= sentinel").
+    assert_eq(t_ne_r(apix, ae_bhumi(rupa_theme_widget(rupa_theme_active()))), 1,
+              "  ...and blended against the backdrop, not painted at full strength");
+
+    # ⚠⚠ NON-VACUITY — THIS IS THE PRE-FIX STATE, AND WITHOUT IT THE ASSERTION ABOVE IS UNFALSIFIABLE.
+    # Force the plan's answer back to 0 with the SAME translucent window: the chrome still goes to the
+    # CPU (fill_rect_a has no other route) while `ae_chrome_on_gpu()` still answers 1, so gpu.cyr skips
+    # the blit and those pixels never leave userland. That co-occurrence IS the bug; it is asserted here
+    # so a future edit that reintroduces it fails loudly rather than merely stopping being tested.
+    ae_gpu_alpha_chrome = 0;
+    bhumi_fb_clear(afb, ACS);
+    ae_rect_reset();
+    ae_text_reset();
+    render_window(afb, aw, 1);
+    assert_eq(ae_chrome_on_gpu(), 1, "pre-fix: the frame still believes chrome is on the GPU");
+    assert_eq(t_gt_r(ae_rect_count(), 0), 1, "  the deco buttons queue, which is what zeroed the band");
+    assert_eq(t_ne_r(bhumi_fb_get(afb, 12, abody), ACS), 1,
+              "  while the body fill sits in a framebuffer the skipped blit never copies — LOST CHROME");
+    ae_gpu_frame_ok = 0;
+    ae_gpu_alpha_chrome = 0;
+    win_set_opacity(aw, 255);
 
     test_group("render — the default applies to new windows");
     win_set_default_opacity(200);
@@ -1063,6 +1159,8 @@ fn main() {
     win_set_default_opacity(255);
     var ow3 = win_new(11, 0, 0, 10, 10, "op3");
     assert_eq(win_opacity(ow3), 255, "and follows it back to opaque");
+
+    return assert_summary();
 }
 
 var exit_code = main();
