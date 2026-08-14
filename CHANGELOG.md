@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+### Removed — 29 build artifacts from version control, ~280 MB
+
+`.gitignore` covered only `build/qemu-linux/`. Tracked under `build/` were **15 static binaries at
+~15 MB each** (~220 MB) plus **62 MB** of QEMU screendumps and guest images — the latter added this
+session, by my own harness runs with `AE_QEMU_OUT=build/qemu-a128`, which slipped past a rule that named
+one path instead of the prefix. Now `build/` is ignored wholesale.
+
+⚠ **Checked before removing, not after.** Every reference to these paths either BUILDS the artifact
+(`cyrius build --agnos src/main.cyr build/aethersafha-agnos` in README.md, CLAUDE.md and the guides) or
+is a `# Run:` header in `programs/*.cyr`. The single script that READS one —
+`docs/development/agnos-render/aethersafha-smoke.sh:37` — already errors with the exact build command
+when it is absent, which is better behaviour than finding a stale one. Files are untracked, not deleted;
+both targets rebuild clean and 133 + 23 stay green.
+
+⛔ **A committed build artifact is actively dangerous, not merely large.** In the sibling agnos repo
+`tests/gpu/build/edgeasm` was committed, ran, and printed *"B4 PASS — the tool reproduces a shipped
+iron-proven shader byte-for-byte"* while `edgeasm.cyr` beside it **could not compile at all**. A
+committed binary is evidence about whatever source existed when someone last ran a compiler — not about
+the source next to it.
+
 ### Fixed — the GPU frame composited in LAYER order, not Z order
 
 ⛔ `ae_gpu_present_frame` drained the **entire** chrome queue, then blitted **all** client surfaces,

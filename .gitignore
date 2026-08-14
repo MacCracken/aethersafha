@@ -35,8 +35,17 @@ tarpaulin-report.*
 *.key
 
 # QEMU Linux-desktop harness artifacts (initramfs, serial log, screendumps)
-# ⛔ ANY qemu harness output, not just the default path. `qemu-linux-desktop.sh` takes AE_QEMU_OUT, and
-# a run with `AE_QEMU_OUT=build/qemu-a128` slipped straight past a rule that named only the default —
-# committing 3 MB screendumps and 15 MB static guest binaries. Match the prefix, not one instance.
-build/qemu-*/
-build/qemu-linux/
+# ⛔⛔ THE WHOLE BUILD DIRECTORY. It previously ignored only `build/qemu-linux/`, and 29 artifacts were
+# tracked — 15 static binaries at ~15 MB each, about 220 MB, plus 62 MB of QEMU screendumps and guest
+# images that a run with `AE_QEMU_OUT=build/qemu-a128` slipped past the one named path.
+# ⚠ NOTHING REQUIRED THEM COMMITTED. Every reference either BUILDS the artifact
+# (`cyrius build --agnos src/main.cyr build/aethersafha-agnos` in the README, CLAUDE.md, the guides) or
+# is a `# Run:` header in programs/*.cyr. The one script that READS one —
+# `docs/development/agnos-render/aethersafha-smoke.sh:37` — already errors with the exact build command
+# when it is absent, which is the correct behaviour and better than finding a stale one.
+# ⛔ AND A COMMITTED BUILD ARTIFACT IS ACTIVELY DANGEROUS, not merely large. In the sibling agnos repo
+# `tests/gpu/build/edgeasm` was committed, ran, and printed "B4 PASS -- the tool reproduces a shipped
+# iron-proven shader byte-for-byte" while `edgeasm.cyr` beside it COULD NOT COMPILE AT ALL. A committed
+# binary is evidence about whatever source existed when someone last ran a compiler, not about the
+# source next to it.
+build/
