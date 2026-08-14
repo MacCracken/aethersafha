@@ -40,6 +40,7 @@ var ae_gpu_blend  = 0;    # 1 = gpu_shader_op#92 is usable (caps bit3) — selec
 # First-occurrence latches, so the log states WHICH kernel op composited client surfaces without
 # printing per frame. ⛔ Both are printed, because "no line" must not be the signal for either case.
 var ae_gpu_blend_seen = 0;
+var ae_gpu_alpha_seen  = 0;   # 1 = the op-0x06 line has been printed this run
 var ae_gpu_fallback_seen = 0;
 var ae_gpu_wp_demote = 0;
 var ae_gpu_op_demote = 0;
@@ -507,13 +508,24 @@ fn ae_gpu_frame_plan(comp, fb): i64 {
             # ⇒ Narrowing this to `if (win_translucent(ww) == 1) { if (ae_gpu_alpha_ok() == 0) { ... } }`
             # is a two-line change, and it must NOT be made until (2) is fixed — otherwise the first
             # burned kernel turns a slow-but-correct frame into a fast wrong one.
-            if (win_translucent(ww) == 1) {
+            # ⭐⭐ NARROWED FOR THE 1.56.44 BURN. A translucent window no longer demotes the frame WHEN the
+            # kernel advertises op 0x06 — the composite path now has a uniform-alpha op to use, and the
+            # z-order defect that blocked this (all chrome, then all surfaces, so a lower window covered
+            # an upper window's titlebar) was fixed in the same cut: `ae_gpu_present_frame` replays each
+            # window's [chrome][surface][text] in order.
+            # ⚠ BOTH conditions, not one. On a kernel without bit 6 this still demotes, byte-for-byte as
+            # before — and that is the only behaviour any kernel before this burn can produce.
+            # ⛔ THE Z-ORDER FIX IS UNVERIFIED ON HARDWARE. Its partition is gated and mutation-tested,
+            # but the emission is `#ifdef CYRIUS_TARGET_AGNOS` and the Linux harness cannot reach it. If
+            # the burn shows floating title text over a neighbour's surface, THAT is the defect — revert
+            # this narrowing first, not the alpha op.
+            if (win_translucent(ww) == 1) { if (ae_gpu_alpha_ok() == 1) { } else {
                 if (ae_gpu_op_demote == 0) {
                     ae_gpu_op_demote = 1;
                     println("aethersafha: GPU frame DEMOTED — a translucent window; op 0x06 exists but is unadvertised (unburned) and the GPU frame cannot yet z-order overlapping windows");
                 }
                 return 0;
-            }
+            } }
         }
         wi = wi + 1;
     }
@@ -1169,7 +1181,22 @@ fn ae_gpu_present_frame(comp, fb): i64 {
             var use_blend = 0;
             if (win_premul(win) == 1) { if (ae_gpu_blend == 1) { use_blend = 1; } }
             if (use_blend == 1) {
-                var brc = ae_gpu_blend_rect(bid, wh, dstxy);
+                # ⭐⭐ M6-C3 — a TRANSLUCENT window composites with op 0x06 and its own alpha; an opaque
+                # one keeps op 0x01, which is cheaper (60 dwords, no multiplies) and iron-proven.
+                # ⚠ `ae_gpu_alpha_ok()` is the whole gate: it needs a shader envelope AND `#89 +28` to
+                # advertise bit 6. On a kernel that does not, `wa` is ignored and this is byte-for-byte
+                # the path that shipped before — the frame plan will have demoted such a frame anyway.
+                var wa = win_opacity(win);
+                var brc = 0;
+                if (wa < 255) {
+                    if (ae_gpu_alpha_ok() == 1) {
+                        brc = ae_gpu_blend_rect_alpha(bid, wh, dstxy, wa);
+                        if (ae_gpu_alpha_seen == 0) {
+                            ae_gpu_alpha_seen = 1;
+                            println("aethersafha: compositing a TRANSLUCENT client surface with #92 op 0x06 (uniform alpha)");
+                        }
+                    } else { brc = ae_gpu_blend_rect(bid, wh, dstxy); }
+                } else { brc = ae_gpu_blend_rect(bid, wh, dstxy); }
                 if (brc != 0) {
                     # ⛔ SAME TWO RECOVERIES AS THE GLYPH PATH. A batch failure left an indeterminate prefix
                     # in the back buffer, so re-clear and refuse the flip; a per-op failure is repairable by

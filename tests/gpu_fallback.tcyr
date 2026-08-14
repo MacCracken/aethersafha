@@ -220,8 +220,11 @@ fn main() {
     # GPU_OP_SUPPORTED is 0x1FF5F but bit 6 sits in GPU_OP_NOTIMPL_MASK because the shader is unburned,
     # and #89 reports `SUPPORTED & ~NOTIMPL`. So the wire value still has bit 6 CLEAR, and that is the
     # case worth pinning — a compositor must not use an op the kernel declines to advertise.
-    assert_eq(ae_gpu_op_supported(0x1FF1F, 6), 0, "bit 6 (BLEND_ALPHA) is NOT advertised while NOTIMPL");
-    assert_eq(ae_gpu_op_supported(0x1FF5F, 6), 1, "...and IS, on a kernel that has cleared NOTIMPL");
+    # ⚠ UPDATED FOR THE BURN. Bit 6 is now CLEAR in GPU_OP_NOTIMPL_MASK, so a 1.56.44 kernel publishes
+    # 0x1FF5F and op 0x06 IS advertised. Both cases stay pinned: an OLDER kernel publishes 0x1FF1F and
+    # the compositor must still fall back on it.
+    assert_eq(ae_gpu_op_supported(0x1FF1F, 6), 0, "an OLDER kernel does not advertise bit 6 -> fall back");
+    assert_eq(ae_gpu_op_supported(0x1FF5F, 6), 1, "a 1.56.44 kernel publishes 0x1FF5F -> op 0x06 live");
     assert_eq(ae_gpu_op_supported(0x1FF1F, 8), 1, "bit 8 (EDGE_COV) is");
     assert_eq(ae_gpu_op_supported(0, 1), 0, "an empty mask advertises nothing");
     # ⚠ The two ops this compositor actually issues, isolated: a kernel offering one and not the other
@@ -245,9 +248,9 @@ fn main() {
     test_group("gpu.cyr — the M6-C3 alpha capability gate");
     ae_gpu_blend = 1;
     ae_gpu_op_mask = 0x1FF1F;
-    assert_eq(ae_gpu_alpha_ok(), 0, "today's kernel advertises no bit 6 -> alpha path OFF");
+    assert_eq(ae_gpu_alpha_ok(), 0, "a pre-1.56.44 kernel -> alpha path OFF, demotion still fires");
     ae_gpu_op_mask = 0x1FF5F;
-    assert_eq(ae_gpu_alpha_ok(), 1, "a post-burn kernel advertising bit 6 -> alpha path ON");
+    assert_eq(ae_gpu_alpha_ok(), 1, "a 1.56.44 kernel advertising bit 6 -> alpha path ON");
     ae_gpu_blend = 0;
     assert_eq(ae_gpu_alpha_ok(), 0, "bit 6 advertised but NO shader envelope -> still OFF");
     ae_gpu_blend = 0; ae_gpu_op_mask = 0;
