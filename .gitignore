@@ -35,4 +35,8 @@ tarpaulin-report.*
 *.key
 
 # QEMU Linux-desktop harness artifacts (initramfs, serial log, screendumps)
+# ⛔ ANY qemu harness output, not just the default path. `qemu-linux-desktop.sh` takes AE_QEMU_OUT, and
+# a run with `AE_QEMU_OUT=build/qemu-a128` slipped straight past a rule that named only the default —
+# committing 3 MB screendumps and 15 MB static guest binaries. Match the prefix, not one instance.
+build/qemu-*/
 build/qemu-linux/

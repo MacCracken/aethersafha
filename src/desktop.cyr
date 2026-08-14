@@ -129,6 +129,9 @@ fn render_desktop(d, fb): i64 {
         if (rend_band_h() > 0) { wp_fill_band(fb, rend_band_y(), rend_band_h(), fbh); }
     }
     if (rend_band_valid() == 0) { wp_fill_all(fb, bhumi_fb_width(fb), fbh); }
+    # ⭐ The background is down; everything queued so far is the PRELUDE that must be emitted before
+    # any window. Marking here is what lets the GPU path replay these queues in z-order.
+    ae_mark_prelude();
     var v = comp_windows(comp);
     var n = vec_len(v);
     var i = 0;
@@ -146,6 +149,9 @@ fn render_desktop(d, fb): i64 {
         if (win_state(win) != WinState.WS_MINIMIZED) {
             render_window(fb, win, focused);
         }
+        # ⚠ MARK EVERY WINDOW, MINIMIZED OR NOT. A minimized one enqueued nothing so its range is
+        # empty — but skipping the mark would shift every later index onto the wrong window.
+        ae_mark_window();
         # ⛔ STAMP THE PREV RECT LAST, after the window is drawn. Stamping at the top of the frame
         # would destroy the "was" before damage is computed from it, and every move would leave
         # its vacated region uncleared.

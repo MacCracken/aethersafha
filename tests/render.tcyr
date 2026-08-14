@@ -268,6 +268,79 @@ fn main() {
     var px_opaque = bhumi_fb_get(trfb, 80, 100);
     assert(px_late != px_opaque, "and it is NOT the opaque colour -- a=128 differs from a=255");
 
+    # ================================================================================================
+    # Z-ORDER MARKS — the partition the GPU frame replays windows in
+    # ================================================================================================
+    # ⛔ WHAT THIS PINS, AND WHAT IT CANNOT. `ae_gpu_present_frame` used to emit ALL chrome, then ALL
+    # client surfaces, then ALL text — so a LOWER window's surface covered an UPPER window's titlebar
+    # while the upper title glyphs were repainted on top. It now replays per window, sliced by these
+    # marks. ⚠ That emission path is `#ifdef CYRIUS_TARGET_AGNOS` and cannot run here at all, so this
+    # suite gates the PARTITION (which is pure and portable) and NOT the emission. The reorder itself
+    # is unverified until it runs on agnos — a QEMU Linux screendump is byte-identical before and after,
+    # precisely because the code never executes there.
+    test_group("render — the per-window z-order partition");
+    var zfb = bhumi_fb_new(400, 400);
+    var zcomp = comp_new();
+    var zw0 = comp_create_window(zcomp, 10, 10, 100, 80, "A");
+    var zw1 = comp_create_window(zcomp, 200, 200, 100, 80, "B");
+    # Drive the exact sequence render_desktop performs — reset, mark the prelude, then render+mark each
+    # window. Calling render_desktop itself is not possible here (desktop.cyr is not in this suite's
+    # include graph), and this is the more faithful test anyway: it pins the call ORDER the fix depends
+    # on rather than trusting one caller to have it right.
+    # ⚠ Rects are only queued when chrome is on the GPU; force that on for the duration.
+    # ⛔ `ae_chrome_on_gpu()` is a CONJUNCTION — it needs the frame plan to have said yes AND the chrome
+    # path to be live AND the glyph op available. Setting only one left it 0, no rects were queued, every
+    # slice was empty, and the content checks below passed VACUOUSLY: two deliberate mutations (dropping
+    # the mark, and marking before the render instead of after) both stayed green. Instrumented rather
+    # than assumed — the counters read prelude=0 m0=0 m1=0 total=0.
+    # ⚠ FOUR conjuncts, all required: ae_gpu_frame_ok, ae_text_gpu_ok, ae_cursor_gpu_ok, ae_chrome_gpu_ok.
+    var zsaved = ae_chrome_gpu_ok;
+    var zsaved_ok = ae_gpu_frame_ok;
+    var zsaved_t = ae_text_gpu_ok;
+    var zsaved_c = ae_cursor_gpu_ok;
+    ae_chrome_gpu_ok = 1; ae_gpu_frame_ok = 1; ae_text_gpu_ok = 1; ae_cursor_gpu_ok = 1;
+    ae_rect_reset(); ae_text_reset(); ae_marks_reset();
+    # ⚠ QUEUE A BACKGROUND FIRST, as wp_fill_band does in a real frame. Without it the prelude is empty
+    # and "forget the prelude mark" is an equivalent mutation — the test could not tell the two apart,
+    # and a mutation that cannot fail is not coverage.
+    fill_rect(zfb, 0, 0, 400, 400, 0x00101018);
+    ae_mark_prelude();
+    render_window(zfb, zw0, 1); ae_mark_window();
+    render_window(zfb, zw1, 0); ae_mark_window();
+
+    assert_eq(ae_mark_count(), 2, "one mark per window, drawn or not");
+    # ⛔ NON-VACUITY GUARD, and it is not decoration: without it this whole group passed with ZERO rects
+    # queued, and two deliberate mutations went undetected. Every range check below is trivially true on
+    # an empty queue.
+    assert(ae_rect_count() > 0, "rects were actually queued -- the checks below are not vacuous");
+    assert(ae_rect_mark_at(0 - 1) > 0, "the PRELUDE is non-empty -- the background was queued");
+    assert(ae_rect_mark_at(0) > ae_rect_mark_at(0 - 1), "window 0's slice is NON-EMPTY");
+    assert(ae_rect_mark_at(1) > ae_rect_mark_at(0), "window 1's slice is NON-EMPTY");
+    # The slices must TILE the queue: prelude, then each window, in order, ending at the count.
+    assert(ae_rect_mark_at(0 - 1) <= ae_rect_mark_at(0), "prelude ends at or before window 0's slice");
+    assert(ae_rect_mark_at(0) <= ae_rect_mark_at(1), "window 0's slice ends at or before window 1's");
+    assert(ae_rect_mark_at(1) <= ae_rect_count(), "window 1's slice ends at or before the queue end");
+    assert(ae_text_mark_at(0) <= ae_text_mark_at(1), "the text queue is partitioned the same way");
+
+    # ⭐ THE CONTENT CHECK, WHICH IS THE ONE THAT MATTERS. Every rect in window 0's slice must lie
+    # inside window 0's bounds. If the marks were off by one window, this fails — an ordering test that
+    # only checked the arithmetic would not.
+    var zi = ae_rect_mark_at(0 - 1);
+    var zbad = 0;
+    while (zi < ae_rect_mark_at(0)) {
+        if (ae_rect_get_x(zi) + ae_rect_get_w(zi) > 200) { zbad = zbad + 1; }
+        zi = zi + 1;
+    }
+    assert_eq(zbad, 0, "window 0's slice contains only rects inside window 0 (x < 200)");
+    var zj = ae_rect_mark_at(0);
+    var zbad2 = 0;
+    while (zj < ae_rect_mark_at(1)) {
+        if (ae_rect_get_x(zj) < 200) { zbad2 = zbad2 + 1; }
+        zj = zj + 1;
+    }
+    assert_eq(zbad2, 0, "window 1's slice contains only rects inside window 1 (x >= 200)");
+    ae_chrome_gpu_ok = zsaved; ae_gpu_frame_ok = zsaved_ok; ae_text_gpu_ok = zsaved_t; ae_cursor_gpu_ok = zsaved_c;
+
     # ⛔⛔ `AE-0a`: A **CLOSED** WINDOW IS NOT A MOVED WINDOW, and the difference cost an iron burn.
     # The 2026-08-08 flash proved the move leaves no ghost (the group above). Closing a window instead
     # left it **standing on the panel, flashing** — because every damage producer walks the LIVE window

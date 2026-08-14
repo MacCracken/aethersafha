@@ -663,7 +663,9 @@ fn ae_gpu_alpha_ok(): i64 {
 var ae_gpu_chrome_seen = 0;
 
 # Drain the frame's chrome rects. -> count filled, or -1 if a fill was refused and the path is now retired.
-fn ae_gpu_emit_chrome(): i64 {
+# ⭐ RANGE FORM. `ae_gpu_present_frame` replays this queue per WINDOW so overlapping windows stack
+# correctly; the whole-queue wrapper below keeps every other caller unchanged.
+fn ae_gpu_emit_chrome_range(ae_rect_lo, ae_rect_hi): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     # ⛔ ANNOUNCE THE PATH, NOT THE EMISSION, AND SAY IT BEFORE THE EARLY RETURN.
     # This logged only after a rect was successfully filled, so "no line" had TWO causes: the chrome never
@@ -675,9 +677,9 @@ fn ae_gpu_emit_chrome(): i64 {
         ae_gpu_chrome_seen = 1;
         println("aethersafha: chrome fills are on the GPU (#88 gpu_fill_rect) -- the #39 blit is gone");
     }
-    var n = ae_rect_count();
-    if (n == 0) { return 0; }
-    var i = 0;
+    var n = ae_rect_hi;
+    if (n <= ae_rect_lo) { return 0; }
+    var i = ae_rect_lo;
     while (i < n) {
         var wh = (ae_rect_get_h(i) << 16) | ae_rect_get_w(i);
         var dstxy = (ae_rect_get_y(i) << 16) | ae_rect_get_x(i);
@@ -692,12 +694,14 @@ fn ae_gpu_emit_chrome(): i64 {
         }
         i = i + 1;
     }
-    return n;
+    return n - ae_rect_lo;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
     return 0;
     #endif
 }
+
+fn ae_gpu_emit_chrome(): i64 { return ae_gpu_emit_chrome_range(0, ae_rect_count()); }
 
 # ============================================================================================
 # ⭐⭐ `AE-8` — GLYPHS ON THE SHADER CORES. `#92` op 0x03 GLYPH_1BPP.
@@ -821,18 +825,21 @@ fn ae_gpu_glyph_ensure_slot(): i64 {
     #endif
 }
 
-fn ae_gpu_emit_text(): i64 {
+# ⭐ RANGE FORM, same reason as the chrome emitter: a window's title must land on ITS OWN surface,
+# after it and before the next window's chrome.
+fn ae_gpu_emit_text_range(ae_text_lo, ae_text_hi): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
-    var n = ae_text_count();
-    if (n == 0) { return 0; }
+    # ⚠ Guard on the RANGE, not the whole queue — an empty slice (a window with no title, or a
+    # minimized one) must be a cheap no-op, not a walk that emits nothing but still arms the slot.
+    if (ae_text_hi <= ae_text_lo) { return 0; }
     if (ae_gpu_text_fail == 1) { return 0; }
     # ⚠ The kernel does not advertise op 0x03 — do not issue it. Chrome text falls back to the CPU
     # glyph path, which `AE-8` kept precisely so a glyph refusal never costs the frame.
     if (ae_gpu_glyph_op == 0) { return 0; }
     if (ae_gpu_glyph_ensure_slot() == 0) { return 0; }
     var emitted = 0;
-    var i = 0;
-    while (i < n) {
+    var i = ae_text_lo;
+    while (i < ae_text_hi) {
         var len = ae_text_run_len(i);
         var w = ae_text_pack_1bpp(ae_gpu_glyph_buf, ae_text_run_ptr(i), len);
         if (sys_shm_write(ae_gpu_glyph_slot, ae_gpu_glyph_buf, ae_text_bytes(len)) == 0) {
@@ -872,6 +879,8 @@ fn ae_gpu_emit_text(): i64 {
     return 0;
     #endif
 }
+
+fn ae_gpu_emit_text(): i64 { return ae_gpu_emit_text_range(0, ae_text_count()); }
 
 var ae_gpu_cursor_seen = 0;     # first-occurrence log latch
 # Visible-rect scratch for the cursor emit. MODULE scope => 4 x u64 = 32 bytes, reused every frame.
@@ -1060,8 +1069,19 @@ fn ae_gpu_present_frame(comp, fb): i64 {
     # them. Setting the band height to 0 skips the blit — the deletion this rung existed for.
     # ⚠ `-1` means a fill was refused mid-frame: the queue held the chrome, the framebuffer is empty, and the
     # path has just been retired — so the blit MUST still run or this frame shows nothing.
-    var chrome_rc = 0;
-    if (ae_chrome_on_gpu() == 1) { chrome_rc = ae_gpu_emit_chrome(); }
+    # ⛔⛔ STEP 1 NOW EMITS ONLY THE PRELUDE — the clear / wallpaper band — NOT every window's chrome.
+    # It used to drain the WHOLE rect queue here, which put every titlebar down before any client
+    # surface. With two overlapping windows the lower window's surface then covered the upper window's
+    # titlebar background, while step 2c repainted the upper title GLYPHS on top afterwards: floating
+    # title text over a neighbour's surface. Per-window chrome now goes down inside the loop below,
+    # interleaved with that window's own surface and text, so windows stack in z-order.
+    # ⚠ `chrome_rc` still decides whether the `#39` band blit runs, and it must count EVERY rect this
+    # frame puts on the GPU — not just the prelude — or a frame whose chrome is entirely per-window
+    # would blit an empty userland framebuffer over the chrome the GPU just filled. It is accumulated
+    # across the loop and tested after it.
+    if (ae_chrome_on_gpu() == 1) {
+        if (ae_gpu_emit_chrome_range(0, ae_rect_prelude_n()) == 0 - 1) { ae_gpu_demote(); return 0; }
+    }
     var band_y = 0;
     var band_h = fh;
     if (rend_band_valid() == 1) {
@@ -1076,7 +1096,15 @@ fn ae_gpu_present_frame(comp, fb): i64 {
     # The band block assigns `band_h` unconditionally, so zeroing above it was silently overwritten — the
     # blit would then have run and copied an EMPTY userland framebuffer straight over the chrome the GPU had
     # just filled. Order is the whole correctness of this block, not a style choice.
-    if (chrome_rc > 0) { band_h = 0; }
+    # ⛔⛔ THE BLIT MUST STAY *BEFORE* THE CLIENT SURFACES, and my first attempt at this reorder moved it
+    # after them. When chrome is on the CPU the band carries that chrome, so blitting it after the
+    # surfaces paints titlebars OVER the windows — the mirror image of the z-order bug being fixed here.
+    # ⚠ The decision therefore cannot wait for `chrome_rc` to finish accumulating. It does not need to:
+    # "is the chrome on the GPU this frame" is knowable NOW, from the path flag and whether anything was
+    # queued at all. A rect refusal later in the frame is handled by demoting and letting the caller do a
+    # full CPU present — strictly safer than the old latch-and-blit, which repainted from a framebuffer
+    # that was already partly stale.
+    if (ae_chrome_on_gpu() == 1) { if (ae_rect_count() > 0) { band_h = 0; } }
     # ⚠ A ZERO-HEIGHT BAND IS A RESULT, NOT AN ERROR: nothing changed in two frames, so the buffer about
     # to be flipped to already holds the right pixels and there is nothing to copy. Skip the blit and
     # still present — the flip is what puts the finished frame on screen.
@@ -1096,6 +1124,21 @@ fn ae_gpu_present_frame(comp, fb): i64 {
     while (i < n) {
         var win = vec_get(v, i);
         var bid = win_bufid(win);
+        # ⭐⭐ THIS WINDOW'S CHROME, IMMEDIATELY BEFORE ITS OWN SURFACE — the whole z-order fix.
+        # `render_desktop` enqueued the rects in paint order and marked each window's end, so the slice
+        # [prev_mark, this_mark) is exactly this window's chrome and nobody else's.
+        # ⚠ A minimized window's slice is EMPTY and the range emitter no-ops on it, which is why the
+        # marks are recorded for every window rather than only the drawn ones.
+        if (ae_chrome_on_gpu() == 1) {
+            if (i < ae_mark_count()) {
+                # ⚠ A refusal here retires the chrome path mid-frame. The band blit has already been
+                # decided and possibly skipped, so this frame cannot be rescued by blitting — demote and
+                # let the caller repaint the whole thing on the CPU.
+                if (ae_gpu_emit_chrome_range(ae_rect_mark_at(i - 1), ae_rect_mark_at(i)) == 0 - 1) {
+                    ae_gpu_demote(); return 0;
+                }
+            }
+        }
         # ⛔⛔ A MINIMIZED WINDOW IS NOT COMPOSITED EITHER, AND MISSING THIS SHIPPED TO IRON. A window is
         # drawn in TWO places — `render_window` paints the chrome on the CPU, and this loop blits the
         # CLIENT SURFACE on the GPU. The minimize fix skipped only the first, so F6 removed the titlebar
@@ -1150,20 +1193,43 @@ fn ae_gpu_present_frame(comp, fb): i64 {
                 }
             }
         }
+        # ⭐ AND THIS WINDOW'S TITLE, AFTER ITS OWN SURFACE. Previously every title was emitted after
+        # every surface, which is why a title could survive on top of a NEIGHBOUR's window — the code
+        # that did it even said so ("so a title cannot be hidden under a window"). Correct is: after
+        # its own surface, before the next window's chrome.
+        if (i < ae_mark_count()) {
+            if (ae_gpu_emit_text_range(ae_text_mark_at(i - 1), ae_text_mark_at(i)) == 0 - 2) {
+                ae_gpu_batch_recover();
+                return 0;
+            }
+        }
         i = i + 1;
     }
 
-    # 2c. `AE-8` — the frame's chrome text, on the shader cores. AFTER the chrome blit (which would erase
-    #     it) and the client surfaces (so a title cannot be hidden under a window), BEFORE the flip.
+    # 2c. THE POSTLUDE — whatever was queued AFTER the last window: the shell panel and anything else
+    #     that must sit above every window. Each window's own chrome and title already went down inside
+    #     the loop, in z-order, which is the fix.
     # ⛔ -2 MEANS DO NOT PRESENT. A batched `#92` failure left an indeterminate prefix in the back buffer;
     # the kernel's stated recovery is re-clear and no `#84`. Returning 0 here sends the caller to the CPU
     # present, which repaints the whole frame from the userland framebuffer — the correct outcome, and the
     # one thing that must NOT happen is flipping the half-composited buffer to the panel.
-    if (ae_gpu_emit_text() == 0 - 2) {
+    var post_lo = ae_rect_prelude_n();
+    var tpost_lo = ae_text_prelude_n();
+    if (ae_mark_count() > 0) {
+        post_lo = ae_rect_mark_at(ae_mark_count() - 1);
+        tpost_lo = ae_text_mark_at(ae_mark_count() - 1);
+    }
+    if (ae_chrome_on_gpu() == 1) {
+        if (ae_gpu_emit_chrome_range(post_lo, ae_rect_count()) == 0 - 1) {
+            ae_gpu_demote(); return 0;
+        }
+    }
+    if (ae_gpu_emit_text_range(tpost_lo, ae_text_count()) == 0 - 2) {
         ae_gpu_batch_recover();
         ae_gpu_demote();
         return 0;
     }
+
 
     # 2d. THE POINTER, LAST. Op order is paint order, so this is what makes the arrow top-most — over
     #     chrome, over captions, over client surfaces. ⛔ It must stay AFTER the text drain for a second

@@ -4,6 +4,45 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+
+### Fixed — the GPU frame composited in LAYER order, not Z order
+
+⛔ `ae_gpu_present_frame` drained the **entire** chrome queue, then blitted **all** client surfaces,
+then repainted **all** chrome text. With two overlapping windows the lower window's surface covered the
+upper window's titlebar background, while `:1100` repainted the upper title glyphs on top — its own
+comment saying *"so a title cannot be hidden under a window"*. Signature: floating title text over a
+neighbour's surface with no titlebar behind it.
+
+⚠ **Not an opacity bug** — it is why the GPU path could not be trusted with overlapping windows at all,
+and therefore why M6-C3 per-window opacity could not be allowed onto it.
+
+**The queues were already in z-order; only the boundaries were missing.** `render_desktop` paints
+bottom-to-top, so a mark after each window recovers which rects and text runs belong to whom. The frame
+now emits `[chrome_i][surface_i][text_i]` per window, with a prelude (the clear/wallpaper) and a
+postlude (shell panel) either side. No new queue, no new pass.
+
+⛔ **The band blit must stay BEFORE the client surfaces, and my first attempt moved it after.** When
+chrome is on the CPU that blit *carries* the chrome, so running it after the surfaces paints titlebars
+over the windows — the mirror image of the bug being fixed. The decision no longer waits for a running
+`chrome_rc`: "is chrome on the GPU this frame" is knowable up front, and a rect refusal mid-frame now
+demotes to a full CPU present rather than latching and blitting from a partly-stale framebuffer.
+
+⚠ **The emission path is `#ifdef CYRIUS_TARGET_AGNOS` and CANNOT be verified here.** A QEMU Linux
+screendump is **byte-identical** before and after (0 differing pixels) precisely because the code never
+runs there. What is gated is the **partition**, which is pure and portable: `ae_mark_*` slices both
+queues per window, with a content check that every rect in window 0's slice lies inside window 0.
+Mutation-tested — marking before the render instead of after (2 red), dropping a window's mark (4 red),
+dropping the prelude mark (2 red).
+
+⛔⛔ **And that test was VACUOUS on its first two mutations.** `ae_chrome_on_gpu()` is a conjunction of
+**four** flags; setting one left it 0, no rects were queued, every range was empty, and both mutations
+stayed green. Instrumented rather than assumed — the counters read `prelude=0 m0=0 m1=0 total=0`. It now
+carries an explicit non-vacuity guard asserting the queue is non-empty and each slice non-empty, and the
+prelude is deliberately populated so "forget the prelude mark" is not an equivalent mutation.
+
+⚠ Still **unverified on hardware**: this path runs only on agnos, and the run-to-run noise floor in the
+Linux harness is one character cell (a clock digit, 128 px).
+
 ## [0.16.1] - 2026-08-13 — the wallpaper rides `#87`, where it fits
 
 ⭐ **The image wallpaper goes to the GPU by the same path a client surface already takes**: an

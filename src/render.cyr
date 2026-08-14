@@ -726,6 +726,9 @@ fn rend_frame_damage(comp, fb, bg): i64 {
     # every title on top of the next one.
     ae_text_reset();
     ae_rect_reset();
+    # ⚠ Cleared with the queues they index, in the same place and for the same reason: a mark that
+    # outlived its queue would slice this frame's rects at last frame's window boundaries.
+    ae_marks_reset();
     if (ae_prev_dmg == 0) { ae_prev_dmg = rend_dmg_new(); }
     rend_dmg_copy(ae_prev_dmg, ae_frame_dmg);
     if (ae_frame_dmg != 0) { rend_dmg_clear(ae_frame_dmg); }
@@ -865,6 +868,48 @@ var ae_chrome_gpu_ok = 1;
 # it unreachable for any window count the compositor supports; the counter is there because "unreachable"
 # is a claim about today's code.
 var ae_rect_dropped = 0;
+
+# ============================================================================================
+# ⭐⭐ Z-ORDER MARKS — which queued rects and text runs belong to which window
+# ============================================================================================
+# ⛔⛔ WHY THIS EXISTS. Both queues are FLAT and append-only, and `ae_gpu_present_frame` used to drain
+# them in LAYER order: every window's chrome, then every window's client surface, then every window's
+# text. With two overlapping windows that is wrong — the LOWER window's surface is blitted after the
+# UPPER window's titlebar and covers it, while the upper title GLYPHS are repainted on top afterwards.
+# The signature on screen is floating title text over a neighbour's surface with no titlebar behind it.
+# ⚠ It is not an opacity bug; it is why the GPU frame cannot be trusted with overlapping windows at
+# all, and therefore why per-window opacity could not be allowed onto that path.
+#
+# ⭐ THE FIX NEEDS NO NEW QUEUE. `render_desktop` already paints windows bottom-to-top, so both queues
+# are ALREADY in z-order — the only thing missing was where one window ends and the next begins.
+# A mark after each window recovers that, and `present_frame` can then emit
+# [chrome_i][surface_i][text_i] per window instead of [all chrome][all surfaces][all text].
+#
+# ⚠ MARK EVERY WINDOW, INCLUDING ONES THAT DREW NOTHING. A minimized window enqueues no rects, so its
+# range is empty — but its mark must still exist or every later index refers to the wrong window.
+var AE_MARK_MAX = 64;
+var ae_rect_mark[64];
+var ae_text_mark[64];
+var ae_mark_n = 0;
+var ae_rect_prelude = 0;      # rects queued BEFORE the first window: the clear / wallpaper band
+var ae_text_prelude = 0;
+
+fn ae_marks_reset(): i64 { ae_mark_n = 0; ae_rect_prelude = 0; ae_text_prelude = 0; return 0; }
+# Called once after the background and before the first window.
+fn ae_mark_prelude(): i64 { ae_rect_prelude = ae_rect_n; ae_text_prelude = ae_text_n; return 0; }
+# Called after EACH window, drawn or not.
+fn ae_mark_window(): i64 {
+    if (ae_mark_n >= AE_MARK_MAX) { return 0; }
+    store64(&ae_rect_mark + ae_mark_n * 8, ae_rect_n);
+    store64(&ae_text_mark + ae_mark_n * 8, ae_text_n);
+    ae_mark_n = ae_mark_n + 1;
+    return 1;
+}
+fn ae_mark_count(): i64 { return ae_mark_n; }
+fn ae_rect_mark_at(i): i64 { if (i < 0) { return ae_rect_prelude; } return load64(&ae_rect_mark + i * 8); }
+fn ae_text_mark_at(i): i64 { if (i < 0) { return ae_text_prelude; } return load64(&ae_text_mark + i * 8); }
+fn ae_rect_prelude_n(): i64 { return ae_rect_prelude; }
+fn ae_text_prelude_n(): i64 { return ae_text_prelude; }
 
 fn ae_rect_reset(): i64 { ae_rect_n = 0; return 0; }
 fn ae_rect_count(): i64 { return ae_rect_n; }
