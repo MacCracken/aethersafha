@@ -48,7 +48,15 @@ var ae_gpu_op_demote = 0;
 # (`AE-2`, iron-proven for an opaque surface). No new kernel op, no shader, no driver stack.
 # ⛔ mabda is NOT involved: its GPU surface rides Linux's driver stack while this band is the agnos
 # kernel's own ring-3 `#82`-`#94` (roadmap, corrected 2026-08-01). Decode is chitra's, on CPU.
-# ⛔⛔ AND IT ONLY FITS AT SOME GEOMETRIES, WHICH IS A HARD KERNEL LIMIT, NOT A TUNABLE. A `#86` slot is
+# ⛔⛔ THE 2 MB CAP IS ON UPLOADS, NOT ON THE DESKTOP — do not read the table below as a resolution
+# limit. `gpu_blit_arm` sizes the back buffer from boot_info as `pitch * height` (14.7 MB at 2560x1440),
+# so the clear, the chrome `#88` fills, the `#92` glyphs and blend, and the `#84` flip all run at full
+# native resolution; `AE-9` burned there. What the cap bites is what userland UPLOADS through `#86`:
+# a full-screen wallpaper, and any single client surface over 2 MB (a window larger than ~724x724,
+# which falls back to the CPU per-window exactly as `AE-6`'s routing intends). Client windows fit today
+# because a window is smaller than the screen.
+#
+# ⛔ A `#86` slot is
 # capped at **2 MB** (`SHM_MAX_SIZE = 2097152`, 16 slots system-wide). A full-screen XRGB wallpaper is
 # `w*h*4`, so: 800x600 = 1,920,000 -> **FITS**, and that is archaemenid's actual scanout geometry.
 # 1280x800 = 4,096,000 and 2560x1440 = 14,745,600 -> do NOT. Tiling across slots was considered and

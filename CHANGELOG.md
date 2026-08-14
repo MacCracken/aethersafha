@@ -11,7 +11,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 for an opaque surface — no new kernel op, no shader, no driver stack, and **not mabda** (its GPU
 surface rides Linux's driver stack; this band is the agnos kernel's own ring-3 `#82`-`#94`).
 
-### ⛔⛔ It only fits at some geometries, and that is a kernel limit rather than a tunable
+### ⛔⛔ It only fits at some geometries — and this caps UPLOADS, not the desktop
+
+⚠ **Read this before drawing the wrong conclusion.** The 2 MB cap is on `#86` slots, i.e. buffers
+USERLAND UPLOADS. It is **not** a cap on the compositing target: `gpu_blit_arm` sizes the back buffer
+from boot_info as `pitch * height` rounded to 2 MB pages (14.7 MB at 2560x1440), so the clear, every
+chrome rect (`#88`), the glyphs and the blend (`#92`) and the flip (`#84`) all run at full native
+resolution. `AE-9` burned at 2560x1440 and that result stands.
+⇒ What the cap bites is (a) a full-screen wallpaper, which exceeds a slot above ~800x600 by definition,
+and (b) any single client surface over 2 MB — a window larger than ~724x724, which falls back to the
+CPU per-window exactly as `AE-6`'s routing intends. Client windows fit today because a window is
+smaller than the screen; **the wallpaper is simply the first full-screen thing anyone has uploaded.**
 
 A `#86` slot is capped at **2 MB** (`SHM_MAX_SIZE = 2097152`, 16 slots system-wide), so a full-screen
 XRGB wallpaper is `w*h*4` against that:
