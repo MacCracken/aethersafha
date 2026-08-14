@@ -1,0 +1,32 @@
+[2J[001;001H[=3h[2J[001;001H[2J[001;001H[8;056;240t[2J[001;001H[2J[001;001H[=3h[2J[001;001H[2J[001;001H[8;042;160t[2J[001;001H[    0.168384] virt/tdx: TDX not supported by the host platform
+qemu_init: PID 1 up
+qemu_init: framebuffer probe --
+  /sys/class/graphics/fb0/virtual_size = 1280,800
+  /sys/class/graphics/fb0/stride = 5120
+  /sys/class/graphics/fb0/bits_per_pixel = 32
+  /sys/class/graphics/fb0/name = simpledrmdrmfb
+qemu_init: exec /aethersafha with argc 6
+aethersafha: AI-augmented AGNOS compositor (Cyrius port)
+aethersafha: window opacity set (0-255):
+255
+aethersafha: bhumi backend up
+aethersafha: screen size read from the kernel
+1280
+800
+security-ui: initialized 6 permission definitions
+aethersafha: foreign guest ran (0=OK):
+0
+aethersafha: desktop up — windows:
+1
+aethersafha: a11y nodes synced:
+1
+aethersafha: setu listener up (AF_UNIX SOCK_SEQPACKET) at:
+/tmp/setu-display.sock
+aethersafha: at exit — clients told to close:
+0
+aethersafha: at exit — frames, then apps that connected:
+400
+0
+aethersafha: frame loop ok
+qemu_init: aethersafha exit 0
+qemu_init: holding the framebuffer for the screendump

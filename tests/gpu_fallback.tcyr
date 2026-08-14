@@ -216,6 +216,12 @@ fn main() {
     assert_eq(ae_gpu_op_supported(0x1FF1F, 1), 1, "0x1FF1F advertises op 0x01 (BLEND_RECT)");
     assert_eq(ae_gpu_op_supported(0x1FF1F, 3), 1, "0x1FF1F advertises op 0x03 (GLYPH_1BPP)");
     assert_eq(ae_gpu_op_supported(0x1FF1F, 5), 0, "bit 5 is NOT in 0x1FF1F");
+    # ⭐ M6-C3. Op 0x06 BLEND_ALPHA. ⚠ 0x1FF1F is what a kernel PUBLISHES today: agnos's
+    # GPU_OP_SUPPORTED is 0x1FF5F but bit 6 sits in GPU_OP_NOTIMPL_MASK because the shader is unburned,
+    # and #89 reports `SUPPORTED & ~NOTIMPL`. So the wire value still has bit 6 CLEAR, and that is the
+    # case worth pinning — a compositor must not use an op the kernel declines to advertise.
+    assert_eq(ae_gpu_op_supported(0x1FF1F, 6), 0, "bit 6 (BLEND_ALPHA) is NOT advertised while NOTIMPL");
+    assert_eq(ae_gpu_op_supported(0x1FF5F, 6), 1, "...and IS, on a kernel that has cleared NOTIMPL");
     assert_eq(ae_gpu_op_supported(0x1FF1F, 8), 1, "bit 8 (EDGE_COV) is");
     assert_eq(ae_gpu_op_supported(0, 1), 0, "an empty mask advertises nothing");
     # ⚠ The two ops this compositor actually issues, isolated: a kernel offering one and not the other
@@ -233,6 +239,19 @@ fn main() {
     # full-screen XRGB wallpaper fits only at some geometries. This is the ONLY part of the #87
     # wallpaper path a box without an AMD GPU can execute — QEMU exposes no AMD PCI device, so
     # `gpu_find` never matches and every other branch is dead there.
+    # ---- the capability gate the consumer will branch on ------------------------------------
+    # ⛔ THE TWO-CONDITION SHAPE IS THE POINT. `ae_gpu_alpha_ok` must answer 0 when the kernel does not
+    # advertise op 6 AND when there is no shader envelope at all — a mask bit alone is not permission.
+    test_group("gpu.cyr — the M6-C3 alpha capability gate");
+    ae_gpu_blend = 1;
+    ae_gpu_op_mask = 0x1FF1F;
+    assert_eq(ae_gpu_alpha_ok(), 0, "today's kernel advertises no bit 6 -> alpha path OFF");
+    ae_gpu_op_mask = 0x1FF5F;
+    assert_eq(ae_gpu_alpha_ok(), 1, "a post-burn kernel advertising bit 6 -> alpha path ON");
+    ae_gpu_blend = 0;
+    assert_eq(ae_gpu_alpha_ok(), 0, "bit 6 advertised but NO shader envelope -> still OFF");
+    ae_gpu_blend = 0; ae_gpu_op_mask = 0;
+
     test_group("gpu.cyr — wallpaper #86 slot budget (pure)");
     # 800x600x4 = 1,920,000 — archaemenid's actual scanout geometry, and it FITS.
     assert_eq(ae_gpu_wp_fits(800, 600, 2097152), 1, "800x600 fits one 2 MB slot");

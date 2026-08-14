@@ -490,10 +490,27 @@ fn ae_gpu_frame_plan(comp, fb): i64 {
     while (wi < wn) {
         var ww = vec_get(wv, wi);
         if (ww != 0) {
+            # ⚠ THE MESSAGE BELOW IS NOW HALF FALSE AND THE DEMOTE IS STILL RIGHT. `#92` DOES have an
+            # opacity field as of agnos 1.56.44 — op 0x06 BLEND_ALPHA, dword 9 — and
+            # `ae_gpu_blend_rect_alpha` is written and tested. Two things still block using it, and
+            # they are different in kind:
+            #   1. NO KERNEL ADVERTISES IT. `blend_alpha` has never been burned, so agnos keeps bit 6
+            #      in GPU_OP_NOTIMPL_MASK and `#89 +28` reports it absent. `ae_gpu_alpha_ok()` is 0
+            #      everywhere today. This one clears itself on a green burn, with no edit here.
+            #   2. ⛔ THE GPU FRAME CANNOT ORDER TWO OVERLAPPING WINDOWS, AND THAT IS INDEPENDENT OF
+            #      OPACITY. `ae_gpu_present_frame` drains the ENTIRE chrome layer in step 1, then blits
+            #      ALL client surfaces in step 2 — so a LOWER window's content covers an UPPER window's
+            #      titlebar BACKGROUND, while step 2c repaints the upper title GLYPHS on top (":1100 —
+            #      so a title cannot be hidden under a window"). The result is floating title text over
+            #      a neighbour's surface. Opacity exists to see a lower window THROUGH an upper one; a
+            #      path that cannot stack two OPAQUE windows correctly must not be the one it lands on.
+            # ⇒ Narrowing this to `if (win_translucent(ww) == 1) { if (ae_gpu_alpha_ok() == 0) { ... } }`
+            # is a two-line change, and it must NOT be made until (2) is fixed — otherwise the first
+            # burned kernel turns a slow-but-correct frame into a fast wrong one.
             if (win_translucent(ww) == 1) {
                 if (ae_gpu_op_demote == 0) {
                     ae_gpu_op_demote = 1;
-                    println("aethersafha: GPU frame DEMOTED — a window is translucent and #92 has no opacity field; CPU path for the run");
+                    println("aethersafha: GPU frame DEMOTED — a translucent window; op 0x06 exists but is unadvertised (unburned) and the GPU frame cannot yet z-order overlapping windows");
                 }
                 return 0;
             }
@@ -585,6 +602,45 @@ fn ae_gpu_blend_rect(bid, wh, dstxy): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     return 0 - 1;
     #endif
+}
+
+# ⭐ M6-C3 — the same composite with a UNIFORM per-surface alpha, `#92` op 0x06 GPU_OP_BLEND_ALPHA.
+# The record is BLEND_RECT's field-for-field plus dword 9, so a reader who knows one reads the other.
+#
+# ⛔⛔ INERT TODAY, AND DELIBERATELY SO. agnos ships op 0x06 behind `GPU_OP_NOTIMPL_MASK` bit 6 because
+# `blend_alpha` HAS NEVER BEEN BURNED, so `#89 gpu_caps` byte +28 does not advertise it and
+# `ae_gpu_alpha_ok()` below is 0 on every kernel in existence. Nothing calls this yet. It lands now so
+# that clearing one kernel constant after a successful burn is the whole of the consumer change.
+#
+# ⚠ ALPHA IS A 0..255 SCALAR IN DWORD 9, which is `color0` — a full 32-bit ARGB — for ops 0x02/0x03/
+# 0x04. The kernel refuses anything above 255 with GPO_E_ARANGE, op-guarded so it cannot touch those
+# other ops. The shader reads the value with `v_cvt_f32_ubyte0` (BYTE 0), so an unrefused 0x100 would
+# render FULLY TRANSPARENT rather than opaque. Masking here as well costs nothing and means a caller
+# that bypasses validation still cannot produce that picture.
+fn ae_gpu_blend_rect_alpha(bid, wh, dstxy, alpha): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var d[64];                                  # function-local => 64 BYTES = exactly one op record
+    var z = 0;
+    while (z < 16) { store32(&d + z * 4, 0); z = z + 1; }
+    store32(&d + 0, 6);                         # op = GPU_OP_BLEND_ALPHA (0x06)
+    store32(&d + 8, bid);                       # src_id — same dword as BLEND_RECT
+    store32(&d + 16, wh);                       # (h << 16) | w
+    store32(&d + 20, dstxy);                    # (dy << 16) | dx
+    store32(&d + 36, alpha & 0xFF);             # dword 9 — alpha, 0..255
+    return syscall(92, &d, 64);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
+}
+
+# ⭐ Is the uniform-alpha composite available on THIS kernel? Pure; the whole capability test.
+# ⚠ A new op advertises itself for free — this reads the same `#89 +28` mask every other op gate uses,
+# so no probe-by-calling is involved. It answers 0 on every kernel today (NOTIMPL bit 6) and will
+# answer 1 the moment a burned kernel clears it, with no change here.
+fn ae_gpu_alpha_ok(): i64 {
+    if (ae_gpu_blend == 0) { return 0; }        # no shader envelope at all
+    return ae_gpu_op_supported(ae_gpu_op_mask, 6);
 }
 
 # ============================================================================================
