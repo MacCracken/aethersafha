@@ -338,6 +338,9 @@ fn ae_gpu_active(): i64 {
 # FOREVER, with no way back. Degrading to a working software desktop is strictly better than a
 # fast empty one.
 fn ae_gpu_demote(): i64 {
+    # ⚠ wallpaper-staged must clear too, or a demote leaves wp_fill_band believing the GPU will paint
+    # a backdrop that is no longer coming. Same defect as the frame_plan reset above, permanently.
+    ae_gpu_wp_ready = 0;
     ae_gpu_mode = 0;
     ae_gpu_blend = 0;
     ae_gpu_glyph_op = 0;
@@ -451,6 +454,14 @@ fn ae_gpu_window_admissible(win, fw, fh): i64 {
 fn ae_gpu_frame_plan(comp, fb): i64 {
     ae_gpu_frame_ok = 0;
     ae_gpu_plan_n = 0;
+    # ⛔⛔ RESET HERE, WITH THE OTHER TWO — NOT 40 LINES DOWN. `ae_gpu_wp_ready` used to be cleared
+    # only at :495, BELOW the translucency `return 0`. So a frame that demoted for a translucent
+    # window kept LAST frame's 1; `wp_fill_band` reads it (`wallpaper.cyr:172`) and skips painting the
+    # CPU backdrop; the GPU path then never runs to blit one. ⇒ **an image-wallpaper session that
+    # gains a translucent window loses its wallpaper — a black desktop.** Every early return between
+    # here and :495 had the same hole, which is exactly why the reset belongs with the frame's other
+    # per-frame state and not beside the code that happens to set it.
+    ae_gpu_wp_ready = 0;
     # ⚠ OFF AGNOS THERE IS NO GPU FRAME, EVER — and saying so HERE is what fixes the bug. The old
     # code let the renderer believe hardware compositing was live on any build, then discovered at
     # present time that it was not. The plan is the single place that belief is formed.

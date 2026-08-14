@@ -213,6 +213,61 @@ fn main() {
     assert_eq(bhumi_fb_get(gfb, 80, 100), GBG, "after the move: the VACATED region is background, not a ghost");
     assert(bhumi_fb_get(gfb, 80, 260) != GBG, "after the move: and the window is drawn at its new position");
 
+    # ================================================================================================
+    # A STATIONARY TRANSLUCENT WINDOW MUST NOT CONVERGE TO OPAQUE
+    # ================================================================================================
+    # ⛔⛔ THE BUG THIS PINS SHIPPED, AND A PUBLISHED VERIFICATION MISSED IT. `fill_rect_a` is
+    # read-modify-write (`render.cyr:81`). `render_desktop` calls `render_window` every frame while the
+    # clear is band-limited, and `rend_frame_damage` used to damage a window only on a rect change or a
+    # live `bufid` — so a STATIONARY translucent window was re-blended over its OWN previous output,
+    # frame after frame. The iteration's fixed point is (near) the source colour: the window fades in
+    # and then goes effectively OPAQUE in about four frames.
+    #
+    # ⚠ 0.15.0's null-test reported inside-pixels `1A1D24` at a=150 and `171A24` at a=60 over one
+    # gradient wallpaper and read that as blending. It is arithmetically NOT a single blend: solving
+    # `rend_blend` from the widget colour `1B1E24` admits backdrop red {25,26} at a=150 and {22,23} at
+    # a=60, green {28,29} and {25,26} — **both intersections EMPTY**. Iterating the blend from the
+    # backdrop that run itself published (`151727`) reproduces BOTH values exactly, in 4 frames.
+    # ⇒ The measurement was real; the interpretation was convergence, not opacity.
+    #
+    # This test settles the frame, then runs many more and requires the pixel to STOP MOVING at a value
+    # that is still visibly blended. A pixel that keeps drifting toward the source is the bug.
+    test_group("render — a stationary translucent window stays translucent");
+    var trfb = bhumi_fb_new(400, 400);
+    var trcomp = comp_new();
+    var trwin = comp_create_window(trcomp, 40, 40, 120, 100, "T");
+    var TRBG = 0x00101018;
+    win_set_opacity(trwin, 128);
+    assert_eq(win_translucent(trwin), 1, "the fixture window is translucent");
+
+    ae_last_bg = 0 - 1;
+    rend_dmg_clear(ae_frame_dmg);
+    rend_dmg_clear(ae_prev_dmg);
+    ghost_frame(trcomp, trfb, trwin, TRBG);
+    ghost_frame(trcomp, trfb, trwin, TRBG);
+    var px_settled = bhumi_fb_get(trfb, 80, 100);
+
+    # ⛔ THE DAMAGE ASSERTION IS THE ROOT CAUSE, AND IT IS CHECKED DIRECTLY. Without it the band goes
+    # empty for a stationary translucent window and every pixel assertion below becomes vacuous —
+    # nothing would be redrawn, so nothing could drift, and a broken build would pass.
+    rend_frame_damage(trcomp, trfb, TRBG);
+    assert(rend_band_h() > 0, "a stationary translucent window is STILL damaged (no bufid, no move)");
+
+    var trf = 0;
+    while (trf < 12) { ghost_frame(trcomp, trfb, trwin, TRBG); trf = trf + 1; }
+    var px_late = bhumi_fb_get(trfb, 80, 100);
+    assert_eq(px_late, px_settled, "12 further frames change NOTHING — no accumulation");
+    assert(px_late != TRBG, "the window is still drawn");
+
+    # And it must genuinely be a blend of the two, not either one alone. The opaque chrome colour is
+    # whatever a=255 produces; assert the translucent result differs from it.
+    win_set_opacity(trwin, 255);
+    rend_dmg_clear(ae_frame_dmg); rend_dmg_clear(ae_prev_dmg); ae_last_bg = 0 - 1;
+    ghost_frame(trcomp, trfb, trwin, TRBG);
+    ghost_frame(trcomp, trfb, trwin, TRBG);
+    var px_opaque = bhumi_fb_get(trfb, 80, 100);
+    assert(px_late != px_opaque, "and it is NOT the opaque colour -- a=128 differs from a=255");
+
     # ⛔⛔ `AE-0a`: A **CLOSED** WINDOW IS NOT A MOVED WINDOW, and the difference cost an iron burn.
     # The 2026-08-08 flash proved the move leaves no ghost (the group above). Closing a window instead
     # left it **standing on the panel, flashing** — because every damage producer walks the LIVE window

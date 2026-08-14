@@ -201,12 +201,17 @@ fn main() {
     assert_eq(ae_chrome_on_gpu(), 0, "  and chrome follows, so the #39 blit runs");
     ae_cursor_gpu_ok = 1;
 
-    return 0;
-
+    # ⛔ A BARE `return 0;` SAT HERE AND SWITCHED OFF THE REST OF THE FILE. 26 assertions ran; the
+    # 20 below never executed — including the ENTIRE op-support-mask suite, which is the one place
+    # a caps-decode error for a newly minted #92 op would be caught. A suite that prints nothing
+    # looks exactly like a suite that passes.
     # ----- gpu.cyr — #89 byte +28, the #92 op-support mask (A3) ---
     # ⛔ Before this, the compositor read caps +0..+24 and discovered which #92 ops existed by ISSUING
     # one and reading the error — the shape #86 already proved wrong. The kernel publishes a bitmask
-    # (syscall.cyr:4294, GPU_OP_SUPPORTED = 0x1FF1F) exactly so a caller need not probe by trial.
+    # (agnos syscall.cyr:1514, GPU_OP_SUPPORTED = 0x1FF5F) exactly so a caller need not probe by trial.
+    # ⚠ The published value is NOT that constant: gpu_caps computes `GPU_OP_SUPPORTED & ~GPU_OP_NOTIMPL_MASK`,
+    # and with bit 6 (BLEND_ALPHA) currently NOTIMPL the wire value is still 0x1FF1F. The literals below
+    # deliberately keep testing 0x1FF1F — that is what a caller actually receives today.
     test_group("gpu.cyr — #92 op-support mask (pure)");
     assert_eq(ae_gpu_op_supported(0x1FF1F, 1), 1, "0x1FF1F advertises op 0x01 (BLEND_RECT)");
     assert_eq(ae_gpu_op_supported(0x1FF1F, 3), 1, "0x1FF1F advertises op 0x03 (GLYPH_1BPP)");

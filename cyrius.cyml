@@ -100,7 +100,14 @@ path = "../kavach"
 # 3.11.8 and any local build re-materialised 3.11.10 from `../kavach`, because the `path` override wins.
 # So the manifest declared a graph nothing here had built since 3.11.7. Verified before bumping: 3.11.10 is
 # a real tag on a clean kavach tree, so the declared graph is now fetchable and matches the vendored copy.
-tag = "3.11.10"
+# ⛔ 3.11.10 → 3.11.12 (2026-08-13) — AND IT HAPPENED AGAIN, EXACTLY AS THE NOTE ABOVE PREDICTS. The
+# sibling moved to 3.11.12; the first local build of this session silently re-materialised `lib/kavach.cyr`
+# (+61/-12 lines) and moved its `cyrius.lock` digest, while this line still said 3.11.10. Nothing warns:
+# `path` wins, so the build is green either way and the DECLARED graph is the only thing that is wrong.
+# ⚠ The comment above did not prevent the recurrence, and a third instance should not be met with a third
+# comment — this wants a gate that diffs every declared tag against its sibling VERSION at check time.
+# Verified before bumping: 3.11.12 is a real tag locally AND on the remote, on a clean tree.
+tag = "3.11.12"
 modules = ["dist/kavach.cyr"]
 
 # --- Image decode: chitra (चित्र — image / picture). Pure-Cyrius CPU raster decoder — PNG (all bit

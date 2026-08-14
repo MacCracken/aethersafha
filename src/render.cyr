@@ -748,10 +748,30 @@ fn rend_frame_damage(comp, fb, bg): i64 {
     # window's buffer every frame, so its CONTENT is damaged even when its geometry is not.
     # Treating those as undamaged would freeze animating windows — the one bug this model could
     # introduce that looks like a client problem rather than a compositor one.
+    #
+    # ⛔⛔ A TRANSLUCENT WINDOW IS DAMAGED FOR THE SAME REASON, AND OMITTING IT MEANT OPACITY HAS
+    # NEVER WORKED FOR A STATIONARY WINDOW. `fill_rect_a` (:81) is read-modify-write —
+    # `bhumi_fb_set(fb, xx, yy, rend_blend(bhumi_fb_get(fb, xx, yy), color, a))`. `render_desktop`
+    # calls `render_window` every frame while the clear is band-limited, so an undamaged translucent
+    # window is re-blended OVER ITS OWN PREVIOUS OUTPUT. That iteration's fixed point is (near) the
+    # source colour: the window fades in and then **converges to opaque in about four frames**.
+    #
+    # ⛔ AND THE 0.15.0 NULL-TEST MEASURED EXACTLY THAT, NOT BLENDING. It published, at identical
+    # coordinates over one gradient wallpaper, inside-pixels `1A1D24` at a=150 and `171A24` at a=60
+    # with the outside pixel `151727` at both. Solving `rend_blend` for a backdrop that yields both
+    # under a SINGLE blend from the widget colour `1B1E24`: red admits {25,26} at a=150 and {22,23}
+    # at a=60; green admits {28,29} and {25,26}. **Both intersections are EMPTY — no backdrop
+    # explains both samples.** Iterating the blend from the published backdrop `151727` reproduces
+    # `1A1D24` and `171A24` EXACTLY, in 4 frames. The run was real; its interpretation was not.
+    # ⚠ Cost, stated: the AE-0a damage band can no longer shrink below a translucent window's rows.
+    # That is the honest price of blending against a fresh backdrop every frame.
     wi = 0;
     while (wi < wn) {
         var w1 = vec_get(wv, wi);
-        if (win_bufid(w1) != 0) {
+        var dmg1 = 0;
+        if (win_bufid(w1) != 0) { dmg1 = 1; }
+        if (win_translucent(w1) == 1) { dmg1 = 1; }
+        if (dmg1 == 1) {
             if (ae_frame_dmg != 0) {
                 rend_dmg_add(ae_frame_dmg, win_x(w1), win_y(w1),
                 win_w(w1), win_total_h(w1));
