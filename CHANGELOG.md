@@ -15,11 +15,12 @@ verification turned out to have measured convergence rather than blending.
 translucent window onto the GPU frame lost every window's titlebar background, because `fill_rect_a`
 has no `#88` route and nothing had added it to the list of layers that drag chrome back to the CPU.
 
-⚠ **RESTAGE BEFORE ANY FLASH.** The staged rootfs entry is **14,069,784 B** and this tree builds
-**4,075,560 B** — ~10 MB less `.bss` with `.text` unchanged (2,472,800 → 2,473,648). ⛔ That gap predates
-this cut and is **not** the compiler (6.5.20 and 6.5.21 build byte-identically): it opened between the
-last staging and the previous session's commits, and is recorded here unattributed rather than guessed
-at. `sigil` declares ~10.08 MB of module-scope arrays, which matches the delta and is where to start.
+⭐ **THE BINARY LOST ~10 MB, AND IT IS A DEP DOING ITS JOB.** The staged rootfs entry is 14,069,784 B;
+this tree builds **4,075,560 B**, all of it `.bss` (11,545,776 → 1,551,568) with `.text` unchanged.
+Cause: **sigil 3.12.9 (2026-08-14) unbanked the RSA sign path — "9.53 MiB of `.bss` goes with it"**,
+9,993,748 B declared against 9,994,208 B measured here. It reaches this tree transitively through kavach
+and landed hours after the tool was last staged. ⚠ **Restage before any flash** regardless — the staged
+entry is 0.16.1 at the old footprint.
 
 ### Changed — cyrius pin 6.5.20 → **6.5.21**, matching agnos, and kavach 3.11.12 → **3.11.13**
 
