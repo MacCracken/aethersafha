@@ -342,6 +342,38 @@ fired** — it is a brief now, not an idea log.
   - ⚠ Decide the SURFACE of the knob too: whole-window (chrome + content) vs content-only. Chrome is
     compositor-drawn and trivially fadeable; the client surface is the part with the ABI problem.
 
+#### M7 — THE NEXT PHASE: the toolkit becomes the surface (opened 2026-08-17)
+
+> ⭐ **WHY A NEW MILESTONE RATHER THAN MORE M6-C RUNGS.** M6-C was "the thing a person looks at" —
+> wallpaper, opacity, chrome. Those are COMPOSITOR properties and they are done and iron-proven. What is
+> left is not more compositor surface: it is that **apps still cannot be built cheaply**. crab hand-draws
+> its dual-pane UI, puka hand-draws a terminal grid, and the launcher I just added hand-draws a list —
+> three programs, three private renderers, one toolkit none of them fully uses. The next phase moves
+> that weight into the library.
+>
+> ⛔ **THE OPERATOR RULING THAT SHAPES ALL OF IT:** app-facing behaviour lives in **dhancha**, not in the
+> compositor. aethersafha owns COMPOSITING; the toolkit owns what an app draws and how it behaves. Every
+> row below is filed on that basis, and the design brief's §2 claim that a motion language is
+> *"a compositor-level concept"* is superseded by it.
+
+| Rung | What | Why it is next | Gate |
+|---|---|---|---|
+| **M7-A — dhancha widget depth** | The tree has WINDOW / BOX / LABEL / BUTTON / TEXTINPUT and nothing else. A file manager needs a LIST/scroll container; a terminal needs a text surface; the launcher needs exactly the list crab and I both hand-rolled. ⚠ `dh_hit_test` was taught to CLIP to the parent at 0.9.5 precisely so a scroll container is expressible — that fix is this rung's prerequisite, already paid. | Three programs are re-implementing the same list | run-tests + a pixel proof per widget |
+| **M7-B — TEXTINPUT actually takes input** | The kind exists in the enum. Nothing routes keys into it, so no dhancha app can have a text field — which is why the launcher has no filter box and crab has no rename. | The first widget an app asks for after a button | `event_test` sub-tests |
+| **M7-C — the motion language, IN dhancha** | Design brief §1/§2: one "the system is working" vocabulary apps inherit instead of each shipping a spinner. ⛔ In the LIB. ⚠ Open question the brief never answered and this rung must: what the toolkit GRANTS vs what an app may override. Decide before code. | The brief's own two surviving ideas | pure easing/field functions are host-testable; the draw needs a pixel proof |
+| **M7-D — crab and puka onto the widget tree** | The reunion. dhancha is *"the spiritual extraction of puka's windowing code"*, and puka still hand-draws. crab uses dhancha for pixels but hand-rolls its panes. ⚠ Gated on A and B — porting onto a toolkit that lacks a list and a text field just moves the hand-rolling inside. | Proves the toolkit carries real weight; a consumer that STOPS hand-rolling is the only evidence | `presented: 2` + per-app pixel proofs |
+| **M7-E — runtime theme switching** | rupa 0.1.2 ships **four** variants (MUDRA/SHANTA × dark/light) and `rupa_theme_set_active`, and the desktop picks one at boot and never changes it. The themes exist; the switch does not. ⚠ Cheap, and it exercises the damage model hard — a theme change invalidates every pixel without moving a window, which `rend_band_compute` already has a serial for. | The design work is already done and unused | a pixel proof that the whole frame repaints |
+| **M7-F — the shell panel earns its place** | `render_shell_panel` draws a status strip; M2 still lists *"notifications surface, quick-settings, panel text labels (cpu/mem %)"* as unbuilt. With a launcher on F2, the panel is the natural home for it. | Closes the oldest open M2 remainder | pixel proofs |
+
+⚠ **NOT IN THIS PHASE, DELIBERATELY:** M6-B (Linux as a display target) is **on hold by operator ruling,
+2026-08-17**; the generative/shader wallpaper is **deleted, not deferred**; and the `murrahir` EditorGUI
+port stays hard-gated behind M7-A/B — porting a second unfinished surface alongside the first is how
+both stall.
+
+⛔ **SEQUENCING IS A → B → D, with C, E and F independent.** A and B are the toolkit's missing primitives
+and D is the proof they work; running D early produces a port that re-implements the gaps inside the
+consumer, which is the state the stack is already in.
+
 - **C2 — a system motion language** (design brief §2). A "the system is working" vocabulary rather than
   every app shipping its own spinner.
   ⛔⛔ **OPERATOR RULING 2026-08-16 — IT LIVES IN THE LIBRARY, NOT THE COMPOSITOR.** This entry used to

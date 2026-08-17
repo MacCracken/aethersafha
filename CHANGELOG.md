@@ -5,6 +5,76 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.16.3] - 2026-08-17 — the application launcher, and the active window comes to the front
+
+### Added — `src/launcher.cyr`: start apps FROM the desktop instead of pre-loading them
+
+⛔⛔ **NOTHING COULD START A CLIENT AFTER BOOT, AND THE REASON WAS STRUCTURAL.** Every windowed app was
+spawned by a hardcoded `while (ci < 2)` loop inside `main()` — `/bin/puka` and `/bin/crab`, always both,
+always at startup — with the mint → endow → `spawn_path_env` sequence written INLINE and its state in
+FUNCTION-LOCAL arrays. The only code that knew how to host a client was a loop that had already
+finished. Operator: *"an application launcher of some sort so we don't have to pre load programs on
+start."*
+
+⭐ **`ae_client_spawn` is that loop's body, lifted verbatim** — not a reimplementation — and the client
+table moved to module scope. One writer, two callers (the `--clients` pre-spawn and the launcher).
+⚠ Writing the sequence twice is how copies drift: the launcher would spawn clients that never connect
+while boot kept working, and each would read as a transport bug.
+⛔ `endow` stays immediately before the spawn it belongs to — the arm is per-CPU and one-shot, so
+minting both channels first puts the SECOND endowment into the FIRST child.
+⚠ The table also moved from function-local `[32]` (32 BYTES = 4 slots) to module-scope `[8]` (8 real
+slots): the unit rule flips, and this exact table already paid for that once when a second client's
+store ran off the end of the first.
+
+**The default changed; the harnesses did not.** A bare `aethersafha` REGISTERS puka and crab and
+launches nothing (`launcher ready -- F2 lists the apps, nothing pre-loaded`). ⚠ `--clients` still
+pre-spawns both, unchanged — `puka-terminal-test.py` re-ran green (`presented: 2`, `exit 95`). Changing
+the default is the feature; changing what the gates measure would silently recalibrate the burn evidence.
+
+**Keys**: `F2` opens · `Up`/`Down` select, wrapping · `Enter` launches AND closes · `Esc` closes.
+⛔ **Closed, the launcher is inert** — including Escape, which is the compositor's QUIT; swallowing it
+would make the desktop unquittable. ⛔ **Open, it swallows everything else** — a modal chooser that
+leaks keys types into the window behind it while the operator believes they are picking an app.
+⚠ HID usages added (`F2 0x3B`, `Enter 0x28`, `Down 0x51`, `Up 0x52`), cross-checked against crab's own
+key handling rather than a table: a guessed usage silently binds the wrong key.
+
+⚠ **Not `src/apps.cyr`'s Command Palette.** That runs SHELL UTILITIES via fork+execve to capture stdout.
+This launches WINDOWED CLIENTS, which on agnos means minting a `#97` channel and announcing
+`AGNOS_CHAN`. agnos has no fork, and a captured stdout is not a window.
+
+### Fixed — the focused window was not the top layer
+
+⛔ Seen on iron 2026-08-17: *"active window should be the highest layer"* — puka focused with crab drawn
+over it. `comp_focus` stored an index and never touched the window vector, and **both** draw paths walk
+that vector bottom-to-top, so z-order was pure creation order and clicking did nothing.
+⭐ Raising is a vector move (remove + push), because paint order IS the vector — no z field, and adding
+one would give two sources of truth. TAB still visits every window: with focus always on top, "next"
+raises the bottom-most and rotates the stack.
+⚠ Three assertions encoded the old "focus is just an index" semantics and went red; they now assert the
+raise, plus a no-op check for re-focusing the top window.
+
+### Verification — three layers, because each is blind to the next
+
+| gate | proves | mutation |
+|---|---|---|
+| `tests/launcher.tcyr` (44) | registry, keys, geometry — no compositor needed | — |
+| `tests/desktop.tcyr` pixel proofs | the panel and the raise reach the FRAMEBUFFER via `render_desktop` | unhooking `render_launcher` fails it while all 44 pure assertions stay green |
+| `agnos/.../launcher-panel-test.py` | a REAL F2 over the real HID path on the real kernel opens it | — |
+
+⛔ **The QEMU harness failed on its first run and that was worth having.** The panel rect was unchanged
+and `first key-down seen` never appeared — no key reached the compositor at all. The non-vacuity gate
+(the compositor must LOG `launcher opened`) refused to call it a pass. Cause was the harness: agnos
+drains the HID ring once per FRAME, so a single injected key can land in a gap and vanish — the same
+one-record-per-frame shape behind the old *"puka didn't register key commands"* report. Repeated
+injection makes arrival certain. Result: accent seal spanning the full 260 px panel at (894,661).
+
+### Changed — `[deps.setu]` 0.8.5 -> 0.8.6
+
+`present_probe` honours `SETU_CLOSE`, closing the `#86` slot leak that cost one of 16 system-wide slots
+per desktop launch (measured on iron: 16 → 15 → 14 → 13).
+
+## [0.16.2] - 2026-08-16 — per-window opacity is real on iron, and the chrome regression it exposed
+
 ### Verified on iron — the whole opacity path, 2026-08-16 (agnos 1.56.45)
 
 ⭐⭐ **M6-C3 CLOSES ON HARDWARE.** A translucent `crab` you can see through, over a working `puka`
@@ -56,7 +126,6 @@ branch that sets the fallback is unreachable on a host — **measured: inverting
 move `ae_gpu_window_admissible` made for the same reason; the mutation now fails two assertions.
 Mutation-tested both ways: dropping the queued alpha to 255 fails the render gate.
 
-## [0.16.2] - 2026-08-16 — per-window opacity is real on iron, and the chrome regression it exposed
 
 ⭐⭐ **M6-C3 CLOSES.** `#92` op 0x06 `BLEND_ALPHA` composited a translucent client surface on
 archaemenid — the first hardware evidence that per-window opacity works at all, after 0.15.0's
