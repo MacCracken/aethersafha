@@ -7,7 +7,7 @@ version = "${file:VERSION}"
 description = "aethersafha — AI-augmented AGNOS compositor (Cyrius port, from 27207 lines of Rust)"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.5.21"
+cyrius = "6.5.27"
 
 [build]
 entry = "src/main.cyr"
@@ -48,7 +48,7 @@ modules = ["dist/bhumi.cyr"]
 [deps.rupa]
 git = "https://github.com/MacCracken/rupa.git"
 path = "../rupa"
-tag = "0.1.2"
+tag = "0.1.4"
 modules = ["dist/rupa.cyr"]
 
 # --- Shared AGNOS domain primitives (was Rust `agnostik` 0.90.0). Error family
@@ -75,7 +75,18 @@ modules = ["dist/agnodrm.cyr"]
 [deps.kashi]
 git = "https://github.com/MacCracken/kashi.git"
 path = "../kashi"
-tag = "1.0.4"
+tag = "1.0.6"
+# ⛔⛔ THE FREESTANDING CORE IS A MEASURED CHOICE, NOT A SHORTCUT (recorded 2026-08-17, kashi 1.0.6).
+# kashi's ADR 0001 says stdlib-linked consumers should take the LIBRARY FACE, and this project links
+# the full stdlib — so `src/font_data.cyr` looks like the wrong surface. Two reasons it is not:
+#   1. Until kashi 1.0.6 the library face was UNCONSUMABLE. `src/lib.cyr` opens with
+#      `include "src/font_data.cyr"`, a kashi-root-relative path that cannot resolve once vendored
+#      into this repo's `lib/` — `error: cannot open include file: src/font_data.cyr`. kashi 1.0.6
+#      adds `dist/kashi.cyr`, which fixes that, so the choice is now real.
+#   2. It is still the core. MEASURED on dhancha: core 364,640 B vs full face 548,000 B —
+#      **+183,360 (+50%)** for PSF/BDF/PCF import and a runtime font registry nothing here calls, and
+#      `CYRIUS_DCE=1` reclaims NONE of it. This project uses `kashi_font_init` + `kashi_glyph_row`.
+# ⇒ Switch to `modules = ["dist/kashi.cyr"]` only when this project needs runtime font LOADING.
 modules = ["src/font_data.cyr"]
 
 # --- Compat / "swallow" backend: does XWayland's job the sovereign way — hosts foreign-ABI app
@@ -153,5 +164,5 @@ git = "https://github.com/MacCracken/setu.git"
 # a local setu change could not be built against at all. Every sibling dep here carries both. The
 # path-wins hazard applies as it does to the rest: re-verify tag vs sibling VERSION at each cut.
 path = "../setu"
-tag = "0.8.6"
+tag = "0.8.7"
 modules = ["dist/setu.cyr"]
