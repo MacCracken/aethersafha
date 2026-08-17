@@ -153,5 +153,5 @@ git = "https://github.com/MacCracken/setu.git"
 # a local setu change could not be built against at all. Every sibling dep here carries both. The
 # path-wins hazard applies as it does to the rest: re-verify tag vs sibling VERSION at each cut.
 path = "../setu"
-tag = "0.8.5"
+tag = "0.8.6"
 modules = ["dist/setu.cyr"]
