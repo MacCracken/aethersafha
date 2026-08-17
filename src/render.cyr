@@ -1173,6 +1173,15 @@ fn ae_text_pack_1bpp(dst, s, len): i64 {
 
 # draw_char(fb, ch, x, y, color): blit one kashi VGA 8x16 glyph. Each row is a
 # byte; bit (7 - col) = leftmost-first pixel. Requires kashi_font_init() first.
+# ⭐ ONE-SHOT FONT GUARD (0.16.4). See `draw_text` for why this exists rather than a bare call.
+var ae_font_ready = 0;
+fn ae_font_ensure(): i64 {
+    if (ae_font_ready == 1) { return 0; }
+    kashi_font_init();
+    ae_font_ready = 1;
+    return 1;
+}
+
 fn draw_char(fb, ch, x, y, color): i64 {
     var row = 0;
     while (row < FONT_H) {
@@ -1191,6 +1200,15 @@ fn draw_char(fb, ch, x, y, color): i64 {
 
 # draw_text(fb, s, x, y, color): render a NUL-terminated cstring. -> width in px.
 fn draw_text(fb, s, x, y, color): i64 {
+    # ⛔⛔ THE FONT MUST BE UP BEFORE ANY GLYPH IS READ, AND THE COST OF FORGETTING IS NOT BLANK TEXT.
+    # `kashi_font_init` was called once from `main.cyr` at boot, so every production path was fine and
+    # the requirement was invisible. It surfaced when 0.16.4 taught `render_shell_panel` to draw
+    # labels: `tests/shell_render.tcyr` had never pulled in the font data, because until then nothing
+    # it called REACHED a glyph — the link succeeded with `kashi_glyph_row` undefined-but-unreachable,
+    # and the moment it became reachable the suite died on SIGILL rather than drawing nothing.
+    # ⚠ GUARDED, NOT UNCONDITIONAL: `kashi_font_init` rewrites the whole 8x16 table, and this is a
+    # per-frame path. One branch per string is the price of never losing text to an init order again.
+    ae_font_ensure();
     # ⭐ `AE-8`: on a GPU frame the glyphs go to `#92` op 0x03 instead of through `bhumi_fb_set` per pixel.
     # ⛔ Only when `ae_gpu_frame_ok == 1` — that flag means `ae_gpu_present_frame` WILL run and drain the
     # queue. Enqueuing on a CPU frame would silently drop the text, because nothing would ever emit it.

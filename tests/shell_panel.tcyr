@@ -1,0 +1,228 @@
+# aethersafha shell-panel test — the status panel and the NOTIFICATION SURFACE (M7-F).
+#
+# ⭐⭐ WHAT THIS RUNG CLOSED, AND IT WAS NOT A MISSING FEATURE. Every field the panel now shows was
+# already modelled, already maintained, and read by NOTHING:
+#   - `shell_status_disk`   — zero readers outside shell.cyr. A full disk was invisible.
+#   - `shell_status_agents` — zero readers. On a desktop whose shell models agents as first-class.
+#   - the whole `Notification` record — id, app_name, title, body, priority, timestamp,
+#     requires_action, is_agent. The ONLY field any renderer touched was the COUNT, drawn as a red
+#     square. A battery warning and an agent finishing a task rendered identically.
+# ⛔ AND THE PANEL WAS THE ONE SURFACE M7-E's THEME SWITCHING DID NOT REACH — it hardcoded its
+# colours, so cycling to a light theme repainted the desktop and left a dark slab across the top.
+#
+# ⚠ These are PIXEL assertions where they can be. The formatter and the bar arithmetic are pure, so
+# they are checked directly; the drawing is checked by rendering into a real framebuffer and reading
+# it back, because "the panel follows the theme" is a claim about what is on screen.
+# Stdlib + [deps.*] auto-included via cyrius.cyml.
+include "lib/bhumi.cyr"
+include "src/geom.cyr"
+include "src/window.cyr"       # Deco / TITLEBAR_H — render.cyr's chrome reads them
+include "src/compositor.cyr"
+include "src/theme.cyr"        # ae_bhumi — the panel packs every token through it
+include "src/cursor.cyr"
+include "src/render.cyr"
+include "src/wallpaper.cyr"    # rend_band_compute reads wp_serial()
+include "src/shell.cyr"
+include "src/shell_render.cyr"
+
+fn t_gt(a, b): i64 { if (a > b) { return 1; } return 0; }
+
+fn t_streq(a, b): i64 {
+    var i = 0;
+    while (load8(a + i) != 0) {
+        if (load8(a + i) != load8(b + i)) { return 0; }
+        i = i + 1;
+    }
+    if (load8(b + i) != 0) { return 0; }
+    return 1;
+}
+
+# Does the horizontal span [x0,x1) of row `y` contain `col` anywhere?
+fn t_row_has(fb, y, x0, x1, col): i64 {
+    var x = x0;
+    while (x < x1) {
+        if (bhumi_fb_get(fb, x, y) == col) { return 1; }
+        x = x + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    # ⛔ WITHOUT THIS EVERY GLYPH ROW IS ZERO AND `draw_text` DRAWS NOTHING — silently. `main.cyr`
+    # calls it at boot; a test that forgets it sees a panel with no text and no error, which is
+    # exactly how the first version of this suite "passed" a label check by scanning past the
+    # framebuffer's right edge, where out-of-bounds reads return black.
+    kashi_font_init();
+
+    test_group("panel — the percentage formatter the panel had no text without");
+    var b = alloc(16);
+    panel_pct_str(b, 0);    assert_eq(t_streq(b, "0%"), 1, "zero");
+    panel_pct_str(b, 7);    assert_eq(t_streq(b, "7%"), 1, "one digit");
+    panel_pct_str(b, 71);   assert_eq(t_streq(b, "71%"), 1, "two digits");
+    panel_pct_str(b, 100);  assert_eq(t_streq(b, "100%"), 1, "full");
+    # ⛔ CLAMPED, NOT WRAPPED. A status source glitching to 140 must read as 100%, never "140%" and
+    # never a truncated "40%" — the label is what an operator trusts when the bar looks alarming.
+    panel_pct_str(b, 140);  assert_eq(t_streq(b, "100%"), 1, "over-range clamps to 100%");
+    panel_pct_str(b, 0 - 5); assert_eq(t_streq(b, "0%"), 1, "negative clamps to 0%");
+
+    test_group("panel — the integer formatter (notification and agent counts)");
+    panel_u2s(b, 1);    assert_eq(t_streq(b, "1"), 1, "one");
+    panel_u2s(b, 42);   assert_eq(t_streq(b, "42"), 1, "two digits, in order");
+    panel_u2s(b, 907);  assert_eq(t_streq(b, "907"), 1, "three digits, in order");
+    # ⚠ Digit ORDER is the assertion that matters: the natural implementation emits them backwards.
+    assert_eq(panel_u2s(b, 0), 1, "zero is one byte");
+    assert_eq(t_streq(b, "0"), 1, "  ...and reads as 0, not empty");
+
+    test_group("panel — bar arithmetic");
+    assert_eq(panel_bar_w(0, 40), 0, "empty");
+    assert_eq(panel_bar_w(50, 40), 20, "half");
+    assert_eq(panel_bar_w(100, 40), 40, "full");
+    assert_eq(panel_bar_w(140, 40), 40, "over-range clamps to full");
+    assert_eq(panel_bar_w(0 - 1, 40), 0, "negative clamps to empty");
+
+    test_group("panel — ⛔ THE PANEL FOLLOWS THE ACTIVE THEME (it did not before 0.16.4)");
+    var fb = bhumi_fb_new(640, 400);
+    var sh = shell_new();
+    # Render under two different themes and require the panel background to DIFFER. Asserting a
+    # specific colour would just re-encode rupa's palette here; asserting that it CHANGES is the
+    # actual claim — the panel used to be a hardcoded slab that no theme switch could touch.
+    ae_theme_select(0);
+    render_shell_panel(fb, sh);
+    var dark_px = bhumi_fb_get(fb, 320, 2);
+    var dark_tok = ae_bhumi(rupa_theme_panel(rupa_theme_active()));
+    assert_eq(dark_px, dark_tok, "the panel paints the ACTIVE theme's panel token");
+    var found = 0;
+    var i = 1;
+    while (i < ae_theme_count()) {
+        ae_theme_select(i);
+        render_shell_panel(fb, sh);
+        if (bhumi_fb_get(fb, 320, 2) != dark_px) { found = 1; }
+        i = i + 1;
+    }
+    assert_eq(found, 1, "...and a DIFFERENT theme repaints it differently");
+    ae_theme_select(0);
+
+    test_group("panel — the labels are actually drawn");
+    # A gauge at 0% must still show its label, and the track must be visible. Checked as "the label
+    # column is not uniformly the panel background", which is what "there is text here" means.
+    var st = shell_status(sh);
+    render_shell_panel(fb, sh);
+    var panel_bg = ae_bhumi(rupa_theme_panel(rupa_theme_active()));
+    var lbl_y = (PANEL_H - IND_H) / 2 + 2;
+    var ink_seen = 0;
+    # ⛔ THE LABEL COLUMN IS INSIDE THE SLOT, LEFT OF THE BAR — and the scan must stay inside the
+    # framebuffer. Scanning past `fw` reads black, which is never the panel background, so an
+    # off-screen label would pass a naive "not background" check while being invisible on screen.
+    var x = 640 - PANEL_PAD - panel_slot_w();
+    var xx = x;
+    while (xx < x + LABEL_W) {
+        var yy = lbl_y;
+        while (yy < lbl_y + 10) {
+            if (bhumi_fb_get(fb, xx, yy) != panel_bg) { ink_seen = 1; }
+            yy = yy + 1;
+        }
+        xx = xx + 1;
+    }
+    assert_eq(ink_seen, 1, "the cpu gauge's percentage label reaches the framebuffer");
+
+    test_group("panel — ⛔ NO GAUGE'S LABEL FALLS OFF THE SCREEN");
+    # ⚠ THIS IS A GEOMETRY ASSERTION BECAUSE A PIXEL ONE CANNOT MAKE IT. The first version of this
+    # suite scanned the rightmost label's column and passed even with the label drawn off-screen —
+    # the NEIGHBOURING gauge's label bled into the sampled column. `bhumi_fb_set` discards
+    # out-of-bounds writes silently, so an off-screen label is not a visual glitch, it is a number
+    # that simply is not there. The painter computes every position through these functions, so a
+    # change that moves a label out of its slot has to edit them, and this catches it.
+    var g = 0;
+    var all_on = 1;
+    var monotonic = 1;
+    var prev_slot = 640;
+    while (g < 4) {
+        var sx = panel_slot_x(640, g);
+        var lx = panel_label_x(sx);
+        var bx = panel_bar_x(sx);
+        if (lx < 0) { all_on = 0; }
+        if (lx + LABEL_W > 640) { all_on = 0; }          # the label must END on screen
+        if (bx + IND_W > 640) { all_on = 0; }            # ...and so must the bar
+        if (bx < lx + LABEL_W) { all_on = 0; }           # the bar must not overlap the label
+        # ⛔ NON-OVERLAP, NOT MERELY DECREASING. A step that shrinks (say, the gap without the slot
+        # width) still marches left while each gauge paints over its neighbour's label — the numbers
+        # would be present, wrong, and unreadable. The slot must END at or before the previous one
+        # BEGINS, which is the constraint "they do not collide" actually means.
+        if (sx + panel_slot_w() > prev_slot) { monotonic = 0; }
+        prev_slot = sx;
+        g = g + 1;
+    }
+    assert_eq(all_on, 1, "every gauge's label AND bar fit inside the framebuffer");
+    assert_eq(monotonic, 1, "slots march left without overlapping");
+    # ⛔ THE RIGHTMOST SLOT IS THE ONE THAT BREAKS. It is flush against the edge, so a label placed
+    # after its bar lands past `fw`. Stated as arithmetic so the constraint survives a re-layout.
+    # ⚠ Hoisted into locals rather than wrapped: `cyrius fmt --check` rejects any multi-line call
+    # (filed 2026-08-17, cyrius docs/development/issues/2026-08-17-fmt-check-rejects-wrapped-calls.md).
+    var r0 = panel_slot_x(640, 0);
+    assert_eq(t_gt(panel_bar_x(r0), panel_label_x(r0)), 1, "the label precedes the bar");
+
+    test_group("notifications — ⛔ THE SURFACE THAT NEVER EXISTED");
+    # An empty shell draws nothing at all — no empty card, no stray chrome.
+    assert_eq(render_notifications(fb, sh), 0, "no notifications -> nothing drawn");
+    # One notification draws exactly one card.
+    var n1 = shell_notif_new(1, "crab", "Copy finished", "42 files", SH_NotifPriority.SH_PRIO_NORMAL, 0, 0, 0);
+    vec_push(shell_get_notifications(sh), n1);
+    assert_eq(shell_notification_count(sh), 1, "the shell holds it");
+    assert_eq(render_notifications(fb, sh), 1, "...and exactly one card is drawn");
+    # ⛔ ITS TEXT REACHES THE SCREEN. This is the whole rung: before 0.16.4 the title and body were
+    # stored and never rendered, so every notice looked like every other notice.
+    var card_x = 640 - PANEL_PAD - NOTE_W;
+    var ink = ae_bhumi(rupa_theme_ink(rupa_theme_active()));
+    var title_seen = 0;
+    var ty = PANEL_H + NOTE_GAP + 17;
+    var tyy = ty;
+    while (tyy < ty + 10) {
+        if (t_row_has(fb, tyy, card_x + 10, card_x + NOTE_W - 10, ink) == 1) { title_seen = 1; }
+        tyy = tyy + 1;
+    }
+    assert_eq(title_seen, 1, "the notification's TITLE is drawn in the ink colour");
+
+    test_group("notifications — priority is visible without reading the text");
+    # ⚠ The stripe is what makes a stack of notices scannable. A CRITICAL notice must not paint the
+    # same stripe as a LOW one, or the field is modelled and not communicated.
+    var lo = panel_prio_color(SH_NotifPriority.SH_PRIO_LOW, rupa_theme_active());
+    var hi = panel_prio_color(SH_NotifPriority.SH_PRIO_CRITICAL, rupa_theme_active());
+    assert_eq(lo != hi, 1, "LOW and CRITICAL do not share a stripe colour");
+    assert_eq(hi, ae_bhumi(rupa_theme_alert(rupa_theme_active())), "CRITICAL takes the alert token");
+
+    test_group("notifications — ⚠ the overflow is STATED, not swallowed");
+    # Push past NOTE_MAX. Drawing four of nine silently would tell the operator there are four.
+    var k = 0;
+    while (k < 8) {
+        vec_push(shell_get_notifications(sh), shell_notif_default(2 + k, 0));
+        k = k + 1;
+    }
+    assert_eq(shell_notification_count(sh), 9, "nine are held");
+    assert_eq(render_notifications(fb, sh), NOTE_MAX, "at most NOTE_MAX cards are drawn");
+    # ⛔ AND THE REST ARE COUNTED ON SCREEN. The "+5" row sits below the last card.
+    var over_y = PANEL_H + NOTE_GAP + NOTE_MAX * (NOTE_H + NOTE_GAP);
+    var mute = ae_bhumi(rupa_theme_mute(rupa_theme_active()));
+    var over_seen = 0;
+    var oy = over_y;
+    while (oy < over_y + 14) {
+        if (t_row_has(fb, oy, card_x + 8, card_x + 60, mute) == 1) { over_seen = 1; }
+        oy = oy + 1;
+    }
+    assert_eq(over_seen, 1, "the +N overflow count is drawn");
+
+    test_group("panel — net status stays a STATE encoding, not a themed one");
+    # ⚠ Deliberately NOT themed: green/amber/red is what makes "disconnected" legible at a glance,
+    # and a palette that recoloured it would make the most urgent indicator theme-dependent.
+    var c_up = panel_net_color(SH_NetStatus.SH_NET_CONNECTED);
+    var c_dn = panel_net_color(SH_NetStatus.SH_NET_DISCONNECTED);
+    assert_eq(c_up != c_dn, 1, "connected and disconnected differ");
+    ae_theme_select(1);
+    assert_eq(panel_net_color(SH_NetStatus.SH_NET_CONNECTED), c_up, "...and neither moves with the theme");
+    ae_theme_select(0);
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

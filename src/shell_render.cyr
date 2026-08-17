@@ -16,6 +16,57 @@ enum PanelK {
     IND_W     = 40;   # status-indicator bar width
     IND_H     = 12;
     IND_GAP   = 8;
+    # ⭐ 0.16.4 — the notification surface. Wide enough for an app name and a title on one line at
+    # the 8px system-font pitch; tall enough for a title over a body.
+    NOTE_W    = 300;
+    NOTE_H    = 44;
+    NOTE_GAP  = 6;
+    NOTE_MAX  = 4;    # how many stack below the panel before the rest are counted, not drawn
+    LABEL_W   = 34;   # room for "100%" left of each bar
+}
+
+# ============================================================================================
+# ⭐ NUMBER → TEXT. The panel had NO TEXT AT ALL before 0.16.4.
+# ============================================================================================
+# ⚠ M2 has listed *"panel text labels (cpu/mem %)"* as unbuilt since the milestone was written, and
+# the reason it stayed unbuilt is visible here: the compositor had no integer formatter. Bars alone
+# answer "is it high" and never "how high" — and at a glance two bars at 71% and 78% are the same
+# bar. `draw_text` existed the whole time; only this did not.
+# Writes a 0..100 percentage as "N%" into `dst` (max 5 bytes incl NUL). -> byte length.
+fn panel_pct_str(dst, pct): i64 {
+    var v = pct;
+    if (v < 0) { v = 0; }
+    if (v > 100) { v = 100; }
+    var n = 0;
+    if (v >= 100) {
+        store8(dst, 49); store8(dst + 1, 48); store8(dst + 2, 48);
+        n = 3;
+    } else {
+        if (v >= 10) {
+            store8(dst, 48 + v / 10);
+            store8(dst + 1, 48 + v % 10);
+            n = 2;
+        } else {
+            store8(dst, 48 + v);
+            n = 1;
+        }
+    }
+    store8(dst + n, 37);                 # '%'
+    store8(dst + n + 1, 0);
+    return n + 1;
+}
+
+# Small unsigned int -> decimal cstring in `dst`. -> byte length.
+fn panel_u2s(dst, n): i64 {
+    if (n <= 0) { store8(dst, 48); store8(dst + 1, 0); return 1; }
+    var d = alloc(24);
+    var k = 0;
+    var v = n;
+    while (v > 0) { store8(d + k, 48 + v % 10); v = v / 10; k = k + 1; }
+    var i = 0;
+    while (i < k) { store8(dst + i, load8(d + k - 1 - i)); i = i + 1; }
+    store8(dst + k, 0);
+    return k;
 }
 
 # panel_bar_w(pct, max_w): filled width of a 0..100% bar-graph (clamped).
@@ -26,41 +77,168 @@ fn panel_bar_w(pct, max_w): i64 {
 }
 
 # net-status indicator color (parity: shell SH_NetStatus).
+# ⚠ NOT themed, deliberately, unlike everything else in this file since 0.16.4. Green/amber/red is a
+# STATE encoding, not decoration: recolouring "disconnected" to match a theme's palette would make
+# the one indicator whose whole job is to be legible at a glance depend on which theme is active.
 fn panel_net_color(net): i64 {
     if (net == SH_NetStatus.SH_NET_CONNECTED) { return bhumi_xrgb(90, 200, 90); }
     if (net == SH_NetStatus.SH_NET_CONNECTING) { return bhumi_xrgb(210, 190, 90); }
     return bhumi_xrgb(210, 80, 80);
 }
 
+# Colour for a notification's priority stripe. CRITICAL takes the theme's alert token; the rest are
+# progressively quieter, so a stack of notices reads by urgency without being read.
+fn panel_prio_color(prio, th): i64 {
+    if (prio == SH_NotifPriority.SH_PRIO_CRITICAL) { return ae_bhumi(rupa_theme_alert(th)); }
+    if (prio == SH_NotifPriority.SH_PRIO_HIGH)     { return ae_bhumi(rupa_theme_accent(th)); }
+    if (prio == SH_NotifPriority.SH_PRIO_NORMAL)   { return ae_bhumi(rupa_theme_line(th)); }
+    return ae_bhumi(rupa_theme_mute(th));
+}
+
+# ============================================================================================
+# ⭐⭐ THE NOTIFICATION SURFACE — the model has been complete since the port and NEVER DRAWN
+# ============================================================================================
+# ⛔ `Notification` carries id, app_name, title, body, priority, timestamp, requires_action and
+# is_agent. Before 0.16.4 the ONLY field any renderer read was the COUNT, drawn as a red square in
+# the panel's corner. Every notification the system produced arrived, was stored with its text, and
+# was displayed as "there is at least one". An operator could not learn what it said, which app sent
+# it, or whether it was critical — the square is identical for a battery warning and an agent
+# finishing a task.
+# ⚠ This is the same shape as `WS_MAXIMIZED`, `DECO_RESIZE_*` and dhancha's client layer: state that
+# exists, is maintained correctly, and has no consumer. The fix is never a new model.
+#
+# Draws up to NOTE_MAX cards below the panel, newest first. -> the number drawn.
+fn render_notifications(fb, shell): i64 {
+    var v = shell_get_notifications(shell);
+    var n = vec_len(v);
+    if (n <= 0) { return 0; }
+    var th = rupa_theme_active();
+    var fw = bhumi_fb_width(fb);
+    var shown = n;
+    if (shown > NOTE_MAX) { shown = NOTE_MAX; }
+    var x = fw - PANEL_PAD - NOTE_W;
+    var y = PANEL_H + NOTE_GAP;
+    var i = 0;
+    while (i < shown) {
+        # ⚠ NEWEST FIRST. The vec appends, so index (n-1) is the most recent; drawing in vec order
+        # would put the oldest notice at the top of the stack, which is where the eye goes first.
+        var note = vec_get(v, n - 1 - i);
+        fill_rect(fb, x, y, NOTE_W, NOTE_H, ae_bhumi(rupa_theme_panel(th)));
+        fill_rect(fb, x, y, 3, NOTE_H, panel_prio_color(shell_notif_priority(note), th));
+        # ⛔ A NOTICE THAT NEEDS AN ANSWER IS MARKED. `requires_action` is the difference between
+        # "for your information" and "nothing proceeds until you decide", and a surface that renders
+        # both identically has thrown away the only field that distinguishes them.
+        if (shell_notif_requires_action(note) != 0) {
+            fill_rect(fb, x + NOTE_W - 10, y + 4, 6, 6, ae_bhumi(rupa_theme_alert(th)));
+        }
+        var app = shell_notif_app_name(note);
+        if (app != 0) { draw_text(fb, app, x + 10, y + 5, ae_bhumi(rupa_theme_mute(th))); }
+        var title = shell_notif_title(note);
+        if (title != 0) { draw_text(fb, title, x + 10, y + 17, ae_bhumi(rupa_theme_ink(th))); }
+        var body = shell_notif_body(note);
+        if (body != 0) { draw_text(fb, body, x + 10, y + 29, ae_bhumi(rupa_theme_mute(th))); }
+        y = y + NOTE_H + NOTE_GAP;
+        i = i + 1;
+    }
+    # ⚠ THE OVERFLOW IS STATED, NOT SWALLOWED. Silently drawing four of nine notices tells the
+    # operator there are four. A "+5" is the difference between a full surface and a truncated one.
+    if (n > shown) {
+        var more = alloc(16);
+        store8(more, 43);                                   # '+'
+        panel_u2s(more + 1, n - shown);
+        fill_rect(fb, x, y, NOTE_W, 16, ae_bhumi(rupa_theme_panel(th)));
+        draw_text(fb, more, x + 10, y + 4, ae_bhumi(rupa_theme_mute(th)));
+    }
+    return shown;
+}
+
 # render_shell_panel: draw the top status bar from the desktop shell's
 # SystemStatus — cpu/mem/battery as bar-graphs, net as a colored dot, and a
 # badge when notifications are pending. (shell → renderer)
+# One labelled bar-graph occupying a slot of `panel_slot_w()` px at `x`: the "NN%" label, then the
+# track with its fill. -> the slot's left edge.
+#
+# ⛔ THE LABEL SITS **LEFT** OF THE BAR, AND THAT IS NOT A STYLE CHOICE. The gauge group is laid out
+# right-to-left from the screen edge, so the FIRST gauge placed is already flush against it — a label
+# drawn to the right of that bar lands past `fw` and is silently discarded by `bhumi_fb_set`'s bounds
+# check. It does not warn, it does not clip visibly, the number simply is not there. Putting the
+# label inside the slot, ahead of the bar, means every gauge's label is on screen by construction.
+fn panel_slot_w(): i64 { return LABEL_W + IND_W; }
+
+# ⭐ PURE GEOMETRY, and the painter below is required to go through it. Splitting these out is not
+# tidiness: a pixel test cannot tell "the rightmost label is on screen" from "the NEXT gauge's label
+# happens to overlap the column I sampled", and the first version of this suite was fooled by exactly
+# that. With the positions computed here, a change that moves a label off-screen has to edit THESE
+# functions, and `tests/shell_panel.tcyr` asserts on them directly.
+fn panel_label_x(slot_x): i64 { return slot_x; }
+fn panel_bar_x(slot_x): i64   { return slot_x + LABEL_W; }
+
+# The slot x of gauge `i`, counting from the right edge (0 = rightmost).
+fn panel_slot_x(fw, i): i64 {
+    return fw - PANEL_PAD - panel_slot_w() - i * (IND_GAP + panel_slot_w());
+}
+
+fn panel_gauge(fb, x, y, pct, fill_col, track_col, ink): i64 {
+    var lbl = alloc(8);
+    panel_pct_str(lbl, pct);
+    draw_text(fb, lbl, panel_label_x(x), y + 2, ink);
+    var bx = panel_bar_x(x);
+    fill_rect(fb, bx, y, IND_W, IND_H, track_col);
+    fill_rect(fb, bx, y, panel_bar_w(pct, IND_W), IND_H, fill_col);
+    return x;
+}
+
 fn render_shell_panel(fb, shell): i64 {
     var fw = bhumi_fb_width(fb);
-    fill_rect(fb, 0, 0, fw, PANEL_H, bhumi_xrgb(28, 30, 38));
+    # ⛔⛔ THE PANEL WAS THE ONE SURFACE THEME SWITCHING DID NOT REACH. M7-E shipped runtime theme
+    # switching and every other painter — the desktop void, window chrome, the launcher — reads
+    # `rupa_theme_active()`. This file hardcoded `bhumi_xrgb(28, 30, 38)` and friends, so cycling to
+    # a LIGHT theme repainted the entire desktop and left a dark slab pinned across the top of it.
+    # Not a subtle mismatch: the panel is the one element always on screen.
+    var th = rupa_theme_active();
+    var ink = ae_bhumi(rupa_theme_ink(th));
+    var mute = ae_bhumi(rupa_theme_mute(th));
+    var track = ae_bhumi(rupa_theme_widget(th));
+    fill_rect(fb, 0, 0, fw, PANEL_H, ae_bhumi(rupa_theme_panel(th)));
     var st = shell_status(shell);
     var y = (PANEL_H - IND_H) / 2;
-    var x = fw - PANEL_PAD - IND_W;
+    # ⚠ Right-to-left from the screen edge, one whole SLOT at a time (label + bar), so a conditional
+    # indicator like battery appearing or vanishing never shifts the ones already placed.
+    var gi = 0;
+    var x = panel_slot_x(fw, gi);
     # cpu
-    fill_rect(fb, x, y, IND_W, IND_H, bhumi_xrgb(50, 54, 62));
-    fill_rect(fb, x, y, panel_bar_w(shell_status_cpu(st), IND_W), IND_H, bhumi_xrgb(90, 140, 210));
-    x = x - IND_GAP - IND_W;
+    panel_gauge(fb, x, y, shell_status_cpu(st), ae_bhumi(rupa_theme_accent(th)), track, ink);
+    gi = gi + 1; x = panel_slot_x(fw, gi);
     # mem
-    fill_rect(fb, x, y, IND_W, IND_H, bhumi_xrgb(50, 54, 62));
-    fill_rect(fb, x, y, panel_bar_w(shell_status_mem(st), IND_W), IND_H, bhumi_xrgb(140, 110, 200));
-    x = x - IND_GAP - IND_W;
+    panel_gauge(fb, x, y, shell_status_mem(st), ae_bhumi(rupa_theme_accent(th)), track, ink);
+    gi = gi + 1; x = panel_slot_x(fw, gi);
+    # ⭐ DISK — modelled since the port, never drawn until 0.16.4. `shell_status_disk` had ZERO
+    # readers outside shell.cyr, which is why a full disk was invisible to the operator.
+    panel_gauge(fb, x, y, shell_status_disk(st), ae_bhumi(rupa_theme_accent(th)), track, ink);
+    gi = gi + 1; x = panel_slot_x(fw, gi);
     # battery (only when present)
     if (shell_status_battery_is_none(st) == 0) {
-        fill_rect(fb, x, y, IND_W, IND_H, bhumi_xrgb(50, 54, 62));
-        fill_rect(fb, x, y, panel_bar_w(shell_status_battery(st), IND_W), IND_H, bhumi_xrgb(90, 200, 120));
-        x = x - IND_GAP - IND_W;
+        panel_gauge(fb, x, y, shell_status_battery(st), ae_bhumi(rupa_theme_accent(th)), track, ink);
+        gi = gi + 1; x = panel_slot_x(fw, gi);
     }
     # net-status dot to the left of the bars
     fill_rect(fb, x + IND_W - IND_H, y, IND_H, IND_H, panel_net_color(shell_status_net(st)));
-    # notification badge on the far left
+    # ⭐ AGENT COUNT — the other field with no reader. On a desktop whose shell models agents as
+    # first-class, "how many are running" was tracked and never shown.
+    var na = shell_status_agents(st);
+    if (na > 0) {
+        var ab = alloc(24);
+        store8(ab, 65);                                     # 'A'
+        panel_u2s(ab + 1, na);
+        draw_text(fb, ab, PANEL_PAD + IND_H + IND_GAP + 24, y + 2, mute);
+    }
+    # notification badge on the far left, now with the COUNT rather than a bare square
     var nc = shell_notification_count(shell);
     if (nc > 0) {
-        fill_rect(fb, PANEL_PAD, y, IND_H, IND_H, bhumi_xrgb(220, 80, 80));
+        fill_rect(fb, PANEL_PAD, y, IND_H, IND_H, ae_bhumi(rupa_theme_alert(th)));
+        var nb = alloc(24);
+        panel_u2s(nb, nc);
+        draw_text(fb, nb, PANEL_PAD + IND_H + 4, y + 2, ink);
     }
     return 0;
 }

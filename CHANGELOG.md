@@ -5,6 +5,84 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.16.4] - 2026-08-17 — the panel earns its place: text labels, and notifications you can read
+
+### Fixed — ⛔ THE PANEL WAS THE ONE SURFACE THEME SWITCHING COULD NOT REACH
+
+M7-E shipped runtime theme switching and every other painter reads `rupa_theme_active()` — the desktop
+void, the window chrome, the launcher. `shell_render.cyr` hardcoded `bhumi_xrgb(28, 30, 38)` and
+friends, so cycling to a LIGHT theme repainted the whole desktop and left **a dark slab pinned across
+the top of it**. Not a subtle mismatch: the panel is the one element always on screen.
+
+The panel now draws every colour from the active theme.
+
+⚠ **The net-status dot is deliberately NOT themed.** Green/amber/red is a *state encoding*, not
+decoration; recolouring "disconnected" to suit a palette would make the one indicator whose whole job
+is to be legible at a glance depend on which theme is active.
+
+### Added — panel text labels: the oldest open M2 remainder
+
+M2 has listed *"panel text labels (cpu/mem %)"* as unbuilt since the milestone was written, and the
+reason it stayed unbuilt is visible in the diff: **the compositor had no integer formatter.**
+`draw_text` existed the whole time. Bars alone answer "is it high" and never "how high" — at a glance
+71% and 78% are the same bar.
+
+⛔ **The label sits LEFT of its bar, and that is not a style choice.** The gauge group is laid out
+right-to-left from the screen edge, so the first gauge placed is already flush against it; a label
+drawn to the right of that bar lands past `fw`, where `bhumi_fb_set` discards it **silently**. Not a
+visual glitch — a number that simply is not there.
+
+### Added — ⭐⭐ a notification surface. The model has existed since the port and was NEVER DRAWN
+
+`Notification` carries id, app_name, title, body, priority, timestamp, requires_action and is_agent.
+The only field any renderer read was the **count**, drawn as a red square. Every notification the
+system produced arrived, was stored with its text, and was displayed as *"there is at least one"* — an
+operator could not learn what it said, which app sent it, or whether it was critical. A battery
+warning and an agent finishing a task rendered identically.
+
+`render_notifications` draws up to four cards below the panel, newest first, each with its app name,
+title, body, a priority stripe, and a marker when `requires_action` is set.
+
+⚠ **The overflow is stated, not swallowed** — a "+5" row, because silently drawing four of nine tells
+the operator there are four.
+
+### Added — `disk` and `agents`, which also had zero readers
+
+`shell_status_disk` and `shell_status_agents` were modelled, maintained, and read by nothing outside
+`shell.cyr`. A full disk was invisible; on a desktop whose shell treats agents as first-class, "how
+many are running" was tracked and never shown.
+
+⚠ This is the same shape as `WS_MAXIMIZED`, `DECO_RESIZE_*` and dhancha's client layer. **The fix is
+never a new model.**
+
+### Fixed — a font-init order that only bit once something reached it
+
+`draw_text` needs `kashi_font_init`, called once from `main.cyr` at boot — so every production path
+was fine and the requirement was invisible. Teaching the panel to draw labels made the glyph reader
+reachable from `tests/shell_render.tcyr` for the first time, and cyrius links an undefined function
+that nothing reaches: the moment something did, the suite died on **SIGILL (exit 132)** rather than
+failing at build time. `draw_text` now ensures the font itself, guarded so the table is written once.
+
+### Testing — `tests/shell_panel.tcyr` (33 checks)
+
+Formatter clamping, bar arithmetic, the panel repainting under a theme change, labels reaching the
+framebuffer, notification text and priority stripes on pixels, and the overflow count.
+
+⛔ **Two of these checks exist because earlier versions passed for the wrong reason**, which is worth
+recording:
+- A label check scanned x = 638..672 on a 640-wide framebuffer. Out-of-bounds reads return black,
+  which is never the panel background, so an **off-screen label passed a "there is ink here" test**.
+- After that was fixed, a mutation restoring the off-screen label **still passed** — the neighbouring
+  gauge's label bled into the sampled column.
+
+⇒ Slot positions are now pure functions (`panel_slot_x` / `panel_label_x` / `panel_bar_x`) that the
+painter is required to use, and the suite asserts on them directly: every label and bar ends inside
+the framebuffer, and consecutive slots do not overlap. A pixel scan cannot make that claim.
+
+Mutation-tested: hardcoded panel colour, label placed after the bar, undrawn notification title,
+swallowed overflow, wrapping percentages, a single shared priority stripe, and overlapping slots are
+each caught.
+
 ## [0.16.3] - 2026-08-17 — the application launcher, and the active window comes to the front
 
 ### Added — `src/launcher.cyr`: start apps FROM the desktop instead of pre-loading them

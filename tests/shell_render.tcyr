@@ -6,7 +6,18 @@ include "src/geom.cyr"
 include "src/window.cyr"
 include "src/compositor.cyr"
 include "src/shell.cyr"
+# ⛔ THE THREE INCLUDES BELOW ARE NEW IN 0.16.4 AND THE REASON IS WORTH KNOWING. `render_shell_panel`
+# now draws TEXT, which makes `draw_text` — and with it the glyph reader, the wallpaper serial and the
+# pointer position it consults — REACHABLE from this suite for the first time. Cyrius links an
+# undefined function that nothing reaches; the moment something does, the call traps (SIGILL, exit
+# 132) instead of failing at build time. The suite did not start failing because it got wrong; it
+# started failing because more of the renderer became live.
+include "src/theme.cyr"
+include "src/cursor.cyr"
+include "lib/kashi_font_data.cyr"
 include "src/render.cyr"
+include "src/wallpaper.cyr"
+include "src/input.cyr"
 include "src/shell_render.cyr"
 
 fn main() {
@@ -32,7 +43,12 @@ fn main() {
     assert(fb != 0, "framebuffer allocated");
     bhumi_fb_clear(fb, 0);
     render_shell_panel(fb, shell);
-    var bg = bhumi_xrgb(28, 30, 38);
+    # ⛔ THE ACTIVE THEME'S TOKEN, NOT A LITERAL (0.16.4). This read `bhumi_xrgb(28, 30, 38)` — the
+    # colour the panel used to hardcode — and that literal was the test-side half of the defect M7-F
+    # closed: the panel was the ONE surface M7-E's runtime theme switching could not repaint, so
+    # cycling to a light theme left a dark slab across the top of a light desktop. Asserting the
+    # token means the panel and this check move together, and neither can drift back.
+    var bg = ae_bhumi(rupa_theme_panel(rupa_theme_active()));
     assert_eq(bhumi_fb_get(fb, 0, 0), bg, "top-left is the panel background");
     assert_eq(bhumi_fb_get(fb, 0, 25), bg, "panel bottom row filled (y < PANEL_H)");
     assert_eq(bhumi_fb_get(fb, 5, 30), 0, "below the panel is untouched (y >= PANEL_H)");

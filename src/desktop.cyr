@@ -159,6 +159,7 @@ fn render_desktop(d, fb): i64 {
         i = i + 1;
     }
     render_shell_panel(fb, desk_shell(d));
+    render_notifications(fb, desk_shell(d));   # the notification SURFACE (0.16.4) — see shell_render.cyr
     # ⭐⭐ THE LAUNCHER PANEL, ABOVE EVERY WINDOW AND THE SHELL PANEL. It is a MODAL chooser: it eats
     # every key while it is up (`lnch_key`), so drawing it under anything would show the operator a
     # window they cannot type into and hide the list that is consuming their keystrokes.
