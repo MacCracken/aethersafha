@@ -13,6 +13,31 @@ include "src/security_ui.cyr"
 include "src/shell_integration.cyr"
 include "src/plugin_host.cyr"
 include "src/desktop.cyr"
+# ⚠ Added for the z-order PIXEL test below: it renders a real frame through `render_desktop`, which
+# needs the framebuffer, the renderer, the wallpaper backdrop and the cursor it draws.
+include "lib/bhumi.cyr"
+include "src/theme.cyr"
+include "src/cursor.cyr"
+include "src/render.cyr"
+include "src/wallpaper.cyr"
+include "src/input.cyr"
+# ⚠ `render_desktop` paints the shell status panel and asks gpu.cyr whether the wallpaper is staged, so
+# both must be linked for a REAL frame — this suite previously never rendered one, which is why it did
+# not need them. Including them is what makes the pixel assertion below exercise the production path
+# rather than a trimmed-down lookalike.
+include "src/shell_render.cyr"
+include "src/gpu.cyr"
+
+# Fill a w*h XRGB client surface with one word, the way a setu client would. Same helper as
+# tests/gpu_fallback.tcyr — a distinct sentinel per window is what makes "who owns this pixel"
+# answerable at all.
+fn zseed(w, h, word): i64 {
+    var px = alloc(w * h * 4);
+    if (px == 0) { return 0; }
+    var i = 0;
+    while (i < w * h) { store32(px + i * 4, word); i = i + 1; }
+    return px;
+}
 
 fn t_ok(x): i64 {
     if (x != 0) { return 1; }
@@ -21,6 +46,38 @@ fn t_ok(x): i64 {
 
 fn main() {
     alloc_init();
+
+    # ----- ⭐⭐ THE ACTIVE WINDOW IS THE TOP LAYER — PROVEN IN COMPOSITED PIXELS ------------------
+    # ⛔ SEEN ON IRON 2026-08-17: *"active window should be the highest layer"* — puka focused with crab
+    # drawn over it. `comp_focus` stored an index and never touched the window vector; both draw paths
+    # walk that vector bottom-to-top, so z-order was pure creation order and clicking changed nothing.
+    # ⭐ THIS ASSERTS PIXELS THROUGH THE REAL `render_desktop`, not the vector. `tests/aethersafha.tcyr`
+    # already gates the reorder; a reorder that never reaches the framebuffer is the same class of green
+    # as a compositor's own "presented ok" line.
+    test_group("desktop — focusing a window RAISES it to the top layer (composited pixels)");
+    var zd = desktop_new();
+    var zc = desk_comp(zd);
+    var zfb = bhumi_fb_new(400, 300);
+    var zA = comp_create_window(zc, 20, 20, 200, 150, "A");
+    var zB = comp_create_window(zc, 90, 70, 200, 150, "B");
+    win_set_pix(zA, zseed(200, 150, 0x00AA1111));
+    win_set_pix(zB, zseed(200, 150, 0x0022BB22));
+    var zx = 120;
+    var zy = win_body_y(zB) + 20;      # inside BOTH bodies
+    ae_gpu_frame_ok = 0;               # CPU path: render_desktop composites the surfaces itself
+    render_desktop(zd, zfb);
+    assert_eq(bhumi_fb_get(zfb, zx, zy), 0x0022BB22, "precondition: B is newest, so B owns the overlap");
+
+    # ⚠ NON-VACUITY — the sample must be inside A as well, or "B owns it" is trivially true and the
+    # raise below proves nothing. Raise A and require the SAME pixel to flip to A's sentinel.
+    comp_focus(zc, comp_find_by_id(zc, win_id(zA)));
+    render_desktop(zd, zfb);
+    assert_eq(bhumi_fb_get(zfb, zx, zy), 0x00AA1111, "focusing A RAISES it — A now owns those pixels");
+
+    # ...and back, so the top layer FOLLOWS focus rather than latching one way.
+    comp_focus(zc, comp_find_by_id(zc, win_id(zB)));
+    render_desktop(zd, zfb);
+    assert_eq(bhumi_fb_get(zfb, zx, zy), 0x0022BB22, "focusing B raises it back — it follows focus");
 
     test_group("desktop — aggregate instantiates every subsystem");
     var d = desktop_new();

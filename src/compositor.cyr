@@ -145,11 +145,32 @@ fn comp_create_window(c, x, y, w, h, title): i64 {
     return win;
 }
 
-# comp_focus(c, i): set focus to window index i if valid.
+# comp_focus(c, i): focus window index i AND RAISE IT TO THE TOP OF THE STACK.
+#
+# ⛔⛔ FOCUS USED TO BE A STORED INDEX AND NOTHING ELSE, so the active window could sit UNDER another
+# one. Operator, 2026-08-17 iron: *"active window should be the highest layer"* — puka focused, with
+# crab drawn over it. This function stored `i` and returned; it never touched the window vector, and
+# BOTH draw paths (`render_desktop` and `ae_gpu_present_frame`) walk that vector bottom-to-top. So
+# z-order was purely creation order and clicking a window did nothing to it.
+#
+# ⭐ RAISING IS A VECTOR MOVE, WHICH IS WHY IT BELONGS HERE AND NOT IN THE RENDERER. Paint order IS the
+# vector; there is no separate z field to sort by, and adding one would give two sources of truth for
+# the same fact. Remove + push moves the window to the end = the top.
+# ⚠ EVERY OTHER INDEX SHIFTS when element `i` is removed, so the stored focus must be recomputed
+# (`count - 1`), never left as `i`. A caller holding an index across this call is holding a stale one —
+# `comp_focused_window` is the safe accessor and is what everything uses.
+# ⚠ Already-on-top is a genuine no-op, not a special case: `comp_add` focuses `count-1` immediately, and
+# re-raising the last element would otherwise churn the vector on every click.
 fn comp_focus(c, i): i64 {
     if (i < 0) { return 0 - 1; }
-    if (i >= comp_count(c)) { return 0 - 1; }
-    store64(c + C_FOCUSED, i);
+    var n = comp_count(c);
+    if (i >= n) { return 0 - 1; }
+    if (i == n - 1) { store64(c + C_FOCUSED, i); return 0; }
+    var v = load64(c + C_WINDOWS);
+    var win = vec_get(v, i);
+    vec_remove(v, i);
+    vec_push(v, win);
+    store64(c + C_FOCUSED, comp_count(c) - 1);
     return 0;
 }
 

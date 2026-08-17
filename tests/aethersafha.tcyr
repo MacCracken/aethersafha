@@ -42,9 +42,18 @@ fn main() {
     assert_eq(win_id(w1), 1, "ids assigned from 1");
     assert_eq(win_id(w2), 2, "ids increment");
     assert_eq(comp_focused(c), 1, "focus follows newest window");
+    # ⭐⭐ FOCUSING RAISES (2026-08-17). These two used to assert `focused == 0` and `find_by_id(2) == 1`
+    # — i.e. that focus was a stored index with no effect on the stack. That was the defect the operator
+    # hit on iron: *"active window should be the highest layer"*, with puka focused UNDER crab. Both draw
+    # paths walk the window vector bottom-to-top, so the only way to be on top is to BE last.
     comp_focus(c, 0);
-    assert_eq(comp_focused(c), 0, "focus can be set");
-    assert_eq(comp_find_by_id(c, 2), 1, "find by id");
+    assert_eq(comp_focused(c), 1, "focusing RAISES — the focused window is the top of the stack");
+    assert_eq(comp_find_by_id(c, 1), 1, "  ...w1 moved to the top");
+    assert_eq(comp_find_by_id(c, 2), 0, "  ...and w2 shifted down to make room");
+    # ⚠ NON-VACUITY: re-focusing the window that is ALREADY on top must not churn the vector.
+    comp_focus(c, 1);
+    assert_eq(comp_focused(c), 1, "re-focusing the top window is a no-op");
+    assert_eq(comp_find_by_id(c, 1), 1, "  ...and does not reorder anything");
     assert_eq(comp_find_by_id(c, 99), 0 - 1, "missing id -> -1");
     comp_close_window(c, 1);
     assert_eq(comp_count(c), 1, "count drops after close");

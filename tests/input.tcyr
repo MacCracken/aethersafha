@@ -46,8 +46,15 @@ fn main() {
     comp_create_window(c, 0, 0, 100, 100, "B");
     comp_create_window(c, 0, 0, 100, 100, "C");
     assert_eq(comp_focused(c), 2, "focus follows newest window");
+    # ⭐ WITH RAISE-ON-FOCUS THE ACTIVE WINDOW IS ALWAYS THE TOP, so `focused` is always `count-1` and
+    # asserting an index proves nothing. What FOCUS-NEXT means now is a ROTATION: it takes the
+    # bottom-most window and raises it, so repeated presses visit every window in turn.
+    var top_before = comp_get(c, 2);
+    var bottom_before = comp_get(c, 0);
     input_apply(c, InputAction.IA_FOCUS_NEXT, 800, 600);
-    assert_eq(comp_focused(c), 0, "focus-next wraps to first");
+    assert_eq(comp_focused(c), 2, "focus-next leaves focus on the TOP of the stack");
+    assert_eq(comp_focused_window(c), bottom_before, "  ...and the window it raised is the old BOTTOM");
+    assert_eq(comp_get(c, 1), top_before, "  ...with the old top pushed down one");
     input_apply(c, InputAction.IA_MAXIMIZE_FOCUSED, 800, 600);
     assert_eq(win_state(comp_focused_window(c)), WinState.WS_MAXIMIZED, "maximize focused");
     input_apply(c, InputAction.IA_MAXIMIZE_FOCUSED, 800, 600);

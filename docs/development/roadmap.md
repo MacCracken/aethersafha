@@ -342,9 +342,51 @@ fired** — it is a brief now, not an idea log.
   - ⚠ Decide the SURFACE of the knob too: whole-window (chrome + content) vs content-only. Chrome is
     compositor-drawn and trivially fadeable; the client surface is the part with the ABI problem.
 
-- **C2 — a system motion language** (design brief §2). A "the system is working" vocabulary the
-  compositor OWNS and apps inherit, rather than every app shipping its own spinner. Open question is the
-  boundary: what the compositor grants vs what an app may override.
+- **C2 — a system motion language** (design brief §2). A "the system is working" vocabulary rather than
+  every app shipping its own spinner.
+  ⛔⛔ **OPERATOR RULING 2026-08-16 — IT LIVES IN THE LIBRARY, NOT THE COMPOSITOR.** This entry used to
+  say the vocabulary is one "the compositor OWNS and apps inherit", and the design brief §2 calls it
+  *"a **compositor-level** concept, not an app concept"*. **Both are wrong.** App-facing widget
+  behaviour belongs to **[`dhancha`](https://github.com/MacCracken/dhancha)** — the pure-Cyrius
+  client-side widget toolkit, the Qt/GTK-equivalent layer. ⚠ CORRECTED: an earlier draft of this line
+  said dhancha was "already a dep of this repo and of crab". It is a dep of **crab only** — aethersafha
+  has no `[deps.dhancha]` block, and the compositor should not: dhancha is the CLIENT side.
+  Operator: *"THERE IS SUPPOSE TO BE A FUCKING LIB FOR APP STUFF."*
+  ⇒ The "open question is the boundary" framing is answered: aethersafha owns COMPOSITING, dhancha owns
+  what an app draws and how it behaves. A motion vocabulary is the latter.
+  ⚠ **THE SAME RULE GOVERNS ANY PROCEDURAL/GENERATED VISUAL FUNCTIONALITY**, wallpaper included if it
+  ever returns: *"if we have any wallpaper functionality that would be procedurally generated I would
+  prefer that it be a part of a library for the functionality and not baked into the compositor or
+  kernel."* ⇒ Generated-content code goes in a library, always. The compositor composites; the kernel
+  provides the op band. Neither is a place to put content generation.
+
+- **C4 — THE DESKTOP'S REAL FOCUS (operator, 2026-08-16): the GUI toolkit, then editors on the desktop.**
+  Ahead of any further compositor-surface polish. Two rungs, in order:
+  - **C4a — `dhancha`, the GUI toolkit lib. ⛔⛔ IT IS DISCONNECTED FROM THE SOVEREIGN DESKTOP, MEASURED
+    2026-08-16.** dhancha 0.9.3 has the widget tree, flexbox layout, event dispatch, capture/bubble,
+    drag-drop and a rupa-themed draw stack — all shipped and RUN-tested. What it does NOT have is a way
+    to reach the compositor **on agnos**: `src/dh_client.cyr` and `src/setu_client.cyr` contain **zero**
+    `CYRIUS_TARGET_AGNOS` arms and no `AGNOS_CHAN` / `chan_op` / `#97` reference at all.
+    ⇒ **Every windowed app on agnos hand-rolls its own client**, which is the exact thing the toolkit
+    exists to prevent (its README: apps build on dhancha *"instead of hand-rolling raw GPU + a raw
+    compositor connection"*). Verified on the reference consumer: `crab/src/main.cyr` carries 3
+    `CYRIUS_TARGET_AGNOS` arms and calls `setu_client_connect` itself, using **no** `dh_client` and no
+    `dh_surface_present` — dhancha is its DRAWING library only.
+    ⚠ **HOW IT REGRESSED, and this is the operator's "again":** dhancha 0.7.0 shipped *"a real dhancha
+    app on the sovereign desktop"* over setu's **TCP** transport (0.6.3 adapted to it). That transport
+    was then RETIRED as the wrong primitive for local display IPC, replaced by the agnos channel band
+    `#97` where the compositor mints a channel and endows an end at spawn. setu came across (0.8.5);
+    **dhancha did not.** A working client was left behind by a substrate change under it.
+    ⇒ The bite: give `DhClient` an agnos arm over the channel band, then make crab consume it — a
+    consumer that stops hand-rolling is the only proof the toolkit actually carries the weight.
+    ⚠ README scope is STALE and must not be planned from: it lists *"v0.6+ — next: the compositor-fd
+    input source … the present path"* while the repo is at 0.9.3 with both long shipped (for TCP).
+  - **C4b — LATER, AND HARD-GATED ON C4a. The EditorGUI (`murrahir`) port** — still Rust on GitHub, to be
+    ported the way this repo was, for editor programs at the desktop level (`cyim` is the sovereign
+    Cyrius-native VIM-inspired editor). ⛔ **DO NOT START, DO NOT SCOPE, DO NOT CLONE IT.** Operator,
+    2026-08-16: *"we haven't even gotten the remaining gui basics off the ground again and you think I'm
+    ready to bring it down for porting?"* A port drags a second unfinished surface alongside the first.
+    ⇒ It is a NAME on the map so the direction is known, nothing more. C4a finishes first.
 
 **M6 exit criteria** — a Linux desktop that opens on a real screen, hosts a real client window, takes
 real keyboard and pointer input, draws a wallpaper, and quits cleanly; **and** the agnos debt list
