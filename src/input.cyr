@@ -38,6 +38,16 @@ enum HidUsage {
     HID_F8  = 0x41;   # move focused window right
     HID_F9  = 0x42;   # move focused window up
     HID_F10 = 0x43;   # move focused window down
+    # ⭐ THE LAUNCHER (2026-08-17). F2 opens it; the arrows and Enter drive it while it is up.
+    # ⚠ F2 is free — F4-F10 are the window-management band above and F1/F3 are unclaimed, so this takes
+    # the lowest free function key rather than displacing anything.
+    HID_F2  = 0x3B;   # open the application launcher
+    # ⛔ VALUES ARE THE HID BOOT-KEYBOARD USAGE CODES, cross-checked against a second consumer rather
+    # than a table: crab's own key handling names `Up/Down (0x52/0x51)`, `Left/Right (0x50/0x4F)` and
+    # `Enter (0x28)` for the same wire. A usage code guessed here would silently bind the wrong key.
+    HID_ENTER = 0x28; # launch the highlighted entry
+    HID_DOWN  = 0x51; # next entry
+    HID_UP    = 0x52; # previous entry
 }
 
 # How far one move keystroke slides a window, in pixels.

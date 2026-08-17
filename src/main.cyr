@@ -18,6 +18,9 @@ include "src/render.cyr"
 include "src/gpu.cyr"           # hardware compositing on agnos (#87 + #84) — after render.cyr for TITLEBAR_H
 include "src/wallpaper.cyr"     # the backdrop as a SOURCE (M6-C1a) — after render.cyr for rend_clear_band
 include "src/input.cyr"
+# ⭐ The launcher's PURE half — registry, selection, key semantics, panel geometry. The impure half
+# (spawning a client, painting the panel) is in this file, because both need a kernel or a screen.
+include "src/launcher.cyr"
 # Leaf subsystems + the desktop aggregate that wires them into the compositor.
 include "src/theme_bridge.cyr"
 include "src/gestures.cyr"
@@ -55,6 +58,87 @@ var ae_probe_t0 = 0;
 var ae_probe_next_report = 0;
 # 1 = at least one spawn_path refused, so a "no client connected" verdict has a known cause.
 var ae_spawn_failed = 0;
+
+# ============================================================================================
+# ⭐⭐ THE HOSTED-CLIENT TABLE — module scope, so a client can be spawned AFTER boot
+# ============================================================================================
+# ⛔ THESE WERE FUNCTION-LOCAL IN `main()` AND THAT IS WHY NOTHING COULD BE LAUNCHED LATER. The four
+# arrays were filled by a hardcoded `while (ci < 2)` loop that ran once, at startup, and then went out
+# of reach — so "start an app from the desktop" had nowhere to write.
+# ⚠⚠ THE UNIT RULE FLIPS AT MODULE SCOPE, and this exact table already paid for it once: as a
+# FUNCTION-local `var chan_fd[32]` it was 32 **BYTES** = 4 slots, and a second client's store ran off
+# the end into the adjacent locals — one client presented, the other silently corrupted the first.
+# At MODULE scope `var X[N]` is N x u64, so `[8]` here is 8 real slots (64 bytes).
+# [[feedback_cyrius_var_array_u64_units]]
+var AE_CLIENT_MAX = 8;
+var chan_fd[8];        # compositor-side channel ends, one per hosted client
+var chan_served[8];    # 1 once that client's surface has been committed
+var chan_st[8];        # per-client handshake scratch (see setu_srv_handshake_step)
+var chan_fail[8];      # consecutive handshake failures per client
+var chan_name[8];      # window title for the client on this channel
+var chan_n = 0;
+
+# Mint a channel, endow one end to a child, announce it as `AGNOS_CHAN`, and spawn `path`.
+# -> 1 hosted, 0 refused (and `ae_spawn_failed` latched).
+#
+# ⭐ THIS IS THE BOOT LOOP'S BODY, LIFTED VERBATIM — not a reimplementation. The sequence is exact and
+# order-sensitive, and writing it twice is how the two copies drift: the launcher would spawn clients
+# that never connect while boot's kept working, or the reverse, and each would look like a transport
+# bug. One writer, two callers (boot's `--clients` pre-spawn, and the launcher).
+# ⛔ ENDOW IMMEDIATELY BEFORE THE SPAWN IT IS FOR. The arm is per-CPU and one-shot, so minting both
+# channels first and then spawning both places the SECOND endowment into the FIRST child. That comment
+# survives from the original loop because the hazard survives the refactor.
+fn ae_client_spawn(path, plen, cname): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (chan_n >= AE_CLIENT_MAX) {
+        println("aethersafha: client table full -- not spawning");
+        return 0;
+    }
+    var mint = alloc(32);
+    if (sys_chan_mint(mint) != 0) {
+        println("aethersafha: chan_mint FAILED -- this client cannot be hosted");
+        ae_spawn_failed = 1;
+        return 0;
+    }
+    var mine = load64(mint + 8);                  # the compositor keeps the PEER end
+    var give = load64(mint);                      # the child is endowed this one
+    var afd = sys_chan_endow(give);
+    if (afd < 3) {
+        println("aethersafha: chan_endow FAILED -- spawning without a channel would be pointless");
+        ae_spawn_failed = 1;
+        return 0;
+    }
+    # "AGNOS_CHAN=<fd>\0" — the announcement. Wayland's WAYLAND_SOCKET shape.
+    var envbuf = alloc(64);
+    var w = 0;
+    var lit = "AGNOS_CHAN=";
+    while (w < 11) { store8(envbuf + w, load8(lit + w)); w = w + 1; }
+    if (afd >= 10) { store8(envbuf + w, 48 + (afd / 10)); w = w + 1; }
+    store8(envbuf + w, 48 + (afd % 10)); w = w + 1;
+    store8(envbuf + w, 0); w = w + 1;
+    var pk = sys_spawn_path_env(path, plen, envbuf, w);
+    if (pk < 0) {
+        println("aethersafha: spawn_path_env FAILED");
+        ae_spawn_failed = 1;
+        return 0;
+    }
+    store64(&chan_fd + chan_n * 8, mine);
+    store64(&chan_served + chan_n * 8, 0);
+    var stbuf = alloc(64);          # [0]=state [1]=win [2]=pix [3]=w [4]=h
+    var zi = 0;
+    while (zi < 8) { store64(stbuf + zi * 8, 0); zi = zi + 1; }
+    store64(&chan_st + chan_n * 8, stbuf);
+    store64(&chan_fail + chan_n * 8, 0);
+    store64(&chan_name + chan_n * 8, cname);
+    chan_n = chan_n + 1;
+    println("aethersafha: client spawned on a placed channel");
+    println_int(afd);
+    return 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+}
 # ⭐ THE INPUT LADDER — first-occurrence latches, one per rung. Kept PERMANENTLY, because the input path
 # has been mysterious twice: once when TAB had no handler at all, and once when keystrokes vanished before
 # reaching a client and there was no way to tell WHERE without rebuilding. Each rung prints ONCE, as a
@@ -802,57 +886,28 @@ fn main(): i64 {
     # client 1's store ran straight off the end into the adjacent locals. That is exactly why ONE
     # client presented and TWO presented nothing: the second spawn corrupted the first's state.
     # 4 slots x 8 bytes = 32. [[feedback_cyrius_var_array_u64_units]]
-    var chan_fd[32];       # compositor-side ends, one per spawned client
-    var chan_served[32];   # 1 once that client's surface has been committed
-    var chan_st[32];       # per-client handshake scratch (see setu_srv_handshake_step)
-    var chan_fail[32];     # consecutive handshake failures per client
-    # ⭐ THE APPLICATION NAME, captured where it is already known. The compositor spawns these clients by
-    # path, so it knows what each channel will carry before the client says a word — no protocol change and
-    # no guessing. 4 slots x 8 bytes = 32, same sizing rule as the arrays above.
-    var chan_name[32];     # window title for the client on this channel
-    var chan_n = 0;
+    # ⭐⭐ THE CLIENT TABLE MOVED TO MODULE SCOPE (2026-08-17) so a client can be spawned AFTER boot.
+    # It used to be four function-local arrays filled by a hardcoded `while (ci < 2)` loop right here;
+    # nothing could start a client later because the only code that knew how was a loop that had
+    # already finished. `ae_client_spawn` is that loop's body, lifted out — see its banner.
+    # ⛔ THE PRE-SPAWN IS NOW BEHIND `--clients`, AND THAT IS THE WHOLE FEATURE. A bare `aethersafha`
+    # REGISTERS the apps and launches nothing; F2 opens the launcher and the operator picks. Operator:
+    # *"an application launcher of some sort so we don't have to pre load programs on start."*
+    # ⚠ `--clients` KEEPS pre-spawning both, unchanged, because every harness measures that shape —
+    # `aethersafha-clients-test.py` asserts `connected: 2, presented: 2` and `puka-terminal-test.py`
+    # boots the terminal the same way. Changing the default is the feature; changing what the gates
+    # measure would be a silent recalibration of the burn evidence.
     #ifdef CYRIUS_TARGET_AGNOS
-    var envbuf = alloc(64);
-    var ci = 0;
-    while (ci < 2) {
-        var mint = alloc(32);
-        if (sys_chan_mint(mint) != 0) { println("aethersafha: chan_mint FAILED — this client cannot be hosted"); ae_spawn_failed = 1; ci = ci + 1; }
-        else {
-            var mine = load64(mint + 8);                  # the compositor keeps the PEER end
-            var give = load64(mint);                      # the child is endowed this one
-            var afd = sys_chan_endow(give);
-            if (afd < 3) { println("aethersafha: chan_endow FAILED — spawning without a channel would be pointless"); ae_spawn_failed = 1; }
-            else {
-                # "AGNOS_CHAN=<fd>\0" — the announcement. Wayland's WAYLAND_SOCKET shape.
-                var w = 0;
-                var lit = "AGNOS_CHAN=";
-                while (w < 11) { store8(envbuf + w, load8(lit + w)); w = w + 1; }
-                if (afd >= 10) { store8(envbuf + w, 48 + (afd / 10)); w = w + 1; }
-                store8(envbuf + w, 48 + (afd % 10)); w = w + 1;
-                store8(envbuf + w, 0); w = w + 1;
-                var pk = 0 - 1;
-                var cname = "setu-surface";
-                if (ci == 0) { pk = sys_spawn_path_env("/bin/puka", 9, envbuf, w); cname = "puka"; }
-                if (ci == 1) { pk = sys_spawn_path_env("/bin/crab", 9, envbuf, w); cname = "crab"; }
-                if (pk < 0) { println("aethersafha: spawn_path_env FAILED"); ae_spawn_failed = 1; }
-                else {
-                    store64(&chan_fd + chan_n * 8, mine);
-                    store64(&chan_served + chan_n * 8, 0);
-                    var stbuf = alloc(64);          # [0]=state [1]=win [2]=pix [3]=w [4]=h
-                    var zi = 0;
-                    while (zi < 8) { store64(stbuf + zi * 8, 0); zi = zi + 1; }
-                    store64(&chan_st + chan_n * 8, stbuf);
-                    store64(&chan_fail + chan_n * 8, 0);
-                    store64(&chan_name + chan_n * 8, cname);
-                    chan_n = chan_n + 1;
-                    println("aethersafha: client spawned on a placed channel");
-                    println_int(afd);
-                }
-            }
-            ci = ci + 1;
-        }
+    lnch_register("/bin/puka", 9, "puka");
+    lnch_register("/bin/crab", 9, "crab");
+    if (ae_probe == 1) {
+        ae_client_spawn("/bin/puka", 9, "puka");
+        ae_client_spawn("/bin/crab", 9, "crab");
     }
-    if (chan_n == 0) { println("aethersafha: NO client could be given a channel this run"); }
+    # ⚠ Only a FAILURE now, not a fact about an idle desktop: with no `--clients` a zero count is the
+    # normal, intended state — the launcher has not been used yet.
+    if (ae_probe == 1) { if (chan_n == 0) { println("aethersafha: NO client could be given a channel this run"); } }
+    if (ae_probe == 0) { println("aethersafha: launcher ready -- F2 lists the apps, nothing pre-loaded"); }
     #endif
     # ⛔ THE RETIRED TCP LAUNCH BLOCK IS DELETED (was `#ifdef CYRIUS_TARGET_AGNOS` + `if (0 == 1)`).
     # It was unreachable by construction AND it held the only two writers of `ae_spawn_failed`, so the
@@ -924,6 +979,35 @@ fn main(): i64 {
                     # ⚠ The usable height is `ae_geom_h - TITLEBAR_H`: a window's chrome sits ABOVE
                     # its content rect, so the bottom clamp has to reserve it or the titlebar of a
                     # window pushed to the floor lands off-screen and the GPU refuses the rect.
+                    # ⭐⭐ THE LAUNCHER GETS THE KEY FIRST, AND ONLY WHEN IT IS OPEN. `lnch_key` answers
+                    # LNCH_K_NONE for every key while closed, so this costs one compare on the normal
+                    # path and cannot shadow an existing binding — including Esc, which is the
+                    # compositor's QUIT and must keep working when the panel is down.
+                    # ⛔ IT MUST PRECEDE `input_handle`, or a key would be acted on TWICE: Esc would
+                    # close the panel AND quit the desktop, Tab would move the selection AND cycle the
+                    # windows behind it. That double-apply is the shape that already bit this loop once
+                    # (TAB cycling focus twice, F4/F5/F6 applied here and forwarded to the client).
+                    var lk = lnch_key(bhumi_key_usage(ev));
+                    if (lk == LnchKey.LNCH_K_LAUNCH) {
+                        var lsel = lnch_selected();
+                        println("aethersafha: launching from the launcher:");
+                        println(lnch_name_at(lsel));
+                        ae_client_spawn(lnch_path_at(lsel), lnch_plen_at(lsel), lnch_name_at(lsel));
+                    }
+                    # ⚠ CONSUMED MEANS CONSUMED — skip `input_handle` entirely for this event. A modal
+                    # chooser that lets its own navigation keys reach the window underneath types into
+                    # that window while the operator believes they are picking an app.
+                    if (lk != LnchKey.LNCH_K_NONE) { i = i + 1; continue; }
+
+                    # ⭐ F2 OPENS IT. Read before `input_handle` for the same reason, and deliberately
+                    # NOT an `InputAction`: the launcher is compositor chrome, not a window operation,
+                    # and putting it in that enum would offer it to `input_apply`'s window arms.
+                    if (bhumi_key_usage(ev) == HidUsage.HID_F2) {
+                        if (lnch_openp() == 1) { println("aethersafha: launcher opened"); }
+                        else { println("aethersafha: launcher has no apps registered"); }
+                        i = i + 1;
+                        continue;
+                    }
                     var act = input_handle(comp, ev, ae_geom_w, ae_geom_h - TITLEBAR_H);
                     if (act == InputAction.IA_QUIT) {
                         # ⛔ A PROBE RUN IGNORES THE QUIT KEY. --clients exists to answer a question

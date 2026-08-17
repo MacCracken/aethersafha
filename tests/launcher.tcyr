@@ -1,0 +1,126 @@
+# aethersafha launcher test — the pure half of the application launcher.
+#
+# ⭐ EVERYTHING ASSERTED HERE RUNS WITHOUT A COMPOSITOR, A KERNEL OR A SCREEN, which is the reason
+# `src/launcher.cyr` was split the way it was. The two impure edges — minting a `#97` channel and
+# spawning the client, and painting the panel — live in `main.cyr`; if the registry, the selection
+# semantics or the geometry lived there too, none of it could be tested anywhere but on iron.
+# Stdlib + [deps.*] auto-included via cyrius.cyml.
+# ⚠ input.cyr reaches into the window/compositor types (WinState, win_*, comp_*), so its own
+# dependencies come along — the launcher itself needs none of them.
+include "lib/bhumi.cyr"
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/input.cyr"      # HidUsage — the launcher keys are real usage codes, not private constants
+include "src/launcher.cyr"
+
+fn t_gt(a, b): i64 { if (a > b) { return 1; } return 0; }
+
+fn main() {
+    alloc_init();
+
+    test_group("launcher — the registry");
+    lnch_reset();
+    assert_eq(lnch_count(), 0, "a fresh launcher lists nothing");
+    # ⛔ AND IT REFUSES TO OPEN ON NOTHING. A panel with no rows that still eats every key until Escape
+    # is indistinguishable from a hung desktop — and an image staged with no apps produces exactly that.
+    assert_eq(lnch_openp(), 0, "opening an EMPTY launcher is refused");
+    assert_eq(lnch_is_open(), 0, "  ...and it stays closed");
+
+    assert_eq(lnch_register("/bin/puka", 9, "puka"), 0, "first app registers at index 0");
+    assert_eq(lnch_register("/bin/crab", 9, "crab"), 1, "second at index 1");
+    assert_eq(lnch_count(), 2, "both are listed");
+    assert_eq(lnch_path_at(0), "/bin/puka", "path round-trips");
+    assert_eq(lnch_plen_at(0), 9, "the stored LENGTH round-trips — #43 takes it explicitly");
+    assert_eq(lnch_name_at(1), "crab", "name round-trips");
+    # ⚠ Out-of-range reads answer 0 rather than walking off the table: the renderer iterates by index
+    # and a stale count would otherwise read whatever follows the array.
+    assert_eq(lnch_path_at(2), 0, "past the end reads 0, not garbage");
+    assert_eq(lnch_path_at(0 - 1), 0, "negative reads 0");
+
+    # ⛔ A DUPLICATE PATH IS REFUSED. Two identical rows let one keypress launch either, which looks
+    # like a spawn bug from the outside rather than a registry one.
+    assert_eq(lnch_register("/bin/puka", 9, "puka again"), 0 - 1, "the same PATH cannot register twice");
+    assert_eq(lnch_count(), 2, "  ...and the table is unchanged");
+    assert_eq(lnch_register("/bin/agnsh", 10, "puka"), 2, "but a repeated NAME is fine");
+    assert_eq(lnch_register(0, 9, "null"), 0 - 1, "a null path is refused");
+    assert_eq(lnch_register("/bin/x", 0, "zerolen"), 0 - 1, "a zero-length path is refused");
+
+    test_group("launcher — open, select, close");
+    lnch_reset();
+    lnch_register("/bin/puka", 9, "puka");
+    lnch_register("/bin/crab", 9, "crab");
+    lnch_register("/bin/agnsh", 10, "agnsh");
+    assert_eq(lnch_openp(), 1, "opening a populated launcher succeeds");
+    assert_eq(lnch_is_open(), 1, "  ...and it is up");
+    assert_eq(lnch_selected(), 0, "  ...with the first row selected");
+
+    assert_eq(lnch_key(HidUsage.HID_DOWN), LnchKey.LNCH_K_CONSUMED, "Down is consumed");
+    assert_eq(lnch_selected(), 1, "  ...and moves the selection");
+    lnch_key(HidUsage.HID_DOWN);
+    assert_eq(lnch_selected(), 2, "  ...again");
+    # ⛔ WRAPPING, NOT CLAMPING. Clamped, Down on the last row does nothing and reads as a dropped key.
+    lnch_key(HidUsage.HID_DOWN);
+    assert_eq(lnch_selected(), 0, "Down WRAPS off the end to the first row");
+    lnch_key(HidUsage.HID_UP);
+    assert_eq(lnch_selected(), 2, "Up wraps the other way");
+
+    assert_eq(lnch_key(HidUsage.HID_ESC), LnchKey.LNCH_K_CONSUMED, "Escape is consumed");
+    assert_eq(lnch_is_open(), 0, "  ...and closes the panel");
+
+    test_group("launcher — launching");
+    lnch_reset();
+    lnch_register("/bin/puka", 9, "puka");
+    lnch_register("/bin/crab", 9, "crab");
+    lnch_openp();
+    lnch_key(HidUsage.HID_DOWN);
+    assert_eq(lnch_key(HidUsage.HID_ENTER), LnchKey.LNCH_K_LAUNCH, "Enter asks the caller to LAUNCH");
+    assert_eq(lnch_selected(), 1, "  ...the row that was highlighted");
+    assert_eq(lnch_path_at(lnch_selected()), "/bin/crab", "  ...which resolves to its path");
+    # ⛔ ENTER ALSO CLOSES. Left open, the panel sits over the window it just created and still eats
+    # keys — and the next Enter launches a SECOND copy of the same app.
+    assert_eq(lnch_is_open(), 0, "Enter closes the panel as well as launching");
+
+    test_group("launcher — a closed launcher is inert");
+    # ⚠ THE NON-VACUITY THAT MATTERS FOR THE WHOLE FEATURE: if a closed launcher consumed keys, the
+    # desktop would silently stop responding to typing and every other binding would look broken.
+    lnch_reset();
+    lnch_register("/bin/puka", 9, "puka");
+    assert_eq(lnch_is_open(), 0, "precondition: closed");
+    assert_eq(lnch_key(HidUsage.HID_DOWN), LnchKey.LNCH_K_NONE, "Down passes through when closed");
+    assert_eq(lnch_key(HidUsage.HID_ENTER), LnchKey.LNCH_K_NONE, "Enter passes through when closed");
+    assert_eq(lnch_key(HidUsage.HID_ESC), LnchKey.LNCH_K_NONE, "Escape passes through — QUIT still works");
+    # ⛔ ESCAPE IS THE COMPOSITOR'S QUIT. If the launcher swallowed it while closed, the desktop could
+    # never be exited — the single worst outcome of getting this predicate backwards.
+
+    test_group("launcher — an open launcher swallows unrelated keys");
+    lnch_openp();
+    assert_eq(lnch_key(HidUsage.HID_TAB), LnchKey.LNCH_K_CONSUMED, "TAB does not cycle windows behind the panel");
+    assert_eq(lnch_key(HidUsage.HID_F4), LnchKey.LNCH_K_CONSUMED, "F4 does not close a window behind the panel");
+    assert_eq(lnch_is_open(), 1, "  ...and neither closes the launcher");
+    lnch_key(HidUsage.HID_ESC);
+
+    test_group("launcher — panel geometry");
+    lnch_reset();
+    lnch_register("/bin/puka", 9, "puka");
+    lnch_register("/bin/crab", 9, "crab");
+    # Height follows the row count, so a 3-app desktop and a 1-app desktop do not share a panel size.
+    assert_eq(lnch_panel_h(), LNCH_PAD * 2 + 2 * LNCH_ROW_H, "height = padding + rows");
+    var h2 = lnch_panel_h();
+    lnch_register("/bin/agnsh", 10, "agnsh");
+    assert_eq(t_gt(lnch_panel_h(), h2), 1, "  ...and grows with another app");
+    # Centred horizontally; a third down rather than centred, so the list does not sit on the window
+    # it is about to be launched beside.
+    assert_eq(lnch_panel_x(2560), (2560 - LNCH_W) / 2, "centred horizontally");
+    assert_eq(t_gt(lnch_panel_y(1440), 0), 1, "placed below the top edge");
+    assert_eq(lnch_row_y(1440, 0), lnch_panel_y(1440) + LNCH_PAD, "row 0 sits after the padding");
+    assert_eq(lnch_row_y(1440, 1) - lnch_row_y(1440, 0), LNCH_ROW_H, "rows are one row-height apart");
+    # ⚠ A panel taller than the screen must not be placed off the top — a launcher you cannot see is
+    # worse than one that overflows the bottom, because Escape is the only way out and it is invisible.
+    assert_eq(lnch_panel_y(10), 0, "an over-tall panel clamps to the top edge, never negative");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -20,6 +20,7 @@ include "src/theme.cyr"
 include "src/cursor.cyr"
 include "src/render.cyr"
 include "src/wallpaper.cyr"
+include "src/launcher.cyr"   # render_desktop draws the launcher panel
 include "src/input.cyr"
 # ⚠ `render_desktop` paints the shell status panel and asks gpu.cyr whether the wallpaper is staged, so
 # both must be linked for a REAL frame — this suite previously never rendered one, which is why it did
@@ -31,6 +32,8 @@ include "src/gpu.cyr"
 # Fill a w*h XRGB client surface with one word, the way a setu client would. Same helper as
 # tests/gpu_fallback.tcyr — a distinct sentinel per window is what makes "who owns this pixel"
 # answerable at all.
+fn t_ne_d(a, b): i64 { if (a == b) { return 0; } return 1; }
+
 fn zseed(w, h, word): i64 {
     var px = alloc(w * h * 4);
     if (px == 0) { return 0; }
@@ -78,6 +81,39 @@ fn main() {
     comp_focus(zc, comp_find_by_id(zc, win_id(zB)));
     render_desktop(zd, zfb);
     assert_eq(bhumi_fb_get(zfb, zx, zy), 0x0022BB22, "focusing B raises it back — it follows focus");
+
+    # ----- ⭐⭐ THE LAUNCHER PANEL REACHES THE FRAMEBUFFER -----------------------------------------
+    # ⚠ `tests/launcher.tcyr` gates the registry, keys and geometry — all pure. NONE of that proves the
+    # panel is DRAWN: `render_launcher` could be unhooked from `render_desktop` and every one of those
+    # 44 assertions would stay green. This is the seam that a pure test structurally cannot see, and it
+    # is the same gap that let a z-order reorder pass while never reaching the pixels.
+    test_group("desktop — the launcher panel is composited (pixel proof)");
+    var ld = desktop_new();
+    var lfb = bhumi_fb_new(400, 300);
+    ae_gpu_frame_ok = 0;
+    lnch_reset();
+    lnch_register("/bin/puka", 9, "puka");
+    lnch_register("/bin/crab", 9, "crab");
+    # Sample the centre of the panel's accent seal — a 2 px strip only the launcher draws.
+    var lpx = lnch_panel_x(400) + lnch_panel_w() / 2;
+    var lpy = lnch_panel_y(300);
+    render_desktop(ld, lfb);
+    var closed_px = bhumi_fb_get(lfb, lpx, lpy);
+    assert_eq(lnch_is_open(), 0, "precondition: the launcher is closed");
+
+    lnch_openp();
+    render_desktop(ld, lfb);
+    var open_px = bhumi_fb_get(lfb, lpx, lpy);
+    assert_eq(t_ne_d(open_px, closed_px), 1, "opening the launcher CHANGES those pixels");
+    assert_eq(open_px, ae_bhumi(rupa_theme_accent(rupa_theme_active())),
+              "  ...to the accent seal the panel draws");
+
+    # ⛔ AND IT GOES AWAY AGAIN. A panel that paints but never un-paints looks identical on the frame
+    # that matters and leaves the desktop permanently covered — the damage model does not repaint what
+    # nothing reports as changed.
+    lnch_close();
+    render_desktop(ld, lfb);
+    assert_eq(bhumi_fb_get(lfb, lpx, lpy), closed_px, "closing it restores the pixels underneath");
 
     test_group("desktop — aggregate instantiates every subsystem");
     var d = desktop_new();

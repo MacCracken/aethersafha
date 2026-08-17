@@ -1,0 +1,184 @@
+# launcher.cyr — the application launcher: start apps FROM the desktop instead of pre-loading them.
+#
+# ⛔⛔ WHY THIS EXISTS. Until now every windowed app was spawned in a hardcoded `while (ci < 2)` loop
+# inside `main()` at boot — `/bin/puka` and `/bin/crab`, always both, always at startup, with the
+# mint -> endow -> `spawn_path_env` sequence written INLINE. Nothing could start a client afterwards,
+# because the only code that knew how was a loop that had already finished. Operator: *"an application
+# launcher of some sort so we don't have to pre load programs on start."*
+#
+# ⭐ THE PURE HALF LIVES HERE AND IS TESTABLE WITHOUT A COMPOSITOR. Everything below — the registry,
+# the open/close state, the selection, the key semantics — is arithmetic over module state with no
+# syscalls and no framebuffer. `main.cyr` owns the two impure edges (spawning a client, drawing the
+# panel) and asks this file what to do. That split is deliberate: on agnos the spawn path needs a real
+# kernel and the draw needs a real screen, so anything left in those two places is untestable on a host,
+# and the failure would only ever show up on iron.
+#
+# ⚠ NOT `src/apps.cyr`'s Command Palette, and the difference is not cosmetic. That palette runs SHELL
+# UTILITIES — a 30-entry allowlist (`ls`, `cat`, `grep` …) executed with fork+execve to capture stdout.
+# This launches WINDOWED CLIENTS, which on agnos means the compositor must mint a `#97` channel, endow
+# one end to the child and announce it as `AGNOS_CHAN` before `spawn_path_env`. agnos has no fork, and a
+# captured stdout is not a window. Same word, different operation.
+
+# ============================================================================================
+# THE REGISTRY — what can be launched
+# ============================================================================================
+# ⛔ PATH LENGTH IS STORED, NOT COMPUTED, because `sys_spawn_path #43` takes an explicit length and the
+# two hardcoded call sites both passed a literal `9` for "/bin/puka" and "/bin/crab". A registry that
+# recomputed it with `strlen` would be a second source of truth for a number the kernel is strict about;
+# a registry that stored a wrong one would fail identically for every app. It is stored ONCE, beside the
+# path it belongs to, and `lnch_register` is the only writer.
+# ⚠ MODULE-SCOPE `var X[N]` IS N x u64 (8N bytes) — the opposite of the function-local rule that already
+# cost this repo a corrupted spawn (`main.cyr:800`: two clients, one 4-BYTE array, client 1 ran off the
+# end). 16 slots is 128 bytes each here, which is what the indexing below assumes.
+var LNCH_MAX = 16;
+var lnch_path[16];        # cstr, e.g. "/bin/puka"
+var lnch_plen[16];        # BYTES of that path, as #43 wants it
+var lnch_name[16];        # window title / list label, e.g. "puka"
+var lnch_n = 0;
+
+# ⭐ OPEN/CLOSED, SELECTION, AND NOTHING ELSE. The launcher owns no window, no surface and no client
+# list — it is a chooser. What it produces is an INDEX; `main.cyr` turns that into a process.
+var lnch_open = 0;        # 1 = the panel is up and eating keys
+var lnch_sel = 0;         # highlighted row, always in [0, lnch_n)
+
+fn lnch_reset(): i64 { lnch_n = 0; lnch_open = 0; lnch_sel = 0; return 0; }
+
+# Register one launchable app. -> its index, or -1 if the table is full.
+# ⚠ REFUSES A DUPLICATE PATH. Registering the same binary twice would put two identical rows in the
+# list and let one keypress launch either — the kind of thing that looks like a spawn bug from the
+# outside. Names may repeat; paths may not.
+fn lnch_register(path, plen, name): i64 {
+    if (path == 0) { return 0 - 1; }
+    if (plen < 1) { return 0 - 1; }
+    if (lnch_n >= LNCH_MAX) { return 0 - 1; }
+    var i = 0;
+    while (i < lnch_n) {
+        if (streq(load64(&lnch_path + i * 8), path) == 1) { return 0 - 1; }
+        i = i + 1;
+    }
+    store64(&lnch_path + lnch_n * 8, path);
+    store64(&lnch_plen + lnch_n * 8, plen);
+    store64(&lnch_name + lnch_n * 8, name);
+    lnch_n = lnch_n + 1;
+    return lnch_n - 1;
+}
+
+fn lnch_count(): i64 { return lnch_n; }
+fn lnch_is_open(): i64 { return lnch_open; }
+fn lnch_selected(): i64 { return lnch_sel; }
+fn lnch_path_at(i): i64 { if (i < 0) { return 0; } if (i >= lnch_n) { return 0; } return load64(&lnch_path + i * 8); }
+fn lnch_plen_at(i): i64 { if (i < 0) { return 0; } if (i >= lnch_n) { return 0; } return load64(&lnch_plen + i * 8); }
+fn lnch_name_at(i): i64 { if (i < 0) { return 0; } if (i >= lnch_n) { return 0; } return load64(&lnch_name + i * 8); }
+
+# ⚠ OPENING ON AN EMPTY REGISTRY IS REFUSED. A panel listing nothing, that swallows every key until
+# Escape, is indistinguishable from a hung desktop — and it is exactly what a boot with no staged apps
+# would produce.
+fn lnch_openp(): i64 {
+    if (lnch_n == 0) { return 0; }
+    lnch_open = 1;
+    lnch_sel = 0;
+    return 1;
+}
+fn lnch_close(): i64 { lnch_open = 0; return 0; }
+
+# ============================================================================================
+# KEY SEMANTICS
+# ============================================================================================
+# What a key does while the panel is up. Returned as an outcome so `main.cyr` holds no policy:
+#   LNCH_K_NONE    the key is not ours — pass it on to the focused window
+#   LNCH_K_CONSUMED we handled it (moved the selection, or closed) and nothing else should see it
+#   LNCH_K_LAUNCH   the operator chose `lnch_selected()`; the caller spawns it
+enum LnchKey {
+    LNCH_K_NONE     = 0;
+    LNCH_K_CONSUMED = 1;
+    LNCH_K_LAUNCH   = 2;
+}
+
+# ⛔ WRAPPING, NOT CLAMPING, and it is the difference between a list and a dead end. A 2-entry launcher
+# clamped at both ends means Down does nothing on the last row, which reads as a dropped keypress.
+# ⚠ Enter LAUNCHES AND CLOSES. Leaving the panel open would put a fresh window under a panel that is
+# still eating keys, and the next Enter would launch a second copy of the same app.
+fn lnch_key(usage): i64 {
+    if (lnch_open == 0) { return LnchKey.LNCH_K_NONE; }
+    if (lnch_n == 0) { lnch_open = 0; return LnchKey.LNCH_K_CONSUMED; }
+    if (usage == HidUsage.HID_ESC) { lnch_open = 0; return LnchKey.LNCH_K_CONSUMED; }
+    if (usage == HidUsage.HID_DOWN) {
+        lnch_sel = lnch_sel + 1;
+        if (lnch_sel >= lnch_n) { lnch_sel = 0; }
+        return LnchKey.LNCH_K_CONSUMED;
+    }
+    if (usage == HidUsage.HID_UP) {
+        lnch_sel = lnch_sel - 1;
+        if (lnch_sel < 0) { lnch_sel = lnch_n - 1; }
+        return LnchKey.LNCH_K_CONSUMED;
+    }
+    if (usage == HidUsage.HID_ENTER) {
+        lnch_open = 0;
+        return LnchKey.LNCH_K_LAUNCH;
+    }
+    # ⚠ EVERY OTHER KEY IS SWALLOWED, DELIBERATELY. A modal chooser that lets stray keys through to the
+    # window underneath types into that window while the operator believes they are picking an app.
+    return LnchKey.LNCH_K_CONSUMED;
+}
+
+# ============================================================================================
+# GEOMETRY — computed here so the renderer draws and does not decide
+# ============================================================================================
+# ⚠ Pure arithmetic, so the panel's placement is assertable without a framebuffer. `main.cyr` reads
+# these and fills rects; if it computed them itself the tests could not see a mis-placed panel.
+var LNCH_ROW_H = 22;
+var LNCH_PAD   = 10;
+var LNCH_W     = 260;
+
+fn lnch_panel_h(): i64 { return LNCH_PAD * 2 + lnch_n * LNCH_ROW_H; }
+fn lnch_panel_w(): i64 { return LNCH_W; }
+# Centred horizontally, one third down — not centred vertically, so the list does not sit on top of the
+# window it is about to be launched beside.
+fn lnch_panel_x(screen_w): i64 { return (screen_w - LNCH_W) / 2; }
+fn lnch_panel_y(screen_h): i64 {
+    var y = (screen_h - lnch_panel_h()) / 3;
+    if (y < 0) { return 0; }
+    return y;
+}
+fn lnch_row_y(screen_h, i): i64 { return lnch_panel_y(screen_h) + LNCH_PAD + i * LNCH_ROW_H; }
+
+# ============================================================================================
+# RENDERING — the impure half that needs a framebuffer
+# ============================================================================================
+# ⛔ SEPARATE FROM THE GEOMETRY ABOVE ON PURPOSE. Everything this function needs to know about WHERE
+# things go it asks `lnch_panel_*` / `lnch_row_y` for, so a mis-placed panel is catchable by
+# `tests/launcher.tcyr` on a host. What is left here — fills and glyphs — is the part that genuinely
+# needs a screen, and it is deliberately as small as it can be.
+#
+# ⚠ DRAWN BY `render_desktop` AFTER every window and the shell panel, BEFORE the cursor. The launcher
+# is MODAL — `lnch_key` swallows every key while it is up — so under a window it would hide the list
+# that is eating the operator's keystrokes while showing them a window they cannot type into.
+fn render_launcher(fb): i64 {
+    if (lnch_is_open() == 0) { return 0; }
+    if (lnch_count() == 0) { return 0; }
+    var th = rupa_theme_active();
+    var sw = bhumi_fb_width(fb);
+    var sh = bhumi_fb_height(fb);
+    var px = lnch_panel_x(sw);
+    var py = lnch_panel_y(sh);
+    var pw = lnch_panel_w();
+    var ph = lnch_panel_h();
+    # The panel body, then a 2 px accent seal along the top — the same "this is active" language the
+    # focused window's titlebar uses, so the chrome reads as one system rather than two.
+    fill_rect(fb, px, py, pw, ph, ae_bhumi(rupa_theme_panel(th)));
+    fill_rect(fb, px, py, pw, 2, ae_bhumi(rupa_theme_accent(th)));
+    var i = 0;
+    while (i < lnch_count()) {
+        var ry = lnch_row_y(sh, i);
+        var ink = ae_bhumi(rupa_theme_mute(th));
+        # ⚠ THE SELECTED ROW IS A FILL, NOT JUST BRIGHTER TEXT. A colour-only highlight is invisible
+        # under the high-contrast a11y theme, where ink and mute converge.
+        if (i == lnch_selected()) {
+            fill_rect(fb, px + 4, ry - 3, pw - 8, LNCH_ROW_H, ae_bhumi(rupa_theme_widget(th)));
+            ink = ae_bhumi(rupa_theme_ink(th));
+        }
+        draw_text(fb, lnch_name_at(i), px + LNCH_PAD, ry, ink);
+        i = i + 1;
+    }
+    return 0;
+}

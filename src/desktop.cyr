@@ -159,6 +159,11 @@ fn render_desktop(d, fb): i64 {
         i = i + 1;
     }
     render_shell_panel(fb, desk_shell(d));
+    # ⭐⭐ THE LAUNCHER PANEL, ABOVE EVERY WINDOW AND THE SHELL PANEL. It is a MODAL chooser: it eats
+    # every key while it is up (`lnch_key`), so drawing it under anything would show the operator a
+    # window they cannot type into and hide the list that is consuming their keystrokes.
+    # ⚠ Below the CURSOR, though — see the note there. The pointer stays on top of everything.
+    render_launcher(fb);
     # ⭐ THE CURSOR LAST — after every window and the shell panel, because a cursor that is not on top
     # of everything is not a cursor.
     render_cursor(fb);
