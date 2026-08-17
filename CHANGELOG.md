@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.16.2] - 2026-08-16 — per-window opacity is real on iron, and the chrome regression it exposed
+
+⭐⭐ **M6-C3 CLOSES.** `#92` op 0x06 `BLEND_ALPHA` composited a translucent client surface on
+archaemenid — the first hardware evidence that per-window opacity works at all, after 0.15.0's
+verification turned out to have measured convergence rather than blending.
+
+⛔ **The same burn found a regression this cut introduced**, and it is the honest headline: admitting a
+translucent window onto the GPU frame lost every window's titlebar background, because `fill_rect_a`
+has no `#88` route and nothing had added it to the list of layers that drag chrome back to the CPU.
+
+⚠ **RESTAGE BEFORE ANY FLASH.** The staged rootfs entry is **14,069,784 B** and this tree builds
+**4,075,560 B** — ~10 MB less `.bss` with `.text` unchanged (2,472,800 → 2,473,648). ⛔ That gap predates
+this cut and is **not** the compiler (6.5.20 and 6.5.21 build byte-identically): it opened between the
+last staging and the previous session's commits, and is recorded here unattributed rather than guessed
+at. `sigil` declares ~10.08 MB of module-scope arrays, which matches the delta and is where to start.
+
+### Changed — cyrius pin 6.5.20 → **6.5.21**, matching agnos, and kavach 3.11.12 → **3.11.13**
+
+The kernel and the desktop now build on one language version: agnos moved to 6.5.21 at its 1.56.44 cut.
+`lib sync --full` (107 stdlib files), `deps` relocked, pin-drift warning gone, 24 suites green on both
+targets.
+
+⭐ **THE PIN ITSELF IS PROVENANCE, MEASURED — agnos's finding DOES transfer.** Building the agnos target
+with cycc **6.5.20** and cycc **6.5.21** gives the same binary, `e6789468be0aa31b` both. The pin is a
+declared floor, not a codegen input.
+
+⛔⛔ **AND THE FIRST VERSION OF THIS ENTRY SAID THE OPPOSITE — CORRECTED.** It read *"a pin move is not
+free here … the rebuild changed, `294e6559` → `e6789468`"*, attributing a real hash change to the one
+variable I had deliberately moved. The hash change is real; the cause was not the compiler. Three things
+changed in that window — the pin, `lib sync --full`, and a `deps` relock — and the compiler was the one
+that made no difference. **The delta is dep CONTENT**: `lib/sandhi.cyr` 1.9.9 → 1.9.10 adds a real
+`body_ptr == 0` guard. ⚠ A hash that moves when you change three things is evidence about the set, not
+about your favourite member of it; the isolating build costs two minutes and was worth it.
+
+⚠ **kavach was declared 3.11.12 against a sibling already at 3.11.13** — the `path`-wins hazard firing a
+third time. ⛔ **Measured: the tag edit is inert for the binary.** Building at 3.11.12 and at 3.11.13
+produces the same hash, because `path` had been supplying 3.11.13 to every build regardless of what the
+manifest said. The declaration was wrong; the artifact never was. That is the whole reason a green build
+proves nothing about the declared graph.
+
+⚠ **`lib/sigil.cyr` stays at 3.12.9 against 6.5.21's bundled 3.12.7, and that is correct.** kavach
+3.11.13 declares sigil 3.12.9, so the newer transitive dep wins over the toolchain snapshot. Syncing to
+silence the warning would downgrade a declared requirement and the next `deps` would revert it.
+
 ### Verified on iron — per-window opacity composites on the GPU, agnos 1.56.44 burn
 
 ⭐⭐ **`#92` op 0x06 `BLEND_ALPHA` ran on archaemenid.** `#89 gpu_caps` byte +28 reported `130911`
