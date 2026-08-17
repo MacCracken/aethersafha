@@ -514,9 +514,15 @@ fn ae_gpu_frame_plan(comp, fb): i64 {
             #      exists to see a lower window THROUGH an upper one; a path that cannot stack two
             #      OPAQUE windows must not be the one it lands on. Fixed in the same cut: the frame now
             #      replays each window's [chrome][surface][text] in order.
-            # ⚠ Neither was verified on hardware by the 1.56.44 burn — it ran ONE translucent window over
-            # one opaque one, which does not exercise an overlap. The z-order partition is gated and
-            # mutation-tested on the host only.
+            # ⭐ BOTH RAN ON IRON, 2026-08-16 (agnos 1.56.45, aethersafha 0.16.2 + the op 0x02 chrome
+            # route): the operator reports a live translucent crab over a working puka terminal, with
+            # chrome on the GPU throughout. The 1.56.44 burn could not show this — it demoted the chrome
+            # layer, which is what mis-stacked the overlap in the first place.
+            # ⚠ WHAT THE OPERATOR CONFIRMED IS "see-through and correct", NOT a measured overlap. No
+            # capture isolates an upper window's titlebar against a lower window's surface, so the
+            # z-order PARTITION remains host-gated and mutation-tested while the EMISSION rests on an
+            # eye. That is better evidence than 1.56.45's (which showed the defect) and weaker than a
+            # framebuffer oracle; do not upgrade the wording without one.
             #
             # ⛔⛔ AND THE CHROME LAYER IS THE THIRD CONDITION, WHICH TOOK TWO BURNS TO GET RIGHT.
             # `fill_rect_a` now HAS a GPU route (`#92` op 0x02, constant-coverage mask), so a translucent

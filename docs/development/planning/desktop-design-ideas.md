@@ -1,4 +1,17 @@
-# Desktop Design Ideas — Generative Visual Language for aethersafha
+# Desktop Design Ideas — motion and visual language for aethersafha
+
+> ## ⛔⛔ THE WALLPAPER IS AN IMAGE. 2026-08-16 OPERATOR RULING, AND IT OVERRIDES THIS WHOLE PAGE.
+>
+> This page proposed **"shader wallpapers"** — a backdrop *computed per frame rather than stored* —
+> and roadmap **C1b** carried it as a rung. **It is deleted. It was never a project goal.** Operator,
+> verbatim: *"WALLPAPER SHOULD FUCKING WORK WITH A GOD DAMN IMAGE >>> HENCE THE FUCKING NAME PAPER"* and
+> *"ANY MAGIC SHIT IDEA YOU HAVE FOR ANYTHING ELSE LABELED AS SUCH REMOVE FROM ANY DOCUMENTATION."*
+>
+> ⇒ A wallpaper is a **PNG or a JPEG**, decoded by `chitra`, and C1 is closed by C1a. Every sentence
+> below about a generative, computed or shader backdrop is **void** — do not mine this page for a
+> wallpaper idea, and do not re-open one under another name.
+> ⚠ The page's OTHER content (motion, loaders, the visual vocabulary) is not covered by this ruling —
+> but note that app-facing widget behaviour belongs in the **app library**, not in the compositor.
 
 > ## ⭐ THE TRIGGER HAS FIRED — 2026-08-10. This is the brief now, not an idea log.
 >
@@ -41,10 +54,12 @@ the two. **A correction that lands in one document and not its siblings is half 
 ## The frame — concept survives the rewrite, substrate doesn't
 
 The seed sources are JS/HTML/WebGL — Claude's web design examples
-(<https://claude.ai/design#examples>): organic loaders, a global loader, shader
-wallpapers. **The web implementation is the disposable part.** The durable part
+(<https://claude.ai/design#examples>): organic loaders, a global loader, ~~shader
+wallpapers~~ (⛔ struck 2026-08-16 — see the ruling at the top of this page; a
+wallpaper is an image). **The web implementation is the disposable part.** The durable part
 is the *concept*, and the concepts that caught the eye share one trait worth
-naming: they are **generative — computed per frame, not asset-streamed.** That is
+naming: they are **computed per frame, not asset-streamed.** ⚠ That trait applies
+to MOTION, never to the backdrop. That is
 the same instinct AGNOS already runs on the ML side (everything-is-i64, math over
 assets). A sovereign desktop can express these *more* naturally than the web can,
 because there's no browser engine in the way — a shader talks straight to the GPU
@@ -68,10 +83,26 @@ the same *effect*."
 - **Sovereign restatement**: this is a **compositor-level** concept, not an app concept. It belongs to aethersafha, not to any one program. A system-wide motion vocabulary the compositor owns and apps inherit — the inverse of every app shipping its own spinner.
 - **Open question**: where's the boundary — what does the compositor own vs. what does an app get to override? (Parallels the identity/authorization "capability boundary" thinking — the compositor grants motion, apps consume it.)
 
-### 3. Shader wallpapers
-- **What caught the eye**: dynamic, GPU-driven wallpapers — living math, not a static JPEG.
-- **Sovereign restatement**: literally just math on the GPU — a **mabda surface**. No JS runtime, no Electron, no asset. Arguably the cleanest fit of the three: a shader-as-wallpaper is exactly the kind of thing the everything-is-i64 stack should do cheaply.
-- **Open question**: authoring/format — how is a wallpaper-shader expressed and shipped sovereignly (a Cyrius source? a compiled shader artifact via mabda)? Ties to whatever shader-authoring story mabda lands.
+### 3. ⛔⛔ Shader wallpapers — DELETED 2026-08-16. NOT A GOAL, AND THE ECONOMICS ARE BACKWARDS.
+
+**Operator's argument, and it is the durable one:** *"why would you waste processes to render every
+fucking frame of a wallpaper... such a waste.... even moving wallpaper is a .mov or mp4."*
+
+⇒ The backdrop is the **largest surface on screen** and the **least changing** thing on it. Recomputing
+it every frame spends the most cycles on the least information — the exact inversion of what a
+compositor is for. `AE-0a` exists to STOP repainting unchanged pixels; a computed backdrop would defeat
+the damage model by construction, making every frame full-screen. A still wallpaper is an image; a
+moving one is a **video file** and decodes like one. Neither is a per-frame program.
+
+⚠ Two further reasons it was never real, kept so nobody re-derives it: `#92` exposes a **FIXED op list**
+(`GPU_OP_SUPPORTED`) — there are no programmable shaders to author for — and the "**mabda surface**"
+below is the false attribution `roadmap.md` corrected on 2026-08-01 (the GPU path is the agnos ring-3
+`#82`-`#94` band).
+
+Struck original: *"What caught the eye: dynamic, GPU-driven wallpapers — living math, not a static JPEG.
+Sovereign restatement: literally just math on the GPU — a mabda surface … the cleanest fit of the three."*
+Struck open question: *"how is a wallpaper-shader expressed and shipped sovereignly?"* — void; there is
+no such artifact.
 
 ---
 
@@ -115,7 +146,7 @@ that actually matters here, not raw TOPS):
 | Class | What it is | Sovereignty | AGNOS fit |
 |-------|-----------|-------------|-----------|
 | **CPU** | general-purpose; attn11 already trains `f64` here, no accelerator needed | **most sovereign** — nothing borrowed | the reference tier; always works |
-| **GPU** (programmable SIMT) | flexible throughput — training, flexible inference, *and* the shader/wallpaper visuals above | drivable on **open-driver vendors** (AMD/Intel); NVIDIA gated behind signed GSP firmware | **mabda's eventual target**; one surface serves both ML and the generative visuals |
+| **GPU** (programmable SIMT) | flexible throughput — training, flexible inference, and motion/visual work | drivable on **open-driver vendors** (AMD/Intel); NVIDIA gated behind signed GSP firmware | ⚠ this row said "shader/wallpaper visuals" and named mabda; the wallpaper half is struck (a wallpaper is an image) and the mabda half is the false-attribution the roadmap corrected — aethersafha's GPU path is the agnos ring-3 `#82`-`#94` band |
 | **Tensor cores** | fixed-function low-precision matmul units *inside* the GPU (NVIDIA term) | inherit the GPU's sovereignty — not separable | a GPU-backend detail, not its own tier |
 | **NPU** | *separate* fixed-function block for low-watt sustained int8/int4 inference | **least sovereign** — closed vendor runtimes + proprietary model-compile toolchains, often *no* open path; same firmware wall as NVIDIA, sometimes worse | demand-gated, **post-GPU**, only on open-driver silicon |
 

@@ -128,7 +128,12 @@ desktop and its remaining items are kernel debt; Linux has never had a screen at
 Every `AE-` rung is shipped and iron-proven (`planning/desktop.md:203-217`). What is left is not desktop
 work, it is the bill:
 
-- **A1 — reconcile the staged binary.** `state.md` quotes 13,584,728 B as if the size identifies the
+- **A1 ✅ DONE 2026-08-16 — the staged binary is reconciled and every size now carries a hash.**
+  `stage-tools.sh` → `cmp` against the local build → `burn-prep.sh`'s own staleness gate, all three
+  green, and `state.md` quotes on-disk and on-iron as SEPARATE rows. ⚠ The hazard recurred twice more
+  while closing it, which is why the rule is a rule: agnos `build/agnos` at **1,985,688 B** is
+  `b146780831c6e442` burned and `32927af12471b44b` after a `check.sh` rebuild — same byte count, two
+  binaries. Original note: `state.md` quotes 13,584,728 B as if the size identifies the
   artifact. Measured 2026-08-12: **three distinct binaries share that byte count** — `build/aethersafha_agnos`
   (`1b8b3c57`), the staged `agnos/build/rootfs/bin/aethersafha` (`690160b9`), and a fresh local rebuild
   (`a692279f`). A burn scheduled today flashes an unknown one. Rebuild, restage, re-measure, and quote a
@@ -145,12 +150,20 @@ work, it is the bill:
   all" AND the op bit = "this op exists"); op 0x01 and 0x03 gated separately; the mask is printed at
   probe time; decoding is a pure `ae_gpu_op_supported(mask, op)` with 10 assertions. Original note: (the `#92` op-support mask) in `ae_gpu_probe` and route op dispatch off
   it, instead of discovering support by calling and reading the error.
-- **A4 🔴 — one iron burn with the USB mouse attached**, closing agnos tracker H3 and H5 in one boot with
+- **A4 🟡 — H3 CLOSED 2026-08-16, H5 still open.** The operator drove the 1.56.45 burn **with the USB
+  mouse**: `hid: first mouse report accumulated` → `ptrscan: first sample handed to ring 3` →
+  `pointer motion received -- the cursor is live` → `drag started` → `pointer button click routed` →
+  `drag released`, and the opacity check was done by hand with it. ⇒ **The mouse works on iron; no
+  dedicated burn is owed for that.** ⚠ **H5 is NOT closed and must not be read as closed** — it asks
+  whether a MEDIA KEY on the Keychron can move the cursor or synthesise a click, and that stimulus was
+  never applied. It costs one keypress on any future boot; declare it in advance and watch the pointer.
+  Original entry: one iron burn with the USB mouse attached, closing agnos tracker H3 and H5 in one boot with
   the media-key stimulus **declared in advance**. H5 is a real defect if it fails: the kernel issues
   `SET_PROTOCOL(Boot)` but never `GET_PROTOCOL` and never parses the report descriptor, so if the
   Keychron's phantom mouse interface is not mute, **a media key can move the cursor or synthesise a
   click**. Depends on A1 — we must know which binary is flashed.
-- **A5 🔴 — agnos 1.56.44 is OPEN** (operator, 2026-08-12) for the two kernel defects below.
+- **A5 🔴 — agnos 1.56.45 is OPEN** (operator, 2026-08-16). 1.56.44 RELEASED and burned — it carried the
+  `#92` op 0x06 α dword C3 needed. The two kernel defects below are still open against 1.56.45.
 - **A6 — the `VFS_CHAN` close leak.** `vfs_close_inner` has arms for every tag but `VFS_CHAN`
   (`agnos/kernel/core/vfs.cyr:35, :1262-1282`); `chan_release_pid` runs only on process death. Fix at the
   `SYS_CLOSE` dispatch, and **derive authority first** — an inherited, non-owned channel fd in a child
@@ -269,24 +282,39 @@ fired** — it is a brief now, not an idea log.
     any other surface. This is the load-bearing bite — without a layer, a shader has nowhere to draw.
     ⚠ Interacts with `AE-0a`: the clear is currently ~48% of a GPU frame and a wallpaper REPLACES the
     clear rather than adding to it, so this is not automatically a cost. Measure, do not assume.
-  - **C1b — generative / shader wallpapers.** The concept from the design brief: **computed per frame,
-    not asset-streamed** — the wallpaper *is* a small program, not a stored image. On agnos this is the
-    ring-3 GPU band (`#92` ops); on Linux it is the CPU path until a Linux GPU story exists.
-    ⛔ **NOT via mabda** — `desktop-design-ideas.md` calls a shader wallpaper "a mabda surface", which
-    is the same false claim [corrected here on 2026-08-01](#-corrected-2026-08-01--gpu-acceleration-is-not-out-of-scope-and-it-does-not-go-through-mabda)
-    and left uncorrected in that doc for ten weeks because nothing linked the two. Fix it there when C1b lands.
+  - **C1b — ⛔ DELETED 2026-08-16 BY OPERATOR RULING. A WALLPAPER IS AN IMAGE.**
+    This rung proposed "generative / shader wallpapers — computed per frame, not asset-streamed; the
+    wallpaper *is* a small program, not a stored image", carried over from
+    `planning/desktop-design-ideas.md`. **It is not a goal and never was one.** Operator, verbatim:
+    *"WALLPAPER SHOULD FUCKING WORK WITH A GOD DAMN IMAGE >>> HENCE THE FUCKING NAME PAPER."*
+    ⇒ C1 is CLOSED by C1a: a wallpaper is a PNG or a JPEG, decoded by `chitra`, and there is no second
+    kind. Do not re-open this under any name, and do not treat the design-ideas doc as a wallpaper brief.
   - **C1c ✅ ANSWERED 0.16.0 — the format is PNG and JPEG, and the question was mis-framed.** It asked
     how a wallpaper is "expressed and shipped sovereignly — a Cyrius source, a data file, a shader
     artifact?" ⛔ A wallpaper is a **file**, and the sovereign decoder already existed (`chitra`).
     ⚠ The shader-artifact option was never real on agnos anyway: `#92` exposes a **fixed op list**
     (`GPU_OP_SUPPORTED`), not programmable shaders — there is no upload-a-shader op to author for.
-    C1b's "generative" wallpapers therefore mean *a Cyrius generator compiled in*, which needs no
-    format at all, and it does not block anything.
-- **C3 🚧 CPU PATH DONE 0.15.0 — per-window opacity, chrome and content.** Verified in QEMU against a
-  null: at 255/150/60 the window pixels move monotonically toward the wallpaper while a pixel OUTSIDE
-  the window is byte-identical at all three. ⛔ **Still owed: the agnos GPU route**, which needs a kernel
-  α dword — see below; today a translucent window demotes the frame (latched + named).
-  Original analysis (all still true): Recorded with its
+    ⛔ This entry used to end *"C1b's generative wallpapers therefore mean a Cyrius generator compiled
+    in"* — struck with C1b. **The backdrop is the largest and least-changing surface on screen, so
+    recomputing it per frame spends the most cycles on the least information** and defeats `AE-0a` by
+    making every frame full-screen. A still wallpaper is an image; a moving one is a video file.
+- **C3 ✅ DONE 0.16.2, IRON-PROVEN 2026-08-16 — per-window opacity, chrome and content.** On archaemenid:
+  `#89 +28` = `0x1FF5F`, `#92` **op 0x06 `BLEND_ALPHA`** composites the client surface and **op 0x02
+  `BLEND_COV`** (constant-coverage mask) composites the alpha chrome, both on the GPU, with a live
+  translucent window over a working terminal.
+  ⛔ **THE ANALYSIS BELOW IS KEPT AS HISTORY AND IS NOW FALSE IN ITS TWO LOAD-BEARING CLAIMS**, because
+  the reasoning is worth reading and a silently deleted argument gets re-derived:
+  - *"PER-WINDOW OPACITY IS NOT EXPRESSIBLE IN THE `#92` ABI"* — **false since agnos 1.56.44.** It was a
+    correct reading of the ABI as it stood, and the answer was to change the ABI: op 0x06 puts α in
+    dword 9. The item was filed as a kernel ask, agnos took it, and it burned green.
+  - *"A single translucent window would force the ENTIRE frame back to the CPU — 6.40 ms → 10.58 ms"* —
+    **false, and it was the more expensive mistake.** The perf cliff was treated as structural when it
+    was really one missing primitive: `fill_rect_a` had no GPU route. Two burns went to discovering
+    that (invisible titlebars, then mis-stacked overlap) before op 0x02 — advertised since it was `#93`
+    — turned out to be exactly the operation. ⇒ **Check the op list before calling a gap structural.**
+  - ⚠ Still true and still the rule: applying α to a premultiplied surface must scale colour AND alpha
+    (op 0x06 does), and the knob is whole-window — chrome and content both.
+  Original analysis (kept verbatim below): Recorded with its
   constraints measured, because the obvious reading — "the blend already ships, so this is a render
   tweak" — is wrong on the target that matters.
   - ⭐ **What already exists**: `#92` op 0x01 does real premultiplied src-over on the shader cores

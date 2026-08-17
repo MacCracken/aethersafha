@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+### Verified on iron — the whole opacity path, 2026-08-16 (agnos 1.56.45)
+
+⭐⭐ **M6-C3 CLOSES ON HARDWARE.** A translucent `crab` you can see through, over a working `puka`
+terminal, with **chrome on the GPU** — `#92` op 0x06 for the client surface, op 0x02 for the alpha
+chrome. Both burns' defects are gone: titlebar backgrounds present, and the operator reports the
+stacking correct.
+
+⚠ **What that is and is not.** "See-through and correct" is an eye, not a framebuffer oracle. The
+z-order PARTITION is host-gated and mutation-tested; the EMISSION now has a hardware run behind it that
+shows no defect, which is stronger than 1.56.45 (which showed one) and weaker than a measured overlap.
+
+⛔ **`/bin/puka` was setu's `present_probe`, not the terminal, for two burns** — a staging default, read
+as a capability limit because two files still claimed puka could not build `--agnos`. It builds fine
+and had run on iron weeks earlier. `PUKA_TERMINAL=1` stages the real one; the false claims are deleted
+at both sites with what they cost recorded.
+
 ### Fixed — `fill_rect_a` gets a GPU route (`#92` op 0x02), which was the missing piece behind BOTH chrome burns
 
 ⛔⛔ **Two consecutive iron burns, one absent primitive.** `fill_rect_a` was the only drawing call with no
