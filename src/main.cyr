@@ -331,6 +331,11 @@ var ae_ptr_drag = 0;       # 1 = dragging a window by its titlebar
 # the allocator reuses that memory, writing into whatever now lives there. An id is re-resolved against
 # the live vector each motion, so a closed window ENDS the drag instead of continuing it invisibly.
 var ae_ptr_drag_id = 0;    # window id being dragged (0 = none)
+# ⭐ WHICH GRIP the current pointer drag owns: DECO_TITLEBAR moves the window, DECO_RESIZE_* resizes it.
+# ⚠ One drag flag with a grip beside it, rather than a second `ae_ptr_resize` boolean — two flags for
+# one gesture can disagree, and the release path would have to clear both.
+var ae_ptr_grip = 0;
+var ae_resize_started = 0;   # first-occurrence latch, same shape as ae_drag_started
 var ae_ptr_first = 0;      # one-shot marker latch
 var ae_ptr_click = 0;      # one-shot marker latch
 
@@ -408,7 +413,20 @@ fn ae_pointer_event(comp, ev, frame): i64 {
             if (didx >= 0) {
                 var dwin = comp_get(comp, didx);
                 if (dwin != 0) {
-                    input_move(dwin, dx, dy, ae_geom_w, ae_geom_h - TITLEBAR_H);
+                    # ⛔ RETIRE THE OLD RECT BEFORE EITHER GESTURE CHANGES IT. A resize that SHRINKS a
+                    # window vacates the region it gave up, and that region is in neither `cur` nor
+                    # `prev` for the damage model — the old edges would stay on screen as a ghost. The
+                    # move path never needed this because `win_stamp_prev` covers a same-size rect that
+                    # moved; a size change is the case it does not cover.
+                    # ⚠ Same fix as F4-close, F6-minimize and un-maximize. Four sites now; that is the
+                    # signal it belongs to "the window's extent changed", not to any one gesture.
+                    if (win_grip_is_resize(ae_ptr_grip) == 1) {
+                        comp_retire_add(win_x(dwin), win_y(dwin), win_w(dwin), win_total_h(dwin));
+                        win_resize_by(dwin, ae_ptr_grip, dx, dy, ae_geom_w, ae_geom_h - TITLEBAR_H);
+                    }
+                    if (win_grip_is_resize(ae_ptr_grip) == 0) {
+                        input_move(dwin, dx, dy, ae_geom_w, ae_geom_h - TITLEBAR_H);
+                    }
                 }
             }
         }
@@ -456,9 +474,28 @@ fn ae_pointer_event(comp, ev, frame): i64 {
                     println_int(input_last_action());
                     println_int(input_last_src());
                 }
+                # ⭐⭐ THE RESIZE GRIPS, WIRED (M7). `deco_hit` has returned DECO_RESIZE_R/_B/_BR since it
+                # was written and this handler consumed four of nine regions — the grips were hit-tested
+                # every frame and the answer discarded, exactly like MAX/MIN were before they were wired.
+                # ⚠ A resize drag is the SAME state machine as the titlebar drag, with the grip recorded
+                # so motion knows which edge is moving. Reusing `ae_ptr_drag` rather than adding a second
+                # flag keeps one "a pointer gesture owns this window" fact instead of two that can
+                # disagree — the release path already clears it.
+                if (win_grip_is_resize(hit) == 1) {
+                    ae_ptr_drag = 1;
+                    ae_ptr_drag_id = win_id(win);
+                    ae_ptr_grip = hit;
+                    ae_drag_frame = frame;
+                    if (ae_resize_started == 0) {
+                        ae_resize_started = 1;
+                        println("aethersafha: resize started -- a grip press was caught, region:");
+                        println_int(hit);
+                    }
+                }
                 if (hit == Deco.DECO_TITLEBAR) {
                     ae_ptr_drag = 1;
                     ae_ptr_drag_id = win_id(win);
+                    ae_ptr_grip = Deco.DECO_TITLEBAR;
                     ae_drag_frame = frame;
                     if (ae_drag_started == 0) {
                         ae_drag_started = 1;
@@ -999,6 +1036,18 @@ fn main(): i64 {
                     # that window while the operator believes they are picking an app.
                     if (lk != LnchKey.LNCH_K_NONE) { i = i + 1; continue; }
 
+                    # ⭐ F3 CYCLES THE THEME (M7-E). Four rupa variants shipped and the desktop could
+                    # only ever show one. ⚠ The repaint is free: `render_desktop` -> `wp_track_theme`
+                    # sees a different background token, bumps the wallpaper serial, and
+                    # `rend_band_compute` refuses to band across it — so the whole frame redraws
+                    # without the damage model needing to know what a theme is.
+                    if (bhumi_key_usage(ev) == HidUsage.HID_F3) {
+                        ae_theme_cycle();
+                        println("aethersafha: theme switched:");
+                        println(rupa_theme_name(rupa_theme_active()));
+                        i = i + 1;
+                        continue;
+                    }
                     # ⭐ F2 OPENS IT. Read before `input_handle` for the same reason, and deliberately
                     # NOT an `InputAction`: the launcher is compositor chrome, not a window operation,
                     # and putting it in that enum would offer it to `input_apply`'s window arms.

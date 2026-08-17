@@ -42,6 +42,7 @@ enum HidUsage {
     # ⚠ F2 is free — F4-F10 are the window-management band above and F1/F3 are unclaimed, so this takes
     # the lowest free function key rather than displacing anything.
     HID_F2  = 0x3B;   # open the application launcher
+    HID_F3  = 0x3C;   # cycle the desktop theme (M7-E)
     # ⛔ VALUES ARE THE HID BOOT-KEYBOARD USAGE CODES, cross-checked against a second consumer rather
     # than a table: crab's own key handling names `Up/Down (0x52/0x51)`, `Left/Right (0x50/0x4F)` and
     # `Enter (0x28)` for the same wire. A usage code guessed here would silently bind the wrong key.
@@ -289,10 +290,20 @@ fn input_apply(comp, action, bound_w, bound_h): i64 {
         return 0;
     }
     if (action == InputAction.IA_MAXIMIZE_FOCUSED) {
+        # ⛔⛔ THIS USED TO FLIP THE FLAG AND NOTHING ELSE, so F5 "maximized" a window that never moved.
+        # `WS_MAXIMIZED` was written here and read by NO renderer — measured 2026-08-17, zero consumers
+        # outside this function and the enum itself. A state nothing acts on is not a feature.
+        # ⭐ `bound_w`/`bound_h` are the SCREEN geometry the kernel reported, already threaded into this
+        # function for the window mover's clamp — the size was here all along, unused.
+        # ⛔ RETIRE THE OLD RECT, exactly as the minimize arm below does. A maximized window covers more
+        # than it did, but an UN-maximized one covers LESS: the region it vacates is in neither `cur` nor
+        # `prev` for the damage model, so without this the old edges stay on screen as a ghost. That is
+        # the same defect the F4 close and the F6 minimize both had.
+        comp_retire_add(win_x(win), win_y(win), win_w(win), win_total_h(win));
         if (win_state(win) == WinState.WS_MAXIMIZED) {
-            win_set_state(win, WinState.WS_NORMAL);
+            win_unmaximize(win);
         } else {
-            win_set_state(win, WinState.WS_MAXIMIZED);
+            win_maximize(win, bound_w, bound_h);
         }
         return 0;
     }

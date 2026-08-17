@@ -87,6 +87,55 @@ fn main() {
     # panel is DRAWN: `render_launcher` could be unhooked from `render_desktop` and every one of those
     # 44 assertions would stay green. This is the seam that a pure test structurally cannot see, and it
     # is the same gap that let a z-order reorder pass while never reaching the pixels.
+    # ----- ⭐⭐ M7-E: SWITCHING THE THEME REPAINTS THE WHOLE FRAME ---------------------------------
+    # ⛔ A theme change moves no window, so a damage model that tracks window rects cannot see it — the
+    # frame would band and the OLD colours would survive underneath. `wp_track_theme` is what closes
+    # that: it compares the background token and bumps the wallpaper serial only when the colour really
+    # changed, and `rend_band_compute` refuses to band across a serial change.
+    # ⚠ ASSERTED ON THE BACKDROP, far from any window, because that is the region a banded frame would
+    # leave stale — a pixel inside a window repaints for unrelated reasons and would prove nothing.
+    test_group("desktop — cycling the theme repaints the backdrop (pixel proof)");
+    var td = desktop_new();
+    var tfb = bhumi_fb_new(320, 240);
+    ae_gpu_frame_ok = 0;
+    ae_theme_select(0);
+    # ⛔⛔ WHAT THIS TEST DOES **NOT** PROVE, STATED BECAUSE I FIRST CLAIMED IT DID.
+    # The interesting half of a theme switch is that it INVALIDATES THE DAMAGE BAND — a theme moves no
+    # window, so a banded frame would repaint only the rows a window happened to be in and leave the old
+    # colours everywhere else. This test cannot see that: measured 2026-08-17, deleting the
+    # `ae_wp_serial` bump from `wp_track_theme` leaves every assertion below GREEN, because
+    # `rend_band_valid()` is 0 throughout here (`render_desktop` full-repaints in this harness) so a
+    # stale frame is not even possible to produce.
+    # ⇒ What IS proven below: the four variants are reachable, the cycle wraps, out-of-range is refused,
+    # and the backdrop token actually changes. The invalidation half needs a harness where the band is
+    # live — the QEMU framebuffer oracle is the honest home for it, not this file.
+    # ⚠ Do not "strengthen" this by asserting `rend_band_valid() == 1`; it is 0 here and the assertion
+    # would be a false precondition, which is worse than an acknowledged gap.
+    render_desktop(td, tfb);
+    var bg0 = bhumi_fb_get(tfb, 300, 220);
+    assert_eq(ae_theme_index(), 0, "precondition: variant 0 is active");
+
+    ae_theme_cycle();
+    render_desktop(td, tfb);
+    assert_eq(ae_theme_index(), 1, "cycling advances the variant");
+    assert_eq(t_ne_d(bhumi_fb_get(tfb, 300, 220), bg0), 1,
+              "  ...and the BACKDROP actually repaints — the band did not hold the old colour");
+
+    # ⛔ ALL FOUR ARE REACHABLE AND IT RETURNS HOME. A cycle that stops early, or one that never wraps,
+    # strands variants that shipped — which is the state this rung exists to fix.
+    ae_theme_cycle(); ae_theme_cycle();
+    assert_eq(ae_theme_index(), 3, "  ...through every variant");
+    ae_theme_cycle();
+    assert_eq(ae_theme_index(), 0, "  ...and wraps back to the default");
+    render_desktop(td, tfb);
+    assert_eq(bhumi_fb_get(tfb, 300, 220), bg0, "a full cycle restores the original backdrop exactly");
+
+    # ⚠ Out of range is REFUSED, not clamped: a caller computing an index wrongly should see it rather
+    # than silently getting the default and concluding the switch is broken.
+    assert_eq(ae_theme_select(4), 0, "an out-of-range variant is refused");
+    assert_eq(ae_theme_select(0 - 1), 0, "  ...as is a negative one");
+    assert_eq(ae_theme_index(), 0, "  ...and the active variant is untouched");
+
     test_group("desktop — the launcher panel is composited (pixel proof)");
     var ld = desktop_new();
     var lfb = bhumi_fb_new(400, 300);

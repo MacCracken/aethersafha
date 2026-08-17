@@ -55,6 +55,27 @@ fn main() {
     assert_eq(comp_focused(c), 2, "focus-next leaves focus on the TOP of the stack");
     assert_eq(comp_focused_window(c), bottom_before, "  ...and the window it raised is the old BOTTOM");
     assert_eq(comp_get(c, 1), top_before, "  ...with the old top pushed down one");
+    # ⛔⛔ MAXIMIZE MUST CHANGE GEOMETRY, NOT JUST THE FLAG. Until 2026-08-17 this arm flipped
+    # `WS_MAXIMIZED` and nothing read it — zero consumers outside the enum — so F5 "maximized" a window
+    # that never moved. The state assertion below passed the whole time, which is exactly why it was not
+    # noticed: it was testing the flag, and the flag was the bug.
+    var xw = comp_focused_window(c);
+    win_move(xw, 37, 41);
+    win_resize(xw, 120, 90);
+    input_apply(c, InputAction.IA_MAXIMIZE_FOCUSED, 800, 600);
+    assert_eq(win_x(xw), 0, "maximize moves the window to the origin");
+    assert_eq(win_y(xw), 0, "  ...top edge too");
+    assert_eq(win_w(xw), 800, "  ...and fills the work area's width");
+    assert_eq(win_h(xw), 600, "  ...and its CONTENT height (chrome sits above it)");
+    # ⚠ The total on-screen extent must not exceed the screen, or `#88`/`#87` REJECT the rect and the
+    # GPU refuses the whole frame rather than drawing a too-tall window.
+    assert_eq(win_total_h(xw), 600 + TITLEBAR_H, "  ...total extent = content + chrome");
+    input_apply(c, InputAction.IA_MAXIMIZE_FOCUSED, 800, 600);
+    assert_eq(win_x(xw), 37, "un-maximize RESTORES the previous x");
+    assert_eq(win_y(xw), 41, "  ...y");
+    assert_eq(win_w(xw), 120, "  ...width");
+    assert_eq(win_h(xw), 90, "  ...and height — the restore rect survived");
+    # Put it back for the state assertions that follow.
     input_apply(c, InputAction.IA_MAXIMIZE_FOCUSED, 800, 600);
     assert_eq(win_state(comp_focused_window(c)), WinState.WS_MAXIMIZED, "maximize focused");
     input_apply(c, InputAction.IA_MAXIMIZE_FOCUSED, 800, 600);
@@ -82,6 +103,45 @@ fn main() {
     assert_eq(win_x(mw), 240, "two rights are two steps");
     input_apply(m, InputAction.IA_MOVE_DOWN, 800, 600);
     assert_eq(win_y(mw), 200, "down moves by one step");
+
+    # ----- ⭐⭐ M7 — RESIZE: the grips existed and nothing consumed them --------------------------
+    # ⛔ `deco_hit` has returned DECO_RESIZE_R/_B/_BR since it was written, and the pointer handler
+    # consumed four of nine regions — hit-tested every frame, answer discarded. Same shape as the
+    # maximize/minimize buttons, which were painted and inert until wired.
+    test_group("input — resize grips change the size, with a floor and an edge clamp");
+    var r = comp_new();
+    comp_create_window(r, 100, 100, 200, 150, "R");
+    var rw = comp_focused_window(r);
+    assert_eq(win_grip_is_resize(Deco.DECO_RESIZE_R), 1, "R is a grip");
+    assert_eq(win_grip_is_resize(Deco.DECO_RESIZE_BR), 1, "BR is a grip");
+    assert_eq(win_grip_is_resize(Deco.DECO_TITLEBAR), 0, "the titlebar is NOT a grip — it moves");
+    assert_eq(win_grip_is_resize(Deco.DECO_CLOSE), 0, "nor is the close button");
+
+    assert_eq(win_resize_by(rw, Deco.DECO_RESIZE_R, 40, 999, 2000, 2000), 1, "the right grip resizes");
+    assert_eq(win_w(rw), 240, "  ...width grew by the delta");
+    assert_eq(win_h(rw), 150, "  ...and the RIGHT grip ignores dy entirely");
+    win_resize_by(rw, Deco.DECO_RESIZE_B, 999, 30, 2000, 2000);
+    assert_eq(win_h(rw), 180, "the bottom grip grows height");
+    assert_eq(win_w(rw), 240, "  ...and ignores dx");
+    win_resize_by(rw, Deco.DECO_RESIZE_BR, 10, 10, 2000, 2000);
+    assert_eq(win_w(rw), 250, "the corner grip moves both");
+    assert_eq(win_h(rw), 190, "  ...both axes");
+
+    # ⛔ THE FLOOR IS A GPU CONSTRAINT, NOT TASTE. A window dragged to zero or negative width makes
+    # `w < 1`, and `#88`/`#87` REJECT such a rect rather than clipping — the GPU refuses the WHOLE
+    # frame, so one over-drag blanks the desktop instead of pinching one window.
+    win_resize_by(rw, Deco.DECO_RESIZE_BR, 0 - 5000, 0 - 5000, 2000, 2000);
+    assert_eq(win_w(rw), WIN_MIN_W, "an over-drag inward clamps to the minimum width");
+    assert_eq(win_h(rw), WIN_MIN_H, "  ...and the minimum height");
+    assert_eq(win_resize_by(rw, Deco.DECO_RESIZE_BR, 0 - 100, 0 - 100, 2000, 2000), 0,
+              "  ...and once at the floor it reports NO change");
+
+    # ⛔ AND THE OUTWARD CLAMP IS THE SAME HAZARD MIRRORED: growing past the bound is the out-of-range
+    # rect the GPU refuses. The window keeps its origin, so the limit is bound - origin.
+    win_move(rw, 100, 100);
+    win_resize_by(rw, Deco.DECO_RESIZE_BR, 9000, 9000, 800, 600);
+    assert_eq(win_w(rw), 700, "growth clamps to bound_w - x");
+    assert_eq(win_h(rw), 500, "  ...and bound_h - y");
 
     # ⛔ THE EDGE CLAMP IS THE POINT, NOT A NICETY. `#88`/`#87` REJECT an out-of-range rect instead of
     # clipping it, so a window pushed past an edge does not look wrong — it drops the entire frame off

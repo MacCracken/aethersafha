@@ -61,7 +61,18 @@ enum WinOff {
     # W_PREMUL, which describes the per-pixel alpha the CLIENT authored. The two multiply: a
     # premultiplied surface at 50% window opacity is that surface's own alpha scaled by 128.
     W_OPACITY = 136;
-    W_SZ    = 144;
+    # ⭐⭐ M7 — THE RESTORE RECT: where a window goes back to when it stops being maximized.
+    # ⛔ MAXIMIZE WAS A NO-OP UNTIL 2026-08-17, AND THIS IS THE FIELD IT WAS MISSING. `IA_MAXIMIZE_FOCUSED`
+    # flipped `W_STATE` to `WS_MAXIMIZED` and NOTHING read it — no renderer, no GPU path, nothing sized a
+    # window from it — so F5 changed a number and the screen never moved. Making it real needs somewhere
+    # to remember the pre-maximize geometry, or "restore" has nothing to restore TO.
+    # ⚠ Distinct from W_PX..W_PH, which are LAST FRAME's rect for the damage model and are overwritten
+    # every frame. These four survive until the window is un-maximized.
+    W_RX    = 144;
+    W_RY    = 152;
+    W_RW    = 160;
+    W_RH    = 168;
+    W_SZ    = 176;
 }
 
 # win_new(id, x, y, w, h, title_cstr) -> *Window (0 on OOM)
@@ -208,4 +219,120 @@ fn win_set_state(p, s) { store64(p + W_STATE, s); return 0; }
 fn win_set_agent(p, a) { store64(p + W_AGENT, a); return 0; }
 fn win_move(p, x, y)   { store64(p + W_X, x); store64(p + W_Y, y); return 0; }
 fn win_resize(p, w, h) { store64(p + W_W, w); store64(p + W_H, h); return 0; }
+
+# ============================================================================================
+# ⭐⭐ MAXIMIZE / RESTORE — geometry, not just a flag
+# ============================================================================================
+# ⛔ THE STATE FLAG ALONE WAS THE WHOLE FEATURE FOR MONTHS, and it did nothing. `win_set_state(win,
+# WS_MAXIMIZED)` was written by F5 and read by no renderer, so a "maximized" window kept its original
+# rect and the operator saw nothing happen. A state that nothing acts on is not a state.
+fn win_restore_rect_save(p): i64 {
+    store64(p + W_RX, load64(p + W_X));
+    store64(p + W_RY, load64(p + W_Y));
+    store64(p + W_RW, load64(p + W_W));
+    store64(p + W_RH, load64(p + W_H));
+    return 0;
+}
+fn win_restore_x(p) { return load64(p + W_RX); }
+fn win_restore_y(p) { return load64(p + W_RY); }
+fn win_restore_w(p) { return load64(p + W_RW); }
+fn win_restore_h(p) { return load64(p + W_RH); }
+
+# Fill the work area. `sw` / `content_h` are the SAME bounds the window MOVER is already clamped to —
+# `ae_geom_w` and `ae_geom_h - TITLEBAR_H`, derived from the geometry the kernel reports. Taking the
+# content height directly, rather than a screen height this function re-adjusts, keeps ONE subtraction
+# in the whole path: three conversions to express one fact is where an off-by-one lives.
+# ⚠ `win_h` is the CONTENT height and chrome sits ABOVE it, so a window at `content_h` occupies exactly
+# the screen. Maximizing to the full screen height instead would push the titlebar off the top AND make
+# the total extent exceed the back buffer — and `#88`/`#87` REJECT an out-of-range rect rather than
+# clipping it, so the GPU would refuse the whole frame rather than draw a slightly-too-tall window.
+fn win_maximize(p, sw, content_h): i64 {
+    if (win_state(p) == WinState.WS_MAXIMIZED) { return 0; }
+    win_restore_rect_save(p);
+    store64(p + W_X, 0);
+    store64(p + W_Y, 0);
+    store64(p + W_W, sw);
+    store64(p + W_H, content_h);
+    win_set_state(p, WinState.WS_MAXIMIZED);
+    return 1;
+}
+
+# ============================================================================================
+# ⭐⭐ M7 — RESIZE. The regions existed; nothing consumed them.
+# ============================================================================================
+# ⛔ `deco_hit` has returned DECO_RESIZE_R / _B / _BR since it was written, and the pointer handler
+# consumed CLOSE, MAX, MIN and TITLEBAR — so the grips were hit-tested on every frame and the answer
+# thrown away. Same shape as the maximize/minimize buttons, which were PAINTED and inert until wired:
+# a control that responds to nothing reads as a broken desktop, which is worse than one that is absent.
+#
+# ⚠ A MINIMUM SIZE IS NOT COSMETIC. A window dragged to zero (or negative) width produces `w < 1`, and
+# `#88`/`#87` REJECT such a rect rather than clipping it — the GPU refuses the whole frame, so one
+# over-drag would blank the desktop rather than pinch one window. The floor also has to leave room for
+# the three deco buttons or the titlebar's own controls fall outside the window that owns them.
+# ⭐ MOVED HERE FROM render.cyr (2026-08-17): these name WINDOW regions, and this file now ACTS on them
+# (`win_grip_is_resize`, `win_resize_by`). `deco_hit` in render.cyr still produces them; the producer
+# living a layer above the definition is fine, the reverse was not.
+enum Deco {
+    DECO_NONE      = 0;
+    DECO_BODY      = 1;
+    DECO_TITLEBAR  = 2;   # draggable region
+    DECO_CLOSE     = 3;
+    DECO_MAX       = 4;
+    DECO_MIN       = 5;
+    DECO_RESIZE_R  = 6;
+    DECO_RESIZE_B  = 7;
+    DECO_RESIZE_BR = 8;
+}
+
+var WIN_MIN_W = 120;
+var WIN_MIN_H = 60;
+
+# Resize by a pointer delta on the given grip. `bound_w`/`bound_h` are the same usable extent the mover
+# clamps to. -> 1 if the size actually changed.
+# ⚠ ONLY RIGHT/BOTTOM GRIPS EXIST, so x/y never move and the window cannot walk off the top-left while
+# being resized. Left/top grips would have to move the origin AND resize in one step; that is a second
+# behaviour with its own clamp interactions, and it is not written here rather than half-written.
+fn win_resize_by(p, grip, dx, dy, bound_w, bound_h): i64 {
+    var w = load64(p + W_W);
+    var h = load64(p + W_H);
+    var nw = w;
+    var nh = h;
+    if (grip == Deco.DECO_RESIZE_R)  { nw = w + dx; }
+    if (grip == Deco.DECO_RESIZE_B)  { nh = h + dy; }
+    if (grip == Deco.DECO_RESIZE_BR) { nw = w + dx; nh = h + dy; }
+    if (nw < WIN_MIN_W) { nw = WIN_MIN_W; }
+    if (nh < WIN_MIN_H) { nh = WIN_MIN_H; }
+    # ⛔ CLAMP TO THE EDGE, not to the screen: the window keeps its origin, so the most it may grow is
+    # the distance from that origin to the bound. Growing past it is the out-of-range rect the GPU
+    # refuses, and the failure would be a dropped FRAME, not a clipped window.
+    var maxw = bound_w - load64(p + W_X);
+    var maxh = bound_h - load64(p + W_Y);
+    if (nw > maxw) { nw = maxw; }
+    if (nh > maxh) { nh = maxh; }
+    if (nw < WIN_MIN_W) { nw = WIN_MIN_W; }
+    if (nh < WIN_MIN_H) { nh = WIN_MIN_H; }
+    if (nw == w) { if (nh == h) { return 0; } }
+    store64(p + W_W, nw);
+    store64(p + W_H, nh);
+    return 1;
+}
+
+# Is this hit region a resize grip?
+fn win_grip_is_resize(hit): i64 {
+    if (hit == Deco.DECO_RESIZE_R)  { return 1; }
+    if (hit == Deco.DECO_RESIZE_B)  { return 1; }
+    if (hit == Deco.DECO_RESIZE_BR) { return 1; }
+    return 0;
+}
+
+# Put it back where it was. -> 1 if it moved, 0 if it was not maximized.
+fn win_unmaximize(p): i64 {
+    if (win_state(p) != WinState.WS_MAXIMIZED) { return 0; }
+    store64(p + W_X, load64(p + W_RX));
+    store64(p + W_Y, load64(p + W_RY));
+    store64(p + W_W, load64(p + W_RW));
+    store64(p + W_H, load64(p + W_RH));
+    win_set_state(p, WinState.WS_NORMAL);
+    return 1;
+}
 fn win_set_title(p, t) { store64(p + W_TITLE, t); return 0; }

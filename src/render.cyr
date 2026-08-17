@@ -18,17 +18,10 @@ enum RenderK {
 }
 
 # Which part of a window's decoration a point hits (parity: renderer.rs DecorationHit).
-enum Deco {
-    DECO_NONE      = 0;
-    DECO_BODY      = 1;
-    DECO_TITLEBAR  = 2;   # draggable region
-    DECO_CLOSE     = 3;
-    DECO_MAX       = 4;
-    DECO_MIN       = 5;
-    DECO_RESIZE_R  = 6;
-    DECO_RESIZE_B  = 7;
-    DECO_RESIZE_BR = 8;
-}
+# ⚠ `enum Deco` MOVED TO `src/window.cyr` (2026-08-17). It names WINDOW decoration regions and
+# `window.cyr` now acts on them (`win_grip_is_resize`, `win_resize_by`), so leaving the enum here made
+# the lower layer depend on the higher one. Every file that includes render.cyr already includes
+# window.cyr — verified — so the move costs no consumer anything.
 
 # fill_rect: fill [x,x+w) x [y,y+h) with color, clamped to framebuffer bounds.
 #

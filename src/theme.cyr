@@ -14,3 +14,55 @@
 
 # Pack a rupa 0xRRGGBB token into the bhumi framebuffer color (the compositor's format).
 fn ae_bhumi(c): i64 { return bhumi_xrgb(rupa_color_r(c), rupa_color_g(c), rupa_color_b(c)); }
+
+# ============================================================================================
+# ⭐⭐ M7-E — RUNTIME THEME SWITCHING
+# ============================================================================================
+# ⛔⛔ FOUR THEMES SHIPPED AND THE DESKTOP COULD ONLY EVER SHOW ONE. rupa 0.1.2 carries MUDRA and
+# SHANTA, each in dark and light, plus `rupa_theme_set_active` — and the compositor picked a variant at
+# boot and never called it. The design work was done and unreachable, which is the most expensive kind
+# of unfinished: it looks complete from the outside and nobody re-opens it.
+#
+# ⭐ THE DAMAGE PATH ALREADY EXISTS AND IS THE WHOLE REASON THIS IS CHEAP. A theme change repaints
+# EVERY pixel without moving a window, so it is invisible to a damage model that tracks window rects —
+# `AE-0a` would band the frame and the old colours would survive underneath. `wp_track_theme` already
+# solves it: it compares the background token and bumps `ae_wp_serial` only when the colour actually
+# changed, and `rend_band_compute` refuses to band across a serial change. ⇒ Switching the theme
+# invalidates the frame for free, and switching to the SAME theme costs nothing.
+# ⚠ That "compare first, then set" is load-bearing in the other direction too: bumping the serial
+# unconditionally would refuse to band on every frame and silently undo `AE-0a`'s 3.83 -> 2.46 ms.
+#
+# ⚠ THE ORDER IS THE PRODUCT DECISION, not an implementation detail: the two GROUNDS alternate before
+# the mode flips, so one keypress moves between MUDRA and SHANTA — the choice an operator actually
+# makes — and two presses change dark/light. A dark/light-first order would bury the ground switch.
+var AE_THEME_N = 4;
+var ae_theme_i = 0;
+
+fn ae_theme_at(i): i64 {
+    if (i == 1) { return rupa_theme_shanta_dark(); }
+    if (i == 2) { return rupa_theme_mudra_light(); }
+    if (i == 3) { return rupa_theme_shanta_light(); }
+    return rupa_theme_mudra_dark();          # 0 — the sovereign default
+}
+
+fn ae_theme_index(): i64 { return ae_theme_i; }
+fn ae_theme_count(): i64 { return AE_THEME_N; }
+
+# Select variant `i` and make it the desktop's active theme. -> the theme, or 0 if out of range.
+# ⚠ Out of range is REFUSED rather than clamped: a caller computing an index wrongly should see it,
+# not silently get MUDRA dark and conclude the switch is broken.
+fn ae_theme_select(i): i64 {
+    if (i < 0) { return 0; }
+    if (i >= AE_THEME_N) { return 0; }
+    ae_theme_i = i;
+    var t = ae_theme_at(i);
+    rupa_theme_set_active(t);
+    return t;
+}
+
+# Advance to the next variant and activate it. -> the new theme.
+fn ae_theme_cycle(): i64 {
+    var n = ae_theme_i + 1;
+    if (n >= AE_THEME_N) { n = 0; }
+    return ae_theme_select(n);
+}
