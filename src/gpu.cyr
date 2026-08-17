@@ -518,12 +518,17 @@ fn ae_gpu_frame_plan(comp, fb): i64 {
             # one opaque one, which does not exercise an overlap. The z-order partition is gated and
             # mutation-tested on the host only.
             #
-            # ⛔⛔ AND THE BURN FOUND THE PRICE NOBODY HAD PRICED. Admitting a translucent window onto the
-            # GPU frame ALSO takes the CHROME layer off it — `fill_rect_a` has no `#88` route, so a frame
-            # that keeps chrome on the GPU loses every alpha fill into a framebuffer the skipped `#39`
-            # blit never copies. That is what `ae_gpu_alpha_chrome` is; see its banner in render.cyr for
-            # the iron signature (every window lost its titlebar background at `--opacity 128`).
-            if (win_translucent(ww) == 1) { if (ae_gpu_alpha_ok() == 1) { ae_gpu_alpha_chrome = 1; } else {
+            # ⛔⛔ AND THE CHROME LAYER IS THE THIRD CONDITION, WHICH TOOK TWO BURNS TO GET RIGHT.
+            # `fill_rect_a` now HAS a GPU route (`#92` op 0x02, constant-coverage mask), so a translucent
+            # frame keeps its chrome on the GPU and `ae_gpu_present_frame`'s per-window interleave orders
+            # it correctly. ⚠ On a kernel that does not advertise op 0x02 there is still no route, and
+            # `ae_gpu_alpha_chrome` sends the whole chrome layer to the CPU where the `#39` blit carries
+            # it — correct pixels, wrong stacking for OVERLAPPING windows, and strictly better than the
+            # invisible titlebars of burn 1. Both prior shapes are recorded at `ae_gpu_cov_ok`.
+            if (ae_gpu_chrome_cpu_needed(win_translucent(ww), ae_gpu_alpha_ok(), ae_gpu_cov_ok()) == 1) {
+                ae_gpu_alpha_chrome = 1;
+            }
+            if (win_translucent(ww) == 1) { if (ae_gpu_alpha_ok() == 1) { } else {
                 if (ae_gpu_op_demote == 0) {
                     ae_gpu_op_demote = 1;
                     # ⚠ NAME THE KERNEL, NOT THE FEATURE. This line used to say op 0x06 was "unadvertised
@@ -679,6 +684,141 @@ fn ae_gpu_alpha_ok(): i64 {
 }
 
 # ============================================================================================
+# ⭐⭐ ALPHA CHROME ON THE GPU — `#92` op 0x02 BLEND_COV WITH A CONSTANT COVERAGE MASK
+# ============================================================================================
+# ⛔⛔ WHY: `fill_rect_a` WAS THE ONLY DRAWING PRIMITIVE WITH NO GPU ROUTE, AND THAT COST TWO BURNS.
+# Burn 1 (1.56.44): a translucent frame kept chrome "on the GPU" while every alpha fill went to the
+# userland framebuffer, and the skipped `#39` blit threw them away — no titlebar backgrounds.
+# Burn 2 (1.56.45): the repair took chrome OFF the GPU for those frames, which fixed the missing
+# titlebars and immediately reintroduced the LAYER-vs-Z-ORDER defect — one band blit puts every
+# window's chrome down before any client surface, so a LOWER window's surface covers an UPPER
+# window's titlebar. Operator: *"zlevel of topbar and content don't seem to be the same"*.
+# ⇒ Both burns are the same missing primitive. Give `fill_rect_a` a GPU route and neither happens:
+# chrome stays on the GPU, `ae_gpu_present_frame`'s per-window interleave orders it correctly, and
+# the CPU-fallback mode below becomes what it should always have been — a fallback.
+#
+# ⭐ op 0x02 IS ALREADY EXACTLY THIS OPERATION. `blend_cov.s`: `f = cov/255 · sa' = colour_a·f ·
+# sc' = colour_c·f · out = sc' + dst·(1 - sa'/255)`. Feed it a coverage mask whose every byte is the
+# window's alpha and an OPAQUE colour, and it computes `colour·α/255 + dst·(1-α/255)` — `rend_blend`.
+# ⚠ THE COLOUR MUST CARRY A = 255. The shader reads colour_a to form sa'; a theme colour arrives as
+# 0x00RRGGBB, and A = 0 would make sa' = 0, i.e. `out = sc' + dst` — ADDITIVE, not blended. `| 0xFF000000`
+# is load-bearing, not defensive. (`#88 gpu_fill_rect` ignores the byte, which is why nothing caught it.)
+#
+# ⭐⭐ ONE SLOT SERVES EVERY RECT AT A GIVEN ALPHA, AND THE UNIFORMITY IS WHY. A coverage mask is read
+# `w` bytes per row for `h` rows; when every byte is identical the PITCH CANNOT MATTER, so a single
+# buffer sized to the largest rect satisfies a titlebar, a body and an accent strip alike. The kernel
+# accepts an oversized slot (`gpo_slot_bytes(op,w,h) > shm_size` is the refusal, syscall.cyr:4199).
+# ⇒ The upload happens when the ALPHA or the high-water SIZE changes — not per rect and not per frame.
+#
+# ⚠ PRECISION, STATED: `blend_cov.s` documents itself as within 1 of exact rational arithmetic (two
+# rounding sites: the coverage multiply and the final pack), while `rend_blend` is integer-exact. So
+# GPU chrome and CPU chrome may differ by ±1 per channel. That is invisible and it is NOT a licence to
+# compare the two paths pixel-for-pixel in a test.
+var ae_gpu_cov_slot  = 0;      # #86 slot holding the constant coverage mask (0 = none yet)
+var ae_gpu_cov_buf   = 0;      # host staging buffer, ae_gpu_cov_cap bytes
+var ae_gpu_cov_cap   = 0;      # bytes currently allocated AND uploaded
+var ae_gpu_cov_alpha = 0 - 1;  # the alpha the slot is filled with (-1 = never filled)
+var ae_gpu_cov_fail  = 0;      # latched: no slot, no memory, or a refused write
+
+# ⭐ Is the uniform-alpha CHROME path available on this kernel? Pure; same shape as ae_gpu_alpha_ok.
+# ⚠ Unlike op 0x06, op 0x02 is not new — it shipped as `#93` and every kernel with a shader envelope
+# advertises it. This is a capability READ regardless, because a compositor that assumes an op is a
+# compositor that discovers otherwise mid-frame.
+fn ae_gpu_cov_ok(): i64 {
+    if (ae_gpu_blend == 0) { return 0; }
+    if (ae_gpu_cov_fail == 1) { return 0; }
+    return ae_gpu_op_supported(ae_gpu_op_mask, 2);
+}
+
+# ⭐⭐ THE CHROME-ROUTING RULE, PURE AND #ifdef-FREE SO A HOST CAN EXERCISE IT.
+# -> 1 when this frame's chrome must go to the CPU (and the `#39` blit must therefore run).
+#
+# ⛔ FACTORED OUT FOR THE REASON `ae_gpu_window_admissible` WAS, and it was found the same way:
+# `ae_gpu_frame_plan` short-circuits to 0 off agnos, so the branch that sets `ae_gpu_alpha_chrome` is
+# UNREACHABLE on a host — a mutation that inverted the condition passed the whole suite. A rule only a
+# burn can test is a rule nobody tests. This is the entire decision; the plan just calls it.
+#
+# THE TRUTH TABLE, and every row is a shape that has actually occurred:
+#   opaque frame                        -> 0   chrome on the GPU, `#88` (AE-9, the common case)
+#   translucent + op 0x06 + op 0x02     -> 0   chrome on the GPU, alpha rects via op 0x02  (today)
+#   translucent + op 0x06, no op 0x02   -> 1   CPU chrome + `#39`; correct pixels, mis-stacked overlap
+#   translucent, no op 0x06             -> 0   the frame DEMOTES entirely; this answer is never read
+# ⚠ The last row is 0 on purpose: `ae_gpu_frame_plan` returns before the chrome question exists, and
+# answering 1 there would claim a CPU-chrome GPU frame that is not happening.
+fn ae_gpu_chrome_cpu_needed(translucent, alpha_ok, cov_ok): i64 {
+    if (translucent == 0) { return 0; }
+    if (alpha_ok == 0) { return 0; }              # the frame demotes; not a chrome decision
+    if (cov_ok == 1) { return 0; }                # `fill_rect_a` has a GPU route
+    return 1;
+}
+
+# Ensure the coverage slot holds `need` bytes of the constant `alpha`. -> 1 ready, 0 refused.
+# ⚠ GROW-ONLY, and it re-uploads on a size increase as well as an alpha change: the bytes past the old
+# high-water are uninitialised in the slot, and a mask byte the compositor did not choose is a pixel it
+# did not choose.
+fn ae_gpu_cov_ensure(need, alpha): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (ae_gpu_cov_fail == 1) { return 0; }
+    if (need < 1) { return 0; }
+    # ⛔ REFUSE RATHER THAN TRUNCATE. A rect larger than one `#86` slot cannot be masked, and quietly
+    # masking part of it would paint a hard edge mid-window. The caller demotes instead.
+    if (ae_gpu_shm_slot_max > 0) { if (need > ae_gpu_shm_slot_max) { return 0; } }
+    if (need > ae_gpu_cov_cap) {
+        var sl = ae_gpu_cov_slot;
+        if (sl == 0) {
+            sl = sys_shm_create_gpu(need);
+            if (sl < 1) {
+                ae_gpu_cov_fail = 1;
+                println("aethersafha: no graphics-visible slot for alpha chrome -- translucent frames go to the CPU");
+                return 0;
+            }
+            ae_gpu_cov_slot = sl;
+        }
+        # ⚠ A slot cannot grow, so a rect past the ORIGINAL request is a refusal, not a re-create:
+        # re-creating would leak the old slot out of a 16-slot system-wide supply.
+        if (need > ae_gpu_cov_cap) { if (ae_gpu_cov_cap > 0) { return 0; } }
+        var b = alloc(need);
+        if (b == 0) { ae_gpu_cov_fail = 1; return 0; }
+        ae_gpu_cov_buf = b;
+        ae_gpu_cov_cap = need;
+        ae_gpu_cov_alpha = 0 - 1;               # a new buffer holds nothing yet
+    }
+    if (ae_gpu_cov_alpha != alpha) {
+        var i = 0;
+        while (i < ae_gpu_cov_cap) { store8(ae_gpu_cov_buf + i, alpha & 0xFF); i = i + 1; }
+        if (sys_shm_write(ae_gpu_cov_slot, ae_gpu_cov_buf, ae_gpu_cov_cap) != 0) {
+            ae_gpu_cov_fail = 1;
+            return 0;
+        }
+        ae_gpu_cov_alpha = alpha;
+    }
+    return 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+}
+
+# `#92` op 0x02 BLEND_COV — field-for-field GLYPH_1BPP's record (both are mask 0x023B), which is why
+# this reads as a twin of ae_gpu_glyph_rect. The mask is 8bpp here and 1bpp there; the kernel knows.
+fn ae_gpu_blend_cov(mask_id, wh, dstxy, color): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var d[64];                                  # function-local => 64 BYTES = exactly one op record
+    var z = 0;
+    while (z < 16) { store32(&d + z * 4, 0); z = z + 1; }
+    store32(&d + 0, 2);                         # op = GPU_OP_BLEND_COV (0x02)
+    store32(&d + 12, mask_id);                  # mask_id — the constant-coverage slot
+    store32(&d + 16, wh);                       # (h << 16) | w
+    store32(&d + 20, dstxy);                    # (dy << 16) | dx
+    store32(&d + 36, color);                    # color0 — PREMULTIPLIED ARGB, A must be 255
+    return syscall(92, &d, 64);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
+}
+
+# ============================================================================================
 # ⭐⭐ `AE-9` — THE CHROME FILLS ON THE GPU, AND THE `#39` BLIT GOES AWAY.
 # ============================================================================================
 # `#88 gpu_fill_rect(color, wh, dstxy)` fills a rect in the back buffer with CP-DMA. With the clear, the
@@ -716,8 +856,27 @@ fn ae_gpu_emit_chrome_range(ae_rect_lo, ae_rect_hi): i64 {
     if (n <= ae_rect_lo) { return 0; }
     var i = ae_rect_lo;
     while (i < n) {
-        var wh = (ae_rect_get_h(i) << 16) | ae_rect_get_w(i);
+        var rw = ae_rect_get_w(i);
+        var rh = ae_rect_get_h(i);
+        var wh = (rh << 16) | rw;
         var dstxy = (ae_rect_get_y(i) << 16) | ae_rect_get_x(i);
+        # ⭐⭐ A TRANSLUCENT RECT TAKES op 0x02, AN OPAQUE ONE `#88` — the only routing in this loop.
+        # ⚠ `| 0xFF000000` IS LOAD-BEARING. op 0x02 forms `sa' = colour_a * cov/255`; a theme colour is
+        # 0x00RRGGBB, and A = 0 would give sa' = 0, i.e. `out = sc' + dst` — an ADDITIVE glow instead of a
+        # blend. `#88` ignores the byte entirely, which is exactly why nothing upstream sets it.
+        var ra = ae_rect_get_a(i);
+        if (ra < 255) {
+            # ⛔ A REFUSED MASK IS A REFUSED FILL, not a silent opaque one. Falling through to `#88` here
+            # would paint the titlebar at FULL STRENGTH on a translucent window — a wrong picture that
+            # looks deliberate. Retire the path instead and let the caller repaint on the CPU.
+            if (ae_gpu_cov_ensure(rw * rh, ra) != 1) { ae_chrome_gpu_disable(); return 0 - 1; }
+            if (ae_gpu_blend_cov(ae_gpu_cov_slot, wh, dstxy, ae_rect_get_col(i) | 0xFF000000) != 0) {
+                ae_chrome_gpu_disable();
+                return 0 - 1;
+            }
+            i = i + 1;
+            continue;
+        }
         if (sys_gpu_fill_rect(ae_rect_get_col(i), wh, dstxy) != 0) {
             # ⛔ ONE REFUSAL RETIRES THE PATH, AND THIS FRAME MUST STILL BLIT. The rects were queued instead
             # of drawn, so the userland framebuffer holds no chrome — a frame that neither fills nor blits

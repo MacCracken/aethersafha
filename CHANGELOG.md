@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+### Fixed — `fill_rect_a` gets a GPU route (`#92` op 0x02), which was the missing piece behind BOTH chrome burns
+
+⛔⛔ **Two consecutive iron burns, one absent primitive.** `fill_rect_a` was the only drawing call with no
+GPU path. Burn 1 (1.56.44): a translucent frame kept chrome "on the GPU" while every alpha fill went to
+the userland framebuffer and the skipped `#39` blit discarded it — **no titlebar backgrounds**. Burn 2
+(1.56.45): the repair took chrome *off* the GPU for those frames, which restored the titlebars and
+immediately reintroduced the layer-vs-z-order defect — one band blit lays every window's chrome down
+before any client surface, so a **lower** window's surface covers an **upper** window's titlebar.
+Operator: *"zlevel of topbar and content don't seem to be the same"*. Both are the same missing route.
+
+⭐ **op 0x02 `BLEND_COV` already is this operation.** `blend_cov.s` computes `f = cov/255 ·
+sa' = colour_a·f · out = sc' + dst·(1 − sa'/255)`. A coverage mask whose every byte is the window's
+alpha, plus an opaque colour, gives `colour·α/255 + dst·(1−α/255)` — `rend_blend` exactly. It has been
+advertised since it was `#93`; nothing in the kernel changed.
+
+⭐ **One slot serves every rect at a given alpha**, because a uniform mask makes the pitch irrelevant —
+a titlebar, a body and an accent strip all read the same buffer, and the upload happens when the alpha
+or the high-water size moves, not per rect and not per frame.
+
+⚠ **`| 0xFF000000` on the colour is load-bearing, not defensive.** The shader forms `sa'` from
+`colour_a`; a theme colour arrives as `0x00RRGGBB`, and A = 0 would make `sa' = 0`, i.e. `out = sc' +
+dst` — an additive glow. `#88 gpu_fill_rect` ignores that byte, which is why nothing upstream sets it.
+
+⚠ **CPU and GPU chrome may differ by ±1 per channel** — `blend_cov.s` documents two rounding sites
+against `rend_blend`'s integer-exact one. Invisible, and not a licence to compare the paths pixel-wise.
+
+**`ae_gpu_alpha_chrome` survives as a FALLBACK only**, for a kernel with no op 0x02: chrome to the CPU,
+`#39` carries it, overlap mis-stacks — still strictly better than burn 1's invisible titlebars.
+
+⛔ **And the routing rule is now gateable.** `ae_gpu_frame_plan` short-circuits to 0 off agnos, so the
+branch that sets the fallback is unreachable on a host — **measured: inverting its condition passed all
+54 assertions**. Extracted as pure `ae_gpu_chrome_cpu_needed(translucent, alpha_ok, cov_ok)`, the same
+move `ae_gpu_window_admissible` made for the same reason; the mutation now fails two assertions.
+Mutation-tested both ways: dropping the queued alpha to 255 fails the render gate.
+
 ## [0.16.2] - 2026-08-16 — per-window opacity is real on iron, and the chrome regression it exposed
 
 ⭐⭐ **M6-C3 CLOSES.** `#92` op 0x06 `BLEND_ALPHA` composited a translucent client surface on

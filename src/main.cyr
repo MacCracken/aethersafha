@@ -778,8 +778,15 @@ fn main(): i64 {
     # connects back over setu loopback:7700 (composited in the frame loop below).
     # ⛔ The loopback:7700 leg of this connect-back is RETIRED on agnos (architectural — see the
     # listener banner above); the launch-then-connect-back SHAPE survives onto anu unchanged.
-    # /bin/puka is the first-resident slot; the agnos smoke seeds a slim setu client
-    # there until full puka builds --agnos (blocked on mabda's Linux SYS_IOCTL).
+    # ⛔⛔ THIS SAID puka WAS "blocked on mabda's Linux SYS_IOCTL" UNTIL IT COULD BUILD `--agnos`.
+    # FALSE, and stale by weeks: puka 0.6.12 builds `--agnos` clean and the REAL TERMINAL has run on
+    # archaemenid — `AE-T2`, *"puka: terminal up -- 80x24, shell on a pty"*, with the operator later
+    # confirming *"puka displays shell in terminal as expected with expected wrap"*.
+    # ⚠ IT COST A BURN ON 2026-08-16. Read together with the same dead claim in agnos
+    # `stage-tools.sh`, it turned "the burn staged the wrong binary" into "puka can't run here" — so a
+    # burn shipped setu's 114 KB `present_probe` in this slot and the diagnosis chased the compositor
+    # instead of the staging. ⇒ `/bin/puka` is a SLOT that holds either binary by declared choice
+    # (`PUKA_TERMINAL=1` stages the terminal); which one is in it is never a statement about puka.
     # ⭐⭐ BITE 7 — MINT, ENDOW, SPAWN PLACED. Each client gets a channel minted for it, one end
     # endowed so the child is BORN holding it, and `AGNOS_CHAN=<fd>` in its environment so it knows
     # which fd that is. The compositor keeps the other end. No dial, no accept, no race for a port.

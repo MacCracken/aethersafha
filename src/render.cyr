@@ -64,6 +64,15 @@ enum Deco {
 fn fill_rect_a(fb, x, y, w, h, color, a): i64 {
     if (a >= 255) { return fill_rect(fb, x, y, w, h, color); }
     if (a <= 0) { return 0; }
+    # ⭐⭐ THE GPU ROUTE THIS FUNCTION SPENT TWO BURNS WITHOUT. `#92` op 0x02 blends a uniform colour
+    # through a coverage mask; a mask of constant `a` makes that `rend_blend` exactly. Queued here, routed
+    # by `ae_gpu_emit_chrome_range`, ordered per-window by `ae_gpu_present_frame`.
+    # ⛔ GATED ON `ae_chrome_on_gpu()` LIKE EVERY OTHER FILL, so a frame is never half-migrated — and that
+    # predicate is itself false whenever the coverage path is unavailable, which is what keeps the CPU arm
+    # below reachable AND visible (`#39` carries it). The two must agree; see `ae_chrome_on_gpu`'s banner.
+    if (ae_chrome_on_gpu() == 1) {
+        if (ae_rect_enqueue_a(fb, x, y, w, h, color, a) == 1) { return 0; }
+    }
     var x0 = x;
     var y0 = y;
     var x1 = x + w;
@@ -876,6 +885,12 @@ var ae_rect_y[256];
 var ae_rect_w[256];
 var ae_rect_h[256];
 var ae_rect_col[256];
+# ⭐ PER-RECT ALPHA, 255 = opaque. An opaque rect goes to `#88 gpu_fill_rect`; a translucent one to
+# `#92` op 0x02 with a constant-coverage mask (gpu.cyr). ⛔ Before this lane existed `fill_rect_a` had
+# NO GPU route at all, and the two shapes that fell out of that cost two consecutive burns — see
+# `ae_gpu_cov_ok`'s banner. The queue is the right place for it: the routing decision belongs to the
+# emitter, which is the only code that knows whether this frame's chrome is on the GPU.
+var ae_rect_a[256];
 # ⛔ 1 = the GPU chrome path is still trusted. Cleared by gpu.cyr on a refusal, exactly like the text
 # latch, because a queued rect that never gets emitted is a HOLE in the frame — and with `#39` gone there
 # is no userland copy to fall back on after the fact. One bad frame, then the CPU path for the rest.
@@ -934,6 +949,7 @@ fn ae_rect_get_y(i): i64 { return load64(&ae_rect_y + i * 8); }
 fn ae_rect_get_w(i): i64 { return load64(&ae_rect_w + i * 8); }
 fn ae_rect_get_h(i): i64 { return load64(&ae_rect_h + i * 8); }
 fn ae_rect_get_col(i): i64 { return load64(&ae_rect_col + i * 8); }
+fn ae_rect_get_a(i): i64 { return load64(&ae_rect_a + i * 8); }
 fn ae_rect_dropped_get(): i64 { return ae_rect_dropped; }
 fn ae_chrome_gpu_ok_get(): i64 { return ae_chrome_gpu_ok; }
 fn ae_chrome_gpu_disable(): i64 { ae_chrome_gpu_ok = 0; return 0; }
@@ -979,7 +995,13 @@ fn ae_chrome_on_gpu(): i64 {
 # buffer and REFUSES an out-of-range rect rather than clipping it — while `fill_rect` has always clipped
 # silently. Passing an unclipped rect would turn a window dragged one pixel past the edge from a clipped
 # fill into a refused op, and the refusal would retire the whole chrome path for the session.
+# ⚠ The opaque form is the SAME function with alpha 255, not a copy. Two enqueues that clip
+# independently is how the two would drift, and the clip is the load-bearing half.
 fn ae_rect_enqueue(fb, x, y, w, h, color): i64 {
+    return ae_rect_enqueue_a(fb, x, y, w, h, color, 255);
+}
+
+fn ae_rect_enqueue_a(fb, x, y, w, h, color, a): i64 {
     var x0 = x;
     var y0 = y;
     var x1 = x + w;
@@ -998,6 +1020,7 @@ fn ae_rect_enqueue(fb, x, y, w, h, color): i64 {
     store64(&ae_rect_w + ae_rect_n * 8, x1 - x0);
     store64(&ae_rect_h + ae_rect_n * 8, y1 - y0);
     store64(&ae_rect_col + ae_rect_n * 8, color);
+    store64(&ae_rect_a + ae_rect_n * 8, a);
     ae_rect_n = ae_rect_n + 1;
     return 1;
 }

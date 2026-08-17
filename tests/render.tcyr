@@ -1117,37 +1117,54 @@ fn main() {
     assert_eq(t_gt_r(ae_rect_count(), 0), 1, "  its chrome is QUEUED for #88");
     assert_eq(bhumi_fb_get(afb, 12, abody), ACS, "  and NOTHING is written to the userland framebuffer");
 
-    # --- route B: a TRANSLUCENT window, with the plan's answer as ae_gpu_frame_plan now sets it.
-    ae_gpu_alpha_chrome = 1;
+    # --- route A STILL, for a TRANSLUCENT window: `fill_rect_a` now QUEUES (op 0x02) instead of
+    #     drawing. This is the burn-2 repair — chrome stays on the GPU, so the per-window interleave in
+    #     `ae_gpu_present_frame` orders it, and a lower window's surface can no longer cover an upper
+    #     window's titlebar.
+    ae_gpu_alpha_chrome = 0;
     win_set_opacity(aw, 128);
     bhumi_fb_clear(afb, ACS);
     ae_rect_reset();
     ae_text_reset();
     render_window(afb, aw, 1);
-    assert_eq(ae_chrome_on_gpu(), 0, "a TRANSLUCENT window pulls chrome off the GPU, restoring the #39 blit");
-    assert_eq(ae_rect_count(), 0, "  so nothing is queued for #88 — the whole layer is on the CPU");
-    var apix = bhumi_fb_get(afb, 12, abody);
-    assert_eq(t_ne_r(apix, ACS), 1, "  the body fill IS in the framebuffer the blit will carry");
-    # ⚠ And it is BLENDED, not opaque — a route-B fill that came out at full strength would mean the
-    # alpha was dropped somewhere between the window and the pixel, which looks identical on this
-    # assertion's weaker form ("!= sentinel").
-    assert_eq(t_ne_r(apix, ae_bhumi(rupa_theme_widget(rupa_theme_active()))), 1,
-              "  ...and blended against the backdrop, not painted at full strength");
+    assert_eq(ae_chrome_on_gpu(), 1, "a TRANSLUCENT window KEEPS chrome on the GPU (op 0x02 exists)");
+    assert_eq(t_gt_r(ae_rect_count(), 0), 1, "  its alpha chrome is QUEUED, not drawn");
+    assert_eq(bhumi_fb_get(afb, 12, abody), ACS,
+              "  and NOTHING reached the userland framebuffer — no pixels for a skipped blit to lose");
+    # ⭐ THE ALPHA MUST SURVIVE INTO THE QUEUE, which is the whole point of the new lane. A rect queued
+    # at 255 would be emitted through `#88` and paint the titlebar at FULL STRENGTH on a translucent
+    # window — a wrong picture that looks deliberate, and invisible to a count-only assertion.
+    var seen_a = 0;
+    var rq = 0;
+    while (rq < ae_rect_count()) {
+        if (ae_rect_get_a(rq) == 128) { seen_a = seen_a + 1; }
+        rq = rq + 1;
+    }
+    assert_eq(t_gt_r(seen_a, 0), 1, "  at least one queued rect carries alpha 128, not 255");
+    # ⚠ NON-VACUITY: the deco buttons use plain `fill_rect` and MUST still be opaque. If every rect came
+    # out at 128 the assertion above would pass on a bug that made the whole queue translucent.
+    var seen_op = 0;
+    rq = 0;
+    while (rq < ae_rect_count()) {
+        if (ae_rect_get_a(rq) == 255) { seen_op = seen_op + 1; }
+        rq = rq + 1;
+    }
+    assert_eq(t_gt_r(seen_op, 0), 1, "  ...and the opaque deco buttons still carry 255");
 
-    # ⚠⚠ NON-VACUITY — THIS IS THE PRE-FIX STATE, AND WITHOUT IT THE ASSERTION ABOVE IS UNFALSIFIABLE.
-    # Force the plan's answer back to 0 with the SAME translucent window: the chrome still goes to the
-    # CPU (fill_rect_a has no other route) while `ae_chrome_on_gpu()` still answers 1, so gpu.cyr skips
-    # the blit and those pixels never leave userland. That co-occurrence IS the bug; it is asserted here
-    # so a future edit that reintroduces it fails loudly rather than merely stopping being tested.
-    ae_gpu_alpha_chrome = 0;
+    # --- route B: the FALLBACK, for a kernel with no op 0x02. `ae_gpu_alpha_chrome` is what the frame
+    #     plan sets there, and it must still pull the whole layer to the CPU so the `#39` blit carries
+    #     it — the burn-1 repair, now reachable only when the coverage path is unavailable.
+    ae_gpu_alpha_chrome = 1;
     bhumi_fb_clear(afb, ACS);
     ae_rect_reset();
     ae_text_reset();
     render_window(afb, aw, 1);
-    assert_eq(ae_chrome_on_gpu(), 1, "pre-fix: the frame still believes chrome is on the GPU");
-    assert_eq(t_gt_r(ae_rect_count(), 0), 1, "  the deco buttons queue, which is what zeroed the band");
-    assert_eq(t_ne_r(bhumi_fb_get(afb, 12, abody), ACS), 1,
-              "  while the body fill sits in a framebuffer the skipped blit never copies — LOST CHROME");
+    assert_eq(ae_chrome_on_gpu(), 0, "no op 0x02 ⇒ chrome retires to the CPU, restoring the #39 blit");
+    assert_eq(ae_rect_count(), 0, "  nothing is queued — the whole layer is on the CPU");
+    var apix = bhumi_fb_get(afb, 12, abody);
+    assert_eq(t_ne_r(apix, ACS), 1, "  the body fill IS in the framebuffer the blit will carry");
+    assert_eq(t_ne_r(apix, ae_bhumi(rupa_theme_widget(rupa_theme_active()))), 1,
+              "  ...and blended against the backdrop, not painted at full strength");
     ae_gpu_frame_ok = 0;
     ae_gpu_alpha_chrome = 0;
     win_set_opacity(aw, 255);

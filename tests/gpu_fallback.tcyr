@@ -262,6 +262,22 @@ fn main() {
     # `return 0`, and the consequence was an image-wallpaper session losing its wallpaper to a black
     # desktop the moment a translucent window appeared. A per-frame answer that survives a frame is the
     # same bug every time, so the reset is asserted rather than assumed.
+    # ⛔⛔ THE RULE THE FRAME PLAN CANNOT TEST ITSELF. `ae_gpu_frame_plan` short-circuits to 0 off agnos,
+    # so the branch that sets `ae_gpu_alpha_chrome` is unreachable here — measured: inverting its
+    # condition passed all 54 assertions. Factoring the decision out (same move as
+    # `ae_gpu_window_admissible`, same reason) is what makes it gateable without burning a boot.
+    test_group("gpu.cyr — the chrome-routing rule (pure, target-independent)");
+    assert_eq(ae_gpu_chrome_cpu_needed(0, 1, 1), 0, "an OPAQUE frame keeps chrome on the GPU");
+    assert_eq(ae_gpu_chrome_cpu_needed(0, 0, 0), 0, "  ...whatever the kernel advertises");
+    assert_eq(ae_gpu_chrome_cpu_needed(1, 1, 1), 0,
+              "translucent + op 0x06 + op 0x02: chrome STAYS on the GPU (alpha rects take op 0x02)");
+    assert_eq(ae_gpu_chrome_cpu_needed(1, 1, 0), 1,
+              "translucent + op 0x06 but NO op 0x02: fill_rect_a has no route ⇒ chrome to the CPU");
+    # ⚠ NON-VACUITY / the row that is easy to get wrong: with no op 0x06 the whole frame demotes before
+    # the chrome question exists, so answering 1 would claim a CPU-chrome GPU frame that never happens.
+    assert_eq(ae_gpu_chrome_cpu_needed(1, 0, 0), 0, "no op 0x06 ⇒ the FRAME demotes; not a chrome answer");
+    assert_eq(ae_gpu_chrome_cpu_needed(1, 0, 1), 0, "  ...and op 0x02 alone does not change that");
+
     test_group("gpu.cyr — the frame plan clears its per-frame answers before any early return");
     ae_gpu_alpha_chrome = 1;
     ae_gpu_wp_ready = 1;
