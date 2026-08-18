@@ -454,6 +454,28 @@ consumer, which is the state the stack is already in.
     ⚠ Unlike puka, crab already builds a real widget tree, so `dh_client_present` (which renders a
     WIDGET SURFACE) is a fit for it — the reason puka kept its own present path does not apply here.
     ⚠ Not yet scoped: whether `dh_client_next_event` covers everything `setu_poll_input` gives crab.
+
+    ✅ **INPUT HALF DONE — dhancha 0.9.11 + crab 0.4.12 (2026-08-17).** It did not cover it: the only
+    event API BLOCKED, which stalls a file manager's render loop on an idle connection. Operator
+    ruling: *the toolkit should present both styles for downstream users.* dhancha grew
+    `dh_client_poll_event` beside `dh_client_next_event`; crab's hand-rolled `setu_poll_input` loop and
+    its raw `SETU_*` switch are gone, and `setu_client_close` became `dh_client_close`.
+    ⭐ crab gained a fix by adopting: setu documents `setu_poll_input` as dropping coalesced frames,
+    which **loses key-RELEASE events**. dhancha wraps the reassembling `setu_client_poll_input`.
+    ⛔ And it exposed a defect in the first cut of that poll: the drain loop consumed non-input frames
+    silently, which ate `SETU_CLOSE` — the message whose handling is the release path for the `#86`
+    shm slot (16 system-wide; the 2026-08-08 burn left a client orphaned alive holding one). Fixed by
+    mapping it to a new `WINDOW_CLOSE` event kind.
+
+    ⇒ **REMAINING: the PRESENT half, and it is an open question, not a task.** crab writes a LIVE
+    shared buffer with NO per-frame protocol traffic; `dh_client_present` sends **ATTACH + COMMIT every
+    frame**. Adoption costs 2 messages/frame.
+    ⚠ CORRECTED: crab's own note used to justify staying put with *"`dh_client_present` re-sends pixels
+    every call"* — that is stale. `setu_client_present` has cached a shared buffer (create once,
+    rewrite in place, recreate on resize) for some time. The real cost is the commit, not a copy.
+    ⚠ Undecided: whether the per-frame commit is overhead to avoid or a damage signal worth having.
+    That is a compositor-behaviour question — does aethersafha redraw from a live buffer without a
+    commit — and it wants measuring before either path is chosen.
     ⚠ README scope is STALE and must not be planned from: it lists *"v0.6+ — next: the compositor-fd
     input source … the present path"* while the repo is at 0.9.3 with both long shipped (for TCP).
   - **C4b — LATER, AND HARD-GATED ON C4a. The EditorGUI (`murrahir`) port** — still Rust on GitHub, to be
