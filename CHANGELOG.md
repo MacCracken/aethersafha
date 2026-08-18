@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.16.7] - 2026-08-17
+
+### Changed
+
+- mehman 1.0.1 -> **1.0.2**, kavach 3.11.13 -> **3.11.14**. 25/25 suites green.
+- ⛔ Closes a declared-vs-vendored split: 0.16.6 shipped `lib/kavach.cyr` at **3.11.14** while the
+  manifest still said 3.11.13, because kavach resolves by `path` and its tree was mid-flight. kavach
+  3.11.14 is now tagged on a clean tree, so the declaration matches the vendored copy.
+- ⚠ All nine deps now equal their released versions — audited tag-by-tag against each sibling's
+  VERSION, 0 stale.
+
 ## [0.16.6] - 2026-08-17
 
 ### Changed

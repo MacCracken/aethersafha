@@ -31,10 +31,19 @@ fn _mehman_kavach_ensure_init() {
 # drives the kavach lifecycle.
 #
 # Writes kavach's ExecResult exit_code through `out_exit_code` (an i64*, or 0 to
-# ignore). NOTE the PROCESS-backend semantics: that value is 0 when the guest ran
-# and its output was captured, 1 when exec itself failed — it is NOT the guest's
-# own exit status (WEXITSTATUS). kavach's PROCESS backend captures output via
-# exec_capture and does not propagate the child's exit code.
+# ignore). As of mehman v1.0.2 (kavach >= 3.11.4) this IS the guest's own exit
+# status: `/bin/false` reports 1, `/bin/ls` on a missing path reports 2.
+#
+# ⚠ IT DID NOT USED TO BE. Through mehman v1.0.1 this comment said the value was
+# a coarse exec status (0 = ran + captured, 1 = exec failed) and explicitly NOT
+# the guest's WEXITSTATUS — which was true: kavach's unconfined path used the
+# stdlib `exec_capture`, which waits on the child and discards the status, and
+# `backend_capture_finish` hardcoded 0. kavach 3.11.4 routed BOTH the confined
+# and unconfined paths through `confine_capture`, which decodes the status.
+# mehman's declared tag was 3.11.0 — four patches behind — so the stale contract
+# survived a release. Callers that branched on `== 0` meaning "ran" must now
+# branch on the MehmanError return for that and read this value as the guest's
+# own status. See CHANGELOG 1.0.2 and the superseding note on ADR 0002.
 #
 # Returns MehmanError.OK on a clean run+reap, or a MehmanError code identifying
 # the stage that failed.
@@ -100,8 +109,10 @@ fn _mehman_run_guest(spec, surface, out_exit_code): i64 {
     }
 
     if (out_exit_code != 0) {
-        # kavach's exec status (0 = ran + output captured; 1 = exec failed) —
-        # NOT the guest's WEXITSTATUS; see mehman_sandbox_run_guest's doc.
+        # The guest's own exit status (kavach >= 3.11.4 decodes WEXITSTATUS on
+        # both the confined and unconfined paths). Whether the run itself
+        # succeeded is the MehmanError return, not this value — see
+        # mehman_sandbox_run_guest's doc.
         store64(out_exit_code, ExecResult_exit_code(res));
     }
 

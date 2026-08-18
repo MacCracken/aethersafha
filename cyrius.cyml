@@ -98,7 +98,7 @@ modules = ["src/font_data.cyr"]
 [deps.mehman]
 git = "https://github.com/MacCracken/mehman.git"
 path = "../mehman"
-tag = "1.0.1"
+tag = "1.0.2"
 modules = ["src/types.cyr", "src/surface.cyr", "src/sandbox.cyr"]
 
 # --- Sandbox execution surface (mehman's guest backend). Declared explicitly so
@@ -118,7 +118,7 @@ path = "../kavach"
 # ⚠ The comment above did not prevent the recurrence, and a third instance should not be met with a third
 # comment — this wants a gate that diffs every declared tag against its sibling VERSION at check time.
 # Verified before bumping: 3.11.12 is a real tag locally AND on the remote, on a clean tree.
-tag = "3.11.13"
+tag = "3.11.14"
 modules = ["dist/kavach.cyr"]
 
 # --- Image decode: chitra (चित्र — image / picture). Pure-Cyrius CPU raster decoder — PNG (all bit
