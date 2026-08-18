@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.16.6] - 2026-08-17
+
+### Changed
+
+- Deps to the 6.5.27 sweep's releases: bhumi 1.4.1 -> **1.4.2**, agnostik 1.3.4 -> **1.3.5**,
+  agnodrm 1.5.0 -> **1.5.1**, chitra 0.3.0 -> **0.3.1**. 25/25 suites green.
+- ⚠ kavach (3.11.13) and mehman (1.0.1) are unchanged — both are held at their old cyrius pins
+  because they do not build under 6.5.27; see the roadmap's C4a note.
+
 ## [0.16.5] - 2026-08-17 — toolchain pin to 6.5.27
 
 ### Changed — `cyrius = "6.5.21"` -> **6.5.27**

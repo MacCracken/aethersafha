@@ -433,6 +433,27 @@ consumer, which is the state the stack is already in.
     **dhancha did not.** A working client was left behind by a substrate change under it.
     ⇒ The bite: give `DhClient` an agnos arm over the channel band, then make crab consume it — a
     consumer that stops hand-rolling is the only proof the toolkit actually carries the weight.
+
+    ⭐⭐ **RE-MEASURED 2026-08-17 (aethersafha 0.16.6) — THE PREMISE ABOVE IS STALE. THE BITE IS SMALLER
+    AND IT IS NOT THE ONE WRITTEN.** Two of the three claims no longer hold:
+    - **"dhancha did not come across to the channel band" is FALSE now.** `dh_client_connect` calls
+      `setu_client_connect`, which calls **`setu_connect`** — and that function has carried the agnos
+      arm since setu 0.8.5 (*"NO DIAL — returns the endowed fd named by `AGNOS_CHAN`"*, `src/client.cyr`).
+      dhancha inherits the channel band transitively; it needs no arm of its own. The literal
+      observation that `dh_client.cyr` contains zero `CYRIUS_TARGET_AGNOS` lines is still true and is
+      no longer evidence of a gap — the arm lives one layer down, which is where it belongs.
+    - **"crab carries 3 `CYRIUS_TARGET_AGNOS` arms" counts the wrong thing.** Two of the three are
+      `sys_readdir` and `sys_stat` — FILESYSTEM, which a widget toolkit has no business abstracting and
+      which no amount of dhancha adoption would remove. Only the third is display.
+
+    ⇒ **THE ACTUAL REMAINING WORK, stated from measurement:** crab drives the display itself —
+    **17 `setu_*` calls against 4 `dh_client_*`** in `src/main.cyr`. It connects, polls input and
+    presents through setu directly while using dhancha only to draw. The bite is to move crab's
+    connect / input / present onto `dh_client_*`, and it is the same shape as M7-D: *a consumer that
+    deletes its hand-rolled equivalent is the only proof the toolkit carries the weight.*
+    ⚠ Unlike puka, crab already builds a real widget tree, so `dh_client_present` (which renders a
+    WIDGET SURFACE) is a fit for it — the reason puka kept its own present path does not apply here.
+    ⚠ Not yet scoped: whether `dh_client_next_event` covers everything `setu_poll_input` gives crab.
     ⚠ README scope is STALE and must not be planned from: it lists *"v0.6+ — next: the compositor-fd
     input source … the present path"* while the repo is at 0.9.3 with both long shipped (for TCP).
   - **C4b — LATER, AND HARD-GATED ON C4a. The EditorGUI (`murrahir`) port** — still Rust on GitHub, to be
