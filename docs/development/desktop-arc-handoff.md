@@ -10,14 +10,14 @@
 
 | repo | version | what it owns |
 |---|---|---|
-| aethersafha | **0.16.9** | the compositor |
+| aethersafha | **0.16.12** | the compositor |
 | dhancha | **0.9.12** | client-side widget toolkit |
 | setu | **0.8.7** | the display wire |
-| crab | **0.4.12** · puka **0.6.17** | the two reference apps |
+| crab | **0.4.13** · puka **0.6.18** | the two reference apps |
 | rupa 0.1.4 · sadish 0.5.2 · rekha 0.3.5 · kashi 1.0.6 | | theme tokens · 2D raster · fonts · system font |
 | agnos | **1.56.46 OPEN** | the kernel |
 
-All ten declare **cyrius 6.5.27**. Every dep tag was verified against its sibling's `VERSION`: 0 stale.
+All ten declare **cyrius 6.5.28**. Every dep tag was verified against its sibling's `VERSION`: 0 stale.
 
 ## ⛔ The pattern that dominated this arc
 
@@ -48,9 +48,15 @@ new model.
 - **QEMU has no AMD device**, so every GPU branch is dead there. QEMU proves the CPU path only; a GPU
   claim needs iron. QEMU key delivery is also lossy (once-per-frame HID drain) — repetition beats
   patience, and count-based A/B does not work.
-- **`cyrius fmt <file>` prints to stdout and does NOT rewrite in place**, and `--check` exits 1 in
-  silence. agnos has 9 files flagged; deferred pending 6.5.28, which is expected to accept 4-space
-  continuations. Do not churn them before then.
+- **`cyrius fmt <file>` REWRITES THE FILE as of 6.5.28** (breaking; `--dry` is the old stdout form),
+  and `cyrfmt` now tracks parentheses — canonical is 2 spaces per open-paren level, 4 accepted.
+  agnos's 9 files are formatted and its pin is 6.5.28. ⚠ A script that still does
+  `cyrius fmt "$f" > "$tmp"` rewrites `$f` as a side effect and leaves `$tmp` EMPTY, then reports
+  "could not format" for a file it already changed — that bit `agnos/scripts/check/fmt-fix.sh`.
+- **A one-frame full-screen repaint is a BUG on iron and invisible in QEMU.** `#84 present` FLIPS, so
+  any whole-screen invalidation owes TWO consecutive frames, one per buffer — the same arithmetic
+  `comp_retire` does for a rect. QEMU has no GPU, no flip and one buffer, so it cannot show the
+  half-frame-rate blink at all; `render.tcyr` had asserted the one-frame behaviour as correct.
 
 ## Tests: what is actually covered
 
@@ -78,10 +84,16 @@ because the first version reported a pass for a run it never performed.
 
 ## Next
 
-1. **Re-burn.** The fault fix (0.16.8) and the launcher damage (0.16.9) are QEMU/code-verified only.
-   Also unverified on iron: the 32 MB `#86` slot and a full-screen wallpaper.
-2. **Theme repaint on the GPU path** — reported on iron, measured working on the CPU path in QEMU. Most
-   likely the same defect as the flashing. Re-test before treating it as separate.
+1. **Re-burn.** Burn 2 (2026-08-19) closed four defects; three of the four fixes are QEMU-proven and
+   one is not provable there:
+   - wallpaper never loaded — `sys_open`'s agnos contract (0.16.11). QEMU **PASS**.
+   - crab listed 32 of 114 entries — a hardcoded readdir cap (crab 0.4.13). QEMU **PASS** (32/45 ->
+     45/45 on `/bin`).
+   - puka fullscreen grew the frame, not the grid — `SETU_CONFIGURE` unconsumed (puka 0.6.18). QEMU
+     **PASS** (80x24 -> 256x126 cells).
+   - ⚠ theme background flicker — a one-frame full repaint against a FLIPPED double buffer (0.16.12).
+     **Unit-proven and mutation-proven; NOT provable in QEMU** (no GPU, no flip). This one needs iron.
+   Still unverified on iron: the 32 MB `#86` slot and a full-screen wallpaper.
 3. **Producers, not renderers.** The notification surface, disk and agent gauges render correctly and
    **nothing in the running desktop feeds them** — `shell_new()` seeds zeros and nothing updates it.
    That is the same pattern as above, one layer up, and it is now mine rather than inherited.

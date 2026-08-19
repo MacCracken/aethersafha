@@ -282,6 +282,13 @@ var ae_band_h = 0;
 # the band — a stale desktop that no window rect can explain. -1 = no frame has been cleared yet.
 var ae_last_bg = 0 - 1;
 var ae_last_wp = 0 - 1;   # last-seen wallpaper serial; see rend_band_compute
+# ⛔⛔ FRAMES OF FULL-SCREEN REPAINT STILL OWED. A whole-screen invalidation costs TWO consecutive
+# no-band frames, not one, for exactly the reason `comp_retire` exists (compositor.cyr:196): `#84
+# present` FLIPS the render target, so a repaint applied for one frame lands in ONE buffer and the
+# other keeps the old pixels — and `#84` alternates them, so the background blinks at half the frame
+# rate FOREVER, not for a frame. That is the 2026-08-19 iron report ("themes bg flicker ... happened
+# more often than not"), and it is invisible in QEMU because there is no GPU, no flip, one buffer.
+var ae_inval_owed = 0;
 
 # ⭐ THE FRAME PLAN — the single place "is this a GPU frame?" is decided.
 # Written once per frame by ae_gpu_frame_plan (gpu.cyr) BEFORE anything is rendered; read by
@@ -378,6 +385,10 @@ fn rend_dmg_copy(dst, src): i64 {
 # screen", which is the honest answer whenever a tracker is missing (tests allocate neither) or the
 # background changed. ⚠ A VALID band of height 0 is a real and correct result: nothing changed in two
 # frames, so both buffers already hold the right pixels and there is nothing to write.
+# Frames of full-screen repaint still owed after an invalidation. Exposed so a test can assert the
+# DEBT and not just its symptom.
+fn rend_inval_owed(): i64 { return ae_inval_owed; }
+
 fn rend_band_compute(fh, bg): i64 {
     ae_band_valid = 0;
     ae_band_y = 0;
@@ -402,7 +413,14 @@ fn rend_band_compute(fh, bg): i64 {
     if (wps != ae_last_wp) { stale = 1; }
     ae_last_bg = bg;
     ae_last_wp = wps;
-    if (stale == 1) { return 0; }
+    # ⛔ TWO FRAMES, ONE PER BUFFER — see ae_inval_owed. Returning here on the change frame ALONE was
+    # the defect: `render.tcyr` even asserted it ("the frame AFTER a theme switch bands normally
+    # again"), so the suite enshrined the stale buffer as correct.
+    if (stale == 1) { ae_inval_owed = 2; }
+    if (ae_inval_owed > 0) {
+        ae_inval_owed = ae_inval_owed - 1;
+        return 0;
+    }
     var y0 = fh;
     var y1 = 0;
     if (rend_dmg_valid(ae_frame_dmg) == 1) {

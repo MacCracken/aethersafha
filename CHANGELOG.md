@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.16.12] - 2026-08-19 — a full-screen repaint owes TWO frames, not one
+
+### Fixed — the desktop background blinked at half the frame rate after a theme switch
+
+`rend_band_compute` refuses to band when the background or wallpaper serial changed, so the caller
+clears the whole screen. It did that for **one** frame. `#84 present` **FLIPS** the render target,
+so one frame of full repaint reaches ONE buffer and the other keeps the old background — and
+nothing ever gives it another full frame, so `#84` alternates old and new **forever**. Reported from
+iron 2026-08-19: "themes bg flicker ... happened more often than not, more with lighter themes but
+still occurs with all themes." A stale dark buffer is simply more visible under a light theme.
+
+Invalidation now owes **two consecutive no-band frames, one per buffer** (`ae_inval_owed`).
+
+⛔ **This is `comp_retire`'s defect one layer up.** That mechanism exists (compositor.cyr:196)
+because a CLOSED window got one frame of coverage and "the buffer drawn on the close frame lost the
+window and the other buffer kept it forever ⇒ the window blinks at half the frame rate". Identical
+mechanism, whole screen instead of a rect.
+
+⚠ **The suite asserted the defect.** `render.tcyr` read
+`assert_eq(rend_band_valid(), 1, "the frame AFTER a theme switch bands normally again")` over a
+comment saying the repaint lasts "only for that one frame". Now asserts no band for two frames,
+`rend_inval_owed()` counting down, and banding on the third — **mutation-proven**: reverting to one
+frame fails the suite (24/1).
+
+⚠ **QEMU CANNOT CONFIRM THIS FIX** — no GPU, no `#84`, no flip, one buffer, so the flicker is
+structurally absent there. That is exactly why the CPU path measured correct while iron flickered.
+`agnos/scripts/harness/ae-theme-repaint-test.py` shows the CPU path still fully repaints (top bar
+55/55, desktop 39/39 pixels). **The flicker itself needs a burn to confirm.**
+
+⚠ Not affected: the `#86` wallpaper upload (gpu.cyr) is a SOURCE slot read by `#87`, not a render
+target, so its one-shot serial gate is correct.
+
+### Fixed — `ae-theme-repaint-test.py` had never once run its experiment
+
+It opened the launcher and then sent F3. `lnch_key` **swallows every key it does not use**
+(launcher.cyr:119) — deliberately, so a modal chooser cannot leak keys into the window behind it —
+so F3 could never reach the theme handler: four retried bursts of eight delivered **zero** switches.
+It reported INCONCLUSIVE rather than passing, which was honest but useless. Now closes the panel
+with Esc first, and observes the switch.
+
+
 ## [0.16.11] - 2026-08-19 — `sys_open` is one name with two contracts
 
 ### Fixed — `--wallpaper <file>` could never open the file on agnos

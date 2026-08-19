@@ -154,9 +154,23 @@ fn main() {
     rend_dmg_add(ae_frame_dmg, 0, 100, 800, 50);
     rend_band_compute(1440, 0x334455);
     assert_eq(rend_band_valid(), 0, "theme switch: NO band — the whole screen must be cleared");
-    # ...and only for that one frame: the new colour is recorded, so the next frame bands again.
+    assert_eq(rend_inval_owed(), 1, "theme switch: one more full-screen frame is still owed");
+    # ⛔⛔ TWO FRAMES, ONE PER BUFFER — AND THIS ASSERTION USED TO SAY THE OPPOSITE.
+    # It read `assert_eq(rend_band_valid(), 1, "the frame AFTER a theme switch bands normally
+    # again")`, with a comment saying the repaint lasts "only for that one frame". That is the
+    # defect, asserted as the contract: `#84 present` FLIPS, so one frame of full repaint reaches
+    # ONE buffer and the other keeps the old background — forever, because it never gets another
+    # full frame. `#84` alternates them, so the desktop blinks at half the frame rate. Reported from
+    # iron 2026-08-19 ("themes bg flicker ... more often than not, more with lighter themes"); a
+    # dark stale buffer is simply more visible under a light theme.
+    # ⚠ QEMU CANNOT CATCH THIS — no GPU, no flip, one buffer — which is why the suite and the QEMU
+    # runs both called the CPU path correct while iron flickered. Same reasoning as `comp_retire`
+    # (compositor.cyr:196), which buys a closed window exactly these two frames.
     rend_band_compute(1440, 0x334455);
-    assert_eq(rend_band_valid(), 1, "the frame AFTER a theme switch bands normally again");
+    assert_eq(rend_band_valid(), 0, "the frame AFTER a theme switch STILL has no band — buffer 2");
+    assert_eq(rend_inval_owed(), 0, "the debt is paid after two frames");
+    rend_band_compute(1440, 0x334455);
+    assert_eq(rend_band_valid(), 1, "the THIRD frame bands normally again — both buffers correct");
 
     # ⛔ A MISSING TRACKER MEANS FULL SCREEN, NOT AN EMPTY BAND. Every unit suite runs with these unset,
     # and an empty band there would silently stop clearing anything at all.
