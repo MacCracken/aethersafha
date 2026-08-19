@@ -195,7 +195,19 @@ fn wp_fill_band(fb, y, h, fh): i64 {
 # there is nothing beneath it for an alpha to blend against and honouring it would only darken the
 # image against black. A translucent wallpaper is a different feature from a translucent window.
 fn wp_load_file(path): i64 {
-    var fd = sys_open(path, 0, 0);
+    # ⚠ `sys_open` is one NAME with two CONTRACTS. agnos is open(name, NAMELEN, flags)
+    # (SYS_OPEN=7); Linux is open(path, flags, mode). The Linux form compiled fine on agnos and
+    # handed the kernel namelen=0 — a zero-length filename — so an entirely valid path failed with
+    # -1 and read as "no such file". Confirmed on iron 2026-08-19: `ls` listed the PNG, argv carried
+    # the exact path, and this still returned -1. The gate is per-target because the arity matches;
+    # only the meaning of a2 differs, so nothing catches it but the kernel's answer.
+    var fd = 0 - 1;
+    #ifdef CYRIUS_TARGET_AGNOS
+    fd = sys_open(path, strlen(path), 0);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    fd = sys_open(path, 0, 0);
+    #endif
     if (fd < 0) { return 0 - 1; }
     var cap = 16777216;                       # 16 MB — a desktop wallpaper, not a photo library
     var src = alloc(cap);

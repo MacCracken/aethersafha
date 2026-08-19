@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.16.11] - 2026-08-19 — `sys_open` is one name with two contracts
+
+### Fixed — `--wallpaper <file>` could never open the file on agnos
+
+`wp_load_file` called `sys_open(path, 0, 0)`. That is the LINUX contract —
+`open(path, flags, mode)`. agnos is `open(name, NAMELEN, flags)` (`SYS_OPEN` = 7), so the kernel
+received **namelen 0**, a zero-length filename, and refused every path. The failure was reported
+as `rc -1`, which is `sys_open() < 0` — indistinguishable from a missing file.
+
+The arities match, so nothing between the call and the kernel could catch it: it compiles clean on
+both targets and only the kernel's answer differs. Now gated per target with
+`#ifdef CYRIUS_TARGET_AGNOS`, passing `strlen(path)` on agnos.
+
+Iron 2026-08-19: `ls` listed the PNG at the rootfs root and argv carried the exact path
+(`/verify-2560x1440.png`) while the load returned -1. The mangled path in the console transcript
+was the keystroke echo, not argv — the compositor echoed the path back correctly.
+
+⚠ `src/apps.cyr` also uses the Linux form (`sys_open("/dev/null", 1, 0)`); it is in no build graph
+on either target and `sys_fork`/`sys_execve`/`sys_dup2` do not exist on agnos, so it is unreachable
+rather than latent.
+
+### Added — `agnos/scripts/harness/ae-wallpaper-load-test.py`
+
+`wp_load_file` had no test at all, which is why a target-specific contract error shipped. The check
+has to run ON agnos — a Linux run exercises the other arm and passes either way. Boots the image,
+runs `aethersafha --wallpaper /<file>`, and reads the console: pre-fix **FAIL** (`-1`), post-fix
+**PASS** (loaded, 2560x1440). A run that never reached the compositor exits INCONCLUSIVE (2)
+rather than scoring a test that was not performed.
+
+The decoded size is read from the two lines FOLLOWING the load message, not by substring: the
+compositor also prints the screen size as `2560` / `1440`, so `"2560" in out` passes on a run where
+nothing decoded.
+
+
 ## [0.16.10] - 2026-08-18 — the no-band clear reaches the GPU
 
 ### Fixed — ⛔⛔ THE FULL-SCREEN CLEAR WAS LOST ON THE GPU PATH
