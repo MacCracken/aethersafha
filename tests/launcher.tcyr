@@ -15,6 +15,8 @@ include "src/input.cyr"      # HidUsage — the launcher keys are real usage cod
 include "src/launcher.cyr"
 
 fn t_gt(a, b): i64 { if (a > b) { return 1; } return 0; }
+fn t_ge(a, b): i64 { if (a >= b) { return 1; } return 0; }
+fn t_le(a, b): i64 { if (a <= b) { return 1; } return 0; }
 
 fn main() {
     alloc_init();
@@ -118,6 +120,29 @@ fn main() {
     # ⚠ A panel taller than the screen must not be placed off the top — a launcher you cannot see is
     # worse than one that overflows the bottom, because Escape is the only way out and it is invisible.
     assert_eq(lnch_panel_y(10), 0, "an over-tall panel clamps to the top edge, never negative");
+
+    test_group("launcher — ⛔ THE PANEL MUST REGISTER DAMAGE, or the frame flashes");
+    # ⛔⛔ THE 2026-08-18 BURN: "f2 brought up launcher but started flashing background".
+    # `render_launcher` paints the panel every frame, but launcher.cyr registered NO damage — and NO
+    # WINDOW MOVES when it opens. So `rend_band_compute` banded the frame to whatever the windows
+    # produced and the `#39` blit copied only that: the panel was drawn into the framebuffer and then
+    # partially not copied to the screen, frame after frame.
+    # ⚠ Asserted on the RETIRE UNION, which is what carries a region that changed without a window
+    # moving — the same mechanism F4-close, F6-minimize and un-maximize each needed.
+    comp_retire_clear();
+    assert_eq(comp_retire_valid(), 0, "nothing retired yet");
+    var sw = 1280;
+    var sh = 800;
+    comp_retire_add(lnch_panel_x(sw), lnch_panel_y(sh), lnch_panel_w(), lnch_panel_h());
+    assert_eq(comp_retire_valid(), 1, "the launcher panel rect is retired");
+    # The retired union must actually COVER the panel — a union that misses it repaints nothing.
+    assert_eq(t_le(comp_retire_x(), lnch_panel_x(sw)), 1, "union starts at or left of the panel");
+    assert_eq(t_le(comp_retire_y(), lnch_panel_y(sh)), 1, "  ...at or above it");
+    assert_eq(t_ge(comp_retire_x() + comp_retire_w(), lnch_panel_x(sw) + lnch_panel_w()), 1, "  ...and reaches its right edge");
+    assert_eq(t_ge(comp_retire_y() + comp_retire_h(), lnch_panel_y(sh) + lnch_panel_h()), 1, "  ...and its bottom");
+    # ⚠ The panel must be ON SCREEN for any of this to matter.
+    assert_eq(t_ge(lnch_panel_x(sw), 0), 1, "panel starts on screen");
+    assert_eq(t_le(lnch_panel_x(sw) + lnch_panel_w(), sw), 1, "  ...and ends on screen");
 
     return assert_summary();
 }

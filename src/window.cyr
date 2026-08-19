@@ -25,6 +25,14 @@ enum WinOff {
     # Dims = W_W x W_H. render_window re-composites it EVERY frame so the
     # surface persists on screen (not overwritten by the next desktop redraw).
     W_BUFID = 72;   # setu shared-buffer id for a LIVE surface (> 0), or 0 for a static frame.
+    # ⛔⛔ THE SIZE THE CLIENT DECLARED AT ATTACH — NOT the window's size. They are the same only
+    # until the compositor resizes the window, and the gap between them is a PAGE FAULT: the GPU
+    # blit reads `win_w x win_h` out of a slot that holds `buf_w x buf_h`. Measured 2026-08-18 on
+    # iron and reproduced in QEMU (`scripts/harness/ae-resize-fault-test.py`): F5 maximize on a
+    # 640x384 puka asked for 2560x1416 from the same slot -> `fault: cr2=0x12600000`, exit 142.
+    # ⚠ 0 means "the client has never attached", which is NOT the same as a zero-size buffer.
+    W_BUF_W = 176;
+    W_BUF_H = 184;
     # When set, render_window RE-READS the client's buffer into W_PIX each frame,
     # so a client that keeps writing its buffer produces a live-updating window.
     W_CFD   = 80;   # persistent setu client connection fd (a tagged sock fd, always > 0), or 0
@@ -72,7 +80,7 @@ enum WinOff {
     W_RY    = 152;
     W_RW    = 160;
     W_RH    = 168;
-    W_SZ    = 176;
+    W_SZ    = 192;
 }
 
 # win_new(id, x, y, w, h, title_cstr) -> *Window (0 on OOM)
@@ -89,6 +97,8 @@ fn win_new(id, x, y, w, h, title): i64 {
     store64(p + W_AGENT, 0);
     store64(p + W_PIX, 0);
     store64(p + W_BUFID, 0);
+    store64(p + W_BUF_W, 0);
+    store64(p + W_BUF_H, 0);
     store64(p + W_CFD, 0);
     store64(p + W_KEYMODE, 0);
     # ⛔ W_PREMUL WAS MISSING HERE while every other slot was zeroed, and the allocator does not
@@ -180,7 +190,48 @@ fn win_is_agent(p) { return load64(p + W_AGENT); }
 fn win_pix(p) { return load64(p + W_PIX); }
 fn win_set_pix(p, ptr) { store64(p + W_PIX, ptr); return 0; }
 fn win_bufid(p) { return load64(p + W_BUFID); }
-fn win_set_bufid(p, id) { store64(p + W_BUFID, id); return 0; }
+fn win_buf_w(p) { return load64(p + W_BUF_W); }
+fn win_buf_h(p) { return load64(p + W_BUF_H); }
+fn win_set_buf_size(p, w, h) { store64(p + W_BUF_W, w); store64(p + W_BUF_H, h); return 0; }
+
+# 1 when the window's CURRENT extent is fully backed by the client's attached buffer.
+# ⛔ EVERY READER OF A CLIENT BUFFER MUST ASK THIS FIRST. A window whose size the compositor changed
+# is not backed until the client re-attaches; blitting it reads past the slot.
+# ⭐⭐ TELL THE CLIENT ITS NEW SIZE. `SETU_CONFIGURE` (S->C: id, w, h, state) has been in the protocol
+# since it was written and had **zero senders and zero handlers** — the compositor resized windows and
+# never said so, which is why the blit and the buffer could diverge at all.
+# ⛔ THE COMPOSITOR DOES NOT RESIZE THE CLIENT'S BUFFER. It cannot: the buffer is the client's, and on
+# agnos it is a `#86` slot the client owns. All it can do is ASK. Until the client re-attaches at the
+# new size, `win_buf_covers` is false and every blit path clamps or refuses — the ask and the guard
+# are two halves of one fix, and shipping either alone leaves either a fault or a frozen surface.
+fn win_notify_resize(p): i64 {
+    var fd = load64(p + W_CFD);
+    if (fd == 0) { return 0; }                        # no client (the compositor's own window)
+    return setu_send(fd, setu_configure(load64(p + W_ID), load64(p + W_W), load64(p + W_H),
+                                        load64(p + W_STATE)));
+}
+
+fn win_buf_covers(p): i64 {
+    if (load64(p + W_BUFID) == 0) { return 1; }        # no client buffer: nothing to overrun
+    var bw = load64(p + W_BUF_W);
+    var bh = load64(p + W_BUF_H);
+    if (bw <= 0) { return 0; }
+    if (bh <= 0) { return 0; }
+    if (load64(p + W_W) > bw) { return 0; }
+    if (load64(p + W_H) > bh) { return 0; }
+    return 1;
+}
+# ⛔⛔ THE SIZE TRAVELS WITH THE ID, AND THAT IS THE WHOLE POINT OF THE SIGNATURE. A plain
+# `win_set_bufid(p, id)` existed and three call sites used it; only ONE of them was anywhere near the
+# ATTACH that knew the dimensions. Recording the size separately would have been forgotten at exactly
+# the sites that forgot it — so the id cannot be set without saying how big the buffer behind it is.
+# ⚠ w/h are the CLIENT's declared surface size, never the window's.
+fn win_set_client_buf(p, id, w, h) {
+    store64(p + W_BUFID, id);
+    store64(p + W_BUF_W, w);
+    store64(p + W_BUF_H, h);
+    return 0;
+}
 fn win_cfd(p) { return load64(p + W_CFD); }
 fn win_set_cfd(p, fd) { store64(p + W_CFD, fd); return 0; }
 fn win_keymode(p) { return load64(p + W_KEYMODE); }

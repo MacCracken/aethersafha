@@ -305,6 +305,10 @@ fn input_apply(comp, action, bound_w, bound_h): i64 {
         } else {
             win_maximize(win, bound_w, bound_h);
         }
+        # ⛔ TELL THE CLIENT. Its buffer is still the OLD size; until it re-attaches, the blit paths
+        # clamp/refuse (win_buf_covers). Without this ask the surface would simply freeze at the old
+        # extent forever — and before the guard existed, it faulted instead.
+        win_notify_resize(win);
         return 0;
     }
     if (action == InputAction.IA_MINIMIZE_FOCUSED) {

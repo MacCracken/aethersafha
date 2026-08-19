@@ -101,6 +101,9 @@ fn desk_bg_color(d): i64 {
 # rupa is the shared token core every consumer reads (compositor chrome, dhancha, crab, jalwa),
 # so it wins. `desk_bg_color` is retained — the accessibility profile is a real, separate concern
 # and theme_bridge is still its home — it is simply no longer what paints the desktop.
+# Was the launcher up on the PREVIOUS frame? The close needs one more damaged frame than the open.
+var ae_lnch_was_open = 0;
+
 fn render_desktop(d, fb): i64 {
     var comp = desk_comp(d);
     var bg = ae_bhumi(rupa_theme_bg(rupa_theme_active()));
@@ -110,6 +113,25 @@ fn render_desktop(d, fb): i64 {
     # ⚠ BEFORE `rend_frame_damage`, which reads the wallpaper serial to decide whether it may band.
     # A theme switch has to be visible to that check on the SAME frame it happens.
     wp_track_theme(bg);
+    # ⛔⛔ THE LAUNCHER IS AN OVERLAY THE DAMAGE MODEL COULD NOT SEE. `render_launcher` paints its
+    # panel every frame, but launcher.cyr registers NO damage — no window moves when it opens, so
+    # `rend_band_compute` bands the frame to whatever the windows produced and the `#39` blit copies
+    # only that. The panel was drawn into the framebuffer and then partially not copied to the
+    # screen, frame after frame: the FLASHING BACKGROUND reported on the 2026-08-18 burn.
+    # ⚠ Retired while OPEN and for one frame after it CLOSES — the close is the vacate, and a region
+    # that stops being drawn is in neither `cur` nor `prev`, which is the same defect F4-close,
+    # F6-minimize and un-maximize each had. Fifth site; it belongs to "an overlay changed", not to
+    # any one gesture.
+    var lnch_now = lnch_is_open();
+    if (lnch_now == 1) {
+        comp_retire_add(lnch_panel_x(bhumi_fb_width(fb)), lnch_panel_y(bhumi_fb_height(fb)),
+                        lnch_panel_w(), lnch_panel_h());
+    }
+    if (lnch_now == 0) { if (ae_lnch_was_open == 1) {
+        comp_retire_add(lnch_panel_x(bhumi_fb_width(fb)), lnch_panel_y(bhumi_fb_height(fb)),
+                        lnch_panel_w(), lnch_panel_h());
+    } }
+    ae_lnch_was_open = lnch_now;
     rend_frame_damage(comp, fb, bg);
     # ⭐⭐ `AE-0a`: CLEAR THE BAND, NOT THE SCREEN. This was the single biggest cost in the frame —
     # measured 3.83 ms of a 6.40 ms GPU frame, **60%**, at 2560x1440. It is already an optimal scalar

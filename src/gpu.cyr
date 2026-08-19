@@ -437,6 +437,13 @@ fn ae_gpu_capture_result(): i64 { return ae_gpu_cap_rc; }
 # partly-off-screen window must never be handed over. Dragging a window past an edge is ordinary.
 fn ae_gpu_window_admissible(win, fw, fh): i64 {
     if (win_bufid(win) == 0) { return 1; }   # no client buffer: nothing for the GPU to blit
+    # ⛔⛔ THE WINDOW MAY BE BIGGER THAN THE BUFFER BEHIND IT. Every bound below checks the window
+    # against the SCREEN, which a maximized window passes trivially — it fits exactly. Nothing here
+    # compared the blit extent to the client's slot, so `sys_gpu_blit_shm` read `win_w x win_h` out
+    # of a buffer holding `buf_w x buf_h` and faulted (2026-08-18: F5 on a 640x384 client asked for
+    # 2560x1416; `cr2=0x12600000`, exit 142). Refusing here routes the frame to the CPU path, which
+    # applies the same guard, until the client re-attaches at the size CONFIGURE asked for.
+    if (win_buf_covers(win) == 0) { return 0; }
     var w = win_w(win);
     var h = win_h(win);
     var dx = win_x(win);

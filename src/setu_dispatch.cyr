@@ -82,7 +82,11 @@ fn setu_srv_commit_from_create(m, cfd, comp, out4): i64 {
         if (setu_buf_read(buf_id, pix, nbytes) < 0) { return 0 - 14; }
         # LIVE: record the buffer id so render_window RE-READS it every frame — a client
         # that keeps writing its buffer (without re-presenting) produces a live window.
-        win_set_bufid(win, buf_id);
+        # ⛔ RECORD WHAT THE CLIENT ACTUALLY ATTACHED. Every later frame blits `win_w x win_h` out of
+        # this slot, and the compositor can change those independently (maximize / resize). Without
+        # this the two silently diverge and the blit reads past the buffer — a page fault, not a
+        # visual glitch. See win_buf_covers.
+        win_set_client_buf(win, buf_id, w, ah);
     }
     if (buf_id <= 0) {
         if (setu_srv_read_exact(cfd, pix, nbytes) < 0) { return 0 - 6; }
@@ -433,7 +437,7 @@ fn setu_srv_handshake_step(st, cfd, comp, dstx, dsty, title): i64 {
             if (pix == 0) { return 0 - 14; }
         }
         if (setu_buf_read(buf_id, pix, nbytes) < 0) { return 0 - 14; }
-        win_set_bufid(load64(st + 8), buf_id);
+        win_set_client_buf(load64(st + 8), buf_id, w2, ah);
         store64(st + 16, pix);
         store64(st + 24, w2);
         store64(st + 32, ah);

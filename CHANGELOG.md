@@ -5,6 +5,106 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.16.9] - 2026-08-18 — the launcher joins the damage model
+
+### Fixed — ⛔ THE FLASHING BACKGROUND BEHIND THE LAUNCHER
+
+2026-08-18 burn: *"f2 brought up launcher but started flashing background."*
+
+`render_launcher` paints its panel every frame, and `src/launcher.cyr` registered **no damage at
+all** — no `comp_retire_add`, no serial. **No window moves when the launcher opens**, so
+`rend_band_compute` banded the frame to whatever the windows produced and the `#39` chrome blit
+copied only that. The panel was drawn into the framebuffer and then partially not copied to the
+screen, frame after frame.
+
+`render_desktop` now retires the panel rect while the launcher is open, and for one frame after it
+closes — the close is the vacate, and a region that stops being drawn is in neither `cur` nor `prev`.
+
+⚠ **Fifth site for this exact fix.** F4-close, F6-minimize, un-maximize and drag-resize each needed
+it; it belongs to "a region changed without a window moving", not to any one gesture.
+
+### Investigated — theme repaint: NOT reproducible off the GPU path
+
+Also reported: *"theme switching appears to work for application titlebar but not background or
+desktop top bar."* Measured in QEMU with per-region screendump comparison
+(`agnos/scripts/harness/ae-theme-repaint-test.py`): **top bar 55/55 and background 39/39 pixels
+changed — both repaint.**
+
+⚠ QEMU has no AMD device, so that measurement only covers the **CPU** path; the burn ran the GPU
+path (`#92 op 0x01`). Every layer on the GPU side reads correct — `rend_band_compute` marks a theme
+change stale (no band = full frame), the GPU frame defaults to full, and `rend_clear_band` enqueues
+the background as a chrome rect carrying the live token.
+
+⇒ **Not fixed, because it is not yet reproduced.** ⭐ The most likely explanation is that it was the
+SAME defect: the operator pressed F2 first, and a flashing frame reads exactly like "the background
+is not following the theme". Re-test after this release before treating it as a separate bug.
+
+### Testing
+
+`tests/launcher.tcyr` +9 (52): the retire union covers the panel rect and the panel lands on screen.
+
+⛔ **The WIRING is not unit-covered, and the changelog says so rather than implying it is.** A test
+that discriminates needs a narrow band to exist, and `rend_band_compute` returns early unless the
+damage trackers are live — allocation only `main.cyr` performs. Priming frames still leave
+`rend_band_valid() == 0`, making any "is the panel covered" assertion vacuously true: a mutation
+removing the damage call PASSED one. `tests/desktop.tcyr` states that gap in place of a test that
+cannot fail.
+
+## [0.16.8] - 2026-08-18 — the compositor stops reading past a client's buffer
+
+### Fixed — ⛔⛔ MAXIMIZE FAULTED THE DESKTOP ON IRON
+
+2026-08-18 burn: `fault: pid=6 vec=e cr2=0x12600000 err=0x4`, `run: exit 142`. The compositor died.
+
+The GPU client blit takes its extent from the **window**:
+
+```
+var w = win_w(win);  var h = win_h(win);
+sys_gpu_blit_shm(bid, (h << 16) | w, dstxy)
+```
+
+`win_maximize` sets those to the full screen. **The client's buffer does not follow** — it is the
+client's, and on agnos a `#86` slot it owns. puka's 640x384 surface was asked for 2560x1416 out of
+the same slot, so the blit read ~14x past the end of it.
+
+⛔ **The one gate before that blit checked the wrong thing.** `ae_gpu_window_admissible` compared the
+window to the SCREEN — `dx + w > fw`, `dy + h > fh` — which a maximized window passes *trivially*: it
+fits exactly. Nothing anywhere compared the extent to the buffer. The comment above the blit read
+*"NO BOUNDS RE-CHECK HERE — ae_gpu_window_admissible already cleared every window"*: both sides
+believed the other had checked.
+
+⚠ **Same root cause as the drag report.** `win_resize_by` mutates `win_w`/`win_h` identically, which
+is why dragging crab "destroyed its visible FB" — the same divergence, landing as corruption instead
+of a fault.
+
+### Fixed — the size now travels WITH the buffer id
+
+`win_set_bufid(p, id)` is gone; `win_set_client_buf(p, id, w, h)` replaces it. Three call sites set a
+buffer id and only ONE was near the ATTACH that knew the dimensions — recording the size separately
+would have been forgotten at exactly the sites that forgot it. `win_buf_covers` answers "is this
+window backed", and both the GPU gate and the CPU blit consult it.
+
+### Added — the compositor ASKS the client to resize
+
+`SETU_CONFIGURE` (S->C: id, w, h, state) has been in setu's protocol since it was written, with a
+constructor and **zero senders and zero handlers**. `win_notify_resize` now sends it from maximize,
+unmaximize and drag-resize; dhancha 0.9.12 delivers it as `WINDOW_CONFIGURE`.
+
+⚠ **The ask and the guard are two halves of one fix.** Shipping the ask alone leaves the fault open
+until the client answers; shipping the guard alone freezes the surface at its old extent forever.
+
+### Testing — reproduced in QEMU before and after
+
+`agnos/scripts/harness/ae-resize-fault-test.py` boots the desktop, spawns a client through the
+launcher, and drives the sequence. `SEQ=f5` — **maximize alone, no resize and no minimize** — crashed
+the pre-fix build on demand and survives on the fixed one.
+
+⚠ The harness scored its first post-fix run as "survived" while `client spawned: False` — a pass for
+a test it never performed. It now retries the spawn and exits INCONCLUSIVE rather than passing.
+
+`gpu_fallback` +7 checks (67 total): a maximized window is refused, and admitted again once the client
+re-attaches at the new size. Mutation-tested.
+
 ## [0.16.7] - 2026-08-17
 
 ### Changed

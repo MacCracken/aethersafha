@@ -112,7 +112,7 @@ fn main() {
     # machine with no GPU, instead of being tested by burning a boot on the operator's only box.
     test_group("gpu fallback — the admissibility rule (pure, target-independent)");
     var woff = win_new(40, 10, 340, 80, 80, "OFF");   # never rendered — see the note above
-    win_set_bufid(woff, 7);
+    win_set_client_buf(woff, 7, 80, 80);   # ⚠ buffer matches the window — see the backing test below
     assert_eq(ae_gpu_window_admissible(woff, 400, 400), 0, "past the bottom edge: refused");
     assert_eq(ae_gpu_window_admissible(woff, 400, 800), 1, "same window, taller surface: admitted");
     # ⚠ A window with NO client buffer has nothing for the GPU to blit, so it is trivially
@@ -120,10 +120,32 @@ fn main() {
     var wnobuf = win_new(41, 10, 340, 80, 80, "NOBUF");
     assert_eq(ae_gpu_window_admissible(wnobuf, 400, 400), 1, "no client buffer: always admitted");
     var wedge = win_new(50, 0, 0, 100, 100, "E");
-    win_set_bufid(wedge, 8);
+    win_set_client_buf(wedge, 8, 100, 100);
     assert_eq(ae_gpu_window_admissible(wedge, 100, 130), 1, "exactly flush with both edges: admitted");
     assert_eq(ae_gpu_window_admissible(wedge, 99, 130), 0, "one column short: refused");
     assert_eq(ae_gpu_window_admissible(wedge, 100, 129), 0, "one row short: refused");
+
+    # ⛔⛔ THE WINDOW MAY BE BIGGER THAN THE BUFFER BEHIND IT — the 2026-08-18 iron fault.
+    # Every bound above compares the window to the SCREEN, which a MAXIMIZED window passes trivially:
+    # it fits exactly. Nothing compared the blit extent to the client's slot, so `sys_gpu_blit_shm`
+    # read `win_w x win_h` out of a buffer holding `buf_w x buf_h` and took a page fault
+    # (`cr2=0x12600000`, exit 142). Reproduced in QEMU by `scripts/harness/ae-resize-fault-test.py`
+    # with SEQ=f5 — maximize ALONE is enough; no resize and no minimize are needed.
+    test_group("gpu fallback — ⛔ a window larger than its client buffer is REFUSED");
+    var wbig = win_new(60, 0, 0, 640, 384, "BIG");
+    win_set_client_buf(wbig, 9, 640, 384);
+    assert_eq(win_buf_covers(wbig), 1, "window == buffer: backed");
+    assert_eq(ae_gpu_window_admissible(wbig, 2560, 1440), 1, "  ...and admitted");
+    # Maximize it the way F5 does: the WINDOW grows, the client's buffer does not.
+    win_maximize(wbig, 2560, 1440 - TITLEBAR_H);
+    assert_eq(win_buf_covers(wbig), 0, "maximized past the buffer: NOT backed");
+    assert_eq(ae_gpu_window_admissible(wbig, 2560, 1440), 0, "  ...and REFUSED, so the blit never runs");
+    # ⚠ The refusal must lift once the client re-attaches at the size CONFIGURE asked for.
+    win_set_client_buf(wbig, 9, 2560, 1440 - TITLEBAR_H);
+    assert_eq(win_buf_covers(wbig), 1, "client re-attached at the new size: backed again");
+    assert_eq(ae_gpu_window_admissible(wbig, 2560, 1440), 1, "  ...and admitted again");
+    # ⚠ A window with no client buffer is unaffected — chrome-only windows must never be refused.
+    assert_eq(win_buf_covers(wnobuf), 1, "no client buffer: nothing to overrun");
     win_move(wedge, 0 - 1, 0);
     assert_eq(ae_gpu_window_admissible(wedge, 400, 400), 0, "negative x: refused");
     win_move(wedge, 0, 0);

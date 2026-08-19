@@ -668,6 +668,15 @@ fn render_window(fb, win, focused): i64 {
     # the surface dims (comp_create_window used the CREATE_SURFACE w/h). bhumi_fb_set clips to fb.
     var spix = win_pix(win);
     var bid = win_bufid(win);
+    # ⛔ SAME GUARD AS THE GPU GATE, and it must be here too: refusing on the GPU side only routes an
+    # over-sized window to THIS path, which would then read past the client's slot itself. Clamp the
+    # extent to what the client actually attached until it re-attaches at the CONFIGURE size.
+    var bw = win_buf_w(win);
+    var bh = win_buf_h(win);
+    if (bid != 0) {
+        if (bw > 0) { if (w > bw) { w = bw; } }
+        if (bh > 0) { if (h > bh) { h = bh; } }
+    }
     #
     # ⚠ SKIPPED ENTIRELY when the GPU has committed to this frame. The client surface is then
     # composited by the KERNEL straight out of its GPU-visible shm slot via gpu_blit_shm #87 (see

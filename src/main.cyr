@@ -423,6 +423,10 @@ fn ae_pointer_event(comp, ev, frame): i64 {
                     if (win_grip_is_resize(ae_ptr_grip) == 1) {
                         comp_retire_add(win_x(dwin), win_y(dwin), win_w(dwin), win_total_h(dwin));
                         win_resize_by(dwin, ae_ptr_grip, dx, dy, ae_geom_w, ae_geom_h - TITLEBAR_H);
+                        # ⛔ SAME ASK AS MAXIMIZE. A drag-resize changes `win_w`/`win_h` exactly as F5
+                        # does, so it had exactly the same divergence — this is the defect behind the
+                        # 2026-08-18 report that dragging crab "destroyed its visible FB".
+                        win_notify_resize(dwin);
                     }
                     if (win_grip_is_resize(ae_ptr_grip) == 0) {
                         input_move(dwin, dx, dy, ae_geom_w, ae_geom_h - TITLEBAR_H);
@@ -1024,7 +1028,17 @@ fn main(): i64 {
                     # close the panel AND quit the desktop, Tab would move the selection AND cycle the
                     # windows behind it. That double-apply is the shape that already bit this loop once
                     # (TAB cycling focus twice, F4/F5/F6 applied here and forwarded to the client).
-                    var lk = lnch_key(bhumi_key_usage(ev));
+                    # ⛔⛔ PRESS ONLY. `input_handle` drops releases at its own door
+                    # (`input.cyr:105`), but these three chrome handlers run BEFORE it and so bypassed
+                    # that filter — every key acted on BOTH edges. Measured on the 2026-08-18 burn:
+                    # three F3 presses produced SIX `theme switched` lines, and the launcher moved its
+                    # selection twice per keypress, which is what made choosing an app hard.
+                    # ⚠ Releases must still reach `input_handle` and the client forward below — a
+                    # FULL_KEYS consumer that never sees a release has a stuck key. So this gates the
+                    # chrome, not the event.
+                    var pressed = bhumi_key_pressed(ev);
+                    var lk = LnchKey.LNCH_K_NONE;
+                    if (pressed == 1) { lk = lnch_key(bhumi_key_usage(ev)); }
                     if (lk == LnchKey.LNCH_K_LAUNCH) {
                         var lsel = lnch_selected();
                         println("aethersafha: launching from the launcher:");
@@ -1041,22 +1055,22 @@ fn main(): i64 {
                     # sees a different background token, bumps the wallpaper serial, and
                     # `rend_band_compute` refuses to band across it — so the whole frame redraws
                     # without the damage model needing to know what a theme is.
-                    if (bhumi_key_usage(ev) == HidUsage.HID_F3) {
+                    if (pressed == 1) { if (bhumi_key_usage(ev) == HidUsage.HID_F3) {
                         ae_theme_cycle();
                         println("aethersafha: theme switched:");
                         println(rupa_theme_name(rupa_theme_active()));
                         i = i + 1;
                         continue;
-                    }
+                    } }
                     # ⭐ F2 OPENS IT. Read before `input_handle` for the same reason, and deliberately
                     # NOT an `InputAction`: the launcher is compositor chrome, not a window operation,
                     # and putting it in that enum would offer it to `input_apply`'s window arms.
-                    if (bhumi_key_usage(ev) == HidUsage.HID_F2) {
+                    if (pressed == 1) { if (bhumi_key_usage(ev) == HidUsage.HID_F2) {
                         if (lnch_openp() == 1) { println("aethersafha: launcher opened"); }
                         else { println("aethersafha: launcher has no apps registered"); }
                         i = i + 1;
                         continue;
-                    }
+                    } }
                     var act = input_handle(comp, ev, ae_geom_w, ae_geom_h - TITLEBAR_H);
                     if (act == InputAction.IA_QUIT) {
                         # ⛔ A PROBE RUN IGNORES THE QUIT KEY. --clients exists to answer a question
