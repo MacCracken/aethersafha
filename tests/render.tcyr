@@ -54,6 +54,12 @@ fn ghost_frame(comp, fb, win, bg): i64 {
     return 0;
 }
 
+# ⚠ `src/gpu.cyr` cannot be included here (duplicate variable against this suite's own fixtures), and
+# `wp_fill_band`'s IMAGE arm references `ae_gpu_wp_on`. Under `wp_set_solid` that arm is never taken at
+# runtime — but it must LINK. A local stub keeps the suite honest: it exercises the SOLID path, which
+# is the one the no-band clear regression is about.
+fn ae_gpu_wp_on(): i64 { return 0; }
+
 fn main() {
     alloc_init();
     # ⚠ SETTLE THE CURSOR before any band assertion. `rend_cursor_damage` reports the cursor as moved
@@ -1176,6 +1182,42 @@ fn main() {
     win_set_default_opacity(255);
     var ow3 = win_new(11, 0, 0, 10, 10, "op3");
     assert_eq(win_opacity(ow3), 255, "and follows it back to opaque");
+
+    test_group("wallpaper — ⛔ THE NO-BAND CLEAR MUST TAKE THE ENQUEUEING PATH");
+    # ⛔⛔ `wp_fill_all`'s SOLID arm called `bhumi_fb_clear` directly, which writes the USERLAND
+    # framebuffer only. `rend_clear_band` enqueues a `#88` rect when chrome is on the GPU, and with
+    # chrome on the GPU the `#39` blit is SKIPPED — so the no-band clear never reached the screen.
+    # That path is the one a THEME SWITCH takes (`rend_band_compute` refuses to band across a
+    # background change) and the one the FIRST FRAME takes: the 2026-08-18 burn's "theme does not
+    # reach the background" and its `--selftest` residue are the same defect.
+    # ⚠ Asserted on PIXELS via the CPU arm, which is what a host can reach; the GPU arm differs only
+    # in that `rend_clear_band` enqueues instead of storing. The regression this guards is the
+    # BYPASS — a full clear that does not go through `rend_clear_band` at all.
+    var wfb = bhumi_fb_new(64, 32);
+    wp_set_solid(0x00112233);
+    bhumi_fb_clear(wfb, 0x00FFFFFF);
+    wp_fill_all(wfb, 64, 32);
+    assert_eq(bhumi_fb_get(wfb, 0, 0), 0x00112233, "the no-band clear paints the top-left");
+    assert_eq(bhumi_fb_get(wfb, 63, 31), 0x00112233, "  ...and the bottom-right");
+    assert_eq(bhumi_fb_get(wfb, 32, 16), 0x00112233, "  ...and the middle");
+    # ⚠ And it must agree with the BANDED path over the same rows — one clear, two entry points.
+    # ⛔⛔ THE DISCRIMINATING HALF. The pixel checks above pass either way — on the CPU path
+    # `bhumi_fb_clear` and `rend_clear_band` write identical pixels, and a mutation restoring the
+    # bypass PASSED them. What separates the two is that `rend_clear_band` ENQUEUES a `#88` rect when
+    # chrome is on the GPU, and the bypass does not. `ae_gpu_frame_ok` is what gates that, so set it
+    # and count the queue.
+    ae_marks_reset();
+    ae_gpu_frame_ok = 1;
+    var rects_before = ae_rect_count();
+    wp_fill_all(wfb, 64, 32);
+    var rects_after = ae_rect_count();
+    ae_gpu_frame_ok = 0;
+    assert_eq(t_gt_r(rects_after, rects_before), 1, "the no-band clear ENQUEUES for the GPU, not just the framebuffer");
+
+    var wfb2 = bhumi_fb_new(64, 32);
+    bhumi_fb_clear(wfb2, 0x00FFFFFF);
+    wp_fill_band(wfb2, 0, 32, 32);
+    assert_eq(bhumi_fb_get(wfb2, 32, 16), bhumi_fb_get(wfb, 32, 16), "full and banded clears agree");
 
     return assert_summary();
 }

@@ -374,6 +374,13 @@ both stall.
 and D is the proof they work; running D early produces a port that re-implements the gaps inside the
 consumer, which is the state the stack is already in.
 
+> ⭐⭐ **BURNED 2026-08-18, and the arc is handed off — see [`desktop-arc-handoff.md`](desktop-arc-handoff.md).**
+> The phase reached iron: launcher, LIST panes, clipping, both event shapes, puka's widget tree. puka
+> renders OPAQUE (0.6.15's alpha fix holds). Two defects found and fixed after: the compositor acted on
+> BOTH key edges, and **maximize faulted the desktop** — the GPU blit took its extent from the WINDOW
+> while the client's buffer stayed its own size (0.16.8, `SETU_CONFIGURE` now sent). A third, the
+> flashing launcher background, is 0.16.9. ⚠ Still open: theme repaint on the GPU path (not reproduced).
+>
 > **STATUS 2026-08-17: E ✅, C ✅ (rupa 0.1.3 + dhancha 0.9.6), A ✅ B ✅ (dhancha 0.9.7),
 > D ✅ (crab 0.4.10 + puka 0.6.15 on dhancha 0.9.9), F ✅ (0.16.4). **THE PHASE IS COMPLETE.**
 >

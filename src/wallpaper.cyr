@@ -242,7 +242,18 @@ fn wp_load_file(path): i64 {
 # Paint the whole framebuffer from the source — the no-band path.
 fn wp_fill_all(fb, fw, fh): i64 {
     if (fb == 0) { return 0 - 1; }
-    if (ae_wp_kind == AeWallpaperKind.AE_WP_SOLID) { return bhumi_fb_clear(fb, ae_wp_c0); }
+    # ⛔⛔ THIS SOLID ARM USED TO CALL `bhumi_fb_clear` DIRECTLY, AND THAT LOST THE WHOLE CLEAR ON THE
+    # GPU PATH. `bhumi_fb_clear` writes the USERLAND framebuffer; `rend_clear_band` — which the banded
+    # sibling below already used — ENQUEUES a `#88` rect when chrome is on the GPU. With chrome on the
+    # GPU the `#39` blit is skipped, so anything written only to userland never reaches the screen.
+    # ⇒ The no-band path is exactly the one a THEME SWITCH takes (`rend_band_compute` refuses to band
+    # across a background change) and the one the FIRST FRAME takes. Both lost their clear:
+    #   · 2026-08-18 burn — "theme switching works for the titlebar but not background or top bar".
+    #     Titlebars are chrome rects, enqueued separately, so they updated; the background did not.
+    #   · the same burn — `--selftest` pixels surviving into the desktop launched after it.
+    # ⚠ INVISIBLE IN QEMU, which has no AMD device: with no GPU the `#39` blit runs and the userland
+    # framebuffer IS the screen, so a per-region screendump measured both regions repainting.
+    # ⇒ Delegate to `wp_fill_band`, whose SOLID arm is `rend_clear_band`. One clear path, not two.
     return wp_fill_band(fb, 0, fh, fh);
 }
 

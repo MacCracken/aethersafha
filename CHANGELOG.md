@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.16.10] - 2026-08-18 — the no-band clear reaches the GPU
+
+### Fixed — ⛔⛔ THE FULL-SCREEN CLEAR WAS LOST ON THE GPU PATH
+
+`wp_fill_all`'s SOLID arm called **`bhumi_fb_clear` directly**, which writes the USERLAND framebuffer.
+Its banded sibling `wp_fill_band` calls **`rend_clear_band`**, which ENQUEUES a `#88` rect when chrome
+is on the GPU. With chrome on the GPU the `#39` blit is skipped — so anything written only to userland
+never reaches the screen.
+
+⇒ **The no-band path is exactly the one a THEME SWITCH takes** (`rend_band_compute` refuses to band
+across a background change) **and the one the FIRST FRAME takes.** Both silently lost their clear.
+
+⭐ **One root cause for two 2026-08-18 burn reports:**
+- *"theme switching works for the titlebar but not background or desktop top bar"* — titlebars are
+  chrome rects, enqueued separately, so they updated; the background's clear was discarded.
+- *`--selftest` residue surviving into the desktop launched after it* — the first frame is unbanded,
+  so its clear went the same way and selftest's pixels stayed in the GPU back buffer.
+
+⚠ **INVISIBLE IN QEMU, which has no AMD device.** With no GPU the `#39` blit runs and the userland
+framebuffer IS the screen, so a per-region screendump measured both regions repainting correctly. The
+CPU path was never broken; only the path that iron actually takes.
+
+The SOLID arm now delegates to `wp_fill_band`. One clear path, not two.
+
+### Testing
+
+`render.tcyr` 272 (+6). ⭐ The pixel checks alone **cannot** catch this — on the CPU path both calls
+write identical pixels, and a mutation restoring the bypass passed them. The discriminating assertion
+sets `ae_gpu_frame_ok` and counts `ae_rect_count()`: the clear must ENQUEUE, not merely paint. With
+that, restoring the bypass fails.
+
 ## [0.16.9] - 2026-08-18 — the launcher joins the damage model
 
 ### Fixed — ⛔ THE FLASHING BACKGROUND BEHIND THE LAUNCHER
