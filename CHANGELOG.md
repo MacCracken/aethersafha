@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.16.13] - 2026-08-19 — the compositor stopped listening to clients that had spoken once
+
+### Fixed — a resized client's new surface was never received
+
+Iron 2026-08-19: puka logged `grid 320x88 cells, 2560x1408 px` after F5 and the displayed area did
+not change. Two independent gates, both of which had to fall:
+
+1. **`setu_hs_action` treated state 3 as terminal.** Once a client committed, EVERY later record
+   returned `HS_BAD`. Invisible for an arc because of the LIVE re-read — the compositor re-reads the
+   attached `#86` slot each frame, so a client rewriting one slot stays live with no further
+   handshake. It breaks the instant the surface RESIZES: setu **recreates** the slot when the byte
+   count changes, so the client presents a NEW id at a NEW extent and the compositor answered
+   "protocol error" and kept blitting the old slot. State 3 now accepts `ATTACH` (a bare `COMMIT` is
+   `HS_SKIP`, not `HS_BAD` — a client whose attach the ring ate must not be torn down).
+2. **`chan_served` meant two things and gated the poll.** It latched on the first successful present
+   AND on retirement, and the client loop skipped every client with it set — so the compositor
+   **stopped reading a healthy client's channel** after its first present. Split into `chan_served`
+   (announced once) and `chan_dead` (stop polling); only the latter gates the loop.
+
+⚠ Consequences of (2) that had to be latched: `psid > 0` now recurs on every re-attach cycle, so the
+announce, the `comp_focus` grab and the cascade counter fire once per client, not once per resize.
+And `HS_COMMIT`'s `win_move(dstx, dsty)` is now first-commit-only (`st[5]`) — otherwise a re-attach
+would yank a maximized or operator-dragged window back to its spawn position on its next present.
+
+⚠ An unchanged re-attach skips the buffer copy: a presenting client sends ATTACH+COMMIT every frame,
+and copying the surface there would cost a full frame-sized read **on top of** the live re-read —
+14 MB a frame for one fullscreen terminal. A re-attach carries the slot id and extent, not pixels.
+
+### Added — the compositor reports a re-attach at a new extent
+
+`aethersafha: client re-attached at a new size (w, then h):`, bounded at 16. ⛔ The client saying it
+resized proves INTENT; only the server saying it re-attached proves ARRIVAL. The QEMU harness
+asserted just puka's line and **passed while iron failed** — it now requires both, and that they agree.
+
+⚠ **QEMU cannot complete this test.** With no AMD GPU there is no `#86` carveout, so setu falls back
+to `#71`, whose cap is **2 MB** (`SHM_MAX_SIZE`). puka opens at 640x384 = 983 040 B and fits;
+maximized it needs 16.5 MB, `setu_buf_create` refuses, and the present never happens — the harness
+exits INCONCLUSIVE naming the cap rather than blaming the compositor. On iron the same surface is
+14.4 MB against `#86`'s 32 MB. The pre-fix binary still reproduces the rejection, so the harness is
+not vacuous.
+
+### Fixed — `setu_hs_action(3, COMMIT)` was asserted as a protocol error
+
+`setu_handshake.tcyr` encoded state 3 as terminal. Now asserts re-attach, skip-on-commit, and that
+`CREATE_SURFACE`/`CLOSE` remain errors there.
+
+
 ## [0.16.12] - 2026-08-19 — a full-screen repaint owes TWO frames, not one
 
 ### Fixed — the desktop background blinked at half the frame rate after a theme switch

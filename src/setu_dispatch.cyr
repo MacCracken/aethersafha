@@ -344,6 +344,19 @@ enum SetuHsAct {
 # ⭐ The resync: a COMMIT before any ATTACH is an orphan whose ATTACH was dropped (SKIP it); a repeat
 # ATTACH after one landed means OUR commit was dropped (re-apply, idempotent). Either way the machine
 # is back in phase within one record instead of stuck for the rest of the boot.
+# Report a client re-attaching at a NEW extent. Bounded: a drag produces one per step, so this is
+# capped rather than latched — a first-sight latch would hide the second resize of a session, and an
+# ungated print would flood a console three procs share.
+var setu_resize_said = 0;
+fn setu__resized_say(w, h): i64 {
+    if (setu_resize_said >= 16) { return 0; }
+    setu_resize_said = setu_resize_said + 1;
+    println("aethersafha: client re-attached at a new size (w, then h):");
+    println_int(w);
+    println_int(h);
+    return 0;
+}
+
 fn setu_hs_action(state, kind): i64 {
     if (state == 0) {
         if (kind == SETU_CREATE_SURFACE) { return SetuHsAct.HS_CREATE; }
@@ -357,6 +370,27 @@ fn setu_hs_action(state, kind): i64 {
     if (state == 2) {
         if (kind == SETU_COMMIT) { return SetuHsAct.HS_COMMIT; }
         if (kind == SETU_ATTACH) { return SetuHsAct.HS_ATTACH; }
+        return SetuHsAct.HS_BAD;
+    }
+    # ⛔⛔ STATE 3 IS NOT THE END OF THE CONVERSATION. This fell through to HS_BAD, so once a client
+    # had committed ONCE, every later ATTACH was rejected as a protocol error.
+    #
+    # That was invisible for a whole arc because of the LIVE re-read: the compositor keeps the
+    # attached `buf_id` and re-reads that slot every frame, so a client writing the same slot keeps
+    # producing a live window with no further handshake. The id and size never change ⇒ nothing
+    # notices the rejection.
+    #
+    # ⇒ IT BREAKS THE MOMENT THE SURFACE RESIZES. setu RECREATES the `#86` slot when the byte count
+    # changes (`SETU_C_BUFSZ != nbytes` -> recreate), so after a maximize the client presents a NEW
+    # id at a NEW size — and this returned HS_BAD, leaving the compositor live-reading the OLD slot
+    # at the OLD extent. Iron 2026-08-19: puka reported `grid 320x88 cells, 2560x1408 px` while the
+    # displayed area stayed the size it started at. The 2026-08-18 "drag destroyed crab's visible
+    # FB" is the same rejection reached by the other resize path.
+    # ⚠ A bare COMMIT here is SKIP, not BAD: a client whose ATTACH the ring ate would otherwise be
+    # torn down for a message that asks for nothing new.
+    if (state == 3) {
+        if (kind == SETU_ATTACH) { return SetuHsAct.HS_ATTACH; }
+        if (kind == SETU_COMMIT) { return SetuHsAct.HS_SKIP; }
         return SetuHsAct.HS_BAD;
     }
     return SetuHsAct.HS_BAD;
@@ -436,7 +470,28 @@ fn setu_srv_handshake_step(st, cfd, comp, dstx, dsty, title): i64 {
             pix = alloc(nbytes);
             if (pix == 0) { return 0 - 14; }
         }
-        if (setu_buf_read(buf_id, pix, nbytes) < 0) { return 0 - 14; }
+        # ⭐ AN UNCHANGED RE-ATTACH CARRIES NO NEW INFORMATION — SKIP THE COPY. A presenting client
+        # sends ATTACH+COMMIT EVERY FRAME (puka does), and those were all rejected while state 3
+        # answered HS_BAD; accepting them without this guard buys correctness at the price of a full
+        # surface copy per frame ON TOP of the LIVE re-read that render_window already does — 14 MB
+        # a frame for one fullscreen terminal. The pixels are not what a re-attach is for: the slot
+        # id and the extent are, and when neither moved the live read is already showing them.
+        var samebuf = 0;
+        var w_ = load64(st + 8);
+        if (buf_id == win_bufid(w_)) {
+            if (w2 == win_buf_w(w_)) { if (ah == win_buf_h(w_)) { samebuf = 1; } }
+        }
+        if (samebuf == 0) {
+            # ⭐ SAY IT WHEN THE EXTENT ACTUALLY MOVES. A resize that the compositor never learned is
+            # invisible from outside — the client reports its new grid and the screen does not follow
+            # — so the burn (and the QEMU harness) need the SERVER's own confirmation, not just the
+            # client's intent. Gated on a genuine extent change so a normal frame stays silent.
+            if (win_bufid(w_) != 0) {
+                if (w2 != win_buf_w(w_)) { setu__resized_say(w2, ah); }
+                if (w2 == win_buf_w(w_)) { if (ah != win_buf_h(w_)) { setu__resized_say(w2, ah); } }
+            }
+            if (setu_buf_read(buf_id, pix, nbytes) < 0) { return 0 - 14; }
+        }
         win_set_client_buf(load64(st + 8), buf_id, w2, ah);
         store64(st + 16, pix);
         store64(st + 24, w2);
@@ -446,7 +501,14 @@ fn setu_srv_handshake_step(st, cfd, comp, dstx, dsty, title): i64 {
     }
 
     var win3 = load64(st + 8);                     # HS_COMMIT — the only action left
-    win_move(win3, dstx, dsty);
+    # ⛔ PLACE ONCE, ON THE FIRST COMMIT ONLY (st[5]). `dstx/dsty` is the SPAWN placement, so moving
+    # on every commit was harmless only while a second commit was unreachable (state 3 answered
+    # HS_BAD). Now that a resize re-attaches, an unconditional move would yank a maximized window —
+    # or one the operator has dragged — back to where it was launched, on its next present.
+    if (load64(st + 40) == 0) {
+        win_move(win3, dstx, dsty);
+        store64(st + 40, 1);
+    }
     win_set_pix(win3, load64(st + 16));
     win_set_cfd(win3, cfd);                        # ⭐ THE KEY PATH: forward_key refuses on cfd == 0
     store64(st, 3);

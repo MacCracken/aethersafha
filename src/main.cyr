@@ -72,10 +72,18 @@ var ae_spawn_failed = 0;
 # [[feedback_cyrius_var_array_u64_units]]
 var AE_CLIENT_MAX = 8;
 var chan_fd[8];        # compositor-side channel ends, one per hosted client
-var chan_served[8];    # 1 once that client's surface has been committed
+var chan_served[8];    # 1 once that client's surface has been ANNOUNCED (not a poll gate — see chan_dead)
 var chan_st[8];        # per-client handshake scratch (see setu_srv_handshake_step)
 var chan_fail[8];      # consecutive handshake failures per client
 var chan_name[8];      # window title for the client on this channel
+# ⛔⛔ `chan_served` MEANT TWO THINGS AND THAT COST THE RESIZE. It latched on the first successful
+# present AND on retirement, and the poll loop skipped every client with it set — so the compositor
+# STOPPED READING a healthy client's channel the moment it presented once. Its window stayed alive
+# only through the LIVE re-read of the attached `#86` slot, which is why nothing noticed until a
+# resize: setu recreates the slot at a new id, the client sends ATTACH+COMMIT, and nobody was
+# listening. Iron 2026-08-19, puka fullscreen. `served` now means "announced", `dead` means
+# "stop polling"; only the latter gates the loop.
+var chan_dead[8];      # 1 = retired, never poll again (distinct from `served` = announced once)
 var chan_n = 0;
 
 # Mint a channel, endow one end to a child, announce it as `AGNOS_CHAN`, and spawn `path`.
@@ -124,7 +132,8 @@ fn ae_client_spawn(path, plen, cname): i64 {
     }
     store64(&chan_fd + chan_n * 8, mine);
     store64(&chan_served + chan_n * 8, 0);
-    var stbuf = alloc(64);          # [0]=state [1]=win [2]=pix [3]=w [4]=h
+    store64(&chan_dead + chan_n * 8, 0);      # slots are reused across spawns — clear both latches
+    var stbuf = alloc(64);          # [0]=state [1]=win [2]=pix [3]=w [4]=h [5]=placed-once latch
     var zi = 0;
     while (zi < 8) { store64(stbuf + zi * 8, 0); zi = zi + 1; }
     store64(&chan_st + chan_n * 8, stbuf);
@@ -1233,7 +1242,7 @@ fn main(): i64 {
             #ifdef CYRIUS_TARGET_AGNOS
             var pi = 0;
             while (pi < chan_n) {
-                if (load64(&chan_served + pi * 8) == 0) {
+                if (load64(&chan_dead + pi * 8) == 0) {
                     var pstep = accepted % 3;
                     var pcx = 30 + pstep * (ae_geom_w / 6);
                     var pcy = 50 + pstep * (ae_geom_h / 6);
@@ -1243,12 +1252,18 @@ fn main(): i64 {
                     # phase permanently. That is exactly why puka never got a client fd on iron and every
                     # key it should have received died at forward_key's `cfd == 0`.
                     var psid = setu_srv_handshake_drain(load64(&chan_st + pi * 8), load64(&chan_fd + pi * 8), comp, pcx, pcy, load64(&chan_name + pi * 8));
+                    # ⚠ ANNOUNCE ONCE. `psid > 0` now recurs every time a client completes a
+                    # re-attach cycle (a resize), so the announce, the focus grab and the cascade
+                    # counter must be latched — otherwise every resize would steal focus and shift
+                    # the next client's spawn position.
                     if (psid > 0) {
-                        store64(&chan_served + pi * 8, 1);
-                        println("aethersafha: setu client presented surface");
-                        println_int(psid);
-                        comp_focus(comp, comp_count(comp) - 1);
-                        accepted = accepted + 1;
+                        if (load64(&chan_served + pi * 8) == 0) {
+                            store64(&chan_served + pi * 8, 1);
+                            println("aethersafha: setu client presented surface");
+                            println_int(psid);
+                            comp_focus(comp, comp_count(comp) - 1);
+                            accepted = accepted + 1;
+                        }
                     }
                     # ⛔ A HANDSHAKE ERROR IS NOT TERMINAL ON THE FIRST OCCURRENCE. This used to mark
                     # the client served (i.e. give up forever) the first time it saw a negative — but a
@@ -1272,13 +1287,15 @@ fn main(): i64 {
                         if (fails < 200) { psid = 0; }
                     }
                     if (psid < 0) {
-                        # A handshake error is terminal for THIS client — mark it served so the loop
+                        # A handshake error is terminal for THIS client — mark it DEAD so the loop
                         # does not retry a dead channel every frame for the rest of the run.
+                        # ⚠ `dead`, not `served`: `served` only records that the window was announced,
+                        # and gating the poll on it is what stopped live clients being read at all.
                         # ⛔ DISTINCT STRINGS, NOT println_int: three procs share this console
                         # unserialised (spawn_path #43 does not apply an fd redirect unless one is
                         # armed), so a bare number lands mid-line in somebody else's output and is
                         # unreadable. That already cost one diagnosis this session.
-                        store64(&chan_served + pi * 8, 1);
+                        store64(&chan_dead + pi * 8, 1);
                         # ⛔⛔ EVERY RETIREMENT MUST SAY SOMETHING, AND TWO CODES USED TO SAY NOTHING.
                         # `-9` (comp_create_window refused — window table full) and `-12` (attach geometry
                         # or buffer id refused) are both returnable by the handshake and neither had a line

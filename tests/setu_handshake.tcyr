@@ -87,7 +87,25 @@ fn main() {
     assert_eq(setu_hs_action(2, SETU_CREATE_SURFACE), SetuHsAct.HS_BAD, "state 2 + create_surface is a protocol error");
     assert_eq(setu_hs_action(1, SETU_CLOSE), SetuHsAct.HS_BAD, "state 1 + close is not a handshake record");
     assert_eq(setu_hs_action(2, SETU_CLOSE), SetuHsAct.HS_BAD, "state 2 + close is not a handshake record");
-    assert_eq(setu_hs_action(3, SETU_COMMIT), SetuHsAct.HS_BAD, "already done -> no action");
+    # ⛔⛔ STATE 3 IS NOT TERMINAL — THIS ASSERTION USED TO SAY IT WAS.
+    # It read `assert_eq(setu_hs_action(3, SETU_COMMIT), HS_BAD, "already done -> no action")`, and
+    # the whole state fell through to HS_BAD. That looked right because a committed client keeps its
+    # window alive through the LIVE re-read (the compositor re-reads the attached slot every frame),
+    # so rejecting later records changed nothing observable — until the surface RESIZED. setu
+    # recreates the `#86` slot when the byte count changes, so a maximized client presents a NEW id
+    # at a NEW extent and the compositor answered "protocol error" and kept blitting the old slot.
+    # Iron 2026-08-19: puka logged `grid 320x88 cells, 2560x1408 px` while the displayed area never
+    # grew. A re-attach is the ONLY way the compositor can learn a new slot id.
+    assert_eq(setu_hs_action(3, SETU_ATTACH), SetuHsAct.HS_ATTACH,
+              "state 3 + attach -> RE-ATTACH: this is how a resize is learned");
+    # ⚠ A bare COMMIT asks for nothing new. SKIP, not BAD: a client whose ATTACH the ring ate must
+    # not be torn down for it, and presenting clients send this pair every frame.
+    assert_eq(setu_hs_action(3, SETU_COMMIT), SetuHsAct.HS_SKIP,
+              "state 3 + commit -> skip, nothing new is being asked for");
+    assert_eq(setu_hs_action(3, SETU_CREATE_SURFACE), SetuHsAct.HS_BAD,
+              "state 3 + create_surface is still a protocol error");
+    assert_eq(setu_hs_action(3, SETU_CLOSE), SetuHsAct.HS_BAD,
+              "state 3 + close is still not a handshake record");
 
     # -----------------------------------------------------------------------
     test_group("setu handshake — a lossless stream completes");
