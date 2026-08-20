@@ -105,6 +105,7 @@ fn main() {
 
     # A band with neither tracker valid: nothing changed in two frames. VALID with height 0 — a real
     # result, not a failure. ⛔ Conflating it with "no band" would clear the whole screen every idle frame.
+    rend_band_carry_reset();          # independent scenario, not the next frame — see the carry test
     rend_dmg_clear(ae_frame_dmg);
     rend_dmg_clear(ae_prev_dmg);
     rend_band_compute(1440, 0x121218);
@@ -128,6 +129,7 @@ fn main() {
     assert_eq(rend_band_h(), 900, "union: bottom comes from PREV (1000-100) — not cur's 200");
 
     # Order does not matter: prev above cur folds the same way.
+    rend_band_carry_reset();          # independent scenario, not the next frame — see the carry test
     rend_dmg_clear(ae_frame_dmg);
     rend_dmg_clear(ae_prev_dmg);
     rend_dmg_add(ae_frame_dmg, 0, 500, 800, 100);            # cur rows 500..600
@@ -138,6 +140,7 @@ fn main() {
 
     # Clamped to the screen, both edges. An off-screen window rect must not produce a source pointer
     # or a destination row outside the framebuffer — `#39` clips, but the band's own src offset does not.
+    rend_band_carry_reset();          # independent scenario, not the next frame — see the carry test
     rend_dmg_clear(ae_frame_dmg);
     rend_dmg_clear(ae_prev_dmg);
     rend_dmg_add(ae_frame_dmg, 0, 0 - 200, 800, 300);        # rows -200..100
@@ -149,6 +152,7 @@ fn main() {
     # ⛔ A BACKGROUND CHANGE DAMAGES EVERY PIXEL WITHOUT MOVING A WINDOW. The band must refuse, so the
     # caller does a full clear — otherwise the old colour survives everywhere outside the band and reads
     # as a stale desktop that no window rect can explain.
+    rend_band_carry_reset();          # independent scenario, not the next frame — see the carry test
     rend_dmg_clear(ae_frame_dmg);
     rend_dmg_clear(ae_prev_dmg);
     rend_dmg_add(ae_frame_dmg, 0, 100, 800, 50);
@@ -171,6 +175,42 @@ fn main() {
     assert_eq(rend_inval_owed(), 0, "the debt is paid after two frames");
     rend_band_compute(1440, 0x334455);
     assert_eq(rend_band_valid(), 1, "the THIRD frame bands normally again — both buffers correct");
+
+    # -----------------------------------------------------------------------
+    test_group("render — the band itself covers TWO frames (#84 flips)");
+    # ⛔⛔ WHY THIS EXISTS. Since AE-9 the `#39` chrome blit is gone on iron and the GPU's
+    # back-buffer clear IS the band's first rect — so a row outside the band is not just
+    # "not re-copied", it is never painted this frame in THIS buffer. `union(cur, prev)` buys two
+    # frames for anything routed through the damage trackers, but a row that is inside the band on
+    # frame N and outside on N+1 lands in ONE buffer and `#84` alternates them forever.
+    # Iron 2026-08-19: the band moved 458..552 (launcher panel) -> 0..0 -> 0..414 -> 0..464 ->
+    # 50..464, and the background flickered outside the window's rows. `--fullclear` removed it
+    # entirely — the controlled proof that the cause is staleness OUTSIDE the band.
+    rend_band_carry_reset();
+    rend_dmg_clear(ae_frame_dmg);
+    rend_dmg_clear(ae_prev_dmg);
+    rend_dmg_add(ae_frame_dmg, 0, 100, 800, 100);            # frame 1: rows 100..200
+    rend_band_compute(1440, 0x334455);
+    assert_eq(rend_band_y(), 100, "carry frame 1: band starts at the damage");
+    assert_eq(rend_band_h(), 100, "carry frame 1: band is the damage");
+
+    # Frame 2 damages a DISJOINT region far below. Without the carry the band would be 800..900 and
+    # rows 100..200 would never be repainted in the other buffer — the flicker.
+    rend_dmg_clear(ae_frame_dmg);
+    rend_dmg_clear(ae_prev_dmg);
+    rend_dmg_add(ae_frame_dmg, 0, 800, 800, 100);            # frame 2: rows 800..900
+    rend_band_compute(1440, 0x334455);
+    assert_eq(rend_band_y(), 100, "carry frame 2: still covers frame 1's rows — the other buffer");
+    assert_eq(rend_band_h(), 800, "carry frame 2: union of 100..200 and 800..900");
+
+    # ⛔ AND IT MUST SHRINK BACK. Unioning against the EMITTED band instead of the RAW one would
+    # ratchet outward and never recover — a permanent full-screen clear wearing a band's name.
+    rend_dmg_clear(ae_frame_dmg);
+    rend_dmg_clear(ae_prev_dmg);
+    rend_dmg_add(ae_frame_dmg, 0, 800, 800, 100);            # frame 3: the same rows again
+    rend_band_compute(1440, 0x334455);
+    assert_eq(rend_band_y(), 800, "carry frame 3: shrinks back — no ratchet");
+    assert_eq(rend_band_h(), 100, "carry frame 3: band is just the steady damage");
 
     # ⛔ A MISSING TRACKER MEANS FULL SCREEN, NOT AN EMPTY BAND. Every unit suite runs with these unset,
     # and an empty band there would silently stop clearing anything at all.
@@ -214,6 +254,7 @@ fn main() {
     var GBG = 0x00101018;
     ae_dmg_primed = 0;                        # frame 1 must prime full, as it does at startup
     ae_last_bg = 0 - 1;
+    rend_band_carry_reset();          # independent scenario, not the next frame — see the carry test
     rend_dmg_clear(ae_frame_dmg);
     rend_dmg_clear(ae_prev_dmg);
 
@@ -269,6 +310,7 @@ fn main() {
     assert_eq(win_translucent(trwin), 1, "the fixture window is translucent");
 
     ae_last_bg = 0 - 1;
+    rend_band_carry_reset();          # independent scenario, not the next frame — see the carry test
     rend_dmg_clear(ae_frame_dmg);
     rend_dmg_clear(ae_prev_dmg);
     ghost_frame(trcomp, trfb, trwin, TRBG);
@@ -386,6 +428,7 @@ fn main() {
     var KBG = 0x00101018;
     ae_dmg_primed = 0;
     ae_last_bg = 0 - 1;
+    rend_band_carry_reset();          # independent scenario, not the next frame — see the carry test
     rend_dmg_clear(ae_frame_dmg);
     rend_dmg_clear(ae_prev_dmg);
     comp_retire_clear();
@@ -435,6 +478,7 @@ fn main() {
     var SBG = 0x00101018;
     ae_dmg_primed = 0;
     ae_last_bg = 0 - 1;
+    rend_band_carry_reset();          # independent scenario, not the next frame — see the carry test
     rend_dmg_clear(ae_frame_dmg);
     rend_dmg_clear(ae_prev_dmg);
     comp_retire_clear();

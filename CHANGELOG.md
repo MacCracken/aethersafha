@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.16.16] - 2026-08-19 — the damage band now covers two frames, like everything else here
+
+### Fixed — background flicker outside a live window's rows
+
+⭐ **Diagnosed by controlled experiment, not by reading.** 0.16.15's `--fullclear` removed the
+flicker completely on iron while the control run reproduced it with identical actions — so the cause
+is staleness OUTSIDE the damage band and nothing else. 0.16.14 had already eliminated the
+GPU/CPU-path family (`frame path -> GPU`, **flips 0** across a 30 s flickering session).
+
+Since **AE-9** the `#39` chrome blit is gone on iron and the GPU's back-buffer clear **is the band's
+first rect** — so a row outside the band is not merely "not re-copied", it is **never painted this
+frame in this buffer**. `union(cur, prev)` buys two frames for anything routed through the damage
+trackers, but a row inside the band on frame N and outside on N+1 lands in **one** buffer, and `#84`
+alternates them forever.
+
+The iron band history is that shape exactly, on a 1440-row screen:
+
+```
+458..552  (launcher panel)  ->  0..0  ->  0..414  ->  0..464  ->  50..464 (settles on the window)
+```
+
+Rows the panel had painted fall out of the band; rows 464..1440 are never painted again. That is
+"flicker below the application, sometimes a few rows above, stopping when the app closes, repaired
+by a theme switch" — a theme switch invalidates fully, for two frames since 0.16.12.
+
+⇒ The band now emits **union(this frame's band, LAST frame's raw band)**. Every row painted at N is
+painted again at N+1, so both buffers converge regardless of which producer caused it — including
+producers that never touch `cur`/`prev`. ⚠ The union is taken against the **RAW** band, never the
+emitted one, or it ratchets outward and never shrinks — a permanent full-screen clear wearing a
+band's name.
+
+⚠ Cost is one extra band's worth of rows, not a full clear: AE-0a's 3.83 ms → 2.46 ms saving is kept.
+`--fullclear` stays as the diagnostic.
+
+⚠ `rend_band_carry_reset()` exists for TESTS and hard discontinuities. Consecutive frames must keep
+the carry — that is the whole mechanism.
+
+### Added — a test for the carry, mutation-proven both ways
+
+Three frames: damage at 100..200, then a DISJOINT 800..900 (band must still cover 100..200 — the
+other buffer), then 800..900 again (band must SHRINK BACK — no ratchet). Removing the carry fails
+the suite (24/1); unioning against the emitted band instead of the raw one also fails (24/1).
+
+⚠ The existing band assertions drive independent scenarios back to back, so they now reset the carry
+explicitly — `rend_band_compute` has frame-to-frame state by design.
+
+
 ## [0.16.15] - 2026-08-19 — the band IS the GPU's clear, and `#84` flips
 
 ### Ruled out — the background flicker is NOT a rendering-path flip

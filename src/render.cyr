@@ -300,6 +300,15 @@ var ae_inval_owed = 0;
 # frame. It is a DIAGNOSTIC, not a fix: it discards the AE-0a optimisation (3.83 ms -> 2.46 ms of a
 # 6.40 ms frame) and costs a full clear per frame. If the flicker disappears under it, the cause is
 # "regions outside the band differ between the flipped buffers" and nothing else.
+# LAST frame's RAW band (pre-union), so the emitted band can cover both frames without ratcheting.
+var ae_band_prev_valid = 0;
+var ae_band_prev_y = 0;
+var ae_band_prev_h = 0;
+
+# Clear the two-frame carry. ⚠ For TESTS and for a hard discontinuity only: consecutive frames must
+# keep it, or the band stops covering both buffers, which is the defect it exists to fix.
+fn rend_band_carry_reset(): i64 { ae_band_prev_valid = 0; ae_band_prev_y = 0; ae_band_prev_h = 0; return 0; }
+
 var ae_force_full = 0;
 fn rend_force_full_set(v): i64 { ae_force_full = v; return 0; }
 fn rend_force_full(): i64 { return ae_force_full; }
@@ -495,6 +504,34 @@ fn rend_band_compute(fh, bg): i64 {
         ae_band_h = 0;
         return 0;
     }
+    # ⛔⛔ THE BAND ITSELF OWES TWO FRAMES — `#84` FLIPS AND THE BAND *IS* THE GPU'S CLEAR.
+    #
+    # Since AE-9 the `#39` chrome blit is gone on iron and the back-buffer clear is the band's first
+    # rect, so a row outside the band is not merely "not re-copied": it is never painted at all this
+    # frame, in THIS buffer. `union(cur, prev)` already buys two frames for anything that goes
+    # through the damage trackers — but any row that was inside the band on frame N and outside it on
+    # frame N+1 gets painted into ONE buffer and not the other, and `#84` alternates them forever.
+    #
+    # Iron 2026-08-19 measured exactly that shape: the band moved 458..552 (launcher panel) -> 0..0
+    # -> 0..414 -> 0..464 -> 50..464 (settled on the window), so rows the panel had painted fell out
+    # of the band, and rows 464..1440 were never painted again. `--fullclear` removed the flicker
+    # completely, which is the controlled proof that staleness OUTSIDE the band is the whole cause.
+    #
+    # ⇒ Emit union(this frame's band, LAST frame's band). Every row painted at N is painted again at
+    # N+1, so both buffers converge, whatever produced the damage — including producers that never
+    # touch `cur`/`prev`. ⚠ The union is taken against the RAW band, not the emitted one, or it would
+    # ratchet outward and never shrink back.
+    var ry0 = y0;
+    var ry1 = y1;
+    if (ae_band_prev_valid == 1) {
+        if (ae_band_prev_y < y0) { y0 = ae_band_prev_y; }
+        if (ae_band_prev_y + ae_band_prev_h > y1) { y1 = ae_band_prev_y + ae_band_prev_h; }
+    }
+    ae_band_prev_valid = 1;
+    ae_band_prev_y = ry0;
+    ae_band_prev_h = ry1 - ry0;
+    if (y0 < 0) { y0 = 0; }
+    if (y1 > fh) { y1 = fh; }
     ae_band_valid = 1;
     ae_band_y = y0;
     ae_band_h = y1 - y0;
