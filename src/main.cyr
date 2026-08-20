@@ -704,6 +704,16 @@ fn main(): i64 {
     }
     # ⭐ `--wallpaper <file>` loads a PNG or JPEG through chitra. Bare `--wallpaper` keeps the gradient
     # as a no-file fallback, which is what the C1a demo knob was.
+    # ⚠ DIAGNOSTIC FLAG, NOT A FEATURE. `--fullclear` repaints the WHOLE frame every frame instead of
+    # the AE-0a damage band. Since AE-9 the band IS the GPU's back-buffer clear, and `#84` FLIPS — so
+    # regions outside the band keep that buffer's older content and the two buffers can disagree
+    # there. This is the controlled test for that: if the 2026-08-19 background flicker disappears
+    # under `--fullclear`, the cause is exactly that and nothing else. It costs the optimisation
+    # AE-0a bought (3.83 ms -> 2.46 ms of a 6.40 ms frame), so it is not how the desktop should run.
+    if (ae_has_flag("--fullclear") == 1) {
+        rend_force_full_set(1);
+        println("aethersafha: --fullclear -- repainting the WHOLE frame every frame (diagnostic)");
+    }
     if (ae_has_flag("--wallpaper") == 1) {
         var wpf = ae_flag_str("--wallpaper");
         if (wpf == 0) {
@@ -1230,6 +1240,7 @@ fn main(): i64 {
             # prints a pair per flip. Iron 2026-08-19: background flicker below a launched
             # application, undiagnosed, with all twelve demote sites silent.
             ae_gpu_path_note(ae_gpu_frame_ok);
+            rend_band_note();
             render_desktop(desk, fb);
             render_desktop_foreign(desk, fb);
             # setu: accept + composite client presents (over the desktop) — BOTH

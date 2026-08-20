@@ -289,6 +289,49 @@ var ae_last_wp = 0 - 1;   # last-seen wallpaper serial; see rend_band_compute
 # rate FOREVER, not for a frame. That is the 2026-08-19 iron report ("themes bg flicker ... happened
 # more often than not"), and it is invisible in QEMU because there is no GPU, no flip, one buffer.
 var ae_inval_owed = 0;
+# ⛔⛔ THE BAND IS ALSO THE GPU'S CLEAR. Since AE-9 the `#39` chrome blit is GONE on iron and the
+# back-buffer clear "is simply the first rect in the queue" (gpu.cyr) — i.e. the clear covers the
+# BAND, not the buffer. `#84` FLIPS, so any region outside the band keeps THAT buffer's older
+# content and the two buffers can disagree there indefinitely. Iron 2026-08-19: background flicker
+# outside a launched window's rows (mostly below it), healed by a theme switch — which invalidates
+# fully for two frames — and returning on the next launch. QEMU cannot show it: no GPU, no flip.
+#
+# `--fullclear` forces every frame to take the no-band path, so the whole buffer is repainted each
+# frame. It is a DIAGNOSTIC, not a fix: it discards the AE-0a optimisation (3.83 ms -> 2.46 ms of a
+# 6.40 ms frame) and costs a full clear per frame. If the flicker disappears under it, the cause is
+# "regions outside the band differ between the flipped buffers" and nothing else.
+var ae_force_full = 0;
+fn rend_force_full_set(v): i64 { ae_force_full = v; return 0; }
+fn rend_force_full(): i64 { return ae_force_full; }
+
+# Bounded report of the band's extent whenever it CHANGES. A band that oscillates between two
+# extents would leave rows covered on one frame and not the next — one buffer updated, the other
+# not. Silence here means the band is steady, which is itself the answer to a different question.
+var ae_band_last_v = 0 - 1;
+var ae_band_last_y = 0 - 1;
+var ae_band_last_h = 0 - 1;
+var ae_band_said   = 0;
+fn rend_band_note(): i64 {
+    # ⛔ `valid` IS PART OF THE STATE. Comparing only y/h made (valid 0, 0, 0) and (valid 1, 0, 0)
+    # indistinguishable — and the invalid<->valid transition is the single most important one here,
+    # since invalid means "repaint everything" and valid means "repaint the band only". Measured on
+    # the host build: the reporter printed once and then never again while the band flipped state.
+    var same = 1;
+    if (ae_band_last_v != ae_band_valid) { same = 0; }
+    if (ae_band_last_y != ae_band_y) { same = 0; }
+    if (ae_band_last_h != ae_band_h) { same = 0; }
+    if (same == 1) { return 0; }
+    ae_band_last_v = ae_band_valid;
+    ae_band_last_y = ae_band_y;
+    ae_band_last_h = ae_band_h;
+    if (ae_band_said >= 14) { return 0; }
+    ae_band_said = ae_band_said + 1;
+    println("aethersafha: damage band changed (valid, y, h):");
+    println_int(ae_band_valid);
+    println_int(ae_band_y);
+    println_int(ae_band_h);
+    return 0;
+}
 
 # ⭐ THE FRAME PLAN — the single place "is this a GPU frame?" is decided.
 # Written once per frame by ae_gpu_frame_plan (gpu.cyr) BEFORE anything is rendered; read by
@@ -395,6 +438,8 @@ fn rend_band_compute(fh, bg): i64 {
     ae_band_h = 0;
     if (ae_frame_dmg == 0) { return 0; }
     if (ae_prev_dmg == 0) { return 0; }
+    # ⚠ DIAGNOSTIC: repaint everything, every frame. See ae_force_full.
+    if (ae_force_full == 1) { return 0; }
     # A background change damages every pixel, so refuse to band this frame at all — and so does a
     # WALLPAPER change, which the `bg` compare cannot see (M6-C1a): two different gradients can share a
     # top colour, so comparing one i64 would band a frame in which every pixel changed, repainting only

@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.16.15] - 2026-08-19 — the band IS the GPU's clear, and `#84` flips
+
+### Ruled out — the background flicker is NOT a rendering-path flip
+
+0.16.14's instrument answered on the first burn: **one line, `frame path -> GPU`, flips `0`** across a
+30 s session with a client open and flickering. The path never left the GPU, so the whole
+`ae_gpu_demote` family — and the `wp_fill_band`/`ae_gpu_wp_on` coupling with it — is eliminated.
+
+### Added — `--fullclear`, the controlled test for what is left
+
+Since **AE-9** the `#39` chrome blit is GONE on iron (`chrome fills are on the GPU (#88
+gpu_fill_rect) -- the #39 blit is gone`), and gpu.cyr states the back-buffer clear "is simply the
+first rect in the queue" — i.e. **the clear covers the damage BAND, not the buffer**. `#84`
+**FLIPS**. ⇒ Any region outside the band keeps THAT buffer's older content, and the two buffers can
+disagree there indefinitely.
+
+That predicts the iron report exactly: flicker outside a live window's rows (**below** it, sometimes
+a few rows above), **starting** at launch (a live client pins the band to its own rows every frame),
+**stopping** at close, and **repaired by a theme switch** — which invalidates fully, for two frames
+since 0.16.12 — but recurring on the next launch.
+
+`--fullclear` forces every frame down the no-band path. ⛔ **A DIAGNOSTIC, NOT A FIX**: it discards
+what AE-0a bought (3.83 ms → 2.46 ms of a 6.40 ms frame). If the flicker disappears under it, the
+cause is "regions outside the band differ between the flipped buffers" and nothing else.
+
+### Added — the damage band reports every change to its extent
+
+`aethersafha: damage band changed (valid, y, h):`, bounded at 14.
+
+⚠ First cut compared only `y` and `h`, so `(valid 0, 0, 0)` and `(valid 1, 0, 0)` were
+indistinguishable — hiding the invalid↔valid transition, which is the one that matters (invalid =
+repaint everything, valid = repaint the band). Caught on the host build: it printed once and then
+never again while the band was in fact changing state. `valid` is now part of the comparison.
+
+
 ## [0.16.14] - 2026-08-19 — a demotion no longer happens in silence
 
 ### Added — the frame path reports every change between GPU and CPU
