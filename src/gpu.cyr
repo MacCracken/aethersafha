@@ -343,6 +343,35 @@ fn ae_gpu_active(): i64 {
 # CPU composite on that belief, the result was a desktop that showed chrome and no window content
 # FOREVER, with no way back. Degrading to a working software desktop is strictly better than a
 # fast empty one.
+# ⛔⛔ A DEMOTION IS A RENDERING-PATH CHANGE, AND ALL TWELVE SITES WERE SILENT.
+# `ae_gpu_frame_ok` decides whether the WHOLE frame is composited by the GPU or by the CPU, and the
+# two paths do not paint identically (the clearest case: `wp_fill_band` paints nothing while
+# `ae_gpu_wp_on()` is 1, so a frame that demotes after the wallpaper was staged has no backdrop
+# producer at all — the black-desktop defect noted at ae_gpu_frame_plan). A plan that demotes on
+# SOME frames therefore alternates what the screen is built from, which reads as a FLICKER and
+# leaves nothing in the log to explain it — the exact "absent and false look alike" failure this
+# tree keeps paying for.
+# ⇒ Report the TRANSITION, not every demote: a steady CPU-path desktop is one line, and an
+# alternating one prints a pair per flip, which is the fingerprint being hunted. Bounded, because a
+# per-frame alternation would otherwise flood a console three procs share.
+var ae_gpu_path_last = 0 - 1;      # -1 = nothing observed yet; else the last frame's ae_gpu_frame_ok
+var ae_gpu_path_flips = 0;         # how many times the path changed
+var ae_gpu_path_said  = 0;
+
+# Call once per frame AFTER the plan has run. `ok` is ae_gpu_frame_ok.
+fn ae_gpu_path_note(ok): i64 {
+    if (ae_gpu_path_last == ok) { return 0; }
+    if (ae_gpu_path_last != 0 - 1) { ae_gpu_path_flips = ae_gpu_path_flips + 1; }
+    ae_gpu_path_last = ok;
+    if (ae_gpu_path_said >= 12) { return 0; }
+    ae_gpu_path_said = ae_gpu_path_said + 1;
+    if (ok == 1) { println("aethersafha: frame path -> GPU (flips so far):"); }
+    if (ok == 0) { println("aethersafha: frame path -> CPU, the plan demoted (flips so far):"); }
+    println_int(ae_gpu_path_flips);
+    return 0;
+}
+fn ae_gpu_path_flip_count(): i64 { return ae_gpu_path_flips; }
+
 fn ae_gpu_demote(): i64 {
     # ⚠ wallpaper-staged must clear too, or a demote leaves wp_fill_band believing the GPU will paint
     # a backdrop that is no longer coming. Same defect as the frame_plan reset above, permanently.

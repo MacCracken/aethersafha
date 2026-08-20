@@ -1224,6 +1224,12 @@ fn main(): i64 {
             # the render (or not at all) is the bug this ordering exists to prevent: the renderer
             # skipping its work for a frame the GPU then refuses, leaving chrome and no content.
             ae_gpu_frame_plan(comp, fb);
+            # ⭐ RECORD WHICH PATH THIS FRAME TOOK. A plan that demotes on some frames alternates
+            # what the screen is built from — a flicker with nothing in the log to name it. This
+            # prints only on a CHANGE, so a healthy desktop costs one line and an alternating one
+            # prints a pair per flip. Iron 2026-08-19: background flicker below a launched
+            # application, undiagnosed, with all twelve demote sites silent.
+            ae_gpu_path_note(ae_gpu_frame_ok);
             render_desktop(desk, fb);
             render_desktop_foreign(desk, fb);
             # setu: accept + composite client presents (over the desktop) — BOTH

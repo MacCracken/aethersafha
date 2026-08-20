@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.16.14] - 2026-08-19 — a demotion no longer happens in silence
+
+### Added — the frame path reports every change between GPU and CPU
+
+All **twelve** `ae_gpu_demote()` sites were silent. `ae_gpu_frame_ok` decides whether the WHOLE
+frame is composited by the GPU or the CPU, and the two paths do not paint identically — the clearest
+case being that `wp_fill_band` paints nothing while `ae_gpu_wp_on()` is 1, so a frame that demotes
+after the wallpaper was staged has no backdrop producer at all (the black-desktop defect already
+documented at `ae_gpu_frame_plan`). ⇒ **A plan that demotes on SOME frames alternates what the screen
+is built from, which reads as a flicker with nothing in the log to name it.**
+
+Reports the TRANSITION, not each demote: a steady desktop costs one line, an alternating one prints
+a pair per flip with a running count. Bounded at 12 — a per-frame alternation would otherwise flood
+a console three processes share.
+
+```
+aethersafha: frame path -> CPU, the plan demoted (flips so far):
+0
+```
+
+⚠ **This is an instrument, not a fix.** Iron 2026-08-19 reports background flicker BELOW a launched
+application, stopping when the application closes, with a theme switch repairing the background but
+not preventing recurrence. That is consistent with path alternation and also with other producers;
+the flip count discriminates. QEMU cannot reproduce it (no GPU ⇒ one demote at boot, zero flips —
+verified, which is also the proof the reporter stays quiet when nothing alternates).
+
+### Known, measured, NOT fixed — fullscreen present cost
+
+A maximized 2560x1408 terminal is **14,417,920 B per frame**, written by the client into its `#86`
+slot and read back by the compositor's live re-read: **~28.8 MB of copying per frame**, against
+983,040 B at 80x24 (**14.7x**). That is the "fullscreen responsiveness slow — keystrokes" report from
+iron. It is inherent to a present protocol with no damage tracking; fixing it means the client
+declaring dirty rects, which is protocol work, not a patch.
+
+
 ## [0.16.13] - 2026-08-19 — the compositor stopped listening to clients that had spoken once
 
 ### Fixed — a resized client's new surface was never received
