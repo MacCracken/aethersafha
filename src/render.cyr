@@ -309,6 +309,15 @@ var ae_band_prev_h = 0;
 # keep it, or the band stops covering both buffers, which is the defect it exists to fix.
 fn rend_band_carry_reset(): i64 { ae_band_prev_valid = 0; ae_band_prev_y = 0; ae_band_prev_h = 0; return 0; }
 
+var ae_stale_said    = 0;
+var ae_stale_bg_prev = 0 - 1;
+var ae_stale_wp_prev = 0 - 1;
+
+# `--clearbg`: full-screen BACKGROUND clear every frame, band kept for everything else. See desktop.cyr.
+var ae_clear_bg_all = 0;
+fn rend_clear_bg_all_set(v): i64 { ae_clear_bg_all = v; return 0; }
+fn rend_clear_bg_all(): i64 { return ae_clear_bg_all; }
+
 var ae_force_full = 0;
 fn rend_force_full_set(v): i64 { ae_force_full = v; return 0; }
 fn rend_force_full(): i64 { return ae_force_full; }
@@ -470,6 +479,22 @@ fn rend_band_compute(fh, bg): i64 {
     # ⛔ TWO FRAMES, ONE PER BUFFER — see ae_inval_owed. Returning here on the change frame ALONE was
     # the defect: `render.tcyr` even asserted it ("the frame AFTER a theme switch bands normally
     # again"), so the suite enshrined the stale buffer as correct.
+    # ⛔ NAME WHAT WENT STALE. Iron 2026-08-19 (b7): with the two-frame carry in place the band still
+    # alternated invalid <-> valid-height-0 while a client ran — i.e. `stale` was firing over and
+    # over — and a full repaint every other frame against a FLIPPED buffer is itself the flicker.
+    # Which of the two inputs moves, and to what, cannot be inferred from the band extent alone.
+    if (stale == 1) {
+        if (ae_stale_said < 10) {
+            ae_stale_said = ae_stale_said + 1;
+            println("aethersafha: band invalidated (bg, last_bg, wp_serial, last_wp):");
+            println_int(bg);
+            println_int(ae_stale_bg_prev);
+            println_int(wps);
+            println_int(ae_stale_wp_prev);
+        }
+    }
+    ae_stale_bg_prev = bg;
+    ae_stale_wp_prev = wps;
     if (stale == 1) { ae_inval_owed = 2; }
     if (ae_inval_owed > 0) {
         ae_inval_owed = ae_inval_owed - 1;

@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.16.17] - 2026-08-19 — isolating the clear, and a hole that hid behind dead-code elimination
+
+### Added — `--clearbg`, to split what `--fullclear` proved but could not attribute
+
+b7 on iron: the two-frame band carry (0.16.16) **did not** fix the flicker, and `--fullclear` still
+does. The band history explains why the carry was beside the point — while the client ran and the
+screen flickered, the band was **steady at `(valid 1, y 50, h 414)`** and never moved. Nothing was
+falling out of it. Rows 464..1440 are simply never painted, and the two flipped buffers already
+disagree there.
+
+⚠ The `valid 0 <-> valid 1` alternation later in that log is the operator's own theme switches —
+correct behaviour, two invalid frames each. Reading it as the flicker was wrong.
+
+`--fullclear` changes every producer at once, so it proves the cause is outside the band but not
+WHICH producer leaves the buffers disagreeing. `--clearbg` clears the background full-screen every
+frame while windows, chrome and glyphs keep their damage band:
+
+- flicker **GONE** → the background clear's extent is the cause; the window/chrome damage is innocent.
+- flicker **REMAINS** → the clear is innocent and a window/chrome/glyph producer paints outside the band.
+
+### Fixed — `path_exists` was never defined, in this tree or in any stdlib
+
+`src/apps.cyr` called it at three sites and the tree compiled anyway, because every one was
+**unreachable** and the compiler refuses only on a REACHABLE undefined fn. A stdlib re-vendor shifted
+the DCE result, one site became reachable, and `tests/apps.tcyr` stopped compiling. Checked 6.5.27
+and 6.5.29: the function exists in neither, so this was never resolving — it was hiding.
+
+Defined locally against `sys_access(path, 0)` (F_OK, matching the Rust `Path::exists()` these sites
+were ported from). ⚠ "Unreachable" is not "absent": `src/apps.cyr` is in no build graph on either
+target, but `tests/apps.tcyr` includes it.
+
+
 ## [0.16.16] - 2026-08-19 — the damage band now covers two frames, like everything else here
 
 ### Fixed — background flicker outside a live window's rows

@@ -221,6 +221,21 @@ fn app_is_ws(ch): i64 {
 # ---------------------------------------------------------------------------
 # app_which_path(name): the first of the 4 standard dirs where `name` exists, as a
 # full-path cstr, or 0. execve has no $PATH; Rust runs the bare name via execvp.
+# ⛔ `path_exists` WAS NEVER DEFINED ANYWHERE — not in this file, not in any stdlib snapshot
+# (checked 6.5.27 and 6.5.29). Three call sites here used it and the tree compiled anyway, because
+# every one of them was UNREACHABLE and the compiler only refuses on a REACHABLE undefined fn. A
+# stdlib re-vendor shifted the DCE result, one call site became reachable, and `tests/apps.tcyr`
+# stopped compiling — a latent hole that had been sitting behind dead-code elimination.
+# ⚠ Linux-only, like the rest of this file (`sys_fork`/`sys_execve` do not exist on agnos), and
+# `src/apps.cyr` is in no build graph on either target — but `tests/apps.tcyr` DOES include it, so
+# "unreachable" was never the same as "absent".
+# F_OK = 0 — existence only, matching the Rust `Path::exists()` these call sites were ported from.
+fn path_exists(path): i64 {
+    if (path == 0) { return 0; }
+    if (sys_access(path, 0) == 0) { return 1; }
+    return 0;
+}
+
 fn app_which_path(name): i64 {
     var dirs = vec_new();
     vec_push(dirs, "/usr/local/bin/");

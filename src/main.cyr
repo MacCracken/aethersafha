@@ -714,6 +714,10 @@ fn main(): i64 {
         rend_force_full_set(1);
         println("aethersafha: --fullclear -- repainting the WHOLE frame every frame (diagnostic)");
     }
+    if (ae_has_flag("--clearbg") == 1) {
+        rend_clear_bg_all_set(1);
+        println("aethersafha: --clearbg -- full-screen background clear, band kept for the rest (diagnostic)");
+    }
     if (ae_has_flag("--wallpaper") == 1) {
         var wpf = ae_flag_str("--wallpaper");
         if (wpf == 0) {

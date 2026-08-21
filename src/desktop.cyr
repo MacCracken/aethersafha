@@ -151,6 +151,19 @@ fn render_desktop(d, fb): i64 {
         if (rend_band_h() > 0) { wp_fill_band(fb, rend_band_y(), rend_band_h(), fbh); }
     }
     if (rend_band_valid() == 0) { wp_fill_all(fb, bhumi_fb_width(fb), fbh); }
+    # ⛔ DIAGNOSTIC `--clearbg`: the BACKGROUND clear covers the whole screen every frame, while
+    # windows, chrome and glyphs keep their damage band. `--fullclear` proved the flicker lives
+    # OUTSIDE the band, but it changes every producer at once and so cannot say WHICH one leaves the
+    # two flipped buffers disagreeing. This isolates the clear:
+    #   flicker GONE under --clearbg  -> the background clear's extent is the cause; the fix is to
+    #                                    scope the clear, and the window/chrome damage is innocent.
+    #   flicker REMAINS               -> the clear is innocent and a window/chrome/glyph producer is
+    #                                    painting outside the band into one buffer.
+    # Costs the full clear (AE-0a's 3.83 ms) but keeps the rest of the band — strictly between the
+    # control run and --fullclear, which is what makes the comparison informative.
+    if (rend_clear_bg_all() == 1) {
+        if (rend_band_valid() == 1) { wp_fill_all(fb, bhumi_fb_width(fb), fbh); }
+    }
     # ⭐ The background is down; everything queued so far is the PRELUDE that must be emitted before
     # any window. Marking here is what lets the GPU path replay these queues in z-order.
     ae_mark_prelude();
