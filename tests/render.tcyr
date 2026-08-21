@@ -212,6 +212,7 @@ fn main() {
     assert_eq(rend_band_y(), 800, "carry frame 3: shrinks back — no ratchet");
     assert_eq(rend_band_h(), 100, "carry frame 3: band is just the steady damage");
 
+
     # ⛔ A MISSING TRACKER MEANS FULL SCREEN, NOT AN EMPTY BAND. Every unit suite runs with these unset,
     # and an empty band there would silently stop clearing anything at all.
     var save_cur = ae_frame_dmg;

@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.16.18] - 2026-08-19 — the background clear is full-screen wherever `#84` flips
+
+### Fixed — the background flicker, attributed by experiment and fixed at the producer
+
+Iron 2026-08-19 (b8), three runs, identical actions:
+
+| run | result |
+|---|---|
+| control | flicker |
+| `--clearbg` — background full-screen, **everything else still banded** | **CLEAN**, and not reported as slow |
+| `--fullclear` — everything, every frame | clean, reported as a whole-screen refresh, slower |
+
+⇒ The **background clear's extent** is the cause; windows, chrome and glyphs are innocent. That is an
+attribution `--fullclear` alone could never make, because it moves every producer at once.
+
+`AE-0a` shrank the clear to a damage band and measured **3.83 ms → 2.46 ms** of a 6.40 ms frame —
+against a **CPU store loop into a SINGLE userland framebuffer**, where a band is exactly right:
+nothing outside it changed and there is no second buffer to disagree. Since **AE-9** the clear is a
+`#88` CP-DMA fill into the GPU back buffer and **`#84` FLIPS**, making the clear the only producer of
+background pixels. A band-limited clear then paints rows into ONE buffer while the other keeps what
+it last held — permanently, because the band never returns to those rows. `#84` alternates them.
+
+⇒ The clear is **full-screen whenever the chrome is on the GPU**, and stays banded otherwise — so
+AE-0a is kept intact on exactly the path it was measured on. `--clearbg` remains, now as a way to
+force the full clear where there is no GPU.
+
+⚠ **What the previous two attempts got wrong, recorded so it is not re-tried.** 0.16.16's two-frame
+band carry was correct in itself but irrelevant here: while the client ran and the screen flickered
+the band was **steady** at `(valid 1, y 50, h 414)` and nothing was falling out of it. And the
+`valid 0 ↔ valid 1` alternation later in that log was the operator's own theme switches — normal
+behaviour, misread as the defect.
+
+### Added — `desk_bg_clear_is_full(chrome_on_gpu, forced)`, pure and tested
+
+Separated from `render_desktop` for the reason `setu_hs_action` is separated from its step function:
+the rule is the part that has to be provably right. All four combinations asserted, and
+mutation-proven — making the GPU arm stop forcing the full clear fails the suite (24/1).
+
+
 ## [0.16.17] - 2026-08-19 — isolating the clear, and a hole that hid behind dead-code elimination
 
 ### Added — `--clearbg`, to split what `--fullclear` proved but could not attribute

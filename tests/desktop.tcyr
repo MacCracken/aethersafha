@@ -221,6 +221,21 @@ fn main() {
     assert_eq(t_ge(lnch_panel_x(1280), 0), 1, "the panel is on screen horizontally");
     assert_eq(t_le(lnch_panel_y(800) + lnch_panel_h(), 800), 1, "  ...and vertically");
 
+    # -----------------------------------------------------------------------
+    test_group("desktop — the background clear is full-screen wherever #84 flips");
+    # ⛔⛔ ESTABLISHED BY EXPERIMENT, NOT BY READING. Iron 2026-08-19 (b8), three runs, same actions:
+    # control flickered; `--clearbg` (background full-screen, everything else still banded) was
+    # CLEAN; `--fullclear` was also clean but a whole-screen refresh. ⇒ the BACKGROUND CLEAR's extent
+    # is the cause and every other producer is innocent.
+    # Since AE-9 the clear is a `#88` fill into the GPU back buffer and `#84` FLIPS, so a band-limited
+    # clear paints rows into ONE buffer and the other keeps what it had — forever, because the band
+    # never returns. AE-0a's 3.83 ms -> 2.46 ms was measured on a CPU store loop against a SINGLE
+    # framebuffer, where a band is exactly right; that path keeps it.
+    assert_eq(desk_bg_clear_is_full(1, 0), 1, "chrome on GPU: #84 flips, so the clear is full-screen");
+    assert_eq(desk_bg_clear_is_full(0, 0), 0, "no GPU chrome: single buffer, AE-0a's band is kept");
+    assert_eq(desk_bg_clear_is_full(0, 1), 1, "--clearbg forces the full clear off the GPU path");
+    assert_eq(desk_bg_clear_is_full(1, 1), 1, "both: still full — the flag cannot narrow the clear");
+
     return assert_summary();
 }
 

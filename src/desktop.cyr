@@ -104,6 +104,18 @@ fn desk_bg_color(d): i64 {
 # Was the launcher up on the PREVIOUS frame? The close needs one more damaged frame than the open.
 var ae_lnch_was_open = 0;
 
+# Does the BACKGROUND clear cover the whole screen this frame? Pure, so a test can drive every
+# combination — the same reason `setu_hs_action` is separated from its step function. The rule this
+# encodes: a band-limited clear cannot converge two flipped buffers, so the flip path takes the full
+# clear and the single-buffer path keeps AE-0a's band.
+#   chrome_on_gpu = 1 -> `#84` is flipping and the clear is the only background producer
+#   forced        = 1 -> `--clearbg`, to exercise the same path where there is no GPU
+fn desk_bg_clear_is_full(chrome_on_gpu, forced): i64 {
+    if (chrome_on_gpu == 1) { return 1; }
+    if (forced == 1) { return 1; }
+    return 0;
+}
+
 fn render_desktop(d, fb): i64 {
     var comp = desk_comp(d);
     var bg = ae_bhumi(rupa_theme_bg(rupa_theme_active()));
@@ -147,22 +159,37 @@ fn render_desktop(d, fb): i64 {
     # ⚠ A wallpaper REPLACES the clear rather than adding to it, so the `AE-0a` band still governs how
     # many pixels are touched and the default (SOLID) takes the identical code path it always did.
     var fbh = bhumi_fb_height(fb);
-    if (rend_band_valid() == 1) {
-        if (rend_band_h() > 0) { wp_fill_band(fb, rend_band_y(), rend_band_h(), fbh); }
+    # ⛔⛔ THE BACKGROUND CLEAR IS FULL-SCREEN WHENEVER `#84` FLIPS, AND THAT IS NOT AN OPTIMISATION
+    # BEING THROWN AWAY — IT IS THE ONE CASE THE BAND CANNOT SERVE.
+    #
+    # `AE-0a` shrank the clear to a damage band and measured 3.83 ms -> 2.46 ms of a 6.40 ms frame.
+    # That measurement was a CPU STORE LOOP against a SINGLE userland framebuffer, where a band is
+    # exactly right: nothing outside it changed, and there is no second buffer to disagree.
+    #
+    # Since `AE-9` the clear is a `#88` CP-DMA fill into the GPU's back buffer and `#84` FLIPS. The
+    # clear is then the ONLY producer of background pixels, and a band-limited clear paints rows into
+    # ONE buffer while the other keeps whatever it last held — forever, because the band never
+    # returns to those rows. `#84` alternates them: flicker.
+    #
+    # ⭐ ESTABLISHED BY EXPERIMENT, IRON 2026-08-19 (b8), three runs, same actions:
+    #     control                -> flicker
+    #     `--clearbg` (this)     -> CLEAN, and the operator did not report it as slow
+    #     `--fullclear`          -> clean, and reported as a whole-screen refresh, slower
+    #   `--clearbg` clears only the BACKGROUND full-screen and leaves windows, chrome and glyphs on
+    #   the band — so the clear is the cause and every other producer is innocent.
+    #
+    # ⇒ Full-screen when the chrome is on the GPU (i.e. `#84` is flipping); the band everywhere else,
+    #   which keeps `AE-0a` intact on exactly the path it was measured on. `--clearbg` remains, now as
+    #   a way to force this on the CPU path too.
+    var bg_full = desk_bg_clear_is_full(ae_chrome_on_gpu(), rend_clear_bg_all());
+    if (bg_full == 1) {
+        wp_fill_all(fb, bhumi_fb_width(fb), fbh);
     }
-    if (rend_band_valid() == 0) { wp_fill_all(fb, bhumi_fb_width(fb), fbh); }
-    # ⛔ DIAGNOSTIC `--clearbg`: the BACKGROUND clear covers the whole screen every frame, while
-    # windows, chrome and glyphs keep their damage band. `--fullclear` proved the flicker lives
-    # OUTSIDE the band, but it changes every producer at once and so cannot say WHICH one leaves the
-    # two flipped buffers disagreeing. This isolates the clear:
-    #   flicker GONE under --clearbg  -> the background clear's extent is the cause; the fix is to
-    #                                    scope the clear, and the window/chrome damage is innocent.
-    #   flicker REMAINS               -> the clear is innocent and a window/chrome/glyph producer is
-    #                                    painting outside the band into one buffer.
-    # Costs the full clear (AE-0a's 3.83 ms) but keeps the rest of the band — strictly between the
-    # control run and --fullclear, which is what makes the comparison informative.
-    if (rend_clear_bg_all() == 1) {
-        if (rend_band_valid() == 1) { wp_fill_all(fb, bhumi_fb_width(fb), fbh); }
+    if (bg_full == 0) {
+        if (rend_band_valid() == 1) {
+            if (rend_band_h() > 0) { wp_fill_band(fb, rend_band_y(), rend_band_h(), fbh); }
+        }
+        if (rend_band_valid() == 0) { wp_fill_all(fb, bhumi_fb_width(fb), fbh); }
     }
     # ⭐ The background is down; everything queued so far is the PRELUDE that must be emitted before
     # any window. Marking here is what lets the GPU path replay these queues in z-order.
