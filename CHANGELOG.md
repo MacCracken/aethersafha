@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
-## [Unreleased]
+## [0.16.20] - 2026-08-22 — the panel gets producers, and an unknown gauge stops claiming zero
 
 ### Added — the shell panel has PRODUCERS for the first time (`src/sysprobe.cyr`)
 
