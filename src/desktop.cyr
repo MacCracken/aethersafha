@@ -181,7 +181,13 @@ fn render_desktop(d, fb): i64 {
     # ⇒ Full-screen when the chrome is on the GPU (i.e. `#84` is flipping); the band everywhere else,
     #   which keeps `AE-0a` intact on exactly the path it was measured on. `--clearbg` remains, now as
     #   a way to force this on the CPU path too.
+    # ⭐ THE MEASUREMENT THE 0.16.18 TRADE WAS MADE WITHOUT. `--bandbg` forces the BANDED clear back
+    # on the GPU path — deliberately re-introducing the flicker — so one burn yields both numbers
+    # under identical actions, the same shape that `--fullclear` -> `--clearbg` used to attribute the
+    # flicker itself. ⛔ A DIAGNOSTIC, NOT A FIX: it makes the screen flicker on iron by design.
     var bg_full = desk_bg_clear_is_full(ae_chrome_on_gpu(), rend_clear_bg_all());
+    if (rend_clear_bg_band() == 1) { bg_full = 0; }
+    var t_clear0 = ae_now_us();
     if (bg_full == 1) {
         wp_fill_all(fb, bhumi_fb_width(fb), fbh);
     }
@@ -191,6 +197,7 @@ fn render_desktop(d, fb): i64 {
         }
         if (rend_band_valid() == 0) { wp_fill_all(fb, bhumi_fb_width(fb), fbh); }
     }
+    ft_add_clear(t_clear0, ae_now_us());
     # ⭐ The background is down; everything queued so far is the PRELUDE that must be emitted before
     # any window. Marking here is what lets the GPU path replay these queues in z-order.
     ae_mark_prelude();

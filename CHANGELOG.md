@@ -5,6 +5,114 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.16.19] - 2026-08-22 — the clock was frozen, so the frame cost was never measurable
+
+### Fixed — `ae_now_ms` returned a CONSTANT on iron, for the compositor's entire run
+
+⛔⛔ **THE INSTRUMENT WAS BROKEN, WHICH IS WHY THERE IS NO NUMBER ANYWHERE IN THIS ARC FOR WHAT A
+FRAME COSTS ON THE GPU PATH.** `ae_now_ms` read `sys_uptime_ms` (**#40**), which reads `timer_ticks`,
+which the 100 Hz timer ISR increments. The desktop starts as `run /bin/aethersafha` — a **FOREGROUND**
+program, and a foreground program begins with **IF CLEARED** ("not meant to be preempted"; only
+`/bin/agnsh` gets IF=1 — agnos `kernel/core/main.cyr:4241`). The timer never fires, so **#40 is frozen
+for the whole run** and every timing readout on agnos was the same number.
+
+⚠ **This is the same defect class as the host arm's `return 0`, fixed at 0.13.1 (M6-B1) — on the
+target that actually matters, and it outlived that fix by six weeks.** It survived because `0` is
+obviously wrong while a *constant* looks like a working clock on a fast machine. What it cost:
+the `--clients` 30 s budget never bound on agnos, the 5 s progress line never printed, the
+end-of-run readout always printed 0 — and, the real price, **the GPU-path frame cost could not be
+measured at all**, which is exactly the measurement 0.16.18 shipped without.
+
+⇒ **`sys_uptime_us` (#95)** — rdtsc-backed, needs no interrupts, the only correct clock on this path.
+⛔ It returns **-1 when TSC calibration was REFUSED**, deliberately never a plausible 0, and that -1
+is now **PROPAGATED**: `-1 / 1000` is `0`, which would rebuild the exact fail-plausible shape the
+kernel added the -1 to prevent. The probe budget branches on "no clock" and says so once, instead of
+silently disarming or silently arming.
+⚠ agnos lost **two iron burns** on its own rung-10 gate to this same syscall. The mistake is not
+subtle in hindsight and was invisible in practice.
+
+### Added — `src/frametime.cyr`: what a frame costs, and how much of it is the clear
+
+The measurement 0.16.18's trade was made without. Per-window frame cost, clear cost, and the clear's
+share, on a bounded cadence (12 report lines max — a wedged run cannot bury the answer).
+
+⚠ **REPORTS WINDOWS, NOT CUMULATIVE MEANS, and that was a defect caught by running it.** The first
+cut printed 47 → 24 → 16 → 12 µs of mean clear across consecutive reports **with the workload
+unchanged** — startup frames simply weighing less as `n` grew. Two burns compared that way would
+differ by **run length** as much as by configuration, which is the precise confound that makes a
+measurement useless for choosing between two clears.
+
+⛔ **Every rule propagates "no clock" as -1 and never as 0.** A mean of 0 µs reads as "infinitely
+fast"; -1 reads as "we could not tell". Unusable samples are **counted as dropped**, not folded in as
+zeros — a run whose clock dies halfway must not report a halved mean and look like a speedup.
+⚠ `ft_mean` without its `n <= 0` guard **faults the process**; the mutation that removes it kills the
+suite mid-group rather than failing an assertion. The guard is not cosmetic.
+
+**48 assertions, 9 mutations proven to fail the suite** (percent dividing before multiplying; bad
+samples folded in as 0; backwards time accepted; share taken from sums instead of means; the report
+cap removed; the window reporting the cumulative mean; `ft_window_close` never snapshotting; an empty
+window returning 0; the mean dividing by a zero count).
+
+### Added — `--bandbg`, the switch that lets ONE burn price the regression
+
+Forces the **banded** background clear back on the GPU path — reintroducing the 0.16.18 flicker
+deliberately — so both numbers come from one boot under identical actions. Same shape as
+`--fullclear` (confirm) → `--clearbg` (attribute), which is what settled the flicker itself.
+⛔ A DIAGNOSTIC, NOT A FIX: it makes the screen flicker on iron by design.
+
+📊 **Measured on the HOST, CPU path**: banded frame **1234–1623 µs** / clear ~**1 µs**; `--clearbg`
+frame **6386–6410 µs** / clear **5132–5165 µs** = **80% of the frame**. ⇒ ~**4×** on that path.
+⛔ **NOT THE IRON NUMBER AND MUST NOT BE QUOTED AS ONE** — on iron the clear is a `#88` CP-DMA fill,
+not a CPU store loop, and the host has no client so its band is empty (the degenerate best case).
+**The iron figure is still unmeasured; that is what the next burn is for.**
+
+### Changed — toolchain pin 6.5.28 → 6.5.33, stdlib re-vendored
+
+⛔ **THE PIN IS NOT DOCUMENTATION — it selects the stdlib snapshot that gets compiled in.** 13 files
+changed under `cyrius lib sync --full`. It also closes the `ganita` 1.0.4 / `patra` 1.13.0 drift that
+sat below the bundle, plus `simd` / `vani` / `yukti`.
+
+⚠ **THE `--agnos` BINARY GREW 4,121,392 → 4,337,008 B (+215,616, +5.2%), AND IT IS ALL DEAD WEIGHT.**
+Attributed rather than shipped unexplained: `lib/bayan.cyr` grew **+10,046 lines** (5,552 → 15,598)
+and contributes **320 unreachable `bayan_*` functions** to the binary — while `bayan` **is not in
+`[deps].stdlib` at all**. `lib sync --full` copies the whole 108-file snapshot and the build compiles
+what is in `lib/`, so the opt-in stdlib list does not bound the binary; `--full` defeats it, and the
+roadmap's own "Known cleanup" requires `--full` before `cyrius deps`. ⚠ `CYRIUS_DCE=1` reclaimed
+**nothing** here despite the build note advertising it. Recorded, not fixed — it is a toolchain-shaped
+problem, not a compositor one.
+
+### Changed — `[deps.kavach]` 3.11.14 → 3.12.2, and the gate that should have caught it
+
+⛔ **FOURTH `path`-beats-`tag` recurrence, and an ordinary `cyrius build` caused this one** — it
+silently re-materialised `lib/kavach.cyr` from 3.11.15 to the sibling's 3.12.2 (+253/-21) and moved
+the `cyrius.lock` digest while the manifest still said 3.11.14. Three explanatory comments in that
+block did not prevent it, because the rewrite happens at **build time** and warns nobody.
+⭐ Binary-inert here — the `--agnos` artifact was byte-identical before and after (kavach is a
+deferred dep and DCE drops it) — so the exposure was the DECLARED graph, not this build.
+
+⭐ **`scripts/check-dep-tags.sh`** — the gate the manifest asked for twice and never got. Per
+path-dep: tag == sibling `VERSION`; the tag exists **locally AND on the remote**; and — the check the
+last three manual sweeps never actually made — **every vendored `lib/` file is byte-identical to that
+dep's module at that tag**. Exit 0/1/2; three mutations proven to fail it. ⛔ **LOCAL ONLY** (needs
+the sibling checkouts; cannot run in CI). Run before every cut and every burn.
+
+⚠ **Three defects in the gate itself, each the failure mode it exists to prevent**: it read setu's
+**SSH** `origin`, got "Permission denied", and reported a present tag as **ABSENT** (now uses the
+manifest's declared URL, and "could not look" is a distinct outcome from "not there"); an awk
+rule-ordering bug made it check **1 dep of 9** while reporting "clean" (now guarded by a count that
+refuses to report on a subset — and that guard caught the same bug in its own counter); and it
+assumed one vendoring shape, where non-`dist` modules namespace on the way in
+(`lib/kashi_font_data.cyr`, `lib/mehman_types.cyr`).
+
+### Notes
+
+- Suites **25 → 26**, assertions **1,778 → 1,827**. `cyrius test` exits **1** on failure (verified —
+  CI gates correctly).
+- ⚠ `tests/desktop.tcyr` needed `src/frametime.cyr` added: `render_desktop` now times the clear, and
+  the **reachable-undefined** gate refused to emit rather than letting it hide — the same mechanism
+  that let `path_exists` survive undefined for months while its call sites were unreachable.
+
+
 ## [0.16.18] - 2026-08-19 — the background clear is full-screen wherever `#84` flips
 
 ### Fixed — the background flicker, attributed by experiment and fixed at the producer

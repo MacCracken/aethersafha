@@ -9,9 +9,25 @@ the frame budget**. This is the next work. Full mechanism and the fix order → 
 
 ⇒ In one line: `desk_bg_clear_is_full` returns 1 whenever the chrome is on the GPU, which since
 **AE-9 is every iron frame**, so the background clear is **full-screen forever** on the only path that
-matters — handing back AE-0a's 3.83 → 2.46 ms of a 6.40 ms frame. ⛔ **Measure the GPU-path frame cost
-before touching it**; no burn in this arc ever has. The durable fix is **per-buffer damage**, not a
-blunt full clear.
+matters — handing back AE-0a's 3.83 → 2.46 ms of a 6.40 ms frame.
+
+⛔⛔ **AND IT WAS NEVER MEASURABLE: THE COMPOSITOR'S CLOCK WAS FROZEN ON IRON.** `ae_now_ms` read
+`sys_uptime_ms` (#40), which reads `timer_ticks`, which the 100 Hz timer ISR increments — but the
+desktop starts as `run /bin/aethersafha`, a FOREGROUND program with **IF CLEARED** (only `/bin/agnsh`
+gets IF=1; agnos `kernel/core/main.cyr:4241`). The timer never fires, so #40 was frozen for the whole
+run and every agnos timing readout was a constant. That is *why* nobody ever measured the frame cost —
+nobody could. Fixed 2026-08-21 to `#95 uptime_us` (rdtsc, no interrupts needed), with its **-1
+"calibration refused" propagated rather than floored to a plausible 0**.
+
+⭐ **THE INSTRUMENT NOW EXISTS: `src/frametime.cyr`** (48 assertions, 9 mutations proven to fail it),
+reporting per-window frame and clear cost, bounded to 12 lines. ⭐ **`--bandbg`** forces the banded
+clear back on the GPU path — reintroducing the flicker deliberately — so ONE burn yields both numbers
+under identical actions.
+
+📊 **Host, CPU path only:** banded frame ~1.3 ms / clear ~1 µs; `--clearbg` frame ~6.4 ms / clear
+~5.15 ms = **80% of the frame**, a ~4× frame cost. ⛔ **NOT THE IRON NUMBER** — on iron the clear is a
+`#88` CP-DMA fill, not a CPU store loop, and the host has no client so its band is empty. **The iron
+figure is what the next burn is for.** The durable fix is **per-buffer damage**, not a blunt full clear.
 
 ## Where it stands
 
@@ -84,7 +100,13 @@ instrument that earned it.
 ## What will bite you
 
 - **`path` beats `tag`.** A vendored copy tracks the local checkout whatever the manifest says. Fired
-  twice more this run (crab and puka both vendored dhancha 0.9.12 while declaring older tags).
+  twice more this run (crab and puka both vendored dhancha 0.9.12 while declaring older tags), and a
+  fourth time in aethersafha on 2026-08-21 — caused by an ordinary `cyrius build`, not by an edit.
+  ⭐ **There is now a gate instead of a fourth comment: `scripts/check-dep-tags.sh`.** Per path-dep it
+  checks tag == sibling VERSION, the tag exists locally AND on the remote, and — the one that matters —
+  every vendored `lib/` file is **byte-identical to that dep's module at that tag**. Exit 0/1/2, three
+  mutations proven to fail it. ⛔ **LOCAL ONLY — it needs the sibling checkouts, so it cannot run in CI.**
+  Run it before every cut and before every burn.
 - **The cyrius pin selects the STDLIB SNAPSHOT.** A re-vendor is a real change: 6.5.28 gave
   `lib/freelist.cyr` redzone poisoning (+4,112 B) and shifted DCE enough to break a test.
 - **Unreachable is not absent.** `path_exists` was called at three sites and defined **nowhere**, in
@@ -110,8 +132,9 @@ Harnesses in `agnos/scripts/harness/`: `ae-wallpaper-load-test.py`, `crab-listin
 
 ## Next — in the order I would take them
 
-0. **THE FRAME BUDGET — the regression above.** Instrument the GPU-path frame cost, then replace the
-   full-screen clear with per-buffer damage. Everything below is slower to notice while this stands.
+0. **THE FRAME BUDGET — the regression above.** ✅ Instrument shipped and the frozen clock fixed.
+   **NEXT: one burn, `--bandbg` vs default, identical actions**, to get the iron numbers — then
+   replace the full-screen clear with per-buffer damage. Everything below is slower while this stands.
 1. **Present protocol has no damage tracking.** A maximized 2560x1408 terminal copies **~28.8 MB per
    frame** (client writes the `#86` slot, compositor re-reads it) vs 983 040 B at 80x24. That is the
    "fullscreen keystrokes are slow" report. The client must declare dirty rects — protocol work.
@@ -134,6 +157,7 @@ Harnesses in `agnos/scripts/harness/`: `ae-wallpaper-load-test.py`, `crab-listin
 - **Never use `gh`** — `curl` to the GitHub API if needed.
 - **Never file an issue without being asked.**
 - Do not modify `rust-old/` (the parity oracle) or `lib/` by hand.
+- **Before a burn or a cut: `scripts/check-dep-tags.sh`** (local only; needs the siblings).
 - Burn artifacts: `PUKA_TERMINAL=1 scripts/burn/stage-tools.sh --build`, then
   `scripts/burn/burn-prep.sh`, then **run nothing in agnos** before flashing —
   `check.sh`/`test.sh` rebuild `build/agnos` without the burn flags.

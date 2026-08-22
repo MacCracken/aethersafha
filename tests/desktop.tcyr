@@ -1,6 +1,7 @@
 # aethersafha desktop-aggregate test (B3 wiring).
 # The Desktop owns the compositor + all 8 leaf subsystems and wires the live
 # compositor→accessibility connection. Stdlib + [deps.*] auto-included.
+include "src/frametime.cyr"   # render_desktop times the background clear through it
 include "src/geom.cyr"
 include "src/window.cyr"
 include "src/compositor.cyr"

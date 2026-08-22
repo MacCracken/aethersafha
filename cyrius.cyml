@@ -7,7 +7,7 @@ version = "${file:VERSION}"
 description = "aethersafha — AI-augmented AGNOS compositor (Cyrius port, from 27207 lines of Rust)"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.5.28"
+cyrius = "6.5.33"
 
 [build]
 entry = "src/main.cyr"
@@ -118,7 +118,13 @@ path = "../kavach"
 # ⚠ The comment above did not prevent the recurrence, and a third instance should not be met with a third
 # comment — this wants a gate that diffs every declared tag against its sibling VERSION at check time.
 # Verified before bumping: 3.11.12 is a real tag locally AND on the remote, on a clean tree.
-tag = "3.11.14"
+# ⛔ 3.11.14 → 3.12.2 (2026-08-21) — FOURTH recurrence, and the gate above is now BUILT rather than
+# re-described: `scripts/check-dep-tags.sh`. No fifth comment. Verified before bumping, all four ways
+# the earlier notes only claimed: 3.12.2 is a real tag locally AND on the remote (37f55c2), the sibling
+# tree is clean, and `lib/kavach.cyr` is **byte-identical to `dist/kavach.cyr` at that tag**
+# (sha `ee243978`, matching `cyrius.lock`). ⚠ kavach HEAD is 1 commit past the tag, but that commit does
+# not touch the one module consumed here — checked, not assumed.
+tag = "3.12.2"
 modules = ["dist/kavach.cyr"]
 
 # --- Image decode: chitra (चित्र — image / picture). Pure-Cyrius CPU raster decoder — PNG (all bit

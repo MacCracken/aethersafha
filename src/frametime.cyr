@@ -1,0 +1,155 @@
+# frametime.cyr — what a frame COSTS, and how much of it is the background clear.
+#
+# ⛔⛔ WHY THIS MODULE EXISTS. 0.16.18 fixed the background flicker by making the clear full-screen
+# wherever the chrome is on the GPU — which since AE-9 is EVERY iron frame. That traded away AE-0a's
+# **measured** 3.83 -> 2.46 ms of a 6.40 ms frame for something nobody has ever priced, and the
+# operator's verdict on iron was that the desktop got slower. The arc has no number on either side of
+# that trade, and it never could have had one:
+#
+#   ⛔ `ae_now_ms` read `sys_uptime_ms` (#40), which reads `timer_ticks`, which the 100 Hz timer ISR
+#      increments. The desktop starts as `run /bin/aethersafha` — a FOREGROUND program, IF CLEARED,
+#      only /bin/agnsh gets IF=1 — so that clock is FROZEN for the compositor's whole run. Every
+#      timing readout on iron was a constant. #95 `uptime_us` is rdtsc-backed, needs no interrupts,
+#      and is the only correct clock on this path (agnos ABI; it cost that project two burns too).
+#
+# ⇒ The rules below are PURE and total, for the reason `desk_bg_clear_is_full` is: arithmetic that
+# decides whether a measurement is trustworthy must be provable off-target, because the substrate
+# that can show the defect (iron) is the one where a wrong instrument is most expensive.
+#
+# ⛔ EVERY RULE HERE PROPAGATES "NO CLOCK" AS -1 AND NEVER AS 0. `#95` returns -1 when calibration was
+# refused, deliberately never a plausible zero. A mean of 0 us reads as "infinitely fast"; a mean of
+# -1 reads as "we could not tell". The second is the only honest answer and the difference is exactly
+# what burned agnos's rung-10 gate twice.
+
+# ---- The clock ------------------------------------------------------------------------------
+
+# Monotonic MICROSECONDS. -1 when the clock could not answer — check `< 0`, never treat as 0.
+# ⛔ agnos MUST use #95 `uptime_us` (rdtsc), not #40 `uptime_ms` (timer_ticks): see the banner.
+fn ae_now_us(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return sys_uptime_us();
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return clock_now_ns() / 1000;
+    #endif
+}
+
+# ---- Pure rules -----------------------------------------------------------------------------
+
+# Is (t0 -> t1) a usable sample? Both timestamps must have answered, and time must not run backwards.
+# -> 1 usable / 0 not.
+fn ft_sample_ok(t0, t1): i64 {
+    if (t0 < 0) { return 0; }
+    if (t1 < 0) { return 0; }
+    if (t1 < t0) { return 0; }
+    return 1;
+}
+
+# Elapsed t0 -> t1, or -1 when the pair is not a usable sample. Total: never faults, never lies.
+fn ft_elapsed(t0, t1): i64 {
+    if (ft_sample_ok(t0, t1) == 0) { return 0 - 1; }
+    return t1 - t0;
+}
+
+# Integer mean, or -1 when there is nothing to average. ⛔ n <= 0 must NOT divide.
+fn ft_mean(total, n): i64 {
+    if (n <= 0) { return 0 - 1; }
+    if (total < 0) { return 0 - 1; }
+    return total / n;
+}
+
+# `part` as a whole-number percent of `whole`, or -1 when undecidable.
+# ⚠ Multiply BEFORE dividing — `(part / whole) * 100` is 0 for every part smaller than whole, which
+# is every interesting case here (a 2,460 us clear in a 6,400 us frame is 38%, not 0%).
+fn ft_pct(part, whole): i64 {
+    if (whole <= 0) { return 0 - 1; }
+    if (part < 0)   { return 0 - 1; }
+    return part * 100 / whole;
+}
+
+# ---- Accumulator ----------------------------------------------------------------------------
+# Sums rather than per-frame prints: one line per N frames costs nothing and cannot scroll a burn
+# log past the answer, and a mean over many frames is what the comparison actually needs.
+
+var ft_frames    = 0;   # frames with a usable TOTAL sample
+var ft_total_us  = 0;   # summed frame duration
+var ft_clear_n   = 0;   # frames with a usable CLEAR sample (may differ: the clear is conditional)
+var ft_clear_us  = 0;   # summed clear duration
+var ft_dropped   = 0;   # samples discarded as unusable — reported, never silently absorbed
+var ft_reported  = 0;   # report lines emitted (bounded)
+
+var FT_REPORT_EVERY = 240;   # frames per report line
+var FT_REPORT_MAX   = 12;    # ⛔ bounded, like every other diagnostic here
+
+fn ft_reset(): i64 {
+    ft_frames = 0; ft_total_us = 0; ft_clear_n = 0; ft_clear_us = 0; ft_dropped = 0;
+    ft_w_frames = 0; ft_w_total = 0; ft_w_clear_n = 0; ft_w_clear = 0;
+    return 0;
+}
+
+# Add one frame's total. Unusable samples are COUNTED as dropped, not folded in as zeros — a run
+# whose clock died halfway must not report a halved mean.
+fn ft_add_frame(t0, t1): i64 {
+    var d = ft_elapsed(t0, t1);
+    if (d < 0) { ft_dropped = ft_dropped + 1; return 0 - 1; }
+    ft_frames = ft_frames + 1;
+    ft_total_us = ft_total_us + d;
+    return d;
+}
+
+fn ft_add_clear(t0, t1): i64 {
+    var d = ft_elapsed(t0, t1);
+    if (d < 0) { ft_dropped = ft_dropped + 1; return 0 - 1; }
+    ft_clear_n = ft_clear_n + 1;
+    ft_clear_us = ft_clear_us + d;
+    return d;
+}
+
+# ---- Windowed reporting ---------------------------------------------------------------------
+# ⛔⛔ A CUMULATIVE MEAN IS THE WRONG NUMBER FOR THIS COMPARISON, measured on the host before it
+# reached iron: consecutive reports read 47 -> 24 -> 16 -> 12 us of mean clear while nothing about
+# the workload changed. The startup frames simply weighed less as `n` grew. Two burns compared that
+# way differ by RUN LENGTH as much as by configuration — which is precisely the confound that makes
+# a measurement useless for deciding between `--bandbg` and the default.
+# ⇒ Every report line describes ITS OWN 240-frame window: lines are comparable to each other, across
+# runs, and across configurations. The cumulative totals stay available underneath.
+
+var ft_w_frames  = 0;   # cumulative snapshots taken at the last report
+var ft_w_total   = 0;
+var ft_w_clear_n = 0;
+var ft_w_clear   = 0;
+
+# PURE: mean over (now - then), or -1 when the window is empty or the snapshots are inconsistent.
+fn ft_window_mean(total_now, total_then, n_now, n_then): i64 {
+    if (total_now < total_then) { return 0 - 1; }
+    if (n_now <= n_then) { return 0 - 1; }
+    return ft_mean(total_now - total_then, n_now - n_then);
+}
+
+fn ft_win_frame_us(): i64 { return ft_window_mean(ft_total_us, ft_w_total, ft_frames, ft_w_frames); }
+fn ft_win_clear_us(): i64 { return ft_window_mean(ft_clear_us, ft_w_clear, ft_clear_n, ft_w_clear_n); }
+fn ft_win_clear_pct(): i64 { return ft_pct(ft_win_clear_us(), ft_win_frame_us()); }
+
+# Take the snapshot that closes this window and opens the next. Call AFTER emitting a report.
+fn ft_window_close(): i64 {
+    ft_w_frames = ft_frames; ft_w_total = ft_total_us;
+    ft_w_clear_n = ft_clear_n; ft_w_clear = ft_clear_us;
+    return 0;
+}
+
+fn ft_mean_frame_us(): i64 { return ft_mean(ft_total_us, ft_frames); }
+fn ft_mean_clear_us(): i64 { return ft_mean(ft_clear_us, ft_clear_n); }
+
+# The clear's share of a frame, in percent. ⚠ Compares the two MEANS, not the two sums: the clear
+# does not run on every frame (a fully-banded frame with h == 0 skips it), so sum/sum would divide
+# by a different denominator and understate the share.
+fn ft_clear_share_pct(): i64 { return ft_pct(ft_mean_clear_us(), ft_mean_frame_us()); }
+
+# Is it time to emit a report line? Pure so the caller's condition is testable.
+fn ft_should_report(frames, every, emitted, cap): i64 {
+    if (every <= 0) { return 0; }
+    if (emitted >= cap) { return 0; }
+    if (frames <= 0) { return 0; }
+    if (frames % every != 0) { return 0; }
+    return 1;
+}

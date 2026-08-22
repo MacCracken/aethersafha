@@ -1,0 +1,106 @@
+# frametime.tcyr — the timing rules that decide whether a measurement is trustworthy.
+# ⛔ Every assertion here exists because the instrument is what a burn will believe. An instrument
+# that reports a plausible number when it has no clock is worse than no instrument: agnos lost two
+# iron burns to exactly that, and this arc lost several to harnesses that scored runs they never ran.
+include "src/frametime.cyr"
+
+fn main(): i64 {
+    alloc_init();
+
+    test_group("frametime — sample validity");
+    assert_eq(ft_sample_ok(100, 200), 1, "an ordinary forward sample is usable");
+    assert_eq(ft_sample_ok(100, 100), 1, "a zero-length sample is usable (a fast phase, not an error)");
+    assert_eq(ft_sample_ok(0 - 1, 200), 0, "start did not answer -> unusable");
+    assert_eq(ft_sample_ok(100, 0 - 1), 0, "end did not answer -> unusable");
+    assert_eq(ft_sample_ok(0 - 1, 0 - 1), 0, "neither answered -> unusable");
+    assert_eq(ft_sample_ok(200, 100), 0, "time ran backwards -> unusable, never a huge positive");
+
+    test_group("frametime — elapsed propagates 'no clock' as -1, never 0");
+    assert_eq(ft_elapsed(1000, 7400), 6400, "a 6.4 ms frame in microseconds");
+    assert_eq(ft_elapsed(0 - 1, 7400), 0 - 1, "no start -> -1, NOT 7400");
+    assert_eq(ft_elapsed(1000, 0 - 1), 0 - 1, "no end -> -1");
+    assert_eq(ft_elapsed(200, 100), 0 - 1, "backwards -> -1, not -100");
+
+    test_group("frametime — mean refuses to divide by nothing");
+    assert_eq(ft_mean(64000, 10), 6400, "mean of ten 6.4 ms frames");
+    assert_eq(ft_mean(0, 10), 0, "a genuinely zero total is 0, not -1");
+    assert_eq(ft_mean(64000, 0), 0 - 1, "no samples -> -1, and no division");
+    assert_eq(ft_mean(64000, 0 - 1), 0 - 1, "negative count -> -1");
+    assert_eq(ft_mean(0 - 1, 10), 0 - 1, "a poisoned total cannot yield a mean");
+
+    test_group("frametime — percent multiplies BEFORE dividing");
+    # ⛔ THE BUG THIS PINS: `(part / whole) * 100` is 0 for every part smaller than whole — i.e. for
+    # every real measurement here. AE-0a's own numbers are the fixture.
+    assert_eq(ft_pct(2460, 6400), 38, "AE-0a's post-band clear is 38% of the frame, not 0%");
+    assert_eq(ft_pct(3830, 6400), 59, "AE-0a's pre-band clear is 59%");
+    assert_eq(ft_pct(6400, 6400), 100, "a frame that is all clear is 100%");
+    assert_eq(ft_pct(0, 6400), 0, "a free clear is 0%");
+    assert_eq(ft_pct(100, 0), 0 - 1, "no frame time -> undecidable, not a division fault");
+    assert_eq(ft_pct(0 - 1, 6400), 0 - 1, "a poisoned part cannot yield a percent");
+
+    test_group("frametime — accumulator drops bad samples instead of folding them in");
+    ft_reset();
+    ft_add_frame(0, 6400);
+    ft_add_frame(0, 6600);
+    assert_eq(ft_frames, 2, "two usable frames counted");
+    assert_eq(ft_mean_frame_us(), 6500, "mean of 6400 and 6600");
+    assert_eq(ft_dropped, 0, "nothing dropped yet");
+    # ⛔ The clock dies mid-run. A folded-in zero would drag the mean to 4333 and read as a SPEEDUP.
+    ft_add_frame(0 - 1, 6400);
+    assert_eq(ft_frames, 2, "the unusable frame is NOT counted");
+    assert_eq(ft_mean_frame_us(), 6500, "and the mean is unmoved — no phantom speedup");
+    assert_eq(ft_dropped, 1, "it is counted as dropped, so the report can say so");
+
+    test_group("frametime — the clear's share uses MEANS, not sums");
+    ft_reset();
+    # Three frames of 6400 us; the clear runs on only two of them (a fully-banded frame skips it).
+    ft_add_frame(0, 6400); ft_add_frame(0, 6400); ft_add_frame(0, 6400);
+    ft_add_clear(0, 2460); ft_add_clear(0, 2460);
+    assert_eq(ft_mean_frame_us(), 6400, "mean frame");
+    assert_eq(ft_mean_clear_us(), 2460, "mean clear over the frames that CLEARED");
+    assert_eq(ft_clear_share_pct(), 38, "38% — sum/sum would say 25% by dividing over the wrong n");
+
+    test_group("frametime — an empty run reports -1, never 0");
+    ft_reset();
+    assert_eq(ft_mean_frame_us(), 0 - 1, "no frames -> -1");
+    assert_eq(ft_mean_clear_us(), 0 - 1, "no clears -> -1");
+    assert_eq(ft_clear_share_pct(), 0 - 1, "no share -> -1");
+
+    test_group("frametime — windowed means, because cumulative ones decay");
+    # ⛔ THE DEFECT THIS PINS, measured on the host before it reached iron: consecutive cumulative
+    # reports read 47 -> 24 -> 16 -> 12 us of mean clear with the workload unchanged — startup frames
+    # simply weighing less as n grew. Two burns compared that way differ by RUN LENGTH.
+    assert_eq(ft_window_mean(20000, 8000, 3, 1), 6000, "12000 us over 2 frames = 6000");
+    assert_eq(ft_window_mean(8000, 8000, 1, 1), 0 - 1, "an empty window is -1, not a division fault");
+    assert_eq(ft_window_mean(8000, 20000, 3, 1), 0 - 1, "totals going backwards -> -1");
+    assert_eq(ft_window_mean(20000, 8000, 1, 3), 0 - 1, "counts going backwards -> -1");
+
+    ft_reset();
+    # Window 1: two expensive frames. Window 2: two cheap ones. A cumulative mean would blend them.
+    ft_add_frame(0, 6400); ft_add_frame(0, 6400);
+    assert_eq(ft_win_frame_us(), 6400, "window 1 sees only its own frames");
+    ft_window_close();
+    ft_add_frame(0, 1200); ft_add_frame(0, 1200);
+    assert_eq(ft_win_frame_us(), 1200, "window 2 reports 1200, NOT the 3800 cumulative blend");
+    assert_eq(ft_mean_frame_us(), 3800, "and the cumulative mean is still there underneath");
+
+    ft_reset();
+    ft_add_frame(0, 6400); ft_add_clear(0, 5152);
+    assert_eq(ft_win_clear_pct(), 80, "a full-screen clear is 80% of the frame — the host number");
+    ft_window_close();
+    ft_add_frame(0, 1300); ft_add_clear(0, 1);
+    assert_eq(ft_win_clear_pct(), 0, "the banded clear is ~0% — the two configurations separate cleanly");
+
+    test_group("frametime — the report cadence is bounded and testable");
+    assert_eq(ft_should_report(240, 240, 0, 12), 1, "first report lands on the 240th frame");
+    assert_eq(ft_should_report(241, 240, 1, 12), 0, "not on the 241st");
+    assert_eq(ft_should_report(480, 240, 1, 12), 1, "and again on the 480th");
+    assert_eq(ft_should_report(240, 240, 12, 12), 0, "the cap stops it — a burn log cannot be flooded");
+    assert_eq(ft_should_report(0, 240, 0, 12), 0, "frame 0 is not a report point");
+    assert_eq(ft_should_report(240, 0, 0, 12), 0, "a zero interval must not modulo-by-zero");
+
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);

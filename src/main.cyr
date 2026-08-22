@@ -8,6 +8,7 @@
 #
 # Stdlib + [deps.*] (bhumi/mehman/agnostik/agnodrm) auto-prepended via cyrius.cyml.
 
+include "src/frametime.cyr"   # the clock + the frame-cost rules — FIRST: desktop.cyr times the clear with it
 include "lib/bhumi.cyr"
 include "src/geom.cyr"
 include "src/window.cyr"
@@ -56,6 +57,8 @@ var ae_probe = 0;
 var ae_quit_ignored = 0;
 var ae_probe_t0 = 0;
 var ae_probe_next_report = 0;
+# Latched: `uptime_us` refused calibration, so nothing on this run can be timed. Said once.
+var ae_noclock_said = 0;
 # 1 = at least one spawn_path refused, so a "no client connected" verdict has a known cause.
 var ae_spawn_failed = 0;
 
@@ -216,14 +219,28 @@ enum AeProbe {
 # bounded host run is **142 ms**, which is a fact nothing in the build could report at the time.
 # ⇒ `clock_now_ms` (`lib/chrono.cyr:46`, CLOCK_MONOTONIC) has always been available and `chrono`
 # has always been in `[deps].stdlib`. There was never a reason for the host arm to be blind.
+# ⛔⛔ AND THE AGNOS ARM WAS BLIND TOO — FROZEN, NOT ZERO, WHICH IS WHY IT SURVIVED THE B1 FIX.
+# `sys_uptime_ms` (#40) reads `timer_ticks`, incremented by the 100 Hz timer ISR. A FOREGROUND `run`
+# program — which is exactly how the desktop starts, `run /bin/aethersafha` (agnos
+# `kernel/core/main.cyr:3281`) — begins with **IF CLEARED**; only `/bin/agnsh` gets IF=1
+# (`kernel/core/main.cyr:4241`). The timer never fires, so #40 is **frozen for the compositor's
+# entire run** and every readout above was a constant. The host arm returned 0 and was fixed at
+# 0.13.1; this arm returned the same number every time, which reads as a working clock on a fast
+# machine and is why nobody caught it.
+# ⭐ THIS IS WHY "NOBODY HAS MEASURED THE GPU-PATH FRAME COST": with this clock it was not
+# measurable. The same mistake cost agnos two iron burns on its rung-10 gate.
+# ⇒ `sys_uptime_us` (#95) is rdtsc-backed and needs no interrupts — the only correct clock on this
+# path. ⚠ It returns **-1 when calibration was REFUSED**, deliberately never a plausible 0, and that
+# -1 must be PROPAGATED: `-1 / 1000` is 0, which would re-create the exact fail-plausible shape the
+# kernel added the -1 to prevent.
 fn ae_now_ms(): i64 {
-    #ifdef CYRIUS_TARGET_AGNOS
-    return sys_uptime_ms();
-    #endif
-    #ifndef CYRIUS_TARGET_AGNOS
-    return clock_now_ms();
-    #endif
+    var us = ae_now_us();
+    if (us < 0) { return 0 - 1; }
+    return us / 1000;
 }
+
+# ⇒ Elapsed is `ft_elapsed` (frametime.cyr) — one total rule, unit-tested, shared by the probe
+#   budget and the frame instrument. There is no second subtraction in this file.
 
 enum AeConfig {
     # ⚠ FALLBACK ONLY — these are what the compositor opens at when it cannot ASK. See
@@ -717,6 +734,11 @@ fn main(): i64 {
     if (ae_has_flag("--clearbg") == 1) {
         rend_clear_bg_all_set(1);
         println("aethersafha: --clearbg -- full-screen background clear, band kept for the rest (diagnostic)");
+    }
+    if (ae_has_flag("--bandbg") == 1) {
+        rend_clear_bg_band_set(1);
+        println("aethersafha: --bandbg -- BANDED background clear forced back on the GPU path.");
+        println("aethersafha: this REINTRODUCES the 0.16.18 flicker on purpose, to price it.");
     }
     if (ae_has_flag("--wallpaper") == 1) {
         var wpf = ae_flag_str("--wallpaper");
@@ -1237,6 +1259,10 @@ fn main(): i64 {
             # decision to know whether to do its own per-pixel client composite. Calling this after
             # the render (or not at all) is the bug this ordering exists to prevent: the renderer
             # skipping its work for a frame the GPU then refuses, leaving chrome and no content.
+            # ⭐ FRAME COST. Stamped around the whole frame body; the clear stamps itself inside
+            # render_desktop. ⛔ Read `ae_now_us` (#95 rdtsc) — #40 is FROZEN for a foreground `run`
+            # program, which is what made this measurement impossible until now.
+            var t_frame0 = ae_now_us();
             ae_gpu_frame_plan(comp, fb);
             # ⭐ RECORD WHICH PATH THIS FRAME TOOK. A plan that demotes on some frames alternates
             # what the screen is built from — a flicker with nothing in the log to name it. This
@@ -1435,17 +1461,43 @@ fn main(): i64 {
             if (ae_probe == 1) {
                 if (accepted >= 2) { running = 0; }
                 if (frame >= AE_PROBE_FRAMES) { running = 0; }
-                var el = ae_now_ms() - ae_probe_t0;
-                if (el >= AE_PROBE_MS) { running = 0; }
+                # ⚠ `el < 0` is "THE CLOCK DID NOT ANSWER", not "no time has passed". A refused
+                # calibration must not silently disarm the budget AND must not silently arm it —
+                # say it once, then let the frame cap and the accept count terminate the run.
+                var el = ft_elapsed(ae_probe_t0, ae_now_ms());
+                if (el < 0) {
+                    if (ae_noclock_said == 0) {
+                        ae_noclock_said = 1;
+                        println("aethersafha: NO CLOCK -- uptime_us refused calibration; the elapsed budget cannot bind this run");
+                    }
+                }
+                if (el >= 0) {
+                    if (el >= AE_PROBE_MS) { running = 0; }
+                }
                 # Progress, so the log proves the run stayed alive rather than wedged. Only while
                 # nothing has connected — once a client is up the accept lines say it.
-                if (el >= ae_probe_next_report) {
+                if (el >= 0 && el >= ae_probe_next_report) {
                     ae_probe_next_report = ae_probe_next_report + AE_PROBE_REPORT_MS;
                     if (accepted == 0) {
                         println("aethersafha: still waiting for an app, milliseconds so far:");
                         println_int(el);
                     }
                 }
+            }
+            # ⭐ CLOSE THE FRAME SAMPLE, then report on a bounded cadence. One line per 240 frames:
+            # a healthy 30 s burn prints a handful, and the cap means a wedged one cannot bury them.
+            ft_add_frame(t_frame0, ae_now_us());
+            if (ft_should_report(ft_frames, FT_REPORT_EVERY, ft_reported, FT_REPORT_MAX) == 1) {
+                ft_reported = ft_reported + 1;
+                # ⚠ -1 in ANY of these means "the clock did not answer", not "free". The banner in
+                # frametime.cyr says why that distinction is the whole point of this instrument.
+                println("aethersafha: frame cost us THIS WINDOW (frames, frame, clear, clear pct, dropped):");
+                println_int(ft_frames);
+                println_int(ft_win_frame_us());
+                println_int(ft_win_clear_us());
+                println_int(ft_win_clear_pct());
+                println_int(ft_dropped);
+                ft_window_close();
             }
             frame = frame + 1;
         }
@@ -1497,8 +1549,10 @@ fn main(): i64 {
             # behind it, and the previous build emitted 93 from a run cut short at frame 191. These
             # two numbers make that unmistakable: an elapsed time near AE_PROBE_MS means the budget
             # was genuinely spent, anything far below it means the run ended for another reason.
-            println("aethersafha: probe ran for milliseconds, and ignored this many quit keys:");
-            println_int(ae_now_ms() - ae_probe_t0);
+            # ⚠ -1 here means the clock never answered — distinguishable from a fast run, which is
+            # the whole point of propagating it instead of flooring to 0.
+            println("aethersafha: probe ran for milliseconds (-1 = no clock), and ignored this many quit keys:");
+            println_int(ft_elapsed(ae_probe_t0, ae_now_ms()));
             println_int(ae_quit_ignored);
             # ⛔⛔ 92 IS A LINUX-ONLY VERDICT AND IT WAS FIRING ON EVERY agnos RUN. `setu_sfd` is assigned
             # in exactly one place, inside `#ifndef CYRIUS_TARGET_AGNOS`, so on agnos it keeps its -1

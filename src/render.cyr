@@ -318,6 +318,14 @@ var ae_clear_bg_all = 0;
 fn rend_clear_bg_all_set(v): i64 { ae_clear_bg_all = v; return 0; }
 fn rend_clear_bg_all(): i64 { return ae_clear_bg_all; }
 
+# ⚠ DIAGNOSTIC, `--bandbg`: force the BANDED background clear even where the chrome is on the GPU,
+# i.e. undo 0.16.18's fix on purpose. It makes the screen FLICKER on iron by design — its only job is
+# to put the pre-0.16.18 cost beside the post-0.16.18 cost inside ONE burn, under identical actions.
+# ⛔ Never ship a default that sets this.
+var ae_clear_bg_band = 0;
+fn rend_clear_bg_band_set(v): i64 { ae_clear_bg_band = v; return 0; }
+fn rend_clear_bg_band(): i64 { return ae_clear_bg_band; }
+
 var ae_force_full = 0;
 fn rend_force_full_set(v): i64 { ae_force_full = v; return 0; }
 fn rend_force_full(): i64 { return ae_force_full; }
