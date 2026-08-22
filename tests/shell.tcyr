@@ -26,9 +26,14 @@ fn main() {
 
     var st0 = shell_get_system_status(sh);
     assert(t_ok(st0), "initial status non-null");
-    assert_eq(shell_status_cpu(st0), 0, "initial cpu 0");
-    assert_eq(shell_status_mem(st0), 0, "initial mem 0");
-    assert_eq(shell_status_disk(st0), 0, "initial disk 0");
+    # ⛔⛔ THIS SUITE ASSERTED THE DEFECT (corrected 0.16.20). It required cpu/mem/disk to be 0 on a
+    # fresh shell — and since NOTHING ever fed them, that made "the panel shows a confident 0% for
+    # everything, forever" the tested, defended behaviour. Third instance of this shape in the arc,
+    # after `render.tcyr` asserted the one-frame repaint and `setu_handshake.tcyr` asserted state 3
+    # as terminal. A seeded gauge is UNKNOWN until a producer answers.
+    assert_eq(shell_status_cpu(st0), 0 - 1, "initial cpu UNKNOWN — no producer has answered yet");
+    assert_eq(shell_status_mem(st0), 0 - 1, "initial mem UNKNOWN");
+    assert_eq(shell_status_disk(st0), 0 - 1, "initial disk UNKNOWN");
     assert_eq(shell_status_battery_is_none(st0), 1, "initial battery None");
     assert_eq(shell_status_net(st0), SH_NetStatus.SH_NET_CONNECTED, "initial net Connected");
     assert_eq(shell_status_agents(st0), 0, "initial agents 0");

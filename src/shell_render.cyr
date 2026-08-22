@@ -33,9 +33,17 @@ enum PanelK {
 # answer "is it high" and never "how high" — and at a glance two bars at 71% and 78% are the same
 # bar. `draw_text` existed the whole time; only this did not.
 # Writes a 0..100 percentage as "N%" into `dst` (max 5 bytes incl NUL). -> byte length.
+# ⛔⛔ AN UNKNOWN GAUGE MUST NOT RENDER AS "0%". This clamped `pct < 0` to 0, so "we have no source
+# for this number" and "this resource is idle" produced identical pixels — and since NOTHING fed the
+# panel until 0.16.20, every burn showed a confident 0% for cpu, mem, disk and agents alike. `0%` is
+# a claim; `--%` is the absence of one. Same rule as `#95 uptime_us` returning -1 rather than a
+# plausible 0, and `ft_mean` refusing to average nothing.
 fn panel_pct_str(dst, pct): i64 {
+    if (pct < 0) {
+        store8(dst, 45); store8(dst + 1, 45); store8(dst + 2, 37); store8(dst + 3, 0);
+        return 3;
+    }
     var v = pct;
-    if (v < 0) { v = 0; }
     if (v > 100) { v = 100; }
     var n = 0;
     if (v >= 100) {
@@ -207,14 +215,14 @@ fn render_shell_panel(fb, shell): i64 {
     var gi = 0;
     var x = panel_slot_x(fw, gi);
     # cpu
-    panel_gauge(fb, x, y, shell_status_cpu(st), ae_bhumi(rupa_theme_accent(th)), track, ink);
+    panel_gauge(fb, x, y, sh_permille_to_pct(shell_status_cpu(st)), ae_bhumi(rupa_theme_accent(th)), track, ink);
     gi = gi + 1; x = panel_slot_x(fw, gi);
     # mem
-    panel_gauge(fb, x, y, shell_status_mem(st), ae_bhumi(rupa_theme_accent(th)), track, ink);
+    panel_gauge(fb, x, y, sh_permille_to_pct(shell_status_mem(st)), ae_bhumi(rupa_theme_accent(th)), track, ink);
     gi = gi + 1; x = panel_slot_x(fw, gi);
     # ⭐ DISK — modelled since the port, never drawn until 0.16.4. `shell_status_disk` had ZERO
     # readers outside shell.cyr, which is why a full disk was invisible to the operator.
-    panel_gauge(fb, x, y, shell_status_disk(st), ae_bhumi(rupa_theme_accent(th)), track, ink);
+    panel_gauge(fb, x, y, sh_permille_to_pct(shell_status_disk(st)), ae_bhumi(rupa_theme_accent(th)), track, ink);
     gi = gi + 1; x = panel_slot_x(fw, gi);
     # battery (only when present)
     if (shell_status_battery_is_none(st) == 0) {

@@ -33,6 +33,11 @@ stdlib = [
     # _sankoch_lock/_unlock wrap mutex_lock/mutex_unlock, hence "thread".
     "sankoch", "thread",
 ]
+# ⛔ `lib/sys.cyr` IS NOT DECLARED HERE, DELIBERATELY — the entry was tried and is INERT. Adding
+# "sys" to the list above is accepted, `cyrius deps` reports success, and the module still never
+# enters the compile set (`sys_sysinfo` returns "reachable undefined"). A declaration that silently
+# does nothing is worse than none, so `src/sysprobe.cyr` includes it BY PATH instead, the way
+# `lib/bhumi.cyr` is included. ⚠ Do not "fix" this by re-adding the entry.
 
 # --- Platform backend: DRM/KMS + libinput + logind → output/input/seat.
 [deps.bhumi]

@@ -190,6 +190,21 @@ fn shell_status_battery_is_none(p): i64 {
 }
 
 fn shell_status_set_agents(p, count) { store64(p + S_AGENTS, count); return 0; }
+fn shell_status_set_cpu(p, v)  { store64(p + S_CPU, v);  return 0; }
+fn shell_status_set_mem(p, v)  { store64(p + S_MEM, v);  return 0; }
+fn shell_status_set_disk(p, v) { store64(p + S_DISK, v); return 0; }
+
+# PURE: permille (0..1000, the stored unit) -> percent (0..100, what a gauge draws).
+# ⛔⛔ THE BOUNDARY THAT WAS MISSING, AND IT WOULD HAVE SHIPPED WRONG NUMBERS THE DAY THE PANEL GOT A
+# PRODUCER. `SH_StatusOff` documents cpu/mem/disk as permille; `render_shell_panel` handed the raw
+# field to `panel_gauge`, which treats its argument as a PERCENT and clamps anything over 100 to a
+# full bar. So 456 permille — 45.6% — would have drawn a saturated "100%". It was invisible for the
+# whole port only because `shell_new` seeded literal zeros and 0 is 0 in both units.
+# ⚠ UNKNOWN (< 0) PASSES THROUGH UNCHANGED. Rounding a sentinel is how it stops being one.
+fn sh_permille_to_pct(pm): i64 {
+    if (pm < 0) { return pm; }
+    return (pm + 5) / 10;
+}
 
 # ================================================================
 # AppEntry (rust: struct AppEntry)
@@ -317,7 +332,10 @@ fn shell_new(): i64 {
     store64(sh + SH_NOTIFS, vec_new());
     store64(sh + SH_QSETTINGS, vec_new());
     # initial SystemStatus: cpu/mem/disk 0, no battery, Connected, 0 agents
-    var st = shell_status_new(0, 0, 0, shell_battery_none(), SH_NetStatus.SH_NET_CONNECTED, 0);
+    # ⛔ SEEDED UNKNOWN, NOT ZERO. These were literal zeros since the port and NOTHING ever
+    # overwrote them, so the panel asserted "cpu 0%, mem 0%, disk 0%" on every burn. -1 renders as
+    # "--%" until a producer answers; a 0 is a claim nobody was entitled to make.
+    var st = shell_status_new(0 - 1, 0 - 1, 0 - 1, shell_battery_none(), SH_NetStatus.SH_NET_CONNECTED, 0);
     if (st == 0) { return 0; }
     store64(sh + SH_STATUS, st);
     store64(sh + SH_ITEMS, vec_new());

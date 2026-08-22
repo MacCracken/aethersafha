@@ -1,0 +1,66 @@
+# sysprobe.tcyr — the panel's producers, and the unit boundary that would have shipped wrong numbers.
+include "src/sysprobe.cyr"
+include "src/shell.cyr"
+
+fn main(): i64 {
+    alloc_init();
+
+    test_group("sysprobe — memory permille from real byte counts");
+    assert_eq(sysp_mem_permille(1000, 500), 500, "half free = 500 permille (50.0%)");
+    assert_eq(sysp_mem_permille(1000, 0), 1000, "nothing free = 1000 permille (100%)");
+    assert_eq(sysp_mem_permille(1000, 1000), 0, "all free = 0");
+    # ⛔ PERMILLE, NOT PERCENT. 16 GiB with 9.4 GiB free is 41.5% used — 415 permille. A percent-
+    # emitting producer would store 41 and the panel would draw 4%.
+    assert_eq(sysp_mem_permille(17179869184, 10050000000), 415, "16 GiB box reads 415 permille");
+    # ⚠ Multiply-before-divide: a percent computed as (used/total)*1000 is 0 on any real machine.
+    assert_eq(sysp_mem_permille(17179869184, 17179869183), 0, "one byte used is 0, not a fault");
+
+    test_group("sysprobe — unbelievable inputs are UNKNOWN, never a number");
+    assert_eq(sysp_mem_permille(0, 0), 0 - 1, "no total -> unknown, and no division");
+    assert_eq(sysp_mem_permille(0 - 1, 100), 0 - 1, "negative total -> unknown");
+    assert_eq(sysp_mem_permille(1000, 0 - 1), 0 - 1, "negative free -> unknown");
+    assert_eq(sysp_mem_permille(1000, 2000), 0 - 1, "more free than total -> unknown, not negative");
+
+    test_group("sysprobe — known vs unknown is a decision, not a guess");
+    assert_eq(sysp_is_known(0), 1, "a genuine 0 IS known");
+    assert_eq(sysp_is_known(415), 1, "a real reading is known");
+    assert_eq(sysp_is_known(0 - 1), 0, "the sentinel is not known");
+
+    test_group("sysprobe — cpu and disk have NO source and must say so");
+    # ⛔ These assert ABSENCE deliberately. agnos exposes no loadavg and no statfs; if either ever
+    # gains a producer this test fails and forces the panel's contract to be revisited on purpose.
+    assert_eq(sysp_cpu_permille_now(), 0 - 1, "no CPU source on either target — UNKNOWN, not 0");
+    assert_eq(sysp_disk_permille_now(), 0 - 1, "no statfs on agnos — UNKNOWN, not 0");
+
+    test_group("sysprobe — sampling cadence");
+    assert_eq(sysp_should_sample(0, 120), 1, "frame 0 samples, so the panel is live immediately");
+    assert_eq(sysp_should_sample(120, 120), 1, "and every 120th after");
+    assert_eq(sysp_should_sample(119, 120), 0, "not in between");
+    assert_eq(sysp_should_sample(120, 0), 0, "a zero interval must not modulo-by-zero");
+    assert_eq(sysp_should_sample(0 - 1, 120), 0, "a negative frame never samples");
+
+    test_group("shell — permille -> percent, the boundary that was missing");
+    # ⛔ THE DEFECT: the record stores permille, panel_gauge takes a PERCENT and clamps >100 to a
+    # full bar. Handing it the raw field drew 456 permille (45.6%) as a saturated "100%".
+    assert_eq(sh_permille_to_pct(456), 46, "456 permille -> 46% (rounded), NOT 456");
+    assert_eq(sh_permille_to_pct(1000), 100, "full is 100%");
+    assert_eq(sh_permille_to_pct(0), 0, "empty is 0%");
+    assert_eq(sh_permille_to_pct(5), 1, "rounds up at the half");
+    assert_eq(sh_permille_to_pct(4), 0, "and down below it");
+    # ⚠ The sentinel must survive the conversion — rounding it is how it stops being a sentinel.
+    assert_eq(sh_permille_to_pct(0 - 1), 0 - 1, "UNKNOWN passes through, it is not rounded to 0");
+
+    test_group("shell — a fresh shell claims nothing it cannot measure");
+    var sh = shell_new();
+    var st = shell_status(sh);
+    assert_eq(shell_status_cpu(st), 0 - 1, "cpu seeded UNKNOWN, not a fabricated 0");
+    assert_eq(shell_status_disk(st), 0 - 1, "disk seeded UNKNOWN");
+    shell_status_set_mem(st, 415);
+    assert_eq(shell_status_mem(st), 415, "a producer can write the gauge");
+    assert_eq(sh_permille_to_pct(shell_status_mem(st)), 42, "and it renders as 42%");
+
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);

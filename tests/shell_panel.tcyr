@@ -64,7 +64,11 @@ fn main() {
     # ⛔ CLAMPED, NOT WRAPPED. A status source glitching to 140 must read as 100%, never "140%" and
     # never a truncated "40%" — the label is what an operator trusts when the bar looks alarming.
     panel_pct_str(b, 140);  assert_eq(t_streq(b, "100%"), 1, "over-range clamps to 100%");
-    panel_pct_str(b, 0 - 5); assert_eq(t_streq(b, "0%"), 1, "negative clamps to 0%");
+    # ⛔⛔ AND THIS ONE ASSERTED THE OTHER HALF OF IT (corrected 0.16.20): it required an unknown
+    # gauge to render as "0%", i.e. required the panel to make a confident claim it had no source
+    # for. `0%` says idle; `--%` says not measured. cpu and disk have NO producer on either target.
+    panel_pct_str(b, 0 - 5); assert_eq(t_streq(b, "--%"), 1, "UNKNOWN renders --%, never a claimed 0%");
+    panel_pct_str(b, 0);     assert_eq(t_streq(b, "0%"), 1, "a GENUINE zero still renders 0%");
 
     test_group("panel — the integer formatter (notification and agent counts)");
     panel_u2s(b, 1);    assert_eq(t_streq(b, "1"), 1, "one");

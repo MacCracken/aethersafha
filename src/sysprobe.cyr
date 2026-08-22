@@ -1,0 +1,79 @@
+# sysprobe.cyr — REAL numbers for the shell panel.
+#
+# ⛔⛔ WHY THIS EXISTS. `render_shell_panel` has drawn cpu / mem / disk gauges and an agent count
+# since M7-F (0.16.4), and **nothing has ever fed them**: `shell_new` seeds `shell_status_new(0, 0,
+# 0, …)` with literal zeros. The panel has been showing four fabricated 0% bars on every burn. That
+# is the pattern named across this whole arc — state that exists with no producer — and it is the
+# reason the arc keeps shipping surfaces that look finished and are not.
+#
+# ⛔ NOT EVERY GAUGE HAS A SOURCE, AND THE HONEST ANSWER IS "UNKNOWN", NOT "0".
+#   · **mem**    — REAL. agnos `#35 sysinfo` gives totalram/freeram; Linux `#99` the same fields at
+#                  different offsets. `lib/sys.cyr` owns both layouts (see the manifest note).
+#   · **agents** — REAL. the `ai_features` agent-HUD registry is an actual live count.
+#   · **cpu**    — **NO SOURCE.** agnos exposes no loadavg and no per-process CPU accounting; the ABI
+#                  has nothing to read. Reports UNKNOWN on both targets rather than inventing one.
+#   · **disk**   — **NO SOURCE.** agnos has **no statfs / free-space syscall at all** (`st_blocks` in
+#                  `#33 stat` is per-FILE, not per-filesystem). Reports UNKNOWN.
+#
+# ⛔ A 0% GAUGE AND AN UNKNOWN GAUGE MUST NOT RENDER THE SAME. `0%` reads as "idle" — a confident
+# claim — where `--%` reads as "not measured". This is the identical lesson to `#95 uptime_us`
+# returning -1 instead of a plausible 0, and to `ft_mean` refusing to average nothing. The panel
+# would otherwise assert, every frame, on every burn, that the disk is empty and the CPU is asleep.
+
+# ⚠ EXPLICIT, because declaring "sys" in `[deps].stdlib` was ACCEPTED AND SILENTLY IGNORED — the
+# manifest took the entry, `cyrius deps` reported success, and `lib/sys.cyr` still never entered the
+# compile set (`sys_sysinfo` came back "reachable undefined"). The opt-in list does not resolve this
+# module, so it is included by path like `lib/bhumi.cyr` is.
+include "lib/sys.cyr"
+
+# The sentinel. ⚠ Any value < 0 is unknown; -1 is what producers emit.
+var SYSP_UNKNOWN = 0 - 1;
+
+# ---- Pure rules -----------------------------------------------------------------------------
+
+# PURE: used-memory in PERMILLE (0..1000) from total/free BYTE counts. -1 when unbelievable.
+# ⛔ PERMILLE, NOT PERCENT — `SH_StatusOff` documents every gauge field as permille (the port's
+# representation of rust's f32 percent). Emitting percent here would under-report by 10x and look
+# entirely plausible on a bar that tops out at 100.
+# ⚠ Multiply before dividing — `(used / total) * 1000` is 0 for any machine with >1000 bytes of RAM,
+# the same defect `ft_pct` exists to avoid.
+fn sysp_mem_permille(total, free): i64 {
+    if (total <= 0) { return SYSP_UNKNOWN; }
+    if (free < 0)   { return SYSP_UNKNOWN; }
+    if (free > total) { return SYSP_UNKNOWN; }
+    return (total - free) * 1000 / total;
+}
+
+# PURE: is this gauge value a real measurement? -> 1 / 0.
+fn sysp_is_known(v): i64 {
+    if (v < 0) { return 0; }
+    return 1;
+}
+
+# ---- Producers ------------------------------------------------------------------------------
+
+# Used-memory percent from the live kernel, or -1 if the read failed.
+# ⛔ Goes through `sys_sysinfo` + `sysinfo_total_memory` / `sysinfo_free_memory` rather than reading
+# offsets here: agnos and Linux disagree on BOTH the offsets and the scaling (Linux multiplies by
+# `mem_unit`), and hand-rolling it is how a plausible wrong number gets shipped.
+fn sysp_mem_permille_now(): i64 {
+    var info[120];                       # >= SYSINFO_SIZE on both targets (agnos 40, Linux 120)
+    if (sys_sysinfo(&info) != 0) { return SYSP_UNKNOWN; }
+    return sysp_mem_permille(sysinfo_total_memory(&info), sysinfo_free_memory(&info));
+}
+
+# ⚠ NO SOURCE ON EITHER TARGET — see the banner. These exist so the call sites are honest and so the
+# day a syscall lands there is exactly one place to change.
+fn sysp_cpu_permille_now(): i64  { return SYSP_UNKNOWN; }
+fn sysp_disk_permille_now(): i64 { return SYSP_UNKNOWN; }
+
+# PURE: should the panel re-sample this frame? Sampling every frame costs a syscall per frame for a
+# number that moves on a human timescale. -> 1 / 0.
+fn sysp_should_sample(frame, every): i64 {
+    if (every <= 0) { return 0; }
+    if (frame < 0) { return 0; }
+    if (frame % every != 0) { return 0; }
+    return 1;
+}
+
+var SYSP_SAMPLE_EVERY = 120;   # frames between samples

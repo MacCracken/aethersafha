@@ -5,6 +5,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [Unreleased]
+
+### Added — the shell panel has PRODUCERS for the first time (`src/sysprobe.cyr`)
+
+⛔ **`render_shell_panel` has drawn cpu / mem / disk gauges and an agent count since M7-F (0.16.4) and
+NOTHING HAS EVER FED THEM.** `shell_new` seeded `shell_status_new(0, 0, 0, …)` with literal zeros and
+no code path ever wrote another value — so every burn in this arc showed a confident **0%** for all
+four. That is the pattern this arc keeps naming: state that exists with no producer.
+
+- **mem — REAL.** `sys_sysinfo` → used-memory permille. Cross-checked against an external oracle:
+  total **64,165,326,848 B**, byte-identical to `free -b`; **277 permille** vs `free`'s 27.8%.
+  ⛔ Goes through `lib/sys.cyr`'s accessors, never hand-rolled offsets — `sysinfo` is one NAME with
+  two CONTRACTS (agnos `#35`, 40-byte, `totalram @ +8`, raw bytes; Linux `#99`, 112-byte,
+  `totalram @ +32`, **scaled by `mem_unit`**). Reading agnos's offsets on Linux hands back `loads[1]`
+  as a memory size — plausible, and silently wrong.
+- **cpu / disk — NO SOURCE, and they now SAY SO.** agnos exposes no loadavg and **no statfs at all**
+  (`st_blocks` in `#33 stat` is per-FILE). They report UNKNOWN rather than inventing a number.
+
+⛔ **AN UNKNOWN GAUGE NO LONGER RENDERS AS "0%".** `panel_pct_str` clamped negatives to 0, so "no
+source" and "idle" produced identical pixels. Unknown now draws **`--%`** with an empty bar. `0%` is
+a claim; `--%` is the absence of one — the same rule as `#95 uptime_us` returning -1 and `ft_mean`
+refusing to average nothing.
+
+### Fixed — permille vs percent: the panel would have drawn every real reading 10x too high
+
+⛔⛔ **A LATENT UNIT DEFECT THAT ONLY A PRODUCER COULD EXPOSE.** `SH_StatusOff` documents cpu/mem/disk
+as **permille (0..1000)** — the port's representation of rust's `f32` percent — but
+`render_shell_panel` handed the raw field to `panel_gauge`, which takes a **percent** and clamps
+anything over 100 to a full bar. A 45.6% reading (456 permille) would have drawn a saturated
+**"100%"**. It survived the entire port because the field was always 0, and 0 is 0 in both units.
+⇒ `sh_permille_to_pct` at the render boundary; the record stays permille for `rust-old/` parity.
+⚠ The UNKNOWN sentinel passes through unconverted — rounding a sentinel is how it stops being one.
+
+### Fixed — two suites that ASSERTED the defects
+
+⛔ Third and fourth instance of this shape in the arc, after `render.tcyr` asserted the one-frame
+repaint and `setu_handshake.tcyr` asserted state 3 as terminal. `shell.tcyr` required a fresh shell's
+gauges to read **0** — making "the panel claims 0% forever" the tested, defended behaviour — and
+`shell_panel.tcyr` required an unknown gauge to render **"0%"**. Both corrected, with a case added
+that a *genuine* zero still renders `0%`.
+
+### Fixed — `lib/bayan.cyr` was vendored from a CONTAMINATED snapshot at the 0.16.19 cut
+
+⛔⛔ **0.16.19 SHIPPED A STDLIB FILE ITS OWN PIN DOES NOT PROVIDE, AND THE +215 KB IT RECORDED IS
+WRONG.** When 0.16.19 ran `cyrius lib sync --full`, `~/.cyrius/versions/6.5.33/lib/` transiently held
+**6.5.34** content — bayan **1.5.2**, 15,598 lines — and that is what got committed. The directory was
+corrected back to bayan **1.4.2** (5,554 lines) shortly after, and the wrapper moved on to 6.5.34.
+
+⇒ The 0.16.19 entry's *"the `--agnos` binary grew +215,616 B (+5.2%) and it is ALL DEAD WEIGHT …
+`lib/bayan.cyr` gained 10,046 lines"* was **measured correctly and caused by the wrong thing**: not by
+the 6.5.28 → 6.5.33 pin bump, but by a snapshot directory that did not hold its own version's content.
+Re-vendored from the corrected 6.5.33: the agnos artifact is **4,125,688 B**, only **+4,296 B** over
+the pre-bump build. **The pin bump was very nearly free.**
+
+⛔ **A PINNED SNAPSHOT DIRECTORY IS NOT IMMUTABLE, so "the pin makes the build reproducible" is FALSE
+as stated.** `~/.cyrius/versions/<pin>/lib` is a mutable directory on this machine; two `lib sync`
+runs at the same pin, minutes apart, produced different sources. ⇒ 0.16.19's recorded artifact
+(`8ee98f49`, 4,337,008 B) **cannot be rebuilt from any tree** — quote it as history only. This is the
+same lesson as "a size does not identify a binary", one layer down: a *pin* does not identify a
+toolchain either. Re-run `cyrius lib sync --full` and re-measure at every cut; never assume a
+same-pin re-sync is a no-op.
+
+### Notes
+
+- `tests/sysprobe.tcyr`: **29 assertions, 6 mutations proven to fail it** (producer emitting percent;
+  divide-before-multiply; `free > total` accepted; the permille→percent boundary removed; the
+  sentinel rounded; the shell re-seeding zeros). Suites **26 → 27**, assertions **1,827 → 1,858**.
+- ⚠ **NOT YET PIXEL-PROVEN.** The producer is validated against `free -b` and the unit path is
+  mutation-tested, but nothing has yet read the PANEL's pixels — `--ppm` (M6-B2) is still unbuilt, so
+  that wants the burn or a QEMU screendump. Do not record this as visually confirmed.
+- ⚠ **`"sys"` in `[deps].stdlib` is INERT** — the entry is accepted, `cyrius deps` reports success,
+  and the module still never enters the compile set. `src/sysprobe.cyr` includes `lib/sys.cyr` BY
+  PATH instead, and the manifest carries a note not to "fix" it by re-adding the entry.
+
+
 ## [0.16.19] - 2026-08-22 — the clock was frozen, so the frame cost was never measurable
 
 ### Fixed — `ae_now_ms` returned a CONSTANT on iron, for the compositor's entire run

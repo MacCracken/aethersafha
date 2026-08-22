@@ -43,7 +43,9 @@ figure is what the next burn is for.** The durable fix is **per-buffer damage**,
 | rupa 0.1.4 · sadish 0.5.2 · rekha 0.3.5 · kashi 1.0.6 | | tokens · raster · fonts |
 | agnos | **1.56.46 OPEN** | the kernel |
 
-The four consumers declare **cyrius 6.5.28**; the libraries still declare 6.5.27.
+aethersafha declares **cyrius 6.5.33** since the 0.16.19 cut; the other consumers declare 6.5.28 and
+the libraries 6.5.27. ⛔ **NOT DRIFT, NOT A TASK — do not chase the pin** ([`CLAUDE.md`](../../CLAUDE.md)
+Rules). cyrius moves constantly; repos legitimately sit on different pins.
 ⛔ **THE "BYTE-IDENTICAL" CLEARANCE HAS EXPIRED — RE-MEASURED 2026-08-21.** This paragraph used to end
 *"the wrapper is now 6.5.29 … measured byte-identical for these artifacts"*. **The wrapper is 6.5.33
 now, and it is not byte-identical.** The pin does not bind the compiler — `cyrius build` warns about

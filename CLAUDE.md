@@ -57,6 +57,13 @@ cyrius test                              # run tests/*.tcyr
 - Do not skip tests before claiming changes work
 - Do not modify `lib/` files (vendored stdlib / dep symlinks)
 - Do not hardcode toolchain versions in CI YAML — `cyrius = "X.Y.Z"` in `cyrius.cyml` is the source of truth
+- **DO NOT CHASE THE CYRIUS PIN.** cyrius releases **constantly**, so the wrapper being ahead of
+  `[package].cyrius` is the **normal, expected state — not drift, not a finding, not a task.** Bump the
+  pin only when it is genuinely **necessary** (something the work needs is in the newer toolchain) or
+  when the **operator asks for it**. Never bump it "to be current", never open a stack-wide sweep, and
+  never report a version difference between this repo and its siblings as a defect — repos legitimately
+  sit on different pins. ⚠ A pin bump is a **real source change**, not a number: it re-vendors `lib/`
+  and changes the compiled binary, so it is never free housekeeping.
 
 ## Documentation
 

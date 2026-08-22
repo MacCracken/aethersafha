@@ -9,6 +9,7 @@
 # Stdlib + [deps.*] (bhumi/mehman/agnostik/agnodrm) auto-prepended via cyrius.cyml.
 
 include "src/frametime.cyr"   # the clock + the frame-cost rules — FIRST: desktop.cyr times the clear with it
+include "src/sysprobe.cyr"    # the PRODUCERS the shell panel never had (M7-F shipped the renderer only)
 include "lib/bhumi.cyr"
 include "src/geom.cyr"
 include "src/window.cyr"
@@ -1263,6 +1264,18 @@ fn main(): i64 {
             # render_desktop. ⛔ Read `ae_now_us` (#95 rdtsc) — #40 is FROZEN for a foreground `run`
             # program, which is what made this measurement impossible until now.
             var t_frame0 = ae_now_us();
+            # ⭐ FEED THE PANEL. `render_shell_panel` has drawn cpu/mem/disk/agents since 0.16.4 with
+            # NOTHING behind them — `shell_new` seeded zeros and no code ever wrote another value.
+            # ⚠ Sampled on a cadence, not per frame: this is a syscall for a number that moves on a
+            # human timescale, and the frame budget is already the open regression.
+            if (sysp_should_sample(frame, SYSP_SAMPLE_EVERY) == 1) {
+                var sh_st = shell_status(desk_shell(desk));
+                if (sh_st != 0) {
+                    shell_status_set_mem(sh_st, sysp_mem_permille_now());
+                    shell_status_set_cpu(sh_st, sysp_cpu_permille_now());
+                    shell_status_set_disk(sh_st, sysp_disk_permille_now());
+                }
+            }
             ae_gpu_frame_plan(comp, fb);
             # ⭐ RECORD WHICH PATH THIS FRAME TOOK. A plan that demotes on some frames alternates
             # what the screen is built from — a flicker with nothing in the log to name it. This
