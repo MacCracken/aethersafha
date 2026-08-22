@@ -1,8 +1,22 @@
-# Desktop arc — handoff (2026-08-19)
+# Desktop arc — handoff (2026-08-21)
+
+## ⛔ READ FIRST — the item this handoff dropped
+
+**The flicker fix made the desktop SLOW, and it shipped that way.** Operator, on iron after 0.16.18:
+the whole-screen refresh is **slower**. The 2026-08-19 handoff recorded the flicker as closed and did
+not carry the cost forward — so "every defect is closed" below is true of the flicker and **false of
+the frame budget**. This is the next work. Full mechanism and the fix order → [`state.md`](state.md).
+
+⇒ In one line: `desk_bg_clear_is_full` returns 1 whenever the chrome is on the GPU, which since
+**AE-9 is every iron frame**, so the background clear is **full-screen forever** on the only path that
+matters — handing back AE-0a's 3.83 → 2.46 ms of a 6.40 ms frame. ⛔ **Measure the GPU-path frame cost
+before touching it**; no burn in this arc ever has. The durable fix is **per-buffer damage**, not a
+blunt full clear.
 
 ## Where it stands
 
-**Every defect from iron burns 2–8 is closed and confirmed on iron.** Nine burns in this run.
+**Every flicker defect from iron burns 2–8 is closed and confirmed on iron.** Nine burns in this run.
+⚠ **Closed ≠ free** — see the section above.
 
 | repo | version | what it owns |
 |---|---|---|
@@ -13,9 +27,17 @@
 | rupa 0.1.4 · sadish 0.5.2 · rekha 0.3.5 · kashi 1.0.6 | | tokens · raster · fonts |
 | agnos | **1.56.46 OPEN** | the kernel |
 
-The four consumers declare **cyrius 6.5.28**; the libraries still declare 6.5.27 and the wrapper is
-now **6.5.29**. That drift is known and deferred — a pin sweep is the operator's call, and 6.5.29 was
-measured **byte-identical** for these artifacts.
+The four consumers declare **cyrius 6.5.28**; the libraries still declare 6.5.27.
+⛔ **THE "BYTE-IDENTICAL" CLEARANCE HAS EXPIRED — RE-MEASURED 2026-08-21.** This paragraph used to end
+*"the wrapper is now 6.5.29 … measured byte-identical for these artifacts"*. **The wrapper is 6.5.33
+now, and it is not byte-identical.** The pin does not bind the compiler — `cyrius build` warns about
+the drift and compiles anyway — so the burned `264d1701` (4,112,704 B) rebuilds today as **`b033fdfc`
+(4,116,816 B)** from the same clean tree. ⇒ **The next burn flashes a binary that has never been on
+iron.** Re-pin, or restage and re-measure, before flashing. (Output-path length ruled out: long and
+short paths give a byte-identical result.)
+
+⚠ **kavach carries three numbers** — manifest **3.11.14**, vendored `lib/kavach.cyr` **3.11.15**,
+sibling **3.12.2**. The other eight deps match their siblings.
 
 ## Closed this run, each with the evidence that closed it
 
@@ -52,6 +74,13 @@ SINGLE framebuffer**. `AE-9` then moved the clear onto the GPU behind a **flippi
 premise silently vanished. The number stayed true and the conclusion stopped being. **Re-read what a
 measurement was taken against before trusting it.**
 
+⛔ **AND THE SAME RULE CUTS BACK — THIS SECTION WAS USED TO JUSTIFY DISCARDING AE-0a, WHICH IS WHY THE
+DESKTOP IS NOW SLOW.** "The premise vanished" licenses re-measuring the optimisation; it does not
+license deleting it unmeasured. 0.16.18 traded a **measured** 1.37 ms saving for an **unmeasured**
+full-screen clear, and the only evidence on the other side was one operator glance recorded as *"not
+reported as slow"*. A glance is not a measurement either. ⇒ Retiring an optimisation owes the same
+instrument that earned it.
+
 ## What will bite you
 
 - **`path` beats `tag`.** A vendored copy tracks the local checkout whatever the manifest says. Fired
@@ -81,6 +110,8 @@ Harnesses in `agnos/scripts/harness/`: `ae-wallpaper-load-test.py`, `crab-listin
 
 ## Next — in the order I would take them
 
+0. **THE FRAME BUDGET — the regression above.** Instrument the GPU-path frame cost, then replace the
+   full-screen clear with per-buffer damage. Everything below is slower to notice while this stands.
 1. **Present protocol has no damage tracking.** A maximized 2560x1408 terminal copies **~28.8 MB per
    frame** (client writes the `#86` slot, compositor re-reads it) vs 983 040 B at 80x24. That is the
    "fullscreen keystrokes are slow" report. The client must declare dirty rects — protocol work.
