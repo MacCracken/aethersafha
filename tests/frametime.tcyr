@@ -91,13 +91,48 @@ fn main(): i64 {
     ft_add_frame(0, 1300); ft_add_clear(0, 1);
     assert_eq(ft_win_clear_pct(), 0, "the banded clear is ~0% — the two configurations separate cleanly");
 
+    test_group("frametime — phase breakdown, because 'clear' measured nothing on iron");
+    # ⛔ THE DEFECT THIS PINS: iron 2026-08-22 reported clear = 0 us on EVERY window while the frame
+    # cost 63,787 -> 150,387 us. Since AE-9 the clear only ENQUEUES a `#88` rect, so its cost lands at
+    # submit/flip where `ft_add_clear` cannot see it. A zero there means NOT MEASURED.
+    ft_reset();
+    ft_add_frame(0, 6400);
+    ft_add_render(0, 1200);
+    ft_add_present(0, 5000);
+    assert_eq(ft_mean_render_us(), 1200, "render is measured on its own");
+    assert_eq(ft_mean_present_us(), 5000, "present is measured on its own");
+    assert_eq(ft_mean_other_us(), 200, "other is the residual: 6400 - 1200 - 5000");
+
+    ft_reset();
+    ft_add_frame(0, 6400);
+    assert_eq(ft_mean_other_us(), 0 - 1, "no phase samples -> residual UNKNOWN, not the whole frame");
+    ft_reset();
+    ft_add_frame(0, 1000); ft_add_render(0, 800); ft_add_present(0, 800);
+    assert_eq(ft_mean_other_us(), 0 - 1, "phases exceeding the frame -> -1, never a negative residual");
+    # ⛔ EACH PHASE NEEDS ITS OWN GUARD, TESTED ALONE. A first cut asserted the residual only when BOTH
+    # phases were unknown, so the present-guard masked the render-guard and a mutation removing the
+    # render check PASSED. One unknown at a time is the only way either guard is actually exercised.
+    ft_reset();
+    ft_add_frame(0, 6400); ft_add_present(0, 5000);
+    assert_eq(ft_mean_other_us(), 0 - 1, "render unknown ALONE -> -1 (not 6400 + 1 - 5000)");
+    ft_reset();
+    ft_add_frame(0, 6400); ft_add_render(0, 1200);
+    assert_eq(ft_mean_other_us(), 0 - 1, "present unknown ALONE -> -1");
+
+    test_group("frametime — bad phase samples are dropped, not folded in");
+    ft_reset();
+    ft_add_render(0, 900);
+    ft_add_render(0 - 1, 900);
+    assert_eq(ft_mean_render_us(), 900, "the unusable render sample does not move the mean");
+    assert_eq(ft_dropped, 1, "and it is counted");
+
     test_group("frametime — the report cadence is bounded and testable");
-    assert_eq(ft_should_report(240, 240, 0, 12), 1, "first report lands on the 240th frame");
-    assert_eq(ft_should_report(241, 240, 1, 12), 0, "not on the 241st");
-    assert_eq(ft_should_report(480, 240, 1, 12), 1, "and again on the 480th");
-    assert_eq(ft_should_report(240, 240, 12, 12), 0, "the cap stops it — a burn log cannot be flooded");
-    assert_eq(ft_should_report(0, 240, 0, 12), 0, "frame 0 is not a report point");
-    assert_eq(ft_should_report(240, 0, 0, 12), 0, "a zero interval must not modulo-by-zero");
+    assert_eq(ft_should_report(120, 120, 0, 12), 1, "first report lands on the 120th frame");
+    assert_eq(ft_should_report(121, 120, 1, 12), 0, "not on the 121st");
+    assert_eq(ft_should_report(240, 120, 1, 12), 1, "and again on the 240th");
+    assert_eq(ft_should_report(120, 120, 12, 12), 0, "the cap stops it — a burn log cannot be flooded");
+    assert_eq(ft_should_report(0, 120, 0, 12), 0, "frame 0 is not a report point");
+    assert_eq(ft_should_report(120, 0, 0, 12), 0, "a zero interval must not modulo-by-zero");
 
     return assert_summary();
 }

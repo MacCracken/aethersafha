@@ -1284,8 +1284,10 @@ fn main(): i64 {
             # application, undiagnosed, with all twelve demote sites silent.
             ae_gpu_path_note(ae_gpu_frame_ok);
             rend_band_note();
+            var t_rend0 = ae_now_us();
             render_desktop(desk, fb);
             render_desktop_foreign(desk, fb);
+            ft_add_render(t_rend0, ae_now_us());
             # setu: accept + composite client presents (over the desktop) — BOTH
             # targets now (setu 0.3.0 TCP transport runs on Linux AND agnos).
             # ⛔ "runs on Linux AND agnos" is a statement about the CURRENT code, not a design
@@ -1437,6 +1439,7 @@ fn main(): i64 {
             # client surface with gpu_blit_shm #87 straight out of its GPU-visible shm slot, and flips
             # once with #84. Returns 0 on any refusal (no GPU, an off-screen window, a failed blit) and
             # we fall through to the untouched CPU present — so QEMU and every non-AMD box are unaffected.
+            var t_pres0 = ae_now_us();
             if (ae_gpu_present_frame(comp, fb) == 0) {
                 # ⛔⛔ THIS RETURN CODE USED TO BE DISCARDED, AND THAT STOPPED BEING FREE AT bhumi 1.2.0.
                 # It was defensible while the host arm was a compile-time -1: every host run "failed" to
@@ -1499,6 +1502,7 @@ fn main(): i64 {
             }
             # ⭐ CLOSE THE FRAME SAMPLE, then report on a bounded cadence. One line per 240 frames:
             # a healthy 30 s burn prints a handful, and the cap means a wedged one cannot bury them.
+            ft_add_present(t_pres0, ae_now_us());
             ft_add_frame(t_frame0, ae_now_us());
             if (ft_should_report(ft_frames, FT_REPORT_EVERY, ft_reported, FT_REPORT_MAX) == 1) {
                 ft_reported = ft_reported + 1;
@@ -1510,6 +1514,13 @@ fn main(): i64 {
                 println_int(ft_win_clear_us());
                 println_int(ft_win_clear_pct());
                 println_int(ft_dropped);
+                # ⭐ WHERE THE FRAME ACTUALLY GOES. Iron 2026-08-22 reported clear = 0 while the frame
+                # cost 63.8 -> 150.4 ms, so the clear was never the cost and the old instrument could
+                # not say what was. Cumulative means.
+                println("aethersafha: cumulative us (render, present, other):");
+                println_int(ft_mean_render_us());
+                println_int(ft_mean_present_us());
+                println_int(ft_mean_other_us());
                 ft_window_close();
             }
             frame = frame + 1;
@@ -1546,6 +1557,16 @@ fn main(): i64 {
         # clients printed "launched" and then nothing ever said whether either arrived. Reporting the
         # accepted count against the frame count separates "the clients died" from "you quit before
         # they connected" without another boot.
+        # ⛔ A SHORT RUN MUST STILL TESTIFY. Iron 2026-08-22: the no-flag CONTROL was quit at 198
+        # frames, never reached the 240-frame cadence, and produced no timing at all — the one
+        # measurement that burn existed to take. This prints whatever accumulated, always.
+        println("aethersafha: frame cost us AT EXIT (frames, frame, render, present, other, dropped):");
+        println_int(ft_frames);
+        println_int(ft_mean_frame_us());
+        println_int(ft_mean_render_us());
+        println_int(ft_mean_present_us());
+        println_int(ft_mean_other_us());
+        println_int(ft_dropped);
         println("aethersafha: at exit — frames, then apps that connected:");
         println_int(frame);
         println_int(accepted);

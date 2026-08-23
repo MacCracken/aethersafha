@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [Unreleased] — phase timing, because iron said the clear was never the cost
+
+### Added — `frametime` times RENDER / PRESENT / OTHER, and reports AT EXIT
+
+⛔⛔ **THE 2026-08-22 BURN FALSIFIED THE PREMISE 0.16.15-0.16.18 WERE BUILT ON.** Measured on iron:
+`clear` **0 µs in every window** while the frame cost **63,787 µs, then 150,387 µs while typing**; a
+second `--bandbg` run measured 67,466 µs. Operator: *"bandbg returns the flicker … no apparent speed
+improvements."* ⇒ **AE-0a's banded clear buys nothing on the GPU path and 0.16.18's full clear cost
+nothing.** The flicker fix is exonerated. The real figure — **7-15 fps, doubling under keystrokes** —
+is the first frame-cost number this arc has ever had.
+
+⚠ **A ZERO THERE MEANT NOT MEASURED, NOT FREE.** Since AE-9 the clear only ENQUEUES a `#88` rect, so
+its cost lands at submit/flip where `ft_add_clear` cannot see it — blind by construction on the only
+path that matters.
+
+- `ft_add_render` / `ft_add_present` and `ft_mean_other_us()` (the residual, **-1** when either phase
+  is unknown — never a negative passed off as a measurement).
+- Host, 100 frames: frame 1805 µs = render 489 + **present 1301** + other 15 — **present is 72%**.
+- **Report cadence 240 -> 120, plus an unconditional summary AT EXIT.** The burn's no-flag CONTROL was
+  quit at **198 frames**, never reached the cadence, and produced no timing at all — the one
+  measurement it existed to take.
+
+**57 assertions in `tests/frametime.tcyr`; the phase rules mutation-proven.** ⚠ One mutation initially
+SURVIVED: the residual's `render < 0` guard was masked by its `present < 0` guard because the test had
+both unknown at once. Each phase is now asserted unknown ALONE, and both guards bite.
+
+### Notes — observed on iron, not yet fixed
+
+- **`ls` renders wrong in COLUMNS in puka; `ls -l` is fine.** kriya's `_ls_term_width` asks agnos
+  `#60 winsize`, which returns the CONSOLE grid derived from the framebuffer (~320 cols at 2560), not
+  puka's window. Needs a per-PTY window size — the same gap as the missing TIOCSWINSZ.
+- **"Which folder" is `/`** — agnos has no cwd and no `chdir`; kriya's `k_getcwd` returns `/`.
+- ✅ **`#86` slot ceiling re-measured: 16 on all three compositor runs in one boot** (it used to fall
+  16 -> 15 -> 14 -> 13). That open item is closed.
+
+
 ## [0.16.20] - 2026-08-22 — the panel gets producers, and an unknown gauge stops claiming zero
 
 ### Added — the shell panel has PRODUCERS for the first time (`src/sysprobe.cyr`)

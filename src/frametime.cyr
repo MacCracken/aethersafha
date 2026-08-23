@@ -75,14 +75,23 @@ var ft_frames    = 0;   # frames with a usable TOTAL sample
 var ft_total_us  = 0;   # summed frame duration
 var ft_clear_n   = 0;   # frames with a usable CLEAR sample (may differ: the clear is conditional)
 var ft_clear_us  = 0;   # summed clear duration
+var ft_render_n  = 0;   # frames with a usable RENDER sample
+var ft_render_us = 0;   # summed render duration (desktop + chrome + glyph queueing)
+var ft_pres_n    = 0;   # frames with a usable PRESENT sample
+var ft_pres_us   = 0;   # summed present duration (GPU submit + `#84` flip, or the CPU blit)
 var ft_dropped   = 0;   # samples discarded as unusable — reported, never silently absorbed
 var ft_reported  = 0;   # report lines emitted (bounded)
 
-var FT_REPORT_EVERY = 240;   # frames per report line
+# ⛔ 240 WAS TOO COARSE AND IT COST THE CONTROL RUN. Iron 2026-08-22: a hand-driven session was quit
+# at **198 frames**, so it never reached a report and produced NO data at all — the one run that was
+# supposed to be the no-flag control. A session ends when a person quits it, not on a round number.
+# ⇒ 120, AND an unconditional summary at exit (see `ft_report_final`), so a short run still testifies.
+var FT_REPORT_EVERY = 120;   # frames per report line
 var FT_REPORT_MAX   = 12;    # ⛔ bounded, like every other diagnostic here
 
 fn ft_reset(): i64 {
     ft_frames = 0; ft_total_us = 0; ft_clear_n = 0; ft_clear_us = 0; ft_dropped = 0;
+    ft_render_n = 0; ft_render_us = 0; ft_pres_n = 0; ft_pres_us = 0;
     ft_w_frames = 0; ft_w_total = 0; ft_w_clear_n = 0; ft_w_clear = 0;
     return 0;
 }
@@ -135,6 +144,43 @@ fn ft_window_close(): i64 {
     ft_w_frames = ft_frames; ft_w_total = ft_total_us;
     ft_w_clear_n = ft_clear_n; ft_w_clear = ft_clear_us;
     return 0;
+}
+
+# ⛔⛔ THE CLEAR TIMER IS STRUCTURALLY BLIND ON THE GPU PATH, AND IRON PROVED IT. On 2026-08-22 every
+# window reported clear = **0 us** while the frame cost 63,787 -> 150,387 us. That is not "the clear
+# is free": since AE-9 the clear only ENQUEUES a `#88` rect, so its real cost lands later, at submit
+# and flip, where `ft_add_clear` cannot see it. ⇒ A zero here means NOT MEASURED, and the phases below
+# exist because the frame's 64-150 ms had to be somewhere the old instrument never looked.
+fn ft_add_render(t0, t1): i64 {
+    var d = ft_elapsed(t0, t1);
+    if (d < 0) { ft_dropped = ft_dropped + 1; return 0 - 1; }
+    ft_render_n = ft_render_n + 1;
+    ft_render_us = ft_render_us + d;
+    return d;
+}
+
+fn ft_add_present(t0, t1): i64 {
+    var d = ft_elapsed(t0, t1);
+    if (d < 0) { ft_dropped = ft_dropped + 1; return 0 - 1; }
+    ft_pres_n = ft_pres_n + 1;
+    ft_pres_us = ft_pres_us + d;
+    return d;
+}
+
+fn ft_mean_render_us(): i64 { return ft_mean(ft_render_us, ft_render_n); }
+fn ft_mean_present_us(): i64 { return ft_mean(ft_pres_us, ft_pres_n); }
+
+# What the frame spends OUTSIDE render and present — client polling, setu dispatch, input.
+# -1 when either part is unknown; never a negative "residual" passed off as a measurement.
+fn ft_mean_other_us(): i64 {
+    var f = ft_mean_frame_us();
+    var r = ft_mean_render_us();
+    var q = ft_mean_present_us();
+    if (f < 0) { return 0 - 1; }
+    if (r < 0) { return 0 - 1; }
+    if (q < 0) { return 0 - 1; }
+    if (f < r + q) { return 0 - 1; }
+    return f - r - q;
 }
 
 fn ft_mean_frame_us(): i64 { return ft_mean(ft_total_us, ft_frames); }
