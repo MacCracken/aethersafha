@@ -365,10 +365,24 @@ var ae_ptr_grip = 0;
 var ae_resize_started = 0;   # first-occurrence latch, same shape as ae_drag_started
 var ae_ptr_first = 0;      # one-shot marker latch
 var ae_ptr_click = 0;      # one-shot marker latch
+# ⚠ ONE-SHOT, and it earns its line: without it "scrolling does nothing" cannot distinguish a
+# compositor that never received a wheel event from one that received and dropped it — two bugs in
+# two different repos, five layers apart.
+var ae_scroll_first = 0;
+# ⚠ The other half of the pair — see the ⛔ at the call site. Without it, a scroll that landed on
+# empty desktop is indistinguishable from a client that ignored one.
+var ae_scroll_nowin = 0;
 
 # Forward a pointer event to the window under the cursor, using the setu messages that already exist.
 # ⚠ Coordinates are sent SURFACE-RELATIVE: a client knows nothing about where the compositor placed it,
 # so screen coordinates would make every client's hit-testing wrong by its own window origin.
+# ⭐ 0.16.21 — `kind_is_btn` became a THREE-VALUE kind rather than a boolean, so the wheel reuses the
+# window lookup and the content-rect guard below instead of copying them. That guard is where the
+# titlebar bug lived (`ry` in [-30,-1] sent to a client that indexes rows by it), and a second copy of
+# it is a second place for that to come back.
+#   0 = MOVE   (a, b unused — position comes from `input_ptr_*`)
+#   1 = BUTTON (a = button, b = pressed)
+#   2 = SCROLL (a = signed delta, + = up/away; b unused)
 fn ae_ptr_forward(comp, kind_is_btn, btn, pressed): i64 {
     var win = comp_window_at(comp, input_ptr_x(), input_ptr_y());
     if (win == 0) { return 0; }
@@ -400,6 +414,15 @@ fn ae_ptr_forward(comp, kind_is_btn, btn, pressed): i64 {
         setu_send(cfd, setu_input_ptr_move(win_id(win), rx, ry));
     }
     if (kind_is_btn == 1) { setu_send(cfd, setu_input_ptr_btn(win_id(win), btn, pressed)); }
+    # ⭐⭐ THE WHEEL (0.16.21). `btn` carries the signed delta here.
+    # ⚠ NOT DEDUPED like motion, and not coalesced. A scroll is a discrete quantity the user asked
+    # for — dropping a repeat because it equals the last one would swallow the second notch of every
+    # steady scroll, which is the opposite of motion's problem.
+    # ⛔ THE CHAIN BELOW THIS LINE IS FIVE REPOS DEEP AND WAS BROKEN AT THE BOTTOM UNTIL TODAY: agnos
+    # 1.56.49 reads HID report byte [3] (it was documented and never read), bhumi 1.4.3 carries it as
+    # `BHUMI_EV_SCROLL`, setu 0.8.8 defines `SETU_INPUT_PTR_SCROLL`. Sending this against an older
+    # stack is inert, not wrong.
+    if (kind_is_btn == 2) { setu_send(cfd, setu_input_ptr_scroll(win_id(win), btn)); }
     return 1;
 }
 
@@ -463,6 +486,36 @@ fn ae_pointer_event(comp, ev, frame): i64 {
         }
         ae_ptr_forward(comp, 0, 0, 0);
         return 0;
+    }
+
+    # ⭐ THE WHEEL ARM. The compositor itself does nothing with a scroll — it has no scrollable chrome
+    # — so this is a pure forward to whichever client is under the cursor.
+    # ⚠ ZERO IS NOT AN EVENT. bhumi already zero-suppresses, but a delta that reached here as 0 would
+    # cost a client a wakeup and a repaint for no change.
+    if (k == BhumiEvKind.BHUMI_EV_SCROLL) {
+        var sd = bhumi_scroll_delta(ev);
+        if (sd != 0) {
+            # ⛔⛔ LOG THE OUTCOME, NOT THE INTENT — AND THE FIRST CUT OF THIS LIED. The one-shot sat
+            # BEFORE the forward and said "forwarded a scroll to the client under the cursor", so it
+            # fired whenever a wheel event REACHED the compositor, whether or not any window was under
+            # the cursor to receive it. A QEMU run then reported the compositor forwarding while the
+            # client logged nothing, and the log gave no way to tell "crab dropped it" from "there was
+            # no window there" — two bugs in two repos, which is exactly what a one-shot exists to
+            # separate. `ae_ptr_forward` returns 1 only when it actually sent.
+            var fwd = ae_ptr_forward(comp, 2, sd, 0);
+            if (fwd == 1) {
+                if (ae_scroll_first == 0) {
+                    ae_scroll_first = 1;
+                    println("aethersafha: forwarded a scroll to the client under the cursor");
+                }
+            }
+            else {
+                if (ae_scroll_nowin == 0) {
+                    ae_scroll_nowin = 1;
+                    println("aethersafha: got a scroll with NO client window under the cursor");
+                }
+            }
+        }
     }
 
     if (k == BhumiEvKind.BHUMI_EV_BUTTON) {

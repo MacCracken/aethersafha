@@ -41,6 +41,81 @@ both unknown at once. Each phase is now asserted unknown ALONE, and both guards 
   16 -> 15 -> 14 -> 13). That open item is closed.
 
 
+## [0.16.21] - 2026-08-27 — the mouse wheel is forwarded to clients
+
+### Added
+
+- **`BHUMI_EV_SCROLL` is forwarded as `SETU_INPUT_PTR_SCROLL`** to the client under the cursor,
+  through the same window lookup and content-rect guard button and motion already use.
+- `ae_ptr_forward`'s second argument became a three-value kind (0 = move, 1 = button, **2 = scroll**)
+  rather than a boolean, so the wheel reuses that guard instead of copying it. That guard is where the
+  titlebar bug lived — `ry` in [-30,-1] handed to a client that indexes rows by it — and a second copy
+  is a second place for it to return.
+- **`aethersafha: forwarded a scroll to the client under the cursor`** — one-shot. Without it
+  "scrolling does nothing" cannot separate a compositor that never received a wheel event from one
+  that received and dropped it: two bugs, two repos, five layers apart.
+
+⚠ **Not deduped and not coalesced, unlike motion.** A scroll is a discrete quantity the user asked
+for; dropping a repeat because it equals the last one would swallow the second notch of every steady
+scroll.
+
+⚠ **Requires the whole chain**: agnos >= 1.56.49 (reads HID report byte [3]), bhumi >= 1.4.3
+(`BHUMI_EV_SCROLL`), setu >= 0.8.8 (`SETU_INPUT_PTR_SCROLL`). Against an older stack it is inert.
+
+### Fixed — the scroll one-shot logged intent rather than outcome
+
+The first cut placed it **before** `ae_ptr_forward`, so it announced *"forwarded a scroll to the
+client under the cursor"* whenever a wheel event merely **reached** the compositor — whether or not
+any window was there to receive it. A QEMU run then showed the compositor "forwarding" while the
+client logged nothing, and the log could not separate *"crab dropped it"* from *"there was no window
+there"* — two bugs in two repos, which is the one thing a one-shot exists to distinguish.
+⇒ It now keys off `ae_ptr_forward`'s return, with `aethersafha: got a scroll with NO client window
+under the cursor` as the other half of the pair. **That correction immediately changed the answer**
+from a false positive to the true one.
+
+### Known
+
+⛔ **UNBLOCKED as of sigil 3.12.12** — `cyrius build --agnos` succeeds again (3,834,136 bytes). What
+follows is the diagnosis, kept because the failure presented four repos from its cause.
+
+**The break was a DEPENDENCY, not this repo's source.**
+
+`cyrius deps` replaces `lib/sigil.cyr` with **`../sigil/dist/sigil.cyr` byte-for-byte** (sigil 3.12.1),
+in preference to the toolchain snapshot. That copy is **not agnos-clean**: `sigil/src/sys_util.cyr`
+uses `SYS_FCNTL`, `WNOHANG` and a three-argument `sys_waitpid` with no target guard. Its own comment
+calls `SYS_FCNTL` "an arch-dispatched stdlib enum (x86_64 72, aarch64 25)" — arch-dispatched is not
+**target**-dispatched, and agnos has none of the three. Result:
+
+    error: lib/sigil.cyr:447: undefined variable 'SYS_FCNTL'
+    error: lib/sigil.cyr:470: 'sys_waitpid' expects 1 argument, got 3
+    error: lib/sigil.cyr:479: undefined variable 'WNOHANG'
+
+**Measured**: the *committed* `lib/sigil.cyr` (27,671 lines, zero `SYS_FCNTL`, matching the 6.5.33 and
+6.5.35 toolchain snapshots) builds clean; `cyrius deps` then rewrites it to 27,907 lines with three,
+and the build fails. A detached worktree at this same commit — where `../sigil` does not exist, so the
+toolchain copy is used — builds `--agnos` **successfully**.
+
+⇒ The desktop is **not broken at HEAD**. It is broken by resolving a sibling checkout that has moved
+ahead of the toolchain. `../sakshi` is resolved the same way and is the next candidate if sigil is
+fixed. The fix belongs in sigil (guard the subprocess helpers behind
+`#ifndef CYRIUS_TARGET_AGNOS` — agnos has no fork/waitpid anyway) or in how this dep is pinned.
+
+⚠ **An earlier draft of this entry blamed `undefined function 'sys_execve'` and called it
+pre-existing. That was WRONG on both counts** and is corrected here. `sys_execve` was a symptom of a
+half-resolved `lib/` produced by repeated `cyrius deps` runs against mutated manifests during
+investigation — not the defect. The "clean tree" test that produced it was not clean: `cyrius build`
+re-resolves dependencies itself, so restoring files and rebuilding silently re-broke them, and
+`git stash` does not isolate a tree whose `lib/` the build regenerates.
+
+✅ **Resolved in sigil 3.12.12**, which guards the helper behind `#ifndef CYRIUS_TARGET_AGNOS`.
+
+⚠ **What the wheel is now proven to do, and what it is not.** QEMU, 2026-08-27: a QMP-injected wheel
+reaches the compositor — agnos 1.56.49 -> bhumi 1.4.3 -> aethersafha is **proven end to end**. The
+last hop is **not**: the compositor forwards to the window under the cursor, and QEMU's `usb-mouse`
+is RELATIVE, so a harness cannot place the cursor on crab's window. The log says exactly that —
+`got a scroll with NO client window under the cursor` — so crab's silence is correct behaviour, not a
+defect. Closing that gap needs absolute pointing or reading the window placement.
+
 ## [0.16.20] - 2026-08-22 — the panel gets producers, and an unknown gauge stops claiming zero
 
 ### Added — the shell panel has PRODUCERS for the first time (`src/sysprobe.cyr`)
