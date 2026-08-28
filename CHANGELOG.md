@@ -41,6 +41,41 @@ both unknown at once. Each phase is now asserted unknown ALONE, and both guards 
   16 -> 15 -> 14 -> 13). That open item is closed.
 
 
+## [0.16.22] - 2026-08-27 — every dependency tag matches its sibling again
+
+### Changed — the four remaining stale tags
+
+| dep | was | now |
+|---|---|---|
+| agnostik | 1.3.5 | **1.5.1** |
+| agnodrm | 1.5.1 | **1.5.3** |
+| kavach | 3.12.2 | **3.12.3** |
+| chitra | 0.3.1 | **1.0.0** |
+
+All nine `[deps.*]` tags now equal their sibling's `VERSION`. Each target tag was verified published
+before the bump — `git ls-remote` against the repo, matching the local object — rather than assumed
+from the sibling's working tree.
+
+⛔ **`path` IS WHY THESE DRIFTED UNSEEN.** Nine deps carry `path = "../<name>"`, which wins over
+`tag`, so local builds resolved the sibling checkouts and were green for however long the declared
+graph had been wrong. 0.16.21's CI failure was the first thing to notice — and it only surfaced the
+two tags *that release* happened to need. The other four were found by auditing every tag against its
+sibling rather than fixing the two that failed.
+
+⚠ **chitra crossed a MAJOR version (0.3.1 → 1.0.0) and that was checked, not waved through.**
+aethersafha calls exactly five chitra names — `chitra_image_decode`, `_free`, `_height`, `_pixels`,
+`_width` — and all five are inside the API surface 1.0.0 froze. 1.0.0 itself changed no code beyond
+the version literal; the risk lived in 0.7.x–0.9.0, and none of it touches those five.
+
+### Verified
+
+Built against the **pure declared graph**: all nine `path` overrides disabled and the lockfile
+deleted, so every dep resolved from its published tag. **host OK · `--agnos` OK.** Locally: host
+3,906,024 B, agnos 3,834,136 B, 133 + 27 assertions green.
+
+⚠ That simulation is the only check that means anything here. A green local build proves the sibling
+checkouts work, which is precisely what was true while four tags were stale.
+
 ## [0.16.21] - 2026-08-27 — the mouse wheel is forwarded to clients
 
 ### Added
@@ -84,18 +119,7 @@ old tags. CI has no siblings, resolved the tags, and failed with
 `undefined variable 'BhumiEvKind'` plus two reachable undefined functions. A green local build is not
 evidence the declared graph resolves.
 
-⚠ **FOUR MORE TAGS ARE STALE AND ARE **NOT** TOUCHED HERE**, because none is needed for this change
-and bumping them is a separate decision with its own risk:
-
-| dep | declared | sibling |
-|---|---|---|
-| agnostik | 1.3.5 | 1.5.1 |
-| agnodrm | 1.5.1 | 1.5.3 |
-| kavach | 3.12.2 | 3.12.3 |
-| chitra | 0.3.1 | **1.0.0** |
-
-chitra in particular is a **major** version apart. `path` is currently the only reason those four
-resolve to anything current, which means the same class of CI failure is queued behind them.
+⚠ Four further tags were stale and were left for **0.16.22**, since none was needed here.
 
 ### Known
 
