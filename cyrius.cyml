@@ -43,7 +43,7 @@ stdlib = [
 [deps.bhumi]
 git = "https://github.com/MacCracken/bhumi.git"
 path = "../bhumi"
-tag = "1.4.2"
+tag = "1.4.3"
 modules = ["dist/bhumi.cyr"]
 
 # --- Desktop theme-token core: rupa (रूप — form / appearance). The ONE source of
@@ -175,5 +175,5 @@ git = "https://github.com/MacCracken/setu.git"
 # a local setu change could not be built against at all. Every sibling dep here carries both. The
 # path-wins hazard applies as it does to the rest: re-verify tag vs sibling VERSION at each cut.
 path = "../setu"
-tag = "0.8.7"
+tag = "0.8.8"
 modules = ["dist/setu.cyr"]

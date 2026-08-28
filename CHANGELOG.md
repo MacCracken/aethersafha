@@ -73,6 +73,30 @@ there"* — two bugs in two repos, which is the one thing a one-shot exists to d
 under the cursor` as the other half of the pair. **That correction immediately changed the answer**
 from a false positive to the true one.
 
+### Changed — dependency tags
+
+- **`[deps.bhumi]` 1.4.2 → 1.4.3** and **`[deps.setu]` 0.8.7 → 0.8.8**, which this release requires:
+  `BHUMI_EV_SCROLL` and `SETU_INPUT_PTR_SCROLL` do not exist in the older tags.
+
+⛔ **`path` MASKED THIS UNTIL CI RAN.** Nine deps carry `path = "../<name>"`, so every local build and
+every local test resolved the sibling checkouts and was green, while the declared graph still named the
+old tags. CI has no siblings, resolved the tags, and failed with
+`undefined variable 'BhumiEvKind'` plus two reachable undefined functions. A green local build is not
+evidence the declared graph resolves.
+
+⚠ **FOUR MORE TAGS ARE STALE AND ARE **NOT** TOUCHED HERE**, because none is needed for this change
+and bumping them is a separate decision with its own risk:
+
+| dep | declared | sibling |
+|---|---|---|
+| agnostik | 1.3.5 | 1.5.1 |
+| agnodrm | 1.5.1 | 1.5.3 |
+| kavach | 3.12.2 | 3.12.3 |
+| chitra | 0.3.1 | **1.0.0** |
+
+chitra in particular is a **major** version apart. `path` is currently the only reason those four
+resolve to anything current, which means the same class of CI failure is queued behind them.
+
 ### Known
 
 ⛔ **UNBLOCKED as of sigil 3.12.12** — `cyrius build --agnos` succeeds again (3,834,136 bytes). What
