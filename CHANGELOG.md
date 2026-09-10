@@ -41,6 +41,40 @@ both unknown at once. Each phase is now asserted unknown ALONE, and both guards 
   16 -> 15 -> 14 -> 13). That open item is closed.
 
 
+## [0.16.23] — 2026-09-10
+
+**Migrated to the cyrius 6.6.x value form.**
+
+### Changed — cyrius pin 6.5.33 → **6.6.2**
+
+cyrius 6.6.0 flipped `Result` / `Option` / `Either` declared `: stack` to a value form — a payload
+variant returns a `(tag, payload)` register pair and allocates nothing; `payload()` is gone. 6.6.2
+is the repair release.
+
+aethersafha's `src/` needed **no** migration edits — zero calls to the retired accessors. The only
+first-party change is `tests/theme_bridge.tcyr` (7 declarations), where `theme_color_hex_to_u32`
+results are now bound as pairs.
+
+### Changed — dependency pins
+
+| dep | from | to |
+|---|---|---|
+| `rupa` | 0.1.4 | **0.1.6** |
+| `agnostik` | 1.5.1 | **1.6.1** |
+| `agnodrm` | 1.5.3 | **1.6.0** |
+| `kavach` | 3.12.3 | **3.12.5** |
+| `chitra` | 1.0.0 | **1.0.3** |
+
+`bhumi` 1.4.3, `kashi` 1.0.6, `mehman` 1.0.2 and `setu` 0.8.8 were already current. Every tag
+verified present on its remote and on a clean sibling tree before pinning.
+
+⚠ The `kavach` bump was **required, not hygiene**. kavach and agnostik both exported
+`audit_entry_new` at different arities for different types (kavach's zero-arg 48-byte entry;
+agnostik's `audit_entry_new(id, agent_id, action, severity)` over a 112-byte record). aethersafha
+is the consumer that vendors both, so "last definition wins" made every call to the loser read
+garbage — silent until cyrius 6.6.2 turned a same-name different-arity duplicate into a hard error.
+Fixed upstream in kavach 3.12.5, which renamed its side to `kavach_audit_entry_new`.
+
 ## [0.16.22] - 2026-08-27 — every dependency tag matches its sibling again
 
 ### Changed — the four remaining stale tags
