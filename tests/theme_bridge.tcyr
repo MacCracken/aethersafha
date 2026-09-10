@@ -57,33 +57,33 @@ fn main() {
 
     # -- color_hex_to_u32 (Ok cases) ---------------------------------------
     test_group("theme_bridge — color_hex_to_u32 Ok (parity)");
-    var r_white = theme_color_hex_to_u32(str_from("#FFFFFF"));
-    assert(t_ok(is_ok(r_white)), "hex->u32 white is Ok");
-    assert_eq(result_unwrap(r_white), 0xFFFFFFFF, "hex->u32 white value");
-    var r_black = theme_color_hex_to_u32(str_from("#000000"));
-    assert(t_ok(is_ok(r_black)), "hex->u32 black is Ok");
-    assert_eq(result_unwrap(r_black), 0xFF000000, "hex->u32 black value");
-    var r_blue = theme_color_hex_to_u32(str_from("#0000FF"));
-    assert(t_ok(is_ok(r_blue)), "hex->u32 blue is Ok");
-    assert_eq(result_unwrap(r_blue), 0xFF0000FF, "hex->u32 blue value");
+    var r_white_t, r_white_v = theme_color_hex_to_u32(str_from("#FFFFFF"));
+    assert(t_ok(is_ok(r_white_t)), "hex->u32 white is Ok");
+    assert_eq(result_unwrap(r_white_t, r_white_v), 0xFFFFFFFF, "hex->u32 white value");
+    var r_black_t, r_black_v = theme_color_hex_to_u32(str_from("#000000"));
+    assert(t_ok(is_ok(r_black_t)), "hex->u32 black is Ok");
+    assert_eq(result_unwrap(r_black_t, r_black_v), 0xFF000000, "hex->u32 black value");
+    var r_blue_t, r_blue_v = theme_color_hex_to_u32(str_from("#0000FF"));
+    assert(t_ok(is_ok(r_blue_t)), "hex->u32 blue is Ok");
+    assert_eq(result_unwrap(r_blue_t, r_blue_v), 0xFF0000FF, "hex->u32 blue value");
 
     # -- color_hex_to_u32 (Err cases) --------------------------------------
     test_group("theme_bridge — color_hex_to_u32 Err (parity)");
-    var r_nohash = theme_color_hex_to_u32(str_from("FFFFFF"));
-    assert(t_ok(is_err_result(r_nohash)), "hex->u32 missing '#' is Err");
-    var r_short = theme_color_hex_to_u32(str_from("#FFF"));
-    assert(t_ok(is_err_result(r_short)), "hex->u32 too short is Err");
-    var r_bad = theme_color_hex_to_u32(str_from("#GGGGGG"));
-    assert(t_ok(is_err_result(r_bad)), "hex->u32 invalid chars is Err");
+    var r_nohash_t, r_nohash_v = theme_color_hex_to_u32(str_from("FFFFFF"));
+    assert(t_ok(is_err_result(r_nohash_t)), "hex->u32 missing '#' is Err");
+    var r_short_t, r_short_v = theme_color_hex_to_u32(str_from("#FFF"));
+    assert(t_ok(is_err_result(r_short_t)), "hex->u32 too short is Err");
+    var r_bad_t, r_bad_v = theme_color_hex_to_u32(str_from("#GGGGGG"));
+    assert(t_ok(is_err_result(r_bad_t)), "hex->u32 invalid chars is Err");
 
     # -- roundtrip ---------------------------------------------------------
     test_group("theme_bridge — color roundtrip (parity)");
     var orig = 0xFF12AB34;
     var rt_hex = theme_color_u32_to_hex(orig);
     assert(t_hexeq(rt_hex, "#12AB34"), "roundtrip hex form");
-    var rt_back = theme_color_hex_to_u32(rt_hex);
-    assert(t_ok(is_ok(rt_back)), "roundtrip parses back Ok");
-    assert_eq(result_unwrap(rt_back), orig, "roundtrip u32 preserved");
+    var rt_back_t, rt_back_v = theme_color_hex_to_u32(rt_hex);
+    assert(t_ok(is_ok(rt_back_t)), "roundtrip parses back Ok");
+    assert_eq(result_unwrap(rt_back_t, rt_back_v), orig, "roundtrip u32 preserved");
 
     # -- convert_to_flutter: light high-contrast ---------------------------
     test_group("theme_bridge — convert light high-contrast (parity)");
