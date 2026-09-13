@@ -49,6 +49,14 @@ enum HidUsage {
     HID_ENTER = 0x28; # launch the highlighted entry
     HID_DOWN  = 0x51; # next entry
     HID_UP    = 0x52; # previous entry
+    # ⭐⭐ THE CHROME MODIFIER (0.16.25). Every window-management key above is claimed ONLY while Ctrl
+    # is held; bare, they belong to the focused client. Ctrl reaches this compositor as its own
+    # press/release events — the kernel diffs the boot report's modifier byte into Set-1 make/break
+    # and bhumi maps them to usages 0xE0 (LCtrl) and 0xE4 (RCtrl); on agnos RCtrl is emitted as 0x1D
+    # like LCtrl, so it arrives as 0xE0 too. `input_mod_track` folds them into a held bitmap.
+    HID_Q     = 0x14; # Ctrl+Q quits the desktop — the bare Esc that used to is the client's now
+    HID_LCTRL = 0xE0; # modifier usages are 0xE0 + bit: LCtrl LShift LAlt LGui RCtrl RShift RAlt RGui
+    HID_RCTRL = 0xE4;
 }
 
 # How far one move keystroke slides a window, in pixels.
@@ -92,8 +100,56 @@ fn ae_usage_first_sight(u): i64 {
     return 1;
 }
 
-# input_map(ev): pure key→action mapping for a pressed key (IA_NONE otherwise).
-fn input_map(ev): i64 {
+# @public — the held-modifier bitmap after `ev`: bit i is modifier usage 0xE0 + i, set on its press,
+# cleared on its release; any other event leaves it. Pure, so the suite can drive a sequence.
+# ⚠ A LATCH, NOT A FIELD. The wire carries no modifier state (bhumi's event is press + usage; setu's
+# `mods` is the press/release edge), so the compositor remembers what it has seen. A modifier release
+# lost to the kernel's 256-byte scancode ring would leave Ctrl believed-held until its next edge —
+# the ring diffs the report's LEVEL, so a level change always produces exactly one edge, and only an
+# overflow can drop it. Accepted and named; a stuck chord is one Ctrl tap to clear.
+fn input_mod_track(mods, ev): i64 {
+    if (bhumi_ev_is_key(ev) == 0) { return mods; }
+    var u = bhumi_key_usage(ev);
+    if (u < 0xE0) { return mods; }
+    if (u > 0xE7) { return mods; }
+    var bit = 1 << (u - 0xE0);
+    if (bhumi_key_pressed(ev) == 1) { return mods | bit; }
+    return mods & (0xFF ^ bit);
+}
+
+# @public — is either Ctrl held, per the bitmap? 1 = yes.
+fn input_mod_ctrl(mods): i64 {
+    if ((mods & 0x11) != 0) { return 1; }
+    return 0;
+}
+
+# @public — is `ev` a modifier key's own press/release (usage 0xE0..0xE7)? 1 = yes.
+# ⚠ These are FORWARDED to the client even while a chord is being swallowed: a client that wants Shift
+# state has no other way to learn it, and a stray modifier edge is a no-op to every client shipped.
+fn input_is_modifier(ev): i64 {
+    if (bhumi_ev_is_key(ev) == 0) { return 0; }
+    var u = bhumi_key_usage(ev);
+    if (u < 0xE0) { return 0; }
+    if (u > 0xE7) { return 0; }
+    return 1;
+}
+
+# input_map(ev, ctrl): pure key→action mapping for a pressed key (IA_NONE otherwise).
+#
+# ⛔⛔ BARE KEYS ARE THE CLIENT'S (0.16.25). Until this cut Esc, Tab and F4–F10 were claimed bare and
+# consumed unforwarded — so a client's Esc could not cancel anything, its Tab could not move focus,
+# its F10 could not open a menu, and Esc ENDED THE DESKTOP. Measured on QEMU by crab (filing
+# `docs/development/issues/2026-09-13-claimed-keys-never-reach-a-client.md`): crab acted on zero of
+# them. That was the right shape for a compositor with no way to tell a chord from a key, and the
+# wrong one the day a client bound any of them. `ctrl` is the latch from `input_mod_track`; with it
+# clear this function answers IA_NONE for everything, and the frame loop forwards.
+#   Ctrl+Q        quit the desktop      (bare Esc, before)
+#   Ctrl+Tab      focus the next window (bare Tab, before)
+#   Ctrl+F4..F10  close · maximize · minimize · move ←→↑↓  (bare F4..F10, before)
+# ⚠ F2 (launcher) and F3 (theme) are NOT in this table and stay bare — they are read before
+# `input_handle` in the frame loop. Whether they move too is an open question, recorded in the
+# CHANGELOG rather than decided here.
+fn input_map(ev, ctrl): i64 {
     # ⛔⛔ KIND FIRST. The event batch is MIXED since bhumi 1.1.4 — pointer events share the array — and
     # every read below is `ev & 0xFF`, so an unchecked motion event is interpreted as a keystroke. The
     # numbers are not harmless: `bhumi_key_usage` is the LOW BYTE of dx and `bhumi_key_pressed` is BIT 8
@@ -103,8 +159,9 @@ fn input_map(ev): i64 {
     # line, and it is here rather than only there because this function is the one a unit test can reach.
     if (bhumi_ev_is_key(ev) == 0) { return InputAction.IA_NONE; }
     if (bhumi_key_pressed(ev) == 0) { return InputAction.IA_NONE; }
+    if (ctrl == 0) { return InputAction.IA_NONE; }
     var u = bhumi_key_usage(ev);
-    if (u == HidUsage.HID_ESC) { return InputAction.IA_QUIT; }
+    if (u == HidUsage.HID_Q)   { return InputAction.IA_QUIT; }
     if (u == HidUsage.HID_TAB) { return InputAction.IA_FOCUS_NEXT; }
     if (u == HidUsage.HID_F4)  { return InputAction.IA_CLOSE_FOCUSED; }
     if (u == HidUsage.HID_F5)  { return InputAction.IA_MAXIMIZE_FOCUSED; }
@@ -375,8 +432,8 @@ fn input_apply(comp, action, bound_w, bound_h): i64 {
 # focused client — one keypress closing a window and typing into it. Worse, TAB was applied here
 # (`IA_FOCUS_NEXT`) and then cycled focus a SECOND time in the loop's own TAB branch, so a single
 # TAB advanced focus by two. Both were invisible on iron because nothing logs a double action.
-fn input_handle(comp, ev, bound_w, bound_h): i64 {
-    var action = input_map(ev);
+fn input_handle(comp, ev, bound_w, bound_h, ctrl): i64 {
+    var action = input_map(ev, ctrl);
     # ⚠ The KEY path, tagged as such — this is the other half of A2. Both sources now record, so
     # `input_last_src()` is never stale from a previous action of the opposite kind.
     input_apply_from(comp, action, bound_w, bound_h, IA_SRC_KEY);

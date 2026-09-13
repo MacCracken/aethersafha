@@ -5,6 +5,76 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.16.25] — 2026-09-13 — chrome keys are Ctrl chords; bare Esc / Tab / F-keys are the client's
+
+> `git describe --tags` answered `0.16.24` exactly before a word of this was written; `[0.16.24]` below
+> is a record. Cut on operator direction; the commit, the tag and the push are the operator's.
+
+### Changed — ⛔⛔ Esc no longer quits the desktop. Ctrl+Q does. Every chrome key moved with it.
+
+| was (bare) | now (chord) | does |
+|---|---|---|
+| `Esc` | **Ctrl+Q** | quit the desktop |
+| `Tab` | **Ctrl+Tab** | focus the next window |
+| `F4` · `F5` · `F6` | **Ctrl+F4** · **Ctrl+F5** · **Ctrl+F6** | close · maximize · minimize the focused window |
+| `F7` … `F10` | **Ctrl+F7** … **Ctrl+F10** | move the focused window ← → ↑ ↓ |
+
+**Bare Esc, Tab and F4–F10 are forwarded to the focused client now.** They were claimed bare and
+consumed unforwarded — the right shape for a compositor that could not tell a chord from a key, and
+the wrong one the day a client bound any of them, which crab did (Esc to cancel, Tab for its
+sidebar, F10 for its menu bar) and measured on QEMU: it acted on zero of them, and bare Esc ended
+the session. Filed as `docs/development/issues/2026-09-13-claimed-keys-never-reach-a-client.md`
+(now closed); the operator's ruling was the third shape it offered, on a modifier: *"it was easy
+for initial testing of the desktop but now it's time to fix that right."*
+
+⭐ **Ctrl was already here — as events, not as a field.** The kernel diffs the boot report's
+modifier byte into Set-1 make/break codes and bhumi maps them to usages `0xE0` (LCtrl) and `0xE4`
+(RCtrl); on agnos RCtrl is emitted as `0x1D` like LCtrl and so arrives as `0xE0` too. No kernel or
+bhumi change. `input_mod_track` folds those edges into a held bitmap (bit *i* is usage `0xE0 + i`),
+`input_mod_ctrl` reads it, and `input_map(ev, ctrl)` answers `IA_NONE` for everything while Ctrl is
+up. ⚠ A latch, not a field: a modifier release lost to the 256-byte scancode ring would leave Ctrl
+believed-held until its next edge — the ring diffs the report's LEVEL, so only an overflow can drop
+one; accepted and named, one Ctrl tap clears it.
+
+⛔⛔ **A CHORD IS SWALLOWED WHOLE.** While Ctrl is held, no non-modifier key event reaches a client —
+not the press of a claimed key, not its release, and not an unclaimed Ctrl+X either (a one-shot
+names the first: `a Ctrl chord claimed nothing and was swallowed, usage:`). The wire carries no
+modifier state, so a forwarded `r` under Ctrl would be a bare `r` to the client — RENAME, in crab.
+The modifier keys' OWN edges still go through, as they always did: that is how a client can learn
+Shift, and crab 0.8.7 now ignores them as keystrokes (its delete prompt used to take a Ctrl press as
+"no"). ⚠ Ctrl released before the key leaves that key's release to be forwarded bare — a release
+edge is a no-op to every client shipped; asserted as the boundary.
+
+⚠ **Still bare, deliberately unasked**: `F2` (launcher) and `F3` (theme) are read before
+`input_handle` and are not in the operator's list; the launcher's own Esc / arrows / Enter while
+its panel is open are a modal panel's keys, not chrome. Whether F2/F3 move too is open.
+
+⚠ **The 297-px hazard, for the latch too.** `input_map`'s kind guard exists because a motion event's
+low byte reads as a usage; `input_mod_track` carries the same guard, and the suite plants the shape
+(dx = 480 = `0x1E0`, low byte LCtrl with bit 8 set) — the mutation that drops the guard turns the
+next keystroke into a swallowed chord.
+
+### Fixed — the launcher announced the app it started as an address
+
+`lnch_name_at` was annotated `: i64`, so `println(lnch_name_at(sel))` took the integer path and the
+line after *"launching from the launcher:"* read `9671447`. A QEMU harness could not tell puka from
+crab. Unannotated now, like `rupa_theme_name`; the name prints.
+
+### Verified
+
+`tests/input.tcyr` **136 → 221 assertions** (the chord map, every bare key answering `IA_NONE`,
+Ctrl+Esc answering `IA_NONE`, the latch's full sequence, RCtrl, the motion-poison shape) · **27 / 27
+suites** · five mutations, each caught (the map ignoring Ctrl; Esc still quitting under Ctrl; the
+latch never clearing; only LCtrl counting; motion poisoning the latch — the last survived until the
+`0x1E0` fixture was planted) · `check-dep-tags.sh` 9 / 9 clean · host **4,175,440 B**.
+⭐ **QEMU** (`agnos/scripts/harness/crab-pointer-test.py`, ARM 7 rewritten to this contract): the
+run is recorded in crab's CHANGELOG `[Unreleased]`.
+⚠ **Every harness that sent a bare chrome key now sends the chord** (`agnos/scripts/harness`:
+crab-resize-test, crab-pointer-test, ae-resize-fault-test, puka-resize-test,
+aethersafha-clients-test, puka-child-stdout-test), and puka-terminal-test expects its typed Tab to
+ARRIVE at puka now. `scripts/qemu-sendkey.py` in this repo still sends one qcode per call and cannot
+spell a chord; unchanged, unused.
+
 ## [0.16.24] — 2026-09-12 — every pointer button reaches the wire
 
 > ⚠ The `[Unreleased]` block BELOW this section is older than it, not newer: its frametime content was

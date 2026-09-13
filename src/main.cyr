@@ -166,6 +166,11 @@ var ae_inp_denied = 0;
 var ae_present_bad = 0;
 var ae_inp_down = 0;
 var ae_inp_tab = 0;
+# ⭐⭐ THE HELD-MODIFIER BITMAP (0.16.25) — the compositor's chrome keys are Ctrl chords now, and this
+# is the Ctrl. Folded by `input_mod_track` from the modifier usages' own press/release events, read
+# by `input_mod_ctrl`. See the ⛔⛔ on `input_map`.
+var ae_mods = 0;
+var ae_inp_chord = 0;      # one-shot: a Ctrl chord claimed nothing and was swallowed
 var ae_inp_fwd = 0;
 var ae_inp_nofwd = 0;   # BITMASK of focus indices already reported — NOT a boot-scoped latch (see the site)
 var ae_inp_move = 0;
@@ -1157,6 +1162,10 @@ fn main(): i64 {
                             println("aethersafha: first key-down seen");
                         }
                     }
+                    # ⭐ THE MODIFIER LATCH IS FOLDED FIRST, on every key event, before anything
+                    # decides what the key means — a Ctrl press is what makes the next key a chord.
+                    ae_mods = input_mod_track(ae_mods, ev);
+                    var ctrl = input_mod_ctrl(ae_mods);
                     # ⭐ NAME THE KEY THAT QUIT, because on the 2026-08-02 burn the desktop
                     # rendered and then exited immediately and nothing said why. IA_QUIT has exactly
                     # one source (HID_ESC), so either an Esc really arrived or the Set-1 decode
@@ -1221,7 +1230,7 @@ fn main(): i64 {
                         i = i + 1;
                         continue;
                     } }
-                    var act = input_handle(comp, ev, ae_geom_w, ae_geom_h - TITLEBAR_H);
+                    var act = input_handle(comp, ev, ae_geom_w, ae_geom_h - TITLEBAR_H, ctrl);
                     if (act == InputAction.IA_QUIT) {
                         # ⛔ A PROBE RUN IGNORES THE QUIT KEY. --clients exists to answer a question
                         # deterministically, and the previous build let a single Esc at frame 191 end
@@ -1234,7 +1243,7 @@ fn main(): i64 {
                         }
                         if (ae_probe == 0) {
                             running = 0;
-                            println("aethersafha: quit on a key, usage then frame:");
+                            println("aethersafha: quit on a key (Ctrl+Q), usage then frame:");
                             println_int(bhumi_key_usage(ev));
                             println_int(frame);
                         }
@@ -1255,6 +1264,8 @@ fn main(): i64 {
                     # ⚠ CLAIMED KEYS ARE CONSUMED, NOT FORWARDED. A focus key that also reached the
                     # client would type a literal tab into the window you just switched away from,
                     # and a move key would scroll a file list while its window slid out from under it.
+                    # ⭐ AND AS OF 0.16.25 A CLAIMED KEY IS A Ctrl CHORD, so the bare key IS forwarded —
+                    # the ⛔⛔ below this block swallows the chord's other edges.
                     var kdone = 0;
                     if (bhumi_key_pressed(ev) == 1) {
                         if (act != InputAction.IA_NONE) { kdone = 1; }
@@ -1302,6 +1313,26 @@ fn main(): i64 {
                                 println("aethersafha: key usage seen:");
                                 println_int(bhumi_key_usage(ev));
                             }
+                        }
+                    }
+                    # ⛔⛔ A CHORD IS SWALLOWED WHOLE (0.16.25): while Ctrl is held, NO non-modifier key
+                    # event reaches a client — not the press of a claimed key, not its release, and
+                    # not an unclaimed Ctrl+X either. The wire carries no modifier state, so a
+                    # forwarded `r` under Ctrl would be a bare `r` to the client: RENAME, in crab.
+                    # The modifier keys' OWN edges still go through (`input_is_modifier`), which is
+                    # how a client can learn Shift.
+                    if (ctrl == 1) {
+                        if (input_is_modifier(ev) == 0) {
+                            if (kdone == 0) {
+                                if (bhumi_key_pressed(ev) == 1) {
+                                    if (ae_inp_chord == 0) {
+                                        ae_inp_chord = 1;
+                                        println("aethersafha: a Ctrl chord claimed nothing and was swallowed, usage:");
+                                        println_int(bhumi_key_usage(ev));
+                                    }
+                                }
+                            }
+                            kdone = 1;
                         }
                     }
                     if (kdone == 0) {

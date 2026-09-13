@@ -68,7 +68,10 @@ fn lnch_is_open(): i64 { return lnch_open; }
 fn lnch_selected(): i64 { return lnch_sel; }
 fn lnch_path_at(i): i64 { if (i < 0) { return 0; } if (i >= lnch_n) { return 0; } return load64(&lnch_path + i * 8); }
 fn lnch_plen_at(i): i64 { if (i < 0) { return 0; } if (i >= lnch_n) { return 0; } return load64(&lnch_plen + i * 8); }
-fn lnch_name_at(i): i64 { if (i < 0) { return 0; } if (i >= lnch_n) { return 0; } return load64(&lnch_name + i * 8); }
+# ⚠ NO `: i64` ON PURPOSE (0.16.25): annotated, `println(lnch_name_at(sel))` took the INTEGER path and
+# the launcher announced the app it started as an address (`9671447`), which is how a QEMU harness
+# could not read which app it had launched. `rupa_theme_name` is the precedent.
+fn lnch_name_at(i) { if (i < 0) { return 0; } if (i >= lnch_n) { return 0; } return load64(&lnch_name + i * 8); }
 
 # ⚠ OPENING ON AN EMPTY REGISTRY IS REFUSED. A panel listing nothing, that swallows every key until
 # Escape, is indistinguishable from a hung desktop — and it is exactly what a boot with no staged apps
