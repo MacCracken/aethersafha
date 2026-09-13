@@ -1,7 +1,17 @@
 # aethersafha forwards only the left button, so no client can see a right-click
 
-**Status:** 🔴 **OPEN — and BLOCKED BEHIND A SECOND, LARGER PROBLEM.** The fix itself is small and is
-described below. It cannot be made, because **aethersafha does not build on any available toolchain.**
+**Status:** ✅ **CLOSED in 0.16.24 (2026-09-12).** Every kernel button bit is forwarded; the numbering
+is `wire = kernel_bit + 1` (**1 = left, 2 = right, 3 = middle**), named as `INPUT_BTN_LEFT` /
+`INPUT_BTN_RIGHT` / `INPUT_BTN_MIDDLE` in `src/input.cyr`, X11 divergence pinned by the input suite.
+Window management stays left-only structurally — the other buttons live in a forward-only loop that
+contains no `deco_hit`, no focus and no drag. ⚠ Focus is still a left-button gesture (a right-click
+reaches an unfocused window's client without focusing it) — deliberately not widened; a policy
+decision, not the wire. ⚠ Not yet run on QEMU or iron; the first consumer's on-target run is the
+end-to-end verdict. See `CHANGELOG.md` `[0.16.24]`.
+⚠ **The blocker-behind-the-blocker below is HISTORY.** 0.16.23 migrated this repo to cyrius 6.6.2 and
+the three disagreeing deps moved with it (sigil 3.12.17 · agnostik 1.6.1 · agnodrm 1.6.0); it builds.
+The table and the pin-skew analysis are kept because the shape — a language change migrated in one
+dep and not its peers — is the transferable part.
 **Filed by:** crab, 2026-09-09, while closing the M6 interaction gaps (crab 0.8.3).
 **Severity:** Medium — it does not lose data; it makes one whole class of gesture unreachable for
 every client on the desktop, not just crab.

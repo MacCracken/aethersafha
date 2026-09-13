@@ -352,7 +352,132 @@ fn main() {
     if (input_btn_pressed(seq) == 1) { if (input_btn_released(seq) == 0) { believed = 1; } }
     assert_eq(believed, 0, "sequence: believed up again, so the next click is not swallowed");
 
-    return assert_summary();
+    # =====================================================================
+    # 0.16.24: every button reaches the wire — and the numbering is pinned
+    # =====================================================================
+    # ⛔ Until this cut the frame loop masked transitions with `1` and forwarded a hardcoded `1`, so no
+    # client on the desktop could see a right-click (filed by crab, 2026-09-09). The kernel, bhumi, setu
+    # and dhancha all carried the bitmap intact; this was the single point of loss.
+    test_group("input — the wire numbering mirrors the kernel's bit order, NOT X11");
+    assert_eq(INPUT_BTN_LEFT, 1, "left is 1 -- the one fact that pre-dates this cut");
+    assert_eq(INPUT_BTN_RIGHT, 2, "right is 2 (kernel bit 1 + 1)");
+    assert_eq(INPUT_BTN_MIDDLE, 3, "middle is 3 (kernel bit 2 + 1)");
+    # ⛔ THE X11 DIVERGENCE, PINNED. X11 is 1=left 2=MIDDLE 3=RIGHT. A reader who "corrects" these to X11
+    # puts Delete on the middle button of every client that already learned the wire.
+    assert_neq(INPUT_BTN_RIGHT, 3, "right is NOT X11's 3");
+    assert_neq(INPUT_BTN_MIDDLE, 2, "middle is NOT X11's 2");
+    assert_eq(input_btn_wire(0), INPUT_BTN_LEFT, "bit 0 forwards as LEFT");
+    assert_eq(input_btn_wire(1), INPUT_BTN_RIGHT, "bit 1 forwards as RIGHT");
+    assert_eq(input_btn_wire(2), INPUT_BTN_MIDDLE, "bit 2 forwards as MIDDLE");
+    assert_eq(input_btn_mask(0), 1, "bit 0 is mask 1 -- the kernel's left");
+    assert_eq(input_btn_mask(1), 2, "bit 1 is mask 2 -- the kernel's right");
+    assert_eq(input_btn_mask(2), 4, "bit 2 is mask 4 -- the kernel's middle");
+    assert_eq(INPUT_BTN_COUNT, 3, "three buttons are forwarded");
+    # The two orderings are one function of the bit, so they cannot be edited apart.
+    var wb = 0;
+    var agree = 1;
+    while (wb < INPUT_BTN_COUNT) {
+        if (input_btn_wire(wb) != wb + 1) { agree = 0; }
+        if (input_btn_mask(wb) != (1 << wb)) { agree = 0; }
+        wb = wb + 1;
+    }
+    assert_eq(agree, 1, "wire = bit + 1 and mask = 1 << bit, for every forwarded button");
+
+    # ⭐⭐ THE CARRY IS THE LEVEL, AND THIS IS THE PROOF, NOT THE CLAIM. The frame loop used to carry the
+    # left button's belief as a three-branch rule over the transitions: "press without release → 1,
+    # no transition → the level, otherwise 0". That rule is the ORACLE below, run per button over every
+    # (believed, cur, seen) the bitmaps can take, and it never once differs from `cur & mask`. So the
+    # belief was never distinct from the level in VALUE — only from `seen` — and `input_btn_carry` is
+    # one line. ⛔ A carry of `cur | seen` or of `seen` fails this in 100+ cells: that is the folded click
+    # left believed-down, the mistake the old ⚠ existed to prevent.
+    test_group("input — the mask carried into the next event is the level (exhaustive)");
+    var mism = 0;
+    var cells = 0;
+    var bv = 0;
+    while (bv < 8) {
+        var cv = 0;
+        while (cv < 8) {
+            var sv = 0;
+            while (sv < 8) {
+                var oracle = 0;
+                var obit = 0;
+                while (obit < INPUT_BTN_COUNT) {
+                    var om = input_btn_mask(obit);
+                    var otr = input_btn_transitions(bv & om, cv, sv, om);
+                    # the frame loop's old three-branch rule, verbatim in shape, for THIS button
+                    var ob = 0;
+                    if (input_btn_pressed(otr) == 1) { if (input_btn_released(otr) == 0) { ob = 1; } }
+                    if (input_btn_pressed(otr) == 0) { if (input_btn_released(otr) == 0) { if ((cv & om) != 0) { ob = 1; } } }
+                    if (ob == 1) { oracle = oracle | om; }
+                    obit = obit + 1;
+                }
+                if (oracle != input_btn_carry(cv)) { mism = mism + 1; }
+                cells = cells + 1;
+                sv = sv + 1;
+            }
+            cv = cv + 1;
+        }
+        bv = bv + 1;
+    }
+    assert_eq(cells, 512, "every (believed, cur, seen) over three buttons was visited");
+    assert_eq(mism, 0, "the old three-branch belief rule equals the level in EVERY cell");
+    assert_eq(input_btn_carry(0), 0, "idle carries nothing");
+    assert_eq(input_btn_carry(2), 2, "a held right carries the right bit");
+    assert_eq(input_btn_carry(7), 7, "all three held carry all three");
+    assert_eq(input_btn_carry(0xFF), 7, "bits beyond the forwarded set are NOT carried -- they were never forwarded");
+    assert_eq(input_btn_all(), 7, "the forwarded set is bits 0..2");
+
+    # ⭐ THE SEQUENCES HARDWARE EMITS, driven exactly as the frame loop drives them -- per-button
+    # `input_btn_transitions` against the carried mask, then `input_btn_carry` -- with a RIGHT button in
+    # them. Every earlier sequence in this file drove the left alone.
+    test_group("input — a right-click is a click: the multi-button machine end to end");
+    # Right press, left idle. Nothing else changes.
+    var bm = 0;
+    var trr = input_btn_transitions(bm & 2, 2, 2, 2);
+    assert_eq(input_btn_pressed(trr), 1, "right press fires");
+    assert_eq(input_btn_pressed(input_btn_transitions(bm & 1, 2, 2, 1)), 0, "  ...and the LEFT machine saw no press");
+    bm = input_btn_carry(2);
+    assert_eq(bm, 2, "  ...and the carried mask is exactly the right bit");
+    # Right held while the left goes down: both carried, one transition (left press).
+    var tl = input_btn_transitions(bm & 1, 3, 3, 1);
+    trr = input_btn_transitions(bm & 2, 3, 3, 2);
+    assert_eq(input_btn_pressed(tl), 1, "left press while right is held");
+    assert_eq(input_btn_pressed(trr), 0, "  ...and the held right does NOT re-press");
+    assert_eq(input_btn_released(trr), 0, "  ...nor release");
+    bm = input_btn_carry(3);
+    assert_eq(bm, 3, "both carried down");
+    # Both come up in one drain, `seen` re-seeded to the last held level (3): BOTH release.
+    tl = input_btn_transitions(bm & 1, 0, 3, 1);
+    trr = input_btn_transitions(bm & 2, 0, 3, 2);
+    assert_eq(input_btn_released(tl), 1, "left release fires through the re-seeded seen -- the burn blocker, still");
+    assert_eq(input_btn_released(trr), 1, "right release fires the same way -- the right button can END a press");
+    bm = input_btn_carry(0);
+    assert_eq(bm, 0, "both carried up again");
+    # A FOLDED right-click -- began and ended inside one frame, so the level is already 0.
+    var tf = input_btn_transitions(0, 0, 2, 2);
+    assert_eq(input_btn_pressed(tf), 1, "folded right-click: press");
+    assert_eq(input_btn_released(tf), 1, "folded right-click: AND release in the same event");
+    assert_eq(input_btn_carry(0), 0, "  ...and it carries UP, so the next right-click is not swallowed");
+    # A folded MIDDLE click while the right is held: middle press+release, right untouched.
+    var tm = input_btn_transitions(0, 2, 6, 4);
+    assert_eq(input_btn_pressed(tm), 1, "folded middle click during a right hold: press");
+    assert_eq(input_btn_released(tm), 1, "  ...and release");
+    assert_eq(input_btn_transitions(2, 2, 6, 2), 0, "  ...and the held right saw no transition at all");
+    assert_eq(input_btn_carry(2), 2, "  ...and the mask afterwards is the right bit alone");
+    # ⛔ ISOLATION, the property the whole change rests on: a right transition never moves the left
+    # machine, and a left transition never moves the right one. A machine fed the WHOLE carried mask
+    # instead of its own bit would report a phantom left RELEASE on every right-click.
+    assert_eq(input_btn_transitions(2 & 1, 2, 2, 1), 0, "right held: the left machine, fed ITS bit, is silent");
+    assert_neq(input_btn_transitions(2, 2, 2, 1), 0, "  ...and fed the whole mask it would NOT be -- which is why the frame loop masks");
+    assert_eq(input_btn_transitions(1 & 2, 3, 3, 2), 1, "left held + right press: the right machine sees exactly a press");
+    assert_eq(input_btn_transitions(2 & 2, 1, 3, 2), 2, "right up + left down in one drain: the right machine sees exactly a release");
+
+    # ⛔⛔ `return assert_summary();` SAT HERE, ABOVE THE GROUP BELOW, AND THE GROUP BELOW NEVER RAN.
+    # Six assertions on `input_apply_from`'s provenance record — the instrument built so a burn capture
+    # can tell a titlebar click from an F5 — compiled, shipped, and were never executed once: the suite
+    # reported 136 while the file held 142. Found 2026-09-12 while adding the group above; moved to the
+    # end of `main` and all six passed first time. The summary is the LAST statement of `main` now, and
+    # anything added after it would be dead the same way. [[feedback_compiled_is_not_reachable]]
 
     # ----- input.cyr — action provenance (A2) ---------------------
     # ⛔ `AE-M`'s BUTTON path was un-adjudicable from a burn capture: min/max route identically whether
@@ -378,6 +503,8 @@ fn main() {
     input_handle(pc, bhumi_key_event(1, BHUMI_HID_TAB), 800, 600);
     assert_eq(input_last_src(), IA_SRC_KEY, "a key action CLEARS a previously recorded button source");
     assert_neq(IA_SRC_KEY, IA_SRC_BUTTON, "the two sources are distinguishable");
+
+    return assert_summary();
 }
 
 var ec = main();

@@ -43,7 +43,7 @@ stdlib = [
 [deps.bhumi]
 git = "https://github.com/MacCracken/bhumi.git"
 path = "../bhumi"
-tag = "1.4.3"
+tag = "1.4.4"
 modules = ["dist/bhumi.cyr"]
 
 # --- Desktop theme-token core: rupa (रूप — form / appearance). The ONE source of
@@ -53,7 +53,7 @@ modules = ["dist/bhumi.cyr"]
 [deps.rupa]
 git = "https://github.com/MacCracken/rupa.git"
 path = "../rupa"
-tag = "0.1.6"
+tag = "0.1.7"
 modules = ["dist/rupa.cyr"]
 
 # --- Shared AGNOS domain primitives (was Rust `agnostik` 0.90.0). Error family
@@ -80,7 +80,7 @@ modules = ["dist/agnodrm.cyr"]
 [deps.kashi]
 git = "https://github.com/MacCracken/kashi.git"
 path = "../kashi"
-tag = "1.0.6"
+tag = "1.0.7"
 # ⛔⛔ THE FREESTANDING CORE IS A MEASURED CHOICE, NOT A SHORTCUT (recorded 2026-08-17, kashi 1.0.6).
 # kashi's ADR 0001 says stdlib-linked consumers should take the LIBRARY FACE, and this project links
 # the full stdlib — so `src/font_data.cyr` looks like the wrong surface. Two reasons it is not:
@@ -103,7 +103,7 @@ modules = ["src/font_data.cyr"]
 [deps.mehman]
 git = "https://github.com/MacCracken/mehman.git"
 path = "../mehman"
-tag = "1.0.2"
+tag = "1.0.3"
 modules = ["src/types.cyr", "src/surface.cyr", "src/sandbox.cyr"]
 
 # --- Sandbox execution surface (mehman's guest backend). Declared explicitly so
@@ -175,5 +175,5 @@ git = "https://github.com/MacCracken/setu.git"
 # a local setu change could not be built against at all. Every sibling dep here carries both. The
 # path-wins hazard applies as it does to the rest: re-verify tag vs sibling VERSION at each cut.
 path = "../setu"
-tag = "0.8.8"
+tag = "0.8.9"
 modules = ["dist/setu.cyr"]

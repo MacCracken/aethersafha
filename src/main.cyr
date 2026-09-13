@@ -347,7 +347,7 @@ fn ae_centre_pointer(): i64 {
 # 9-region `deco_hit`, and `input_move`'s GPU-safe clamp were all written long ago and never called —
 # they were waiting for a pointer. The setu protocol likewise already carries `SETU_INPUT_PTR_MOVE`
 # (kind 9) and `SETU_INPUT_PTR_BTN` (kind 10). Nothing here is a new mechanism.
-var ae_ptr_btn = 0;        # last button bitmap, for edge detection
+var ae_ptr_btn = 0;        # believed-down button BITMAP (kernel bit order), one bit per button — see input_btn_carry
 var ae_ptr_fwd_x = 0 - 1;  # last surface-relative position forwarded (dedupe; -1 = none yet)
 var ae_ptr_fwd_y = 0 - 1;
 var ae_ptr_drag = 0;       # 1 = dragging a window by its titlebar
@@ -372,6 +372,10 @@ var ae_scroll_first = 0;
 # ⚠ The other half of the pair — see the ⛔ at the call site. Without it, a scroll that landed on
 # empty desktop is indistinguishable from a client that ignored one.
 var ae_scroll_nowin = 0;
+# ⚠ The same pair for the non-left buttons (0.16.24) — the wheel's lesson, applied before the burn
+# rather than after it: "right-click does nothing" has to name which repo dropped it.
+var ae_btnx_first = 0;
+var ae_btnx_nowin = 0;
 
 # Forward a pointer event to the window under the cursor, using the setu messages that already exist.
 # ⚠ Coordinates are sent SURFACE-RELATIVE: a client knows nothing about where the compositor placed it,
@@ -525,7 +529,12 @@ fn ae_pointer_event(comp, ev, frame): i64 {
         var seen = bhumi_button_seen(ev);
         # ⛔ NOT an edge on `cur | seen` — that makes the RELEASE unreachable, because the kernel re-seeds
         # `seen` to the held level on every drain. See `input_btn_transitions`.
-        var tr = input_btn_transitions(ae_ptr_btn, cur, seen, 1);   # left button only, for now
+        # ⛔⛔ LEFT FIRST, AND LEFT ALONE OWNS WINDOW MANAGEMENT (0.16.24). Click-to-focus, `deco_hit`'s
+        # close/maximize/minimize and both drag grips live in THIS arm. The other buttons are handled by
+        # the loop after it and only ever FORWARD — routing them through this arm would make a right-click
+        # close a window. Left runs first so its `closed` verdict is already known when they forward.
+        # ⚠ `ae_ptr_btn` is a BITMASK now (its comment always called it one); this arm reads only bit 0.
+        var tr = input_btn_transitions(ae_ptr_btn & input_btn_mask(0), cur, seen, input_btn_mask(0));
         var closed = 0;
         if (input_btn_pressed(tr) == 1) {
             var win = comp_window_at(comp, input_ptr_x(), input_ptr_y());
@@ -591,7 +600,7 @@ fn ae_pointer_event(comp, ev, frame): i64 {
                 ae_ptr_click = 1;
                 println("aethersafha: pointer button click routed");
             }
-            if (closed == 0) { ae_ptr_forward(comp, 1, 1, 1); }
+            if (closed == 0) { ae_ptr_forward(comp, 1, INPUT_BTN_LEFT, 1); }
         }
         if (input_btn_released(tr) == 1) {
             # ⭐ THE LINE THE BURN BLOCKER NEEDED. Before `input_btn_transitions` this branch was
@@ -611,13 +620,55 @@ fn ae_pointer_event(comp, ev, frame): i64 {
             # re-derives `comp_window_at` at the same cursor position, so after a close-button click the
             # window it finds is the one UNDERNEATH, and that client receives a button RELEASE it never
             # got a press for. Half a guard is not a guard.
-            if (closed == 0) { ae_ptr_forward(comp, 1, 1, 0); }
+            if (closed == 0) { ae_ptr_forward(comp, 1, INPUT_BTN_LEFT, 0); }
         }
-        # ⚠ THE BELIEF, not the device level. A folded click (press and release inside one frame) emits
-        # both transitions above and must end BELIEVED-UP, or the next press is swallowed.
-        ae_ptr_btn = 0;
-        if (input_btn_pressed(tr) == 1) { if (input_btn_released(tr) == 0) { ae_ptr_btn = 1; } }
-        if (input_btn_pressed(tr) == 0) { if (input_btn_released(tr) == 0) { ae_ptr_btn = (cur & 1); } }
+        # ⭐⭐ THE OTHER BUTTONS FORWARD, AND ONLY FORWARD (0.16.24). Until this cut every button but the
+        # left was discarded here — the kernel published the bitmap, bhumi and setu carried it, dhancha
+        # delivered it, and this loop's absence was the single point of loss: no client on the desktop
+        # could see a right-click. Filed by crab (docs/development/issues/2026-09-09-forwards-only-the-
+        # left-button.md), whose context menu had no pointer route because of it.
+        # ⛔ NO `deco_hit`, NO focus, NO drag IN HERE. Window management is the left arm's, above, and
+        # stays there — a loop that reached `comp_close_window` would let a right-click close a window.
+        # ⛔ `closed` GUARDS THESE TOO, for the reason it guards the left release: a left press that closed
+        # a window and a right transition in the SAME event must not hand the right button to whatever
+        # `comp_window_at` finds underneath.
+        # ⚠ Each button runs the same state machine the left does, against its own belief bit, so a
+        # folded right-click emits both transitions and a held one emits neither — see the input suite.
+        var bit = 1;
+        while (bit < INPUT_BTN_COUNT) {
+            var bmask = input_btn_mask(bit);
+            var trb = input_btn_transitions(ae_ptr_btn & bmask, cur, seen, bmask);
+            if (input_btn_pressed(trb) == 1) {
+                if (closed == 0) {
+                    # ⚠ ONE-SHOT, for the same reason the wheel has one: on a boot, "right-click does
+                    # nothing" must be attributable to this compositor or to the client, not to both.
+                    var fwd = ae_ptr_forward(comp, 1, input_btn_wire(bit), 1);
+                    if (fwd == 1) {
+                        if (ae_btnx_first == 0) {
+                            ae_btnx_first = 1;
+                            println("aethersafha: forwarded a non-left button press, wire number:");
+                            println_int(input_btn_wire(bit));
+                        }
+                    }
+                    else {
+                        if (ae_btnx_nowin == 0) {
+                            ae_btnx_nowin = 1;
+                            println("aethersafha: a non-left button press had NO client content under the cursor");
+                        }
+                    }
+                }
+            }
+            if (input_btn_released(trb) == 1) {
+                if (closed == 0) { ae_ptr_forward(comp, 1, input_btn_wire(bit), 0); }
+            }
+            bit = bit + 1;
+        }
+        # ⚠ THE LEVEL, NOT `seen`. A folded click (press and release inside one frame) emits both
+        # transitions above and must end BELIEVED-UP, or the next press is swallowed — and `seen` still
+        # says down for it. `input_btn_carry` is `cur` over the forwarded buttons, and the input suite
+        # proves exhaustively that the three-branch rule this line used to be equals exactly that.
+        # ⛔ Assigned AFTER every arm above, all of which derived their transitions from the OLD mask.
+        ae_ptr_btn = input_btn_carry(cur);
         return 0;
     }
     return 0;

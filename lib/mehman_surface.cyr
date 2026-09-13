@@ -23,7 +23,7 @@ enum MehmanPixelFormat {
 
 var MEHMAN_XRGB8888_BPP = 4;         # bytes per pixel for XRGB8888 (matches bhumi bpp)
 var MEHMAN_SURFACE_MAX_DIM = 16384;  # per-axis pixel cap; guards i64 overflow in
-                                     # width*bpp*height (matches bhumi's BHUMI_FB_MAX_DIM)
+# width*bpp*height (matches bhumi's BHUMI_FB_MAX_DIM)
 
 # The captured-surface descriptor. Fields (all i64):
 #   width   — pixels

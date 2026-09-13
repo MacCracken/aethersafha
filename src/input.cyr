@@ -237,6 +237,45 @@ fn input_btn_transitions(believed_down, cur, seen, mask): i64 {
 fn input_btn_pressed(t): i64 { return t & 1; }
 fn input_btn_released(t): i64 { if ((t & 2) != 0) { return 1; } return 0; }
 
+# ⭐⭐ THE BUTTON NUMBERING — A DECISION, MADE HERE, BECAUSE THIS IS THE WIRE'S ONLY PRODUCER (0.16.24).
+# No repository in the stack defines a pointer-button constant: setu carries `button` as an opaque i64,
+# dhancha hands it to the app in `a`, and until this cut the only fact in existence was that this
+# compositor sent `1` for left — and sent NOTHING for any other button. The kernel publishes a full
+# bitmap (`hid_mouse_btn`: bit0 left, bit1 right, bit2 middle — agnos kernel/arch/x86_64/usb/hid.cyr)
+# and bhumi passes it through intact (`bhumi_button_state` = `ev & 0xFF`); the loss was the frame loop
+# masking with `1` and forwarding a hardcoded `1`. Filed by crab, 2026-09-09.
+#
+# ⛔ NOT X11. X11 is 1=left, 2=MIDDLE, 3=RIGHT. This stack already diverged from X11 on the neighbouring
+# question — setu gives the wheel its own kind rather than spending buttons 4/5 on detents, and says why
+# — so the wire number MIRRORS THE KERNEL'S BIT ORDER instead:
+#     wire = kernel_bit + 1   →   1 = left, 2 = right, 3 = middle.
+# It agrees with the one pre-existing fact (left = 1), it is derivable rather than remembered, and it
+# keeps a single source of truth for the ordering. A reader who assumes X11 puts Delete on the middle
+# button; that is why these are named rather than written as literals at the call sites.
+var INPUT_BTN_LEFT   = 1;
+var INPUT_BTN_RIGHT  = 2;
+var INPUT_BTN_MIDDLE = 3;
+var INPUT_BTN_COUNT  = 3;   # kernel bits 0..2 are forwarded; the bitmap has room for more
+
+# The kernel-bitmap mask for button bit `bit`, and the wire number that bit is forwarded as. Both are
+# functions of the bit so the two orderings cannot be edited apart. `input_btn_all` is every forwarded
+# button's mask at once.
+fn input_btn_mask(bit): i64 { return 1 << bit; }
+fn input_btn_wire(bit): i64 { return bit + 1; }
+fn input_btn_all(): i64 { return (1 << INPUT_BTN_COUNT) - 1; }
+
+# ⭐ THE MASK CARRIED INTO THE NEXT EVENT IS THIS EVENT'S LEVEL — for every forwarded button.
+# ⛔ IT IS NOT `cur | seen`. `seen` is the kernel's OR-fold, so after a folded click (press and release
+# inside one drain) `seen` still says down while `cur` says up; carrying the OR would leave the button
+# believed-down and SWALLOW the next press. `cur` alone is what the button is doing now.
+# ⚠ The frame loop used to carry this for the left button as a three-branch rule over the transitions —
+# "press without release → 1, no transition → the level, otherwise 0" — and the input suite proves,
+# exhaustively over every (believed, cur, seen), that every branch of that rule equals the level bit.
+# The belief was never distinct from the level in VALUE; what it is distinct from is `seen`, and what
+# makes it a "belief" is its ROLE: it is `believed_down` for the NEXT `input_btn_transitions`, the one
+# fact the next event cannot tell from its own bitmaps. One line, one place, no per-button copies.
+fn input_btn_carry(cur): i64 { return cur & input_btn_all(); }
+
 # ⛔ `input_btn_edge` WAS DELETED (2026-08-09). It computed ONE edge from a single level, which is the
 # wrong shape for this kernel: `hid_mouse_take` re-seeds `buttons_seen` to the held LEVEL, so a caller had
 # to hand it `cur | seen` to catch a folded click — and that made the RELEASE unreachable, which is the

@@ -5,6 +5,107 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.16.24] — 2026-09-12 — every pointer button reaches the wire
+
+> ⚠ The `[Unreleased]` block BELOW this section is older than it, not newer: its frametime content was
+> already inside the `0.16.21` tag (`git show 0.16.21:CHANGELOG.md` opens with it) and shipped again in
+> 0.16.22 and 0.16.23 under the same heading. It is left as found — a released section is a record —
+> and named here so the ordering does not read as a regression.
+
+### Fixed — ⛔⛔ only the LEFT button was ever forwarded, so no client could see a right-click
+
+The frame loop masked button transitions with `1` (*"left button only, for now"*) and forwarded a
+hardcoded `1`. The kernel publishes a full bitmap (`hid_mouse_btn`: bit0 left, bit1 right, bit2
+middle), bhumi passes it through intact, setu carries `button` as a full i64 and dhancha delivers it
+in `POINTER_BTN`'s `a` — **this compositor was the single point of loss**, and every client on the
+desktop was blind to a whole class of gesture. Filed by crab on 2026-09-09
+([`docs/development/issues/2026-09-09-forwards-only-the-left-button.md`](docs/development/issues/2026-09-09-forwards-only-the-left-button.md)),
+whose context menu had no pointer route because of it. It could not be fixed then: this repo did not
+build on any installed toolchain until 0.16.23's 6.6.2 migration.
+
+⭐ **The numbering is a DECISION, and it is made here, because this is the wire's only producer.**
+No repository in the stack defined a button constant. `src/input.cyr` now names them:
+
+| button | kernel bit | wire | ⛔ X11 says |
+|---|---|---|---|
+| `INPUT_BTN_LEFT` | 0 | **1** | 1 |
+| `INPUT_BTN_RIGHT` | 1 | **2** | 3 |
+| `INPUT_BTN_MIDDLE` | 2 | **3** | 2 |
+
+**`wire = kernel_bit + 1`, NOT X11.** It agrees with the one fact that pre-dated this cut (left = 1),
+it is derivable rather than remembered, and it keeps one source of truth for the ordering. This
+stack already diverged from X11 on the neighbouring question — setu gives the wheel its own kind
+rather than spending buttons 4/5 on detents — and the input suite pins the divergence so a reader who
+"corrects" these to X11 fails four assertions rather than putting Delete on the middle button of
+every client that already learned the wire. ⚠ Consumers: read `a` in `POINTER_BTN` and compare to
+these numbers; nothing below aethersafha defines them yet, and setu is the right eventual home.
+
+⛔⛔ **WINDOW MANAGEMENT STAYS LEFT-ONLY, STRUCTURALLY.** The left arm is unchanged — click-to-focus,
+`deco_hit`'s close/maximize/minimize, both drag grips, and its `closed` guard — and runs FIRST. The
+other buttons are a separate loop beneath it that contains no `deco_hit`, no `comp_focus` and no drag:
+they forward, or they do nothing. A loop that routed every button through the left arm would let a
+right-click close a window. ⚠ `closed` guards the extra buttons too: a left press that closed a window
+and a right transition in the same drain must not hand the right button to whatever `comp_window_at`
+finds underneath.
+
+⚠ **Focus is still a left-button gesture.** A right-click on an unfocused window reaches that window's
+client without focusing it, so keys keep going wherever they went. Deliberately not widened here —
+that is a policy change, and this cut is the wire.
+
+⭐ **The belief carried between events is the LEVEL, and the suite now proves it instead of asserting
+it.** The loop used to carry the left button's belief as a three-branch rule over the transitions
+(*"press without release → 1, no transition → the level, otherwise 0"*). Going per-button meant either
+copying that rule per button — and a duplicated rule drifts on whichever side someone remembered — or
+finding out what it was. Run exhaustively over every `(believed, cur, seen)` the bitmaps can take, per
+button, **it equals `cur & mask` in all 512 cells**. So `input_btn_carry(cur)` is one line, and the ⚠
+that used to guard the three lines is re-aimed at the mistake it was really about: carrying `cur | seen`
+(the kernel's OR-fold) leaves a folded click believed-down and swallows the next press. A mutant that
+does so fails the exhaustive cell in 296 places.
+
+⚠ Two one-shot markers, the wheel's lesson applied before the burn instead of after it:
+`forwarded a non-left button press, wire number:` and `a non-left button press had NO client content
+under the cursor`. On a boot, "right-click does nothing" now names which repo dropped it.
+
+### Fixed — six assertions in `tests/input.tcyr` had never run
+
+`return assert_summary();` sat above the A2 provenance group — the instrument that lets a burn capture
+tell a titlebar click from an F5 — so its six assertions compiled, shipped and were never executed:
+the suite reported 136 while the file held 142. Moved to the end of `main`; all six pass. The summary
+is the last statement now, and the file says why. `input` suite **136 → 183** assertions.
+
+### Verified
+
+`cyrius build` OK on 6.6.2 · **27 / 27 suites** · `tests/input.tcyr` 183 / 0 · six mutations against the
+new group each produce a named failure (carry `cur | seen`; carry the left bit only — the original bug's
+shape; carry unforwarded bits; X11 numbering; two buttons instead of three; transitions ignoring the
+mask). ⚠ Not run on QEMU or iron: the pointer arm is inside the frame loop, which no suite reaches; the
+decisions were lifted into `src/input.cyr` for exactly that reason. crab's context-menu route is the
+first consumer and its on-target run is the end-to-end verdict.
+
+### Changed — dependency pins, because the cut gate said so
+
+`scripts/check-dep-tags.sh` — the gate this repo runs before every cut — **failed on five deps**: the
+first `cyrius deps` on 6.6.2 had already re-vendored the siblings' `dist/` through `path` while the
+manifest still named the previous tags. The fifth `path`-beats-`tag` recurrence, caught by the gate
+built after the fourth rather than by a sixth comment.
+
+| dep | from | to | what moved in the consumed module |
+|---|---|---|---|
+| `bhumi` | 1.4.3 | **1.4.4** | two continuation-indent re-flows in `scanout.cyr` |
+| `rupa` | 0.1.6 | **0.1.7** | version header only |
+| `kashi` | 1.0.6 | **1.0.7** | nothing — `src/font_data.cyr` is byte-identical; tests moved |
+| `mehman` | 1.0.2 | **1.0.3** | one comment re-flow in `surface.cyr` |
+| `setu` | 0.8.8 | **0.8.9** | version header only |
+
+Every one is a 6.6.2 pin move with no behaviour in it — read from the tag-to-tag diff of the module
+this manifest consumes, not from the release note. Every tag verified on its remote and on a clean
+sibling tree; the gate answers `9 path-deps clean` after. The stdlib leaves the same `cyrius deps`
+refreshed (`sakshi` 2.5.2, `sandhi` 1.9.17, `sankoch` 2.7.15, `sigil` 3.12.17, `bayan` 1.5.6) are the
+6.6.2 snapshot's own formatter re-flows, byte-identical to `~/.cyrius/versions/6.6.2/lib`.
+⚠ Binary: **4,171,216 B**, `fc24d7bc…`. The button fix moved it 4,171,032 → 4,171,216 (+184 B); the
+five tag bumps then moved it **0 B** — a same-size rebuild, which is exactly the shape this repo's
+notes say never to read as "nothing changed". `cmp`, never `ls -l`.
+
 ## [Unreleased] — phase timing, because iron said the clear was never the cost
 
 ### Added — `frametime` times RENDER / PRESENT / OTHER, and reports AT EXIT
