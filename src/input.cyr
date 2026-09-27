@@ -38,11 +38,12 @@ enum HidUsage {
     HID_F8  = 0x41;   # move focused window right
     HID_F9  = 0x42;   # move focused window up
     HID_F10 = 0x43;   # move focused window down
-    # ⭐ THE LAUNCHER (2026-08-17). F2 opens it; the arrows and Enter drive it while it is up.
-    # ⚠ F2 is free — F4-F10 are the window-management band above and F1/F3 are unclaimed, so this takes
-    # the lowest free function key rather than displacing anything.
-    HID_F2  = 0x3B;   # open the application launcher
-    HID_F3  = 0x3C;   # cycle the desktop theme (M7-E)
+    # ⭐ THE LAUNCHER (2026-08-17). Ctrl+F2 opens it; the arrows and Enter drive it while it is up.
+    # ⚠ F2 was free — F4-F10 are the window-management band above and F1/F3 were unclaimed, so this took
+    # the lowest free function key rather than displacing anything. Bare until 0.16.26; a Ctrl chord
+    # since, like everything else here (`input_chrome_key`).
+    HID_F2  = 0x3B;   # Ctrl+F2: open the application launcher
+    HID_F3  = 0x3C;   # Ctrl+F3: cycle the desktop theme (M7-E)
     # ⛔ VALUES ARE THE HID BOOT-KEYBOARD USAGE CODES, cross-checked against a second consumer rather
     # than a table: crab's own key handling names `Up/Down (0x52/0x51)`, `Left/Right (0x50/0x4F)` and
     # `Enter (0x28)` for the same wire. A usage code guessed here would silently bind the wrong key.
@@ -139,16 +140,15 @@ fn input_is_modifier(ev): i64 {
 # ⛔⛔ BARE KEYS ARE THE CLIENT'S (0.16.25). Until this cut Esc, Tab and F4–F10 were claimed bare and
 # consumed unforwarded — so a client's Esc could not cancel anything, its Tab could not move focus,
 # its F10 could not open a menu, and Esc ENDED THE DESKTOP. Measured on QEMU by crab (filing
-# `docs/development/issues/2026-09-13-claimed-keys-never-reach-a-client.md`): crab acted on zero of
+# `docs/development/issues/archived/2026-09-13-claimed-keys-never-reach-a-client.md`): crab acted on zero of
 # them. That was the right shape for a compositor with no way to tell a chord from a key, and the
 # wrong one the day a client bound any of them. `ctrl` is the latch from `input_mod_track`; with it
 # clear this function answers IA_NONE for everything, and the frame loop forwards.
 #   Ctrl+Q        quit the desktop      (bare Esc, before)
 #   Ctrl+Tab      focus the next window (bare Tab, before)
 #   Ctrl+F4..F10  close · maximize · minimize · move ←→↑↓  (bare F4..F10, before)
-# ⚠ F2 (launcher) and F3 (theme) are NOT in this table and stay bare — they are read before
-# `input_handle` in the frame loop. Whether they move too is an open question, recorded in the
-# CHANGELOG rather than decided here.
+# ⚠ Ctrl+F2 (launcher) and Ctrl+F3 (theme) are NOT in this table: they are desktop chrome, not window
+# operations, so `input_chrome_key` maps them and the frame loop reads it before `input_handle`.
 fn input_map(ev, ctrl): i64 {
     # ⛔⛔ KIND FIRST. The event batch is MIXED since bhumi 1.1.4 — pointer events share the array — and
     # every read below is `ev & 0xFF`, so an unchecked motion event is interpreted as a keystroke. The
@@ -171,6 +171,35 @@ fn input_map(ev, ctrl): i64 {
     if (u == HidUsage.HID_F9)  { return InputAction.IA_MOVE_UP; }
     if (u == HidUsage.HID_F10) { return InputAction.IA_MOVE_DOWN; }
     return InputAction.IA_NONE;
+}
+
+# ⭐⭐ THE DESKTOP'S OWN CHROME KEYS — the two that are not window operations.
+# ⚠ DELIBERATELY NOT `InputAction` values: `input_apply` has an arm per action, and the launcher and the
+# theme are not something to apply to a window. A separate answer keeps them out of that switch.
+enum ChromeKey {
+    CHROME_NONE     = 0;
+    CHROME_LAUNCHER = 1;   # Ctrl+F2 — open the application launcher
+    CHROME_THEME    = 2;   # Ctrl+F3 — cycle the desktop theme
+}
+
+# input_chrome_key(ev, ctrl): pure key→chrome mapping for a pressed key (CHROME_NONE otherwise).
+#
+# ⛔⛔ Ctrl CHORDS SINCE 0.16.26, and bare F2/F3 are the client's. 0.16.25 moved every window key onto
+# Ctrl and left these two bare as an open question; thoth's AGNOS window plan listed them as claimed
+# keys a client could never receive (`docs/development/issues/archived/2026-09-17-a-setu-client-outside-
+# the-registry-cannot-start.md`). The operator's ruling closed it the way 0.16.25 closed the rest.
+# Until then they were matched inline in the frame loop, where no test reached them.
+# ⚠ Same guards as `input_map`, in the same order and for the same reasons: kind first (a motion's low
+# byte reads as a usage), press only (the loop acted on both edges once, and three F3 presses made six
+# theme switches), and then Ctrl. The loop's chord swallow takes the release.
+fn input_chrome_key(ev, ctrl): i64 {
+    if (bhumi_ev_is_key(ev) == 0) { return ChromeKey.CHROME_NONE; }
+    if (bhumi_key_pressed(ev) == 0) { return ChromeKey.CHROME_NONE; }
+    if (ctrl == 0) { return ChromeKey.CHROME_NONE; }
+    var u = bhumi_key_usage(ev);
+    if (u == HidUsage.HID_F2) { return ChromeKey.CHROME_LAUNCHER; }
+    if (u == HidUsage.HID_F3) { return ChromeKey.CHROME_THEME; }
+    return ChromeKey.CHROME_NONE;
 }
 
 # input_action_is_move(action): does this action slide the focused window?

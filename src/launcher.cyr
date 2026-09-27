@@ -73,9 +73,79 @@ fn lnch_plen_at(i): i64 { if (i < 0) { return 0; } if (i >= lnch_n) { return 0; 
 # could not read which app it had launched. `rupa_theme_name` is the precedent.
 fn lnch_name_at(i) { if (i < 0) { return 0; } if (i >= lnch_n) { return 0; } return load64(&lnch_name + i * 8); }
 
+# The index of the first app registered under `name`, or -1. What `--spawn NAME` resolves through, so a
+# harness can start an app by what it is called rather than by its row — rows move when a
+# presence-gated app is staged. ⚠ Names may repeat (only paths may not), so the FIRST registration wins.
+fn lnch_find(name): i64 {
+    if (name == 0) { return 0 - 1; }
+    var i = 0;
+    while (i < lnch_n) {
+        if (streq(load64(&lnch_name + i * 8), name) == 1) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# ============================================================================================
+# THE SPAWN ENVIRONMENT — what a launched client is born with (the agnos `#43` env blob)
+# ============================================================================================
+# ⛔⛔ THE BLOB REPLACES THE KERNEL'S DEFAULT, IT DOES NOT MERGE WITH IT (agnos ABI §4.6). A child
+# spawned with no blob gets `HOME=/` and `PWD=/`; one spawned with a blob gets exactly the blob. This
+# compositor handed every client `AGNOS_CHAN=<fd>` and nothing else, so a client had NO HOME and NO
+# PWD — thoth reads its global config from `$HOME/.thoth/config.cyml` and starts its file tree from
+# `$PWD` (filed 2026-09-17). Both are now inherited from the compositor's own environment, and "/"
+# when that is unset or empty — the kernel's own default, so a client sees what it would have seen
+# with no blob at all, plus its channel.
+# ⚠ Pure byte-packing, here and not in `main.cyr`, so the exact bytes are assertable on a host. A
+# malformed blob does not FAIL on agnos: the line form of `#43` falls back to the default env, which
+# drops `AGNOS_CHAN` with it, and the client comes up unable to find its compositor.
+# ⚠ Kernel gate: `KEY=VALUE\0` entries, ≤ 1024 B, 1..16 entries. This packs three. A value longer than
+# `LNCH_ENV_VAL_MAX` is passed as "/" rather than cut, because a truncated path names a different
+# directory. Worst case 11+19+1 + 5+255+1 + 4+255+1 = 552 B, so a `LNCH_ENV_CAP` buffer always holds it
+# and nothing can fail between endowing a channel and spawning the child it is armed for.
+var LNCH_ENV_CAP     = 1024;   # the kernel's blob cap, and the buffer size `lnch_env_pack` needs
+var LNCH_ENV_VAL_MAX = 255;    # longest inherited HOME / PWD passed through as-is
+
+fn _lnch_env_put(buf, w, s): i64 {
+    var i = 0;
+    while (load8(s + i) != 0) { store8(buf + w, load8(s + i)); w = w + 1; i = i + 1; }
+    return w;
+}
+
+# The value to pass for an inherited variable: `v`, or "/" when it is unset, empty or over-long.
+fn _lnch_env_val(v) {
+    if (v == 0) { return "/"; }
+    var n = strlen(v);
+    if (n == 0) { return "/"; }
+    if (n > LNCH_ENV_VAL_MAX) { return "/"; }
+    return v;
+}
+
+# Pack `AGNOS_CHAN=<afd>\0HOME=<home>\0PWD=<pwd>\0` into `buf`, which must hold `LNCH_ENV_CAP` bytes.
+# -> the blob's length in bytes, trailing NUL included — the `#43` a4 argument.
+# `home` / `pwd` are cstrs or 0 (what `getenv` answers for an unset variable).
+fn lnch_env_pack(buf, afd, home, pwd): i64 {
+    var w = _lnch_env_put(buf, 0, "AGNOS_CHAN=");
+    var dig[24];
+    var nd = 0;
+    var x = afd;
+    if (x < 0) { x = 0; }
+    if (x == 0) { store8(&dig, 48); nd = 1; }
+    while (x > 0) { store8(&dig + nd, 48 + (x % 10)); nd = nd + 1; x = x / 10; }
+    while (nd > 0) { nd = nd - 1; store8(buf + w, load8(&dig + nd)); w = w + 1; }
+    store8(buf + w, 0); w = w + 1;
+    w = _lnch_env_put(buf, w, "HOME=");
+    w = _lnch_env_put(buf, w, _lnch_env_val(home));
+    store8(buf + w, 0); w = w + 1;
+    w = _lnch_env_put(buf, w, "PWD=");
+    w = _lnch_env_put(buf, w, _lnch_env_val(pwd));
+    store8(buf + w, 0); w = w + 1;
+    return w;
+}
+
 # ⚠ OPENING ON AN EMPTY REGISTRY IS REFUSED. A panel listing nothing, that swallows every key until
 # Escape, is indistinguishable from a hung desktop — and it is exactly what a boot with no staged apps
-# would produce.
+# would produce. (Ctrl+F2 opens it since 0.16.26; bare F2 before, and bare F2 is the client's now.)
 fn lnch_openp(): i64 {
     if (lnch_n == 0) { return 0; }
     lnch_open = 1;

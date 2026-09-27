@@ -6,4 +6,6 @@ Not decisions (those live in [`../adr/`](../adr/)) and not guides (those live in
 
 ## Items
 
-_Empty. Add a numbered entry (`001-kebab-case-title.md`) the first time the code has a non-obvious invariant a reader can't derive. Do not write entries for decisions — those are ADRs._
+- [001 — What a setu client can count on from aethersafha](001-setu-client-contract.md) — how a client is started, the environment it gets, which keys reach it, and the largest surface it can attach.
+
+Add the next as `002-kebab-case-title.md`. Do not write entries for decisions — those are ADRs.

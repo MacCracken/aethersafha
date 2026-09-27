@@ -1,6 +1,9 @@
 # A setu client outside the launcher registry cannot be started, and a spawned client gets no HOME
 
-**Status:** open — filed by thoth (0.52.2) while planning its F8 arc (the AGNOS window backend over setu).
+**Status:** ✅ **CLOSED in 0.16.26 (2026-09-27)** — all four asks answered; see **Resolution** at the end.
+Archived. ⚠ The agnos-side code paths are unit-tested and build `--agnos` clean, but have not yet run on
+QEMU or iron. **Originally:** open — filed by thoth (0.52.2) while planning its F8 arc (the AGNOS window
+backend over setu).
 **Severity:** blocks thoth's window on AGNOS entirely; nothing is broken for puka or crab.
 **Consumer:** thoth `src/gui/` — a raw-wire Wayland window today, whose `gwl_win_*` seam mirrors puka's `win_*`
 contract; the AGNOS backend would follow `puka/src/platform/setu/window_setu.cyr` over `setu/dist/setu.cyr` (0.8.9).
@@ -41,3 +44,33 @@ contract; the AGNOS backend would follow `puka/src/platform/setu/window_setu.cyr
 - setu has no protocol version on the wire (`SETU_HELLO` is defined, but the handshake refuses anything before
   `CREATE_SURFACE`), and the names of pending wire work — modifier state on keys, damage on present, a pointer-motion
   opt-in — mean thoth holds its backend until the contract is declared stable.
+
+## Resolution (0.16.26, 2026-09-27)
+
+The whole contract a client can count on now lives in one place:
+[`docs/architecture/001-setu-client-contract.md`](../../../architecture/001-setu-client-contract.md).
+
+1. **Starting a client that is not puka or crab — two ways.**
+   - **The launcher lists thoth** as `/bin/thoth gui` — `#43`'s line form splits the path line into argv
+     `/bin/thoth`, `gui`. It is listed **only when `/bin/thoth` exists**, and **after** puka and crab. On an
+     image without thoth the panel keeps its size and every row its index; the QEMU harnesses select by row,
+     and `launcher-panel-test.py` recomputes the panel rect from `N_APPS = 2`. Chosen by the operator over a
+     data-file registry: a further app is one `lnch_register` line in `src/main.cyr`.
+   - **`--spawn NAME`** (repeatable) starts any registered app at boot, by name: `aethersafha --spawn thoth`.
+     It is the harness hook, independent of `--clients`, which keeps its fixed puka + crab shape and verdict.
+   - ⚠ **Not done here, and agnos's to do:** staging `/bin/thoth` on the rootfs (`scripts/burn/stage-tools.sh`
+     has no thoth entry), and thoth's AGNOS backend itself.
+2. **HOME and PWD — inherited.** A spawn blob *replaces* the kernel's default env, so a client got
+   `AGNOS_CHAN` and nothing else. Every spawned client now also gets `HOME` and `PWD`, inherited from the
+   compositor's own environment, and `/` when that is unset, empty, or over 255 bytes (`lnch_env_pack`,
+   `src/launcher.cyr`; the exact bytes, and the kernel's env gate, are asserted in `tests/launcher.tcyr`).
+3. **The keys a client can count on** — §3 of the contract. Every chrome key is a Ctrl chord, including, as
+   of this cut, **Ctrl+F2** (launcher) and **Ctrl+F3** (theme), which were bare. So bare F2 and F3 reach a
+   client now. **Alt is never claimed**: its edges are delivered like every modifier's. Anything pressed
+   while Ctrl is held is swallowed, so thoth's Ctrl+B / S / K / R / T still need non-chord routes on AGNOS.
+   The list changed at 0.16.25 and at 0.16.26; nothing further is planned, and a change will be marked ⛔ in
+   the CHANGELOG.
+4. **The largest surface — documented** (§4 of the contract), not a first `CONFIGURE`. A `#86` GPU slot is
+   32 MB (8,388,608 BGRA pixels; 3840×2160 fits). Without a carve-out — QEMU — setu falls back to a `#71`
+   slot of 2 MB (524,288 pixels). **960×600 does not fit that; 960×540 does.** Over the cap,
+   `setu_client_present` returns −45 with nothing sent (setu ≥ 0.8.11), so a client can retry smaller.

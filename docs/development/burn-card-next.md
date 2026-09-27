@@ -14,7 +14,7 @@ The 2026-08-22 burn measured **63.8 -> 150.4 ms per frame (7-15 fps), doubling w
   `run /bin/<tool>`, and an ESP-only refresh pairs a new kernel with a STALE tool, silently
 
 ## 1. THE PHASE LINE — the whole point of this burn
-Open puka, type for ~20 s, quit. Read BOTH:
+Open puka (Ctrl+F2, Enter), type for ~20 s, quit (Ctrl+Q). Read BOTH:
 - `aethersafha: cumulative us (render, present, other)` — printed every 120 frames
 - `aethersafha: frame cost us AT EXIT (frames, frame, render, present, other, dropped)`
 
@@ -36,8 +36,8 @@ Host baseline, 100 frames: frame 1805 = render 489 + **present 1301** + other 15
 - **H5 media key.** Declare it in advance, press a Keychron media key, watch the cursor. Open since
   2026-08-16. The mouse bound (`boot-mouse interfaces bound: 1`) and `ptrscan` reached ring 3, but no
   motion or click was ever driven.
-- **Theme repaint on the GPU path.** Press F3 with a client open. No theme lines appeared in the last
-  log at all, so this remains unreproduced rather than fixed.
+- **Theme repaint on the GPU path.** Press **Ctrl+F3** with a client open — bare F3 is the client's since
+  0.16.26. No theme lines appeared in the last log at all, so this remains unreproduced rather than fixed.
 
 ## 4. Known-open, expect to see it
 `ls` multi-column output wraps in puka (`#60 winsize` returns the ~320-col CONSOLE grid, not the

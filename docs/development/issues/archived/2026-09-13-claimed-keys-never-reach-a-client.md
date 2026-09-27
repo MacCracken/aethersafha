@@ -6,8 +6,13 @@ windows, **Ctrl+F4–F10** close/maximize/minimize/move; bare Esc, Tab and F4–
 focused client and a chord is swallowed whole. Ctrl was already observable as usages 0xE0/0xE4 — no
 kernel or bhumi change. Measured on QEMU with crab: its F10 menu bar opened and `View` was driven from
 the keyboard for the first time, bare Esc and Tab reached it, Ctrl+Tab/Ctrl+F10 stayed the
-compositor's, Ctrl+Q ended the desktop. ⚠ F2 (launcher) and F3 (theme) stay bare — not in the ruling;
-open. ⚠ The 'measured' block below is the OLD contract, kept as the record of why.
+compositor's, Ctrl+Q ended the desktop. ✅ **The F2 / F3 residue closed in 0.16.26 (2026-09-27)**: they
+were not in the first ruling and stayed bare; the operator's second ruling made them **Ctrl+F2**
+(launcher) and **Ctrl+F3** (theme), so **no chrome key is claimed bare any more** (the launcher panel still
+takes key presses while it is open — it is modal). The whole contract a client can
+count on is now written down: `docs/architecture/001-setu-client-contract.md`. ⚠ The agnos harnesses
+that open the launcher with a bare `f2` must send `ctrl-f2`. **Archived at 0.16.26.**
+⚠ The 'measured' block below is the OLD contract, kept as the record of why.
 ⚠ Also fixed in 0.16.25: `println(lnch_name_at(sel))` printed the app name's address.
 **Severity:** High for crab's keyboard surface (three shipped affordances are unreachable), and the
 Esc arm is destructive: a client's operator pressing Esc — the universal "cancel" — ends the session.

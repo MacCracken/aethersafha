@@ -6,8 +6,11 @@ is `wire = kernel_bit + 1` (**1 = left, 2 = right, 3 = middle**), named as `INPU
 Window management stays left-only structurally — the other buttons live in a forward-only loop that
 contains no `deco_hit`, no focus and no drag. ⚠ Focus is still a left-button gesture (a right-click
 reaches an unfocused window's client without focusing it) — deliberately not widened; a policy
-decision, not the wire. ⚠ Not yet run on QEMU or iron; the first consumer's on-target run is the
-end-to-end verdict. See `CHANGELOG.md` `[0.16.24]`.
+decision, not the wire. See `CHANGELOG.md` `[0.16.24]`.
+⭐ **Measured on QEMU, 2026-09-13** — crab's `agnos/scripts/harness/crab-pointer-test.py` against
+aethersafha 0.16.24: *"right click: compositor forwarded a non-left button: True wire number: 2 | crab
+opened the context menu: 1 time(s)"*, PASS (crab `CHANGELOG.md`). ⚠ Not yet run on iron.
+**Archived at 0.16.26 (2026-09-27)** — nothing here was left open.
 ⚠ **The blocker-behind-the-blocker below is HISTORY.** 0.16.23 migrated this repo to cyrius 6.6.2 and
 the three disagreeing deps moved with it (sigil 3.12.17 · agnostik 1.6.1 · agnodrm 1.6.0); it builds.
 The table and the pin-skew analysis are kept because the shape — a language change migrated in one

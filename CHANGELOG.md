@@ -5,6 +5,148 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.16.26] — 2026-09-27 — cyrius 6.6.6, every dep resolved from its tag; Ctrl+F2 / Ctrl+F3; a third client can start
+
+> `git describe --tags` answered `0.16.25-1-g0fdde56` before a word of this was written: 0.16.25 is
+> tagged, and `0fdde56` (two issue filings and a re-vendored `lib/`) sits one commit past it. Cut on
+> operator direction; the commit, the tag and the push are the operator's.
+
+### Fixed — ⛔⛔ `0fdde56` built on NEITHER target
+
+The committed `lib/kavach.cyr` was kavach's **unreleased HEAD** (three commits past 3.13.1, written for
+cyrius 6.6.6) and `lib/agnostik.cyr` agnostik's **uncommitted** 1.6.4 tree, under manifest tags 3.12.5 and
+1.6.1 and a 6.6.2 pin. Reproduced before anything moved:
+
+- **`--agnos`**: `undefined variable 'O_NOFOLLOW'` at `lib/kavach.cyr:522:67`, `8440:66`, `11070:51`, plus
+  `sys_ftruncate` — exactly what agnos 1.57.10 filed as
+  [`2026-09-26-agnos-build-fails-kavach-o-nofollow.md`](docs/development/issues/archived/2026-09-26-agnos-build-fails-kavach-o-nofollow.md).
+- **Host**, which that filing could not see: `refusing to emit binary with 6 reachable undefined function(s)`
+  — `proc_timeout_ms`, `_proc_read_pipe`, `_proc_wait_deadline`, `_proc_child_guard`, `sys_nanosleep`,
+  `sys_ftruncate`.
+
+⛔ **The sixth `path`-beats-`tag` recurrence, and the first one committed.** A live `path = "../kavach"`
+vendored whatever the checkout held, and nothing but `scripts/check-dep-tags.sh` could see it. ⭐ The
+0.16.25 **declared** graph — its own tags, resolved in a scratch tree with no sibling checkouts, at 6.6.2 —
+built on both targets and reproduced `state.md` to the byte (host 4,175,440 B, agnos 4,099,584 B, 27/27).
+The tags were never broken; the committed `lib/` was.
+
+### Changed — cyrius pin 6.6.2 → **6.6.6**
+
+Operator-asked, and **required**: agnodrm 1.6.2 needs ≥ 6.6.5 (`sys_sendto`, `O_DIRECTORY`) and kavach 3.13.1
+needs 6.6.6 (`proc_timeout_ms` and the `_proc_*` capture helpers). 6.6.4 added agnos's `O_NOFOLLOW` /
+`O_DIRECTORY` (mapped to the real `AO_*` bits in `file_open`), and 6.6.5 the `sys_ftruncate` / `sys_nanosleep`
+peers. `src/` needed **no** edits for the toolchain. `cyrius lib sync`, then `cyrius deps`: every stdlib file in
+`lib/` is byte-identical to `~/.cyrius/versions/6.6.6/lib`, checked file by file; one file is new,
+`lib/alloc_cx.cyr`, which 6.6.6's `alloc.cyr` includes.
+
+### Changed — every dependency on its latest published tag
+
+| dep | from | to | what reaches this build |
+|---|---|---|---|
+| `bhumi` | 1.4.4 | **1.4.5** | toolchain bump, and aarch64 fbdev syscall numbers; x86_64 unchanged |
+| `rupa` | 0.1.7 | **0.1.8** | the version line only |
+| `agnostik` | 1.6.1 | **1.6.4** | three fns changed (`_fill_random` via `getrandom`, AgentInfo JSON), none called here; 1.6.4 is docs-only |
+| `agnodrm` | 1.6.0 | **1.6.2** | additive (`bootloader_list_loader_entries`); the 6.6.5 floor above |
+| `kashi` | 1.0.7 | **1.0.10** | `src/font_data.cyr` byte-identical |
+| `kavach` | 3.12.5 | **3.13.1** | no signature change on mehman's path; behaviour ⚠ below |
+| `setu` | 0.8.9 | **0.8.11** | client-side fixes (present never sends a pixel-less ATTACH; Linux poll reports EOF); wire unchanged |
+| `mehman` · `chitra` | 1.0.3 · 1.0.3 | — | already latest |
+
+Every tag was checked present locally and on the remote, with the sibling tree clean at it. agnostik 1.6.4
+was released during the cut (tag `59d2f96`); taking it over 1.6.3 left **both binaries byte-identical**,
+since its dist differs only in the version comment.
+⚠ **kavach on mehman's guest path** (`foreign_run` → `mehman_sandbox_capture_guest`): 3.12.8's seccomp
+filter checks the architecture, so a **32-bit guest is SIGSYS-killed at its first syscall** (exit 159);
+3.12.9 kills `clone` with any `CLONE_NEW*` and the new mount API, so **a guest that builds its own namespace
+sandbox dies**; 3.12.7 execs an absolute path from an `O_PATH` descriptor. `tests/foreign.tcyr` runs 64-bit
+`/bin/true` and `/bin/echo` and stays green.
+⚠ `cyrius deps` warns `refusing to overwrite stdlib leaf 'sigil'`: kavach declares `[deps.sigil]` 3.12.18
+while this manifest declares `sigil` as a stdlib leaf. The kept stdlib copy **is** sigil 3.12.18, byte for
+byte, and the same shape existed with kavach 3.12.5. Left declared, because `lib/tls_native.cyr` includes it.
+
+### Changed — ⛔⛔ every `path` override is DORMANT: the declared graph is the built graph
+
+All nine `path = "../<sibling>"` lines are commented out, one note each, with the rule on `[deps]` —
+dhancha 0.10.3's move. Each dep now resolves from its published tag and `cyrius.lock` pins the commit:
+`86 deps locked, 10 commit-pinned` (the nine, and sigil through kavach). For cross-repo work on an unpushed
+sibling, uncomment one line and put it back before the commit.
+`scripts/check-dep-tags.sh` is rewritten for it: the dormant line is the sibling's location; a **live**
+`path` **fails**; a new check requires the lock to pin the commit the tag names; a `[deps.*]` block with no
+`path` line is named instead of silently scoring fewer. ⚠ **Tag vs sibling `VERSION` is a note now, not a
+failure**: with `path` live it was the drift detector, and with `path` dormant the byte check and the lock
+check catch drift directly — a sibling that is ahead is only a newer release to take. Mutation-tested in a
+scratch copy: a live `path`, a tampered `lib/` file, a lock with a missing, wrong or stale commit, a tag that
+does not exist and a stale-but-real tag each fail it.
+
+### Changed — ⛔⛔ Ctrl+F2 opens the launcher, Ctrl+F3 cycles the theme; bare F2 and F3 are the client's
+
+0.16.25 moved every window key onto Ctrl and left these two bare as an open question; thoth's AGNOS window
+plan named them as keys a client could never receive. The operator's ruling closed it the same way.
+`input_chrome_key` (`src/input.cyr`, pure) replaces two inline matches in the frame loop that no test could
+reach; press only and Ctrl only, and the chord swallow takes their releases like every other chord's.
+**No chrome key is claimed bare any more** — the launcher panel still takes key presses while it is open.
+⚠ **The agnos harnesses that send a bare `f2` or `f3` must send `ctrl-f2` / `ctrl-f3`** (17 files in
+`agnos/scripts/harness`; not changed here). The log lines they match — `launcher opened`, `theme switched:`,
+`launching from the launcher:` — are unchanged. The boot line is now `launcher ready -- Ctrl+F2 lists the
+apps`, which no harness matches.
+
+### Added — a setu client that is not puka or crab can be started (thoth's filing)
+
+Filed by thoth as [`2026-09-17-a-setu-client-outside-the-registry-cannot-start.md`](docs/development/issues/archived/2026-09-17-a-setu-client-outside-the-registry-cannot-start.md).
+
+- **thoth in the launcher** as `/bin/thoth gui` (`#43`'s line form splits it into argv). Listed only when
+  `/bin/thoth` exists, and after puka and crab: the harnesses select by row, and `launcher-panel-test.py`
+  sizes the panel from `N_APPS = 2`, so an image without thoth sees no change. Chosen over a data-file
+  registry; a further app is one `lnch_register` line.
+- **`--spawn NAME`** (repeatable, agnos): start any registered app at boot by name. The harness hook;
+  `--clients` keeps its fixed puka + crab shape and its verdict.
+- ⛔ **HOME and PWD for every spawned client.** A `#43` env blob *replaces* the kernel's default
+  `HOME=/ PWD=/`, so a client had only `AGNOS_CHAN`. Both are now inherited from the compositor, and `/` when
+  unset, empty or over 255 bytes — `lnch_env_pack` (`src/launcher.cyr`), whose exact bytes and the kernel's
+  env gate are asserted on the host. It also writes the fd in full: the packer it replaces wrote at most two
+  digits, so an fd ≥ 100 would have gone out as `AGNOS_CHAN=:5`.
+- ⭐ **[`docs/architecture/001-setu-client-contract.md`](docs/architecture/001-setu-client-contract.md)** —
+  the first architecture note: how a client starts, the environment it gets, which keys reach it, and the
+  largest surface it can attach (a `#86` slot is 32 MB; without a carve-out, as in QEMU, a `#71` slot is
+  2 MB — 960×540 fits, thoth's 960×600 does not).
+
+### Docs — all five filed issues closed and archived
+
+Moved to `docs/development/issues/archived/` (the stack's convention), each with its status and a
+resolution; references in this file and in `src/` follow the move.
+
+- `2026-08-01-linux-only-backends-break-every-agnos-consumer` — fixed in kavach 3.11.7 and never closed
+  here; its consumer half (the `path` override) is closed by the dormant lines above.
+- `2026-09-09-forwards-only-the-left-button` — closed in 0.16.24; measured on QEMU on 2026-09-13 (crab:
+  right click arrives as button 2). Not yet run on iron.
+- `2026-09-13-claimed-keys-never-reach-a-client` — closed in 0.16.25; its F2/F3 residue closes here.
+- `2026-09-17-a-setu-client-outside-the-registry-cannot-start` — closed here, all four asks.
+- `2026-09-26-agnos-build-fails-kavach-o-nofollow` — closed here: `cyrius build --agnos` succeeds.
+
+### Verified
+
+- **Host 4,392,488 B** (sha256 `ebf4ab6b…`) · **`--agnos` 4,316,280 B** (sha256 `9114c5fd…`) · **27 / 27 suites,
+  1,969 assertions**, 1,925 → +44: `input` 221 → 237, `launcher` 52 → 80. ⛔ **A SIZE DOES NOT IDENTIFY A
+  BINARY** — quote the hash.
+- **Eleven mutations of this cut's code, each caught**: the chord mapper without its Ctrl, kind or press
+  guard, or with F2/F3 swapped; the env blob without HOME/PWD, not inheriting HOME, writing two digits,
+  cutting instead of replacing an over-long value, passing an empty one, or skipping fd 0; `lnch_find`
+  letting the last match win. The first version of the env tests crashed on the no-HOME mutant instead of
+  failing it; the helpers are null-safe now.
+- `scripts/check-dep-tags.sh` → **9 deps clean**.
+- **Warnings**: duplicate-fn warnings **24 → 5** — all nineteen of kavach 3.12.5's are gone (fourteen
+  against sigil, three against agnodrm, two inside kavach itself), and the five left (`_hex_nibble`,
+  `result_print_err`, `is_syscall_err`, `wrap_syscall`, `uname_release`) predate this cut. **One is new**: sigil's `var buf[262144]` *"gets STATIC storage"*. 6.6.x promoted an
+  existing note to a warning; sigil banks that buffer per thread deliberately and tracks the warning in its
+  roadmap.
+- **Size**: +217,048 B host and +216,696 B agnos over 0.16.25, of which this cut's code is +48 B and
+  +4,240 B. On the host: unreachable-fn bytes +26,073 (1,862,431 → 1,888,504), static data +13,016
+  (1,211,208 → 1,224,224), and the remaining ~178 KB is reachable code from the 6.6.6 stdlib and the new dep
+  tags, not attributed per module. ⚠ `CYRIUS_DCE=1` cannot separate them: it NOPs dead functions in place,
+  so the file stays the same size.
+- ⚠ **Not run on QEMU or iron.** Ctrl+F2/F3, `--spawn` and HOME/PWD live in the agnos arm; their pure
+  halves are unit-tested and the `--agnos` build is clean. A QEMU run needs the harness update above first.
+
 ## [0.16.25] — 2026-09-13 — chrome keys are Ctrl chords; bare Esc / Tab / F-keys are the client's
 
 > `git describe --tags` answered `0.16.24` exactly before a word of this was written; `[0.16.24]` below
@@ -23,7 +165,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 consumed unforwarded — the right shape for a compositor that could not tell a chord from a key, and
 the wrong one the day a client bound any of them, which crab did (Esc to cancel, Tab for its
 sidebar, F10 for its menu bar) and measured on QEMU: it acted on zero of them, and bare Esc ended
-the session. Filed as `docs/development/issues/2026-09-13-claimed-keys-never-reach-a-client.md`
+the session. Filed as `docs/development/issues/archived/2026-09-13-claimed-keys-never-reach-a-client.md`
 (now closed); the operator's ruling was the third shape it offered, on a modifier: *"it was easy
 for initial testing of the desktop but now it's time to fix that right."*
 
@@ -89,7 +231,7 @@ hardcoded `1`. The kernel publishes a full bitmap (`hid_mouse_btn`: bit0 left, b
 middle), bhumi passes it through intact, setu carries `button` as a full i64 and dhancha delivers it
 in `POINTER_BTN`'s `a` — **this compositor was the single point of loss**, and every client on the
 desktop was blind to a whole class of gesture. Filed by crab on 2026-09-09
-([`docs/development/issues/2026-09-09-forwards-only-the-left-button.md`](docs/development/issues/2026-09-09-forwards-only-the-left-button.md)),
+([`docs/development/issues/archived/2026-09-09-forwards-only-the-left-button.md`](docs/development/issues/archived/2026-09-09-forwards-only-the-left-button.md)),
 whose context menu had no pointer route because of it. It could not be fixed then: this repo did not
 build on any installed toolchain until 0.16.23's 6.6.2 migration.
 
@@ -3472,7 +3614,7 @@ module, this breaks the whole consumer, not just the backend.
 *and* `path = "../kavach"`; the path override wins, so `lib/kavach.cyr` is byte-identical to the local
 checkout at **3.9.3**. The build worked on 2026-07-25 and stopped working with no change to this repo.
 
-Filed in both trees as `docs/development/issues/2026-08-01-linux-only-backends-break-every-agnos-consumer.md`.
+Filed in both trees as `docs/development/issues/archived/2026-08-01-linux-only-backends-break-every-agnos-consumer.md`.
 **Host build and all 20 test suites are green; the agnos build of this change is unverified.**
 
 ### Changed — cyrius pin 6.4.78 -> 6.5.5; bhumi 1.1.2, rupa 0.1.2, kashi 1.0.4, setu 0.7.1, kavach 3.10.0

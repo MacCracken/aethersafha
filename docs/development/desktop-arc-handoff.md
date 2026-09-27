@@ -54,8 +54,8 @@ client-surface blit and the fix is the present protocol's missing damage rects (
 - ⚠ **"Which folder is questionable" — it is `/`.** agnos has **no cwd and no chdir**; kriya's
   `k_getcwd` returns `/` there. The listing was correct, just not visibly anchored.
 - ⚠ **NOT EXERCISED THIS BURN, still owed:** the **H5 media-key** stimulus (declare it in advance and
-  watch the cursor) and **theme repaint on the GPU path** (F3 with a client open) — no theme lines in
-  the log at all. The mouse bound (`boot-mouse interfaces bound: 1`, was 2) and `ptrscan` reached
+  watch the cursor) and **theme repaint on the GPU path** (Ctrl+F3 since 0.16.26, with a client open) —
+  no theme lines in the log at all. The mouse bound (`boot-mouse interfaces bound: 1`, was 2) and `ptrscan` reached
   ring 3, but no motion or click was driven.
 
 ## Where it stands
@@ -85,6 +85,8 @@ cut; a same-pin re-sync is NOT a no-op.** 0.16.19's `8ee98f49` cannot be rebuilt
 path-dep: tag == sibling `VERSION`, the tag exists locally AND on the remote, and every vendored
 `lib/` file is byte-identical to that dep's module **at that tag**. 9/9 clean; three mutations proven
 to fail it. ⛔ LOCAL ONLY (needs the siblings; cannot run in CI). Run before every cut and burn.
+⭐ **0.16.26: every `path` line is DORMANT**, so deps resolve from their tags; the gate now FAILS on a
+live `path`, requires `cyrius.lock` to pin each tag's commit, and reports tag vs `VERSION` as a note.
 ⚠ kavach's three-way split (manifest 3.11.14 / vendored 3.11.15 / sibling 3.12.2) is CLOSED — the
 manifest declares 3.12.2 and the gate verifies the bytes.
 

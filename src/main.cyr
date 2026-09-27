@@ -120,14 +120,12 @@ fn ae_client_spawn(path, plen, cname): i64 {
         ae_spawn_failed = 1;
         return 0;
     }
-    # "AGNOS_CHAN=<fd>\0" — the announcement. Wayland's WAYLAND_SOCKET shape.
-    var envbuf = alloc(64);
-    var w = 0;
-    var lit = "AGNOS_CHAN=";
-    while (w < 11) { store8(envbuf + w, load8(lit + w)); w = w + 1; }
-    if (afd >= 10) { store8(envbuf + w, 48 + (afd / 10)); w = w + 1; }
-    store8(envbuf + w, 48 + (afd % 10)); w = w + 1;
-    store8(envbuf + w, 0); w = w + 1;
+    # "AGNOS_CHAN=<fd>\0HOME=…\0PWD=…\0" — the announcement (Wayland's WAYLAND_SOCKET shape), plus the
+    # HOME and PWD the blob would otherwise ERASE: a caller's blob replaces the kernel's default env,
+    # so a client given only AGNOS_CHAN had neither (0.16.26). Packed by `lnch_env_pack`, which cannot
+    # fail at this size — nothing may fail between the endowment above and the spawn it is armed for.
+    var envbuf = alloc(LNCH_ENV_CAP);
+    var w = lnch_env_pack(envbuf, afd, getenv("HOME"), getenv("PWD"));
     var pk = sys_spawn_path_env(path, plen, envbuf, w);
     if (pk < 0) {
         println("aethersafha: spawn_path_env FAILED");
@@ -630,7 +628,7 @@ fn ae_pointer_event(comp, ev, frame): i64 {
         # ⭐⭐ THE OTHER BUTTONS FORWARD, AND ONLY FORWARD (0.16.24). Until this cut every button but the
         # left was discarded here — the kernel published the bitmap, bhumi and setu carried it, dhancha
         # delivered it, and this loop's absence was the single point of loss: no client on the desktop
-        # could see a right-click. Filed by crab (docs/development/issues/2026-09-09-forwards-only-the-
+        # could see a right-click. Filed by crab (docs/development/issues/archived/2026-09-09-forwards-only-the-
         # left-button.md), whose context menu had no pointer route because of it.
         # ⛔ NO `deco_hit`, NO focus, NO drag IN HERE. Window management is the left arm's, above, and
         # stays there — a loop that reached `comp_close_window` would let a right-click close a window.
@@ -1087,8 +1085,8 @@ fn main(): i64 {
     # nothing could start a client later because the only code that knew how was a loop that had
     # already finished. `ae_client_spawn` is that loop's body, lifted out — see its banner.
     # ⛔ THE PRE-SPAWN IS NOW BEHIND `--clients`, AND THAT IS THE WHOLE FEATURE. A bare `aethersafha`
-    # REGISTERS the apps and launches nothing; F2 opens the launcher and the operator picks. Operator:
-    # *"an application launcher of some sort so we don't have to pre load programs on start."*
+    # REGISTERS the apps and launches nothing; Ctrl+F2 opens the launcher and the operator picks.
+    # Operator: *"an application launcher of some sort so we don't have to pre load programs on start."*
     # ⚠ `--clients` KEEPS pre-spawning both, unchanged, because every harness measures that shape —
     # `aethersafha-clients-test.py` asserts `connected: 2, presented: 2` and `puka-terminal-test.py`
     # boots the terminal the same way. Changing the default is the feature; changing what the gates
@@ -1096,14 +1094,46 @@ fn main(): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     lnch_register("/bin/puka", 9, "puka");
     lnch_register("/bin/crab", 9, "crab");
+    # ⭐ thoth's window (0.16.26) — the first client that is not puka or crab, filed by thoth as
+    # `docs/development/issues/archived/2026-09-17-a-setu-client-outside-the-registry-cannot-start.md`.
+    # `#43`'s line form splits "PATH arg" on spaces, so the child's argv is `/bin/thoth gui`.
+    # ⛔ LISTED ONLY WHEN THE BINARY IS STAGED, and registered AFTER puka and crab. A row for an app that
+    # is not on the disk launches nothing (`#43` answers −4) and eats an Enter; and the harnesses select
+    # by ROW — open, Down, Enter is crab — while `launcher-panel-test.py` recomputes the panel's rect from
+    # `N_APPS = 2`. Appended and gated, rows 0 and 1 and the panel's size are unchanged on every image
+    # that has no thoth. ⚠ puka and crab stay UNGATED for the same reason: gating them would change
+    # both on an image that lacks one.
+    if (file_exists("/bin/thoth") == 1) { lnch_register("/bin/thoth gui", 14, "thoth"); }
     if (ae_probe == 1) {
         ae_client_spawn("/bin/puka", 9, "puka");
         ae_client_spawn("/bin/crab", 9, "crab");
     }
+    # ⭐ `--spawn NAME` (repeatable, 0.16.26) — start a REGISTERED app at boot, by name. The harness hook
+    # thoth asked for: a QEMU run can bring up any listed client without driving the launcher by row,
+    # and rows move when a gated app is staged. ⚠ Independent of `--clients`, which keeps its fixed
+    # puka + crab shape and its verdict; `--spawn` adds a client and changes no exit code.
+    var spi = 1;
+    var spn = argc();
+    while (spi < spn) {
+        if (streq(argv(spi), "--spawn") == 1) {
+            if ((spi + 1) < spn) {
+                var spname = argv(spi + 1);
+                var spix = lnch_find(spname);
+                if (spix < 0) { println("aethersafha: --spawn names no registered app:"); }
+                else {
+                    println("aethersafha: --spawn:");
+                    ae_client_spawn(lnch_path_at(spix), lnch_plen_at(spix), lnch_name_at(spix));
+                }
+                sys_write(1, spname, strlen(spname));
+                sys_write(1, "\n", 1);
+            }
+        }
+        spi = spi + 1;
+    }
     # ⚠ Only a FAILURE now, not a fact about an idle desktop: with no `--clients` a zero count is the
     # normal, intended state — the launcher has not been used yet.
     if (ae_probe == 1) { if (chan_n == 0) { println("aethersafha: NO client could be given a channel this run"); } }
-    if (ae_probe == 0) { println("aethersafha: launcher ready -- F2 lists the apps, nothing pre-loaded"); }
+    if (ae_probe == 0) { println("aethersafha: launcher ready -- Ctrl+F2 lists the apps"); }
     #endif
     # ⛔ THE RETIRED TCP LAUNCH BLOCK IS DELETED (was `#ifdef CYRIUS_TARGET_AGNOS` + `if (0 == 1)`).
     # It was unreachable by construction AND it held the only two writers of `ae_spawn_failed`, so the
@@ -1209,27 +1239,32 @@ fn main(): i64 {
                     # that window while the operator believes they are picking an app.
                     if (lk != LnchKey.LNCH_K_NONE) { i = i + 1; continue; }
 
-                    # ⭐ F3 CYCLES THE THEME (M7-E). Four rupa variants shipped and the desktop could
+                    # ⛔⛔ Ctrl+F3 AND Ctrl+F2 — CHORDS SINCE 0.16.26, and bare F2/F3 go to the client.
+                    # They were the last two keys claimed bare, matched inline here where no test could
+                    # reach them; `input_chrome_key` maps them now, press only and Ctrl only, and the
+                    # chord swallow below takes their releases like every other chord's.
+                    var ck = input_chrome_key(ev, ctrl);
+                    # ⭐ Ctrl+F3 CYCLES THE THEME (M7-E). Four rupa variants shipped and the desktop could
                     # only ever show one. ⚠ The repaint is free: `render_desktop` -> `wp_track_theme`
                     # sees a different background token, bumps the wallpaper serial, and
                     # `rend_band_compute` refuses to band across it — so the whole frame redraws
                     # without the damage model needing to know what a theme is.
-                    if (pressed == 1) { if (bhumi_key_usage(ev) == HidUsage.HID_F3) {
+                    if (ck == ChromeKey.CHROME_THEME) {
                         ae_theme_cycle();
                         println("aethersafha: theme switched:");
                         println(rupa_theme_name(rupa_theme_active()));
                         i = i + 1;
                         continue;
-                    } }
-                    # ⭐ F2 OPENS IT. Read before `input_handle` for the same reason, and deliberately
+                    }
+                    # ⭐ Ctrl+F2 OPENS IT. Read before `input_handle` for the same reason, and deliberately
                     # NOT an `InputAction`: the launcher is compositor chrome, not a window operation,
                     # and putting it in that enum would offer it to `input_apply`'s window arms.
-                    if (pressed == 1) { if (bhumi_key_usage(ev) == HidUsage.HID_F2) {
+                    if (ck == ChromeKey.CHROME_LAUNCHER) {
                         if (lnch_openp() == 1) { println("aethersafha: launcher opened"); }
                         else { println("aethersafha: launcher has no apps registered"); }
                         i = i + 1;
                         continue;
-                    } }
+                    }
                     var act = input_handle(comp, ev, ae_geom_w, ae_geom_h - TITLEBAR_H, ctrl);
                     if (act == InputAction.IA_QUIT) {
                         # ⛔ A PROBE RUN IGNORES THE QUIT KEY. --clients exists to answer a question

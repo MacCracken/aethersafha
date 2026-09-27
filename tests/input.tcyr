@@ -27,6 +27,34 @@ fn main() {
     assert_eq(input_map(bhumi_key_event(1, 0x43), 0), InputAction.IA_NONE, "bare F10 → none: crab's menu bar");
     assert_eq(input_map(bhumi_key_event(1, 0x29), 1), InputAction.IA_NONE, "Ctrl+Esc → none: Esc quits NOTHING any more");
 
+    test_group("input — the desktop's chrome keys are Ctrl chords too (0.16.26: Ctrl+F2, Ctrl+F3)");
+    assert_eq(input_chrome_key(bhumi_key_event(1, 0x3B), 1), ChromeKey.CHROME_LAUNCHER, "Ctrl+F2 → the launcher");
+    assert_eq(input_chrome_key(bhumi_key_event(1, 0x3C), 1), ChromeKey.CHROME_THEME, "Ctrl+F3 → the theme");
+    # ⛔⛔ THE CHANGE: bare F2/F3 were the last two keys claimed bare, and thoth's AGNOS plan listed them
+    # as keys a client could never receive. Bare, they are the client's now.
+    assert_eq(input_chrome_key(bhumi_key_event(1, 0x3B), 0), ChromeKey.CHROME_NONE, "bare F2 → none: the client's");
+    assert_eq(input_chrome_key(bhumi_key_event(1, 0x3C), 0), ChromeKey.CHROME_NONE, "bare F3 → none: the client's");
+    # PRESS ONLY — the loop acted on both edges once: three F3 presses, six theme switches (2026-08-18).
+    assert_eq(input_chrome_key(bhumi_key_event(0, 0x3B), 1), ChromeKey.CHROME_NONE, "Ctrl+F2 RELEASE opens nothing");
+    assert_eq(input_chrome_key(bhumi_key_event(0, 0x3C), 1), ChromeKey.CHROME_NONE, "Ctrl+F3 RELEASE switches nothing");
+    assert_eq(input_chrome_key(bhumi_key_event(1, 0x3D), 1), ChromeKey.CHROME_NONE, "Ctrl+F4 is a window key, not chrome");
+    assert_eq(input_chrome_key(bhumi_key_event(1, 0x3A), 1), ChromeKey.CHROME_NONE, "Ctrl+F1 → none: unbound");
+    # ⚠ And neither is a window action: `input_apply` must never see the launcher or the theme.
+    assert_eq(input_map(bhumi_key_event(1, 0x3B), 1), InputAction.IA_NONE, "Ctrl+F2 is not an InputAction");
+    assert_eq(input_map(bhumi_key_event(1, 0x3C), 1), InputAction.IA_NONE, "Ctrl+F3 is not an InputAction");
+    # ⛔ THE 297-px SHAPE, FOR THE CHROME KEYS: dx = 256 + 0x3B has bit 8 set and low byte F2, so a
+    # mapper that skipped the kind check would open the launcher on a horizontal mouse move.
+    assert_eq(input_chrome_key(bhumi_motion_event(256 + 0x3B, 0), 1), ChromeKey.CHROME_NONE, "dx=315 (low byte F2, bit 8 set) under Ctrl is not Ctrl+F2");
+    assert_eq(input_chrome_key(bhumi_motion_event(256 + 0x3C, 0), 1), ChromeKey.CHROME_NONE, "dx=316 (low byte F3, bit 8 set) under Ctrl is not Ctrl+F3");
+    assert_eq(input_chrome_key(bhumi_button_event(1, 1), 1), ChromeKey.CHROME_NONE, "a button is not a chrome key");
+    # ⭐ THE SEQUENCE A REAL Ctrl+F2 IS, through the latch the loop feeds it.
+    var cs = input_mod_track(0, bhumi_key_event(1, 0xE0));
+    assert_eq(input_chrome_key(bhumi_key_event(1, 0x3B), input_mod_ctrl(cs)), ChromeKey.CHROME_LAUNCHER, "LCtrl down, F2 down: the launcher");
+    cs = input_mod_track(cs, bhumi_key_event(0, 0xE0));
+    assert_eq(input_chrome_key(bhumi_key_event(1, 0x3B), input_mod_ctrl(cs)), ChromeKey.CHROME_NONE, "LCtrl up, F2 down: a bare F2, the client's");
+    cs = input_mod_track(0, bhumi_key_event(1, 0xE4));
+    assert_eq(input_chrome_key(bhumi_key_event(1, 0x3C), input_mod_ctrl(cs)), ChromeKey.CHROME_THEME, "RCtrl + F3: the theme — either Ctrl");
+
     # ⭐⭐ THE WINDOW MOVER'S MAPPING. This group exists because the first mover was written as an
     # inline block in main.cyr's frame loop, where nothing could reach it — it was nested inside the
     # TAB branch, so its `usage >= 0x3A` guard sat inside `usage == 0x2B` and was unsatisfiable. It

@@ -1,7 +1,9 @@
 # The Firecracker and OCI backends call the LINUX syscall wrappers unguarded — every `--agnos` consumer fails to compile
 
-**Status:** ✅ **FIXED upstream in kavach — verified 2026-08-07 at kavach 3.11.7.** Never closed here;
-caught by an issue-rot audit, not by anything noticing on its own.
+**Status:** ✅ **CLOSED and archived at 0.16.26 (2026-09-27)** — both halves. The kavach defect was
+**FIXED upstream in kavach, verified 2026-08-07 at kavach 3.11.7**, and then sat here unclosed for seven
+weeks; the consumer half (the `path` override that let it in) is closed at its mechanism in 0.16.26 —
+see **Resolution** at the end.
 
 ⭐ **kavach fixed it the right way**: rather than sprinkling `#ifdef` at eight call sites, it factored
 the convention mapping into guarded wrappers in `src/util.cyr` (agnos `sys_unlink(path, strlen(path))`
@@ -135,3 +137,17 @@ working on 2026-07-25 and stopped working with no change to the consumer — whi
 worth naming: **the pin did not hold, and nothing said so.** Filed here because it is the same
 incident; it belongs to the consumer to decide (drop the path override for releases, or bump the tag
 to match reality).
+
+## Resolution (0.16.26, 2026-09-27)
+
+- **The kavach half** was fixed upstream at 3.11.7, as the status says: `kv_unlink` / `kv_rmdir` /
+  `kv_waitpid` in `src/util.cyr`, and every fork-reaching entry point guarded to fail closed on agnos.
+  Nothing in this repo was needed beyond taking the release.
+- **The consumer half — "the pin did not hold, and nothing said so" — is closed at its mechanism.**
+  It recurred six more times after this filing: four on kavach, five tags at once on 2026-09-12, and
+  then in a commit (`0fdde56`: kavach's unreleased HEAD under a 3.12.5 tag, and neither target built —
+  `2026-09-26-agnos-build-fails-kavach-o-nofollow.md`).
+  0.16.26 makes every `path = "../<sibling>"` line in `cyrius.cyml` **dormant**, so each dep resolves from
+  its published tag and `cyrius.lock` pins the commit, and `scripts/check-dep-tags.sh` fails on a live
+  `path` and on a lock that does not pin the tag's commit. This is the first of the two remedies the
+  filing offered ("drop the path override for releases").

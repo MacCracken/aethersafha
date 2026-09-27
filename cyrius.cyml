@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "aethersafha — AI-augmented AGNOS compositor (Cyrius port, from 27207 lines of Rust)"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.6.2"
+cyrius = "6.6.6"
 
 [build]
 entry = "src/main.cyr"
@@ -36,11 +36,23 @@ stdlib = [
 # does nothing is worse than none, so `src/sysprobe.cyr` includes it BY PATH instead, the way
 # `lib/bhumi.cyr` is included. ⚠ Do not "fix" this by re-adding the entry.
 
+# ⛔ EVERY `path = "../sibling"` LINE BELOW IS DORMANT (0.16.26), AND STAYS THAT WAY IN A COMMIT.
+# `path` WINS over `tag` and skips the commit-pin verify. While one is live, `cyrius deps` — which
+# `cyrius build` and `cyrius test` run first — re-vendors `lib/` from whatever that checkout holds,
+# and `cyrius.lock` cannot pin the dep's commit. That recurred six times: four on kavach alone, five
+# tags at once on 2026-09-12, and then in a COMMIT (`0fdde56`), which vendored kavach's unreleased
+# HEAD and agnostik's uncommitted tree under 3.12.5 / 1.6.1 tags, so neither target built.
+# `scripts/check-dep-tags.sh` caught it each time it was run and could not stop a commit.
+# With all nine dormant, each dep resolves from its published tag and the lock pins its commit —
+# the graph CI has always built. Uncomment one line for cross-repo work on an unpushed sibling, and
+# put it back before the commit; the gate fails while one is live. dhancha 0.10.3 made the same move.
+
 # --- Platform backend: DRM/KMS + libinput + logind → output/input/seat.
 [deps.bhumi]
 git = "https://github.com/MacCracken/bhumi.git"
-path = "../bhumi"
-tag = "1.4.4"
+# ⚠ dormant (0.16.26) — uncomment for local work on an unpushed sibling; never commit it live.
+# path = "../bhumi"
+tag = "1.4.5"
 modules = ["dist/bhumi.cyr"]
 
 # --- Desktop theme-token core: rupa (रूप — form / appearance). The ONE source of
@@ -49,8 +61,9 @@ modules = ["dist/bhumi.cyr"]
 # compositor's own theme.cyr when dhancha became the second consumer.
 [deps.rupa]
 git = "https://github.com/MacCracken/rupa.git"
-path = "../rupa"
-tag = "0.1.7"
+# ⚠ dormant (0.16.26) — uncomment for local work on an unpushed sibling; never commit it live.
+# path = "../rupa"
+tag = "0.1.8"
 modules = ["dist/rupa.cyr"]
 
 # --- Shared AGNOS domain primitives (was Rust `agnostik` 0.90.0). Error family
@@ -58,8 +71,9 @@ modules = ["dist/rupa.cyr"]
 # collision with agnodrm.
 [deps.agnostik]
 git = "https://github.com/MacCracken/agnostik.git"
-path = "../agnostik"
-tag = "1.6.1"
+# ⚠ dormant (0.16.26) — uncomment for local work on an unpushed sibling; never commit it live.
+# path = "../agnostik"
+tag = "1.6.4"
 modules = ["dist/agnostik.cyr"]
 
 # --- udev + DRM/KMS device model (was Rust `agnosys` 0.50.0; agnosys decomposed
@@ -67,8 +81,9 @@ modules = ["dist/agnostik.cyr"]
 # at 1.4.5. bhumi also sits on agnodrm internally.
 [deps.agnodrm]
 git = "https://github.com/MacCracken/agnodrm.git"
-path = "../agnodrm"
-tag = "1.6.0"
+# ⚠ dormant (0.16.26) — uncomment for local work on an unpushed sibling; never commit it live.
+# path = "../agnodrm"
+tag = "1.6.2"
 modules = ["dist/agnodrm.cyr"]
 
 # --- Bitmap console fonts (the AGNOS font subsystem). We consume only the
@@ -76,8 +91,10 @@ modules = ["dist/agnodrm.cyr"]
 # CGA 8x8 glyph tables + a row-query API. Replaces the hand-rolled 5x7 font.
 [deps.kashi]
 git = "https://github.com/MacCracken/kashi.git"
-path = "../kashi"
-tag = "1.0.7"
+# ⚠ dormant (0.16.26) — uncomment for local work on an unpushed sibling; never commit it live.
+# path = "../kashi"
+# 1.0.10: `src/font_data.cyr` is byte-identical to 1.0.7's (checked with `git diff 1.0.7 1.0.10`).
+tag = "1.0.10"
 # ⛔⛔ THE FREESTANDING CORE IS A MEASURED CHOICE, NOT A SHORTCUT (recorded 2026-08-17, kashi 1.0.6).
 # kashi's ADR 0001 says stdlib-linked consumers should take the LIBRARY FACE, and this project links
 # the full stdlib — so `src/font_data.cyr` looks like the wrong surface. Two reasons it is not:
@@ -99,7 +116,8 @@ modules = ["src/font_data.cyr"]
 # in [deps].stdlib above.
 [deps.mehman]
 git = "https://github.com/MacCracken/mehman.git"
-path = "../mehman"
+# ⚠ dormant (0.16.26) — uncomment for local work on an unpushed sibling; never commit it live.
+# path = "../mehman"
 tag = "1.0.3"
 modules = ["src/types.cyr", "src/surface.cyr", "src/sandbox.cyr"]
 
@@ -108,7 +126,8 @@ modules = ["src/types.cyr", "src/surface.cyr", "src/sandbox.cyr"]
 # / sandbox_* surface directly.
 [deps.kavach]
 git = "https://github.com/MacCracken/kavach.git"
-path = "../kavach"
+# ⚠ dormant (0.16.26) — uncomment for local work on an unpushed sibling; never commit it live.
+# path = "../kavach"
 # ⚠ 3.11.7 → 3.11.10 (2026-08-12). The tag had been WRONG IN COMMITTED STATE for two cuts: HEAD vendored
 # 3.11.8 and any local build re-materialised 3.11.10 from `../kavach`, because the `path` override wins.
 # So the manifest declared a graph nothing here had built since 3.11.7. Verified before bumping: 3.11.10 is
@@ -126,7 +145,11 @@ path = "../kavach"
 # tree is clean, and `lib/kavach.cyr` is **byte-identical to `dist/kavach.cyr` at that tag**
 # (sha `ee243978`, matching `cyrius.lock`). ⚠ kavach HEAD is 1 commit past the tag, but that commit does
 # not touch the one module consumed here — checked, not assumed.
-tag = "3.12.5"
+# ⛔ 3.12.5 → 3.13.1 (0.16.26) — the SIXTH recurrence reached a commit: `0fdde56` vendored kavach's
+# unreleased HEAD (3 commits past 3.13.1, written for cyrius 6.6.6) under this 3.12.5 tag and a 6.6.2
+# pin, so the host build refused 6 undefined stdlib fns and `--agnos` refused `O_NOFOLLOW`. Closed at the
+# mechanism: the `path` line above is dormant, so this tag is what resolves.
+tag = "3.13.1"
 modules = ["dist/kavach.cyr"]
 
 # --- Image decode: chitra (चित्र — image / picture). Pure-Cyrius CPU raster decoder — PNG (all bit
@@ -137,7 +160,8 @@ modules = ["dist/kavach.cyr"]
 # more. Deleted rather than kept as a "lighter" path.
 [deps.chitra]
 git = "https://github.com/MacCracken/chitra.git"
-path = "../chitra"
+# ⚠ dormant (0.16.26) — uncomment for local work on an unpushed sibling; never commit it live.
+# path = "../chitra"
 tag = "1.0.3"
 modules = ["dist/chitra.cyr"]
 
@@ -171,6 +195,7 @@ git = "https://github.com/MacCracken/setu.git"
 # ⚠ `path` added 2026-08-12 — setu was the ONE dep declaring a tag with no path override, which meant
 # a local setu change could not be built against at all. Every sibling dep here carries both. The
 # path-wins hazard applies as it does to the rest: re-verify tag vs sibling VERSION at each cut.
-path = "../setu"
-tag = "0.8.9"
+# ⚠ dormant (0.16.26) — uncomment for local work on an unpushed sibling; never commit it live.
+# path = "../setu"
+tag = "0.8.11"
 modules = ["dist/setu.cyr"]
