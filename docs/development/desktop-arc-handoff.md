@@ -190,9 +190,13 @@ Harnesses in `agnos/scripts/harness/`: `ae-wallpaper-load-test.py`, `crab-listin
 
 ## Next — in the order I would take them
 
-0. **CUT 0.16.21 AND BURN IT — the phase instrument is written and UNCUT.** One run is enough: read
-   `cumulative us (render, present, other)` and the AT EXIT summary. That single line decides item 1
-   below. ⛔ Do NOT re-run the `--bandbg` A/B; it is settled and the clear is exonerated.
+0. **BURN THE PHASE INSTRUMENT — and read the 0.16.27 line, not only the 0.16.21 one.** One run is
+   enough, but ⛔ **0.16.21's `present` could not have decided item 1**: it also held the agnos
+   `sys_sched_yield` (the CPU puka spends re-rendering while keys are typed) and the VSYNC-PACED `#84`
+   wait, and the input phase and the loop period were not timed at all. 0.16.27 reads
+   `cumulative us (client blit, #84 flip, input, yield, period)` beside the old line, so the burn says
+   WHICH: blit → item 1 (damage); flip → frames missing a vblank (iron's 150,387 us is 9.0 × 16.7 ms);
+   yield → the clients' own work; input → the drain. ⛔ Do NOT re-run the `--bandbg` A/B; it is settled.
 1. **Present protocol has no damage tracking — now the PRIME SUSPECT, not a guess.** A maximized
    2560x1408 terminal copies **~28.8 MB per frame** (client writes the `#86` slot, compositor re-reads
    it) vs 983 040 B at 80x24, and the frame DOUBLES to 150 ms while typing. Host phase split already
@@ -207,8 +211,10 @@ Harnesses in `agnos/scripts/harness/`: `ae-wallpaper-load-test.py`, `crab-listin
 4. **crab is thin.** No fullscreen/maximize view; needs real work to feel like a file browser.
 5. **agnos aarch64 does not build** — 30 reachable undefined functions, visible only since the
    compiler probe was fixed (it had been dead since cyrius v6.1.0 behind a swallowed error).
-6. **C4a's present half** — undecided, and needs a measurement nobody has taken: *does aethersafha
-   redraw from a live buffer without a commit?*
+6. ✅ **C4a's present half — the question is ANSWERED (0.16.27, from the code): yes.** Every live
+   surface is redrawn every frame, commit or not, and an unchanged re-ATTACH is skipped, so COMMIT carries
+   nothing the compositor uses. The decision left is setu's: whether COMMIT becomes an opt-in change
+   signal (see roadmap C4a) — which is also what would let item 1 skip an unchanged surface.
 
 **M6-B (Linux)** is on hold by operator ruling. **murrahir** stays do-not-start, gated behind C4a.
 

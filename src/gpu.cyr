@@ -1402,6 +1402,9 @@ fn ae_gpu_present_frame(comp, fb): i64 {
             # `#87` here rather than costing the frame — see ae_gpu_window_admissible. That fallback is
             # exact for the alpha-255 surfaces clients produce today, and it means the desktop keeps
             # hardware compositing on hardware that cannot blend instead of losing it entirely.
+            # ⭐ TIMED (0.16.27): this window's composite is the cost the damage-rect plan assumes
+            # dominates. `ft_blit_acc` sums every window's, and the frame commits one sample.
+            var tb0 = ae_now_us();
             var use_blend = 0;
             if (win_premul(win) == 1) { if (ae_gpu_blend == 1) { use_blend = 1; } }
             if (use_blend == 1) {
@@ -1450,6 +1453,7 @@ fn ae_gpu_present_frame(comp, fb): i64 {
                     }
                 }
             }
+            ft_blit_acc(tb0, ae_now_us());
         }
         # ⭐ AND THIS WINDOW'S TITLE, AFTER ITS OWN SURFACE. Previously every title was emitted after
         # every surface, which is why a title could survive on top of a NEIGHBOUR's window — the code
@@ -1509,7 +1513,12 @@ fn ae_gpu_present_frame(comp, fb): i64 {
     # ⚠ #84 returns 1 = PRESENTED / 0 = nothing to present — the one syscall in this band that does not use
     # the 0-ok convention. Checking `!= 0` here would read success as failure; that exact mistake cost an
     # iron burn on /bin/gpublend.
-    if (sys_gpu_present() != 1) { ae_gpu_demote(); return 0; }
+    # ⭐ TIMED ON ITS OWN (0.16.27): `#84` is VSYNC-PACED, so a frame that missed a vblank spends this
+    # call WAITING for the next one — a cost that is neither the blit nor the compositor's own work.
+    var tf0 = ae_now_us();
+    var prc84 = sys_gpu_present();
+    ft_add_flip(tf0, ae_now_us());
+    if (prc84 != 1) { ae_gpu_demote(); return 0; }
     return 1;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS

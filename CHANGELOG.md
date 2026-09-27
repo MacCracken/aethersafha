@@ -5,6 +5,93 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.16.27] — 2026-09-27 — the phase instrument can finally say WHY a frame is slow
+
+> `git describe --tags` answered `0.16.26` exactly before this was written; `[0.16.26]` below is a record.
+> Cut on operator direction ("the next roadmapped items"); the commit, the tag and the push are the
+> operator's.
+
+### Fixed — ⛔⛔ the frame instrument could not have named the cost, and the next burn would have blamed the blit
+
+The roadmap's first item is gated on one iron reading — the 0.16.21 phase line — and the handoff maps
+*"present dominates"* to the client-surface blit and damage rects. Read against the loop, `present` could
+not have supported that conclusion, for three reasons:
+
+1. **It held the agnos `sys_sched_yield`.** `ft_pres_us` was documented as *"GPU submit + `#84` flip, or
+   the CPU blit"*, but its sample closed AFTER the yield — the CPU the compositor cedes to its clients. So
+   puka re-rendering a typed-into grid was booked as the compositor's present, which is exactly the
+   reading that sends the next session to the blit.
+2. **`#84` is vsync-paced** (agnos ABI), so a frame that misses a vblank WAITS for the next. Iron's
+   2026-08-22 frames are near-whole vblank counts — 150,387 µs is 9.0 × 16.7 ms and 67,466 µs is 4.0 — so
+   `present` may be mostly waiting. Blit volume and missed deadlines want opposite fixes.
+3. **Input was never timed, and nor was the loop period.** The kbscan/ptrscan drain and all key and pointer
+   dispatch run BEFORE `t_frame0`, so the phase that changes most while typing sat outside the frame, and
+   the number a person actually sees — loop start to loop start — was never measured.
+
+Now (`src/frametime.cyr`, wired in `src/main.cyr` and `src/gpu.cyr`):
+
+| phase | measures | where |
+|---|---|---|
+| `present` | compose + `#84`, or the CPU blit — **no yield** (what its comment always said) | unchanged label |
+| `client blit` | every window's `#87` / `#92` composite, **summed into one sample per frame** | inside present |
+| `#84 flip` | the vsync-paced flip alone | inside present |
+| `input` | loop start → frame start: the drain and the key/pointer dispatch | outside the frame |
+| `yield` | `sys_sched_yield` — the clients' time, not the compositor's | outside present |
+| `period` | loop start → the next loop start (also windowed, on the THIS WINDOW line) | the whole loop |
+
+New lines, every 120 frames and AT EXIT: `cumulative us (client blit, #84 flip, input, yield, period)`. Every
+existing field keeps its position (no script parses these lines; three docs quote them), and `-1` still
+means *not measured* — the host has no yield, QEMU has no `#84` — never *free*. `other` subtracts the
+yield when one was sampled and not otherwise, so the host's residual stays known.
+⇒ One burn now attributes instead of confirming: blit → damage (roadmap item 1); flip → pacing; yield → the
+clients; input → the drain. `burn-card-next.md` says so.
+
+### Answered — C4a's present half: the compositor redraws a live buffer every frame, commit or not
+
+The roadmap left *"does aethersafha redraw from a live buffer without a commit?"* as a measurement nobody
+had taken. The code answers it: the GPU path blits the attached slot every frame, the CPU path re-reads it
+with `setu_buf_read` every frame and marks the content damaged every frame, and an ATTACH naming the same
+slot at the same extent is skipped. ⇒ **COMMIT carries nothing the compositor uses** beyond the first attach
+and a resize: `dh_client_present`'s per-frame ATTACH + COMMIT is two messages of overhead, and crab's
+commit-less live buffer loses nothing. ⚠ It is also item 1's structural cost — with no change signal an
+UNCHANGED surface cannot be skipped. Making COMMIT that signal needs an opt-in (crab never commits), so it
+is setu's decision, recorded in the roadmap rather than taken here.
+
+### Found — cyrius reports an unwritable `/tmp` as a TAMPERED dep cache (filed upstream)
+
+Mid-cut, every `cyrius build` and `test` refused all ten deps as *"refusing tampered cache: HEAD is not the
+tag's commit"* and advised `rm -rf` of each — then passed again minutes later with nothing changed. The
+caches were intact (git resolved every tag by hand). ⭐ Reproduced deterministically in a private mount
+namespace: an inode-starved `/tmp` produces the refusal, a roomy one resolves. `_git_run` cannot open its
+capture file, runs git with stdout uncaptured, and `_git_rev` reads "no capture" as "no such tag". This box's
+`/tmp` is a tmpfs mounted `usrquota`, and the user was at quota (the cyrius LSP failed with `errno 122` at the
+same moment). Not fixable here — cyrius is not patched from this repo — so it is filed as
+`cyrius/docs/development/issues/2026-09-27-deps-cache-check-reports-an-unwritable-tmp-as-a-tampered-cache.md`.
+⚠ `TMPDIR` does not help: cbt hard-codes `/tmp` on POSIX. If it recurs, free space in `/tmp`; do NOT delete
+the cache.
+
+### Docs
+
+- `roadmap.md`: **B5 is done** (0.13.4, `--client PATH` — the entry still said clients were started by hand);
+  C4a records the answer above; the two **Known cleanup** entries were stale (the "deferred" deps have been
+  active since 0.2.x, and `lib sync --full` is not the procedure — `lib sync` then `deps`, and since 0.16.26
+  the tags resolve).
+- `desktop-arc-handoff.md` "Next": item 0 names the new line and what each outcome means; item 6 is answered.
+- `burn-card-next.md`: the phase section reads all three lines and maps each outcome to its fix.
+
+### Verified
+
+- Host 0.16.27: a 240-frame run adds up — period **1,090** µs = input **4** + frame **1,084** (render 345 +
+  present 728 + other 11) + the loop tail; blit, flip and yield `-1` (agnos-only paths).
+- `tests/frametime.tcyr` **57 → 76**; **eight mutations, each caught** — `other` not subtracting the yield,
+  an unsampled yield read as unknown, an empty frame committing a zero blit sample, the blit sum not reset,
+  a bad sample not dropped, the period not snapshotted, the flip wired to the yield sums, and per-window
+  blits counted as separate frames.
+- **Host 4,396,864 B** (sha256 `62d222ec…`) · **`--agnos` 4,316,552 B** (sha256 `895dd4c1…`) — +4,376 B and
+  +272 B over 0.16.26. `scripts/check-dep-tags.sh` → 9 deps clean.
+- **27 / 27 suites, 1,988 assertions.** Both targets build. ⚠ The agnos wiring (yield, flip, blit) is compiled
+  but has not run on QEMU or iron; QEMU will read flip and blit as `-1` (no GPU), so only iron exercises all of it.
+
 ## [0.16.26] — 2026-09-27 — cyrius 6.6.6, every dep resolved from its tag; Ctrl+F2 / Ctrl+F3; a third client can start
 
 > `git describe --tags` answered `0.16.25-1-g0fdde56` before a word of this was written: 0.16.25 is

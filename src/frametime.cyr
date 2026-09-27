@@ -93,6 +93,9 @@ fn ft_reset(): i64 {
     ft_frames = 0; ft_total_us = 0; ft_clear_n = 0; ft_clear_us = 0; ft_dropped = 0;
     ft_render_n = 0; ft_render_us = 0; ft_pres_n = 0; ft_pres_us = 0;
     ft_w_frames = 0; ft_w_total = 0; ft_w_clear_n = 0; ft_w_clear = 0;
+    ft_period_n = 0; ft_period_us = 0; ft_input_n = 0; ft_input_us = 0;
+    ft_blit_n = 0; ft_blit_us = 0; ft_flip_n = 0; ft_flip_us = 0; ft_yield_n = 0; ft_yield_us = 0;
+    ft_blit_acc_n = 0; ft_blit_acc_us = 0; ft_w_period_n = 0; ft_w_period = 0;
     return 0;
 }
 
@@ -127,6 +130,8 @@ var ft_w_frames  = 0;   # cumulative snapshots taken at the last report
 var ft_w_total   = 0;
 var ft_w_clear_n = 0;
 var ft_w_clear   = 0;
+var ft_w_period_n = 0;
+var ft_w_period   = 0;
 
 # PURE: mean over (now - then), or -1 when the window is empty or the snapshots are inconsistent.
 fn ft_window_mean(total_now, total_then, n_now, n_then): i64 {
@@ -138,11 +143,13 @@ fn ft_window_mean(total_now, total_then, n_now, n_then): i64 {
 fn ft_win_frame_us(): i64 { return ft_window_mean(ft_total_us, ft_w_total, ft_frames, ft_w_frames); }
 fn ft_win_clear_us(): i64 { return ft_window_mean(ft_clear_us, ft_w_clear, ft_clear_n, ft_w_clear_n); }
 fn ft_win_clear_pct(): i64 { return ft_pct(ft_win_clear_us(), ft_win_frame_us()); }
+fn ft_win_period_us(): i64 { return ft_window_mean(ft_period_us, ft_w_period, ft_period_n, ft_w_period_n); }
 
 # Take the snapshot that closes this window and opens the next. Call AFTER emitting a report.
 fn ft_window_close(): i64 {
     ft_w_frames = ft_frames; ft_w_total = ft_total_us;
     ft_w_clear_n = ft_clear_n; ft_w_clear = ft_clear_us;
+    ft_w_period_n = ft_period_n; ft_w_period = ft_period_us;
     return 0;
 }
 
@@ -170,8 +177,74 @@ fn ft_add_present(t0, t1): i64 {
 fn ft_mean_render_us(): i64 { return ft_mean(ft_render_us, ft_render_n); }
 fn ft_mean_present_us(): i64 { return ft_mean(ft_pres_us, ft_pres_n); }
 
-# What the frame spends OUTSIDE render and present — client polling, setu dispatch, input.
-# -1 when either part is unknown; never a negative "residual" passed off as a measurement.
+# ---- The loop around the frame, and the inside of present (0.16.27) --------------------------
+# ⛔⛔ THE THREE PHASES ABOVE COULD NOT HAVE NAMED THE COST, and the next burn would have blamed the wrong
+# thing. Three holes, all found by reading the loop against these definitions rather than by a burn:
+#   1. `present` INCLUDED the agnos `sys_sched_yield` — the CPU the compositor cedes so its clients run.
+#      Time puka spends re-rendering a maximized grid while keys are typed landed in "present", which is
+#      exactly the reading ("present dominates") the handoff maps to the client blit and damage rects.
+#   2. `#84` IS VSYNC-PACED (agnos ABI): a frame that misses a vblank waits for the next one. Iron's
+#      150,387 us is 9.0 periods of 16.7 ms and 67,466 is 4.0, so present may be mostly WAITING — and
+#      blit volume and a missed deadline want opposite fixes, which one number cannot separate.
+#   3. INPUT WAS OUTSIDE THE FRAME WINDOW. The kbscan/ptrscan drain and the key and pointer dispatch run
+#      before `t_frame0`, so the phase that changes most while typing was never timed, and the loop
+#      PERIOD — the thing a person actually sees — was never measured at all.
+# ⇒ `present` is now what `ft_pres_us`'s own comment always said: compose + flip, or the CPU blit, and
+# NO yield. `blit` (client surfaces) and `flip` (`#84`) are measured INSIDE it; `input`, `yield` and
+# `period` are measured OUTSIDE it.
+var ft_period_n = 0;   # loop start -> the next loop start: what a person sees as the frame rate
+var ft_period_us = 0;
+var ft_input_n = 0;    # loop start -> frame start: the input drain + key and pointer dispatch
+var ft_input_us = 0;
+var ft_blit_n = 0;     # client-surface composites (#87 / #92), SUMMED per frame — one sample per frame
+var ft_blit_us = 0;
+var ft_flip_n = 0;     # `#84` — vsync-paced, so its time is mostly a wait when a frame misses a vblank
+var ft_flip_us = 0;
+var ft_yield_n = 0;    # `sys_sched_yield` — the CPU given to the clients, NOT the compositor's own work
+var ft_yield_us = 0;
+var ft_blit_acc_n = 0;   # this frame's composites so far; `ft_blit_commit` folds them into one sample
+var ft_blit_acc_us = 0;
+
+# Add (t0 -> t1) to the phase whose count and sum live at `np` / `usp`. Same rule as every phase above:
+# an unusable sample is COUNTED as dropped, never folded in as a zero.
+fn _ft_accum(t0, t1, np, usp): i64 {
+    var d = ft_elapsed(t0, t1);
+    if (d < 0) { ft_dropped = ft_dropped + 1; return 0 - 1; }
+    store64(np, load64(np) + 1);
+    store64(usp, load64(usp) + d);
+    return d;
+}
+
+fn ft_add_period(t0, t1): i64 { return _ft_accum(t0, t1, &ft_period_n, &ft_period_us); }
+fn ft_add_input(t0, t1): i64 { return _ft_accum(t0, t1, &ft_input_n, &ft_input_us); }
+fn ft_add_flip(t0, t1): i64 { return _ft_accum(t0, t1, &ft_flip_n, &ft_flip_us); }
+fn ft_add_yield(t0, t1): i64 { return _ft_accum(t0, t1, &ft_yield_n, &ft_yield_us); }
+
+# One client-surface composite. Summed across the frame's windows; `ft_blit_commit` makes it ONE sample.
+fn ft_blit_acc(t0, t1): i64 { return _ft_accum(t0, t1, &ft_blit_acc_n, &ft_blit_acc_us); }
+
+# Close the frame's blit sum into one sample — only if a composite was timed, so a frame that drew no
+# client (or took the CPU path) does not drag the per-frame mean toward zero. Call once per frame.
+fn ft_blit_commit(): i64 {
+    if (ft_blit_acc_n > 0) {
+        ft_blit_n = ft_blit_n + 1;
+        ft_blit_us = ft_blit_us + ft_blit_acc_us;
+    }
+    ft_blit_acc_n = 0;
+    ft_blit_acc_us = 0;
+    return 0;
+}
+
+fn ft_mean_period_us(): i64 { return ft_mean(ft_period_us, ft_period_n); }
+fn ft_mean_input_us(): i64 { return ft_mean(ft_input_us, ft_input_n); }
+fn ft_mean_blit_us(): i64 { return ft_mean(ft_blit_us, ft_blit_n); }
+fn ft_mean_flip_us(): i64 { return ft_mean(ft_flip_us, ft_flip_n); }
+fn ft_mean_yield_us(): i64 { return ft_mean(ft_yield_us, ft_yield_n); }
+
+# What the frame spends OUTSIDE render, present and the yield — client polling and setu dispatch.
+# -1 when a part is unknown; never a negative "residual" passed off as a measurement.
+# ⚠ A yield that was NEVER SAMPLED counts as none: the host has no yield, and that must not make the
+# residual unknown there. One that was sampled but reads -1 does.
 fn ft_mean_other_us(): i64 {
     var f = ft_mean_frame_us();
     var r = ft_mean_render_us();
@@ -179,8 +252,11 @@ fn ft_mean_other_us(): i64 {
     if (f < 0) { return 0 - 1; }
     if (r < 0) { return 0 - 1; }
     if (q < 0) { return 0 - 1; }
-    if (f < r + q) { return 0 - 1; }
-    return f - r - q;
+    var y = 0;
+    if (ft_yield_n > 0) { y = ft_mean_yield_us(); }
+    if (y < 0) { return 0 - 1; }
+    if (f < r + q + y) { return 0 - 1; }
+    return f - r - q - y;
 }
 
 fn ft_mean_frame_us(): i64 { return ft_mean(ft_total_us, ft_frames); }

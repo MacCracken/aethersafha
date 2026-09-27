@@ -14,14 +14,25 @@ The 2026-08-22 burn measured **63.8 -> 150.4 ms per frame (7-15 fps), doubling w
   `run /bin/<tool>`, and an ESP-only refresh pairs a new kernel with a STALE tool, silently
 
 ## 1. THE PHASE LINE — the whole point of this burn
-Open puka (Ctrl+F2, Enter), type for ~20 s, quit (Ctrl+Q). Read BOTH:
-- `aethersafha: cumulative us (render, present, other)` — printed every 120 frames
-- `aethersafha: frame cost us AT EXIT (frames, frame, render, present, other, dropped)`
+Open puka (Ctrl+F2, Enter), type for ~20 s, quit (Ctrl+Q). Read ALL of these — every 120 frames, and
+again AT EXIT (so a short run still testifies):
+- `aethersafha: frame cost us THIS WINDOW (frames, frame, clear, clear pct, dropped, period)`
+- `aethersafha: cumulative us (render, present, other)`
+- ⭐ **0.16.27:** `aethersafha: cumulative us (client blit, #84 flip, input, yield, period)` — and
+  `aethersafha: AT EXIT, cumulative us (client blit, #84 flip, input, yield, period)`
 
-Host baseline, 100 frames: frame 1805 = render 489 + **present 1301** + other 15 (**present 72%**).
-- **present dominates on iron** ⇒ the cost is the client-surface blit ⇒ the fix is damage rects in the
-  present protocol (~28.8 MB/frame at 2560x1408 vs 983 KB at 80x24). Go there next.
-- **render dominates** ⇒ the cost is in the compositor's own drawing; instrument inside `render_desktop`.
+⛔ **Before 0.16.27, `present` also held the `sys_sched_yield` and the vsync-paced `#84` wait, and input
+and the loop period were not timed at all**, so "present dominates" could not have said WHY. Blit and flip
+are now inside present; input, yield and period outside the frame. `-1` = not measured on that path.
+- **client blit dominates** ⇒ the per-window composite of a whole surface every frame ⇒ damage /
+  change-signal in the present protocol (~28.8 MB/frame at 2560x1408 vs 983 KB at 80x24). Go there next.
+- **`#84` flip dominates** ⇒ the frame is WAITING for vblank — work is pushing each flip past a vblank
+  (iron's 150,387 us is 9.0 × 16.7 ms, 67,466 is 4.0). The fix is pacing, not blit volume.
+- **yield dominates** ⇒ the clients' own work (puka re-rendering its grid) while the compositor waits.
+- **input dominates** ⇒ the kbscan/ptrscan drain or the key/pointer dispatch.
+- **render dominates** ⇒ the compositor's own drawing; instrument inside `render_desktop`.
+Host baseline (0.16.27, no clients, 240 frames): period 1,090 = input 4 + frame 1,084 (render 345 +
+present 728 + other 11); blit, flip and yield `-1` — those paths are agnos-only.
 - **other dominates** ⇒ the cost is client polling / setu dispatch / input, none of which is timed yet.
 ⛔ Do NOT re-run the `--bandbg` A/B. It is settled.
 ⚠ `dropped` must be 0. Nonzero means `#95` refused calibration and NOTHING here is trustworthy.

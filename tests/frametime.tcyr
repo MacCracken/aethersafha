@@ -126,6 +126,62 @@ fn main(): i64 {
     assert_eq(ft_mean_render_us(), 900, "the unusable render sample does not move the mean");
     assert_eq(ft_dropped, 1, "and it is counted");
 
+    test_group("frametime — the loop around the frame: period, input, yield (0.16.27)");
+    # ⛔ THE HOLE THIS PINS: the agnos `sys_sched_yield` sat INSIDE the present window, so the CPU the
+    # compositor gives puka landed in "present" — the reading the handoff maps to the client blit.
+    ft_reset();
+    ft_add_frame(0, 10000);
+    ft_add_render(0, 1000);
+    ft_add_present(0, 3000);
+    ft_add_yield(0, 5000);
+    assert_eq(ft_mean_yield_us(), 5000, "yield is measured on its own");
+    assert_eq(ft_mean_other_us(), 1000, "other = 10000 - 1000 - 3000 - 5000: the yield is NOT other");
+    ft_reset();
+    ft_add_frame(0, 6400); ft_add_render(0, 1200); ft_add_present(0, 5000);
+    assert_eq(ft_mean_other_us(), 200, "a yield NEVER sampled (the host) counts as none — other is still known");
+    ft_reset();
+    ft_add_frame(0, 6400); ft_add_render(0, 1200); ft_add_present(0, 5000); ft_add_yield(0, 300);
+    assert_eq(ft_mean_other_us(), 0 - 1, "phases + yield exceeding the frame -> -1, never a negative residual");
+    ft_reset();
+    ft_add_period(1000, 17700); ft_add_period(17700, 34400);
+    assert_eq(ft_mean_period_us(), 16700, "period is loop start to loop start — one vblank, twice");
+    ft_add_input(0, 900);
+    assert_eq(ft_mean_input_us(), 900, "input is measured on its own");
+    ft_add_input(0 - 1, 900);
+    assert_eq(ft_mean_input_us(), 900, "an unusable input sample does not move the mean");
+    assert_eq(ft_dropped, 1, "  ...and it is counted as dropped");
+    ft_reset();
+    assert_eq(ft_mean_period_us(), 0 - 1, "no period sample -> -1, never 0");
+    assert_eq(ft_mean_yield_us(), 0 - 1, "no yield sample -> -1, never 0");
+    assert_eq(ft_mean_flip_us(), 0 - 1, "no flip sample (QEMU has no #84) -> -1, never 0");
+
+    test_group("frametime — inside present: client blits are ONE sample per frame, and the flip");
+    ft_reset();
+    ft_blit_acc(0, 400);
+    ft_blit_acc(0, 600);
+    assert_eq(ft_mean_blit_us(), 0 - 1, "nothing counts until the frame is committed");
+    ft_blit_commit();
+    assert_eq(ft_mean_blit_us(), 1000, "two windows in one frame: ONE sample of 1000, not a mean of 500");
+    ft_blit_commit();
+    assert_eq(ft_mean_blit_us(), 1000, "a frame that composited no client adds no sample and no zero");
+    ft_blit_acc(0, 3000);
+    ft_blit_commit();
+    assert_eq(ft_mean_blit_us(), 2000, "the next frame's sum is its own sample: (1000 + 3000) / 2");
+    ft_blit_acc(0 - 1, 50);
+    ft_blit_commit();
+    assert_eq(ft_mean_blit_us(), 2000, "a frame whose only composite had no clock adds nothing");
+    ft_add_flip(0, 16000);
+    ft_add_flip(0, 17400);
+    assert_eq(ft_mean_flip_us(), 16700, "the flip is measured on its own");
+
+    test_group("frametime — the windowed period, because the report compares windows");
+    ft_reset();
+    ft_add_period(0, 100000);
+    ft_window_close();
+    ft_add_period(0, 16700); ft_add_period(0, 16700);
+    assert_eq(ft_win_period_us(), 16700, "the window after the snapshot excludes the slow startup frame");
+    assert_eq(ft_mean_period_us(), 44466, "while the cumulative mean still carries it: 133400 / 3");
+
     test_group("frametime — the report cadence is bounded and testable");
     assert_eq(ft_should_report(120, 120, 0, 12), 1, "first report lands on the 120th frame");
     assert_eq(ft_should_report(121, 120, 1, 12), 0, "not on the 121st");

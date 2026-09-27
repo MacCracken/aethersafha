@@ -1150,6 +1150,7 @@ fn main(): i64 {
     var running = 1;
     var accepted = 0;  # count of setu clients composited so far — cascades each new one
     var prev_focus = 0 - 1;  # last-notified focus index; -1 forces the first notification
+    var ae_loop_prev = 0 - 1;  # the previous iteration's start, for the loop PERIOD; -1 = none yet
     ae_probe_t0 = ae_now_ms();
     ae_probe_next_report = AE_PROBE_REPORT_MS;
     #ifdef CYRIUS_TARGET_AGNOS
@@ -1159,6 +1160,12 @@ fn main(): i64 {
         # host: bounded so the dev build terminates — unless `--frames 0` asked for a real session.
         while ((running == 1) && ((setu_cap == 0) || (frame < setu_cap))) {
             #endif
+            # ⭐⭐ THE LOOP PERIOD AND THE INPUT PHASE (0.16.27). The frame sample below starts AFTER the
+            # input drain and the key/pointer dispatch, so neither the phase that changes most while typing
+            # nor the period a person actually sees was ever measured. See frametime.cyr.
+            var t_loop0 = ae_now_us();
+            if (ae_loop_prev >= 0) { ft_add_period(ae_loop_prev, t_loop0); }
+            ae_loop_prev = t_loop0;
             var n = bhumi_backend_poll(be, &events, AE_MAXEV, now);
             if (n == BHUMI_SEAT_DENIED) {
                 if (ae_inp_denied == 0) {
@@ -1434,6 +1441,7 @@ fn main(): i64 {
             # render_desktop. ⛔ Read `ae_now_us` (#95 rdtsc) — #40 is FROZEN for a foreground `run`
             # program, which is what made this measurement impossible until now.
             var t_frame0 = ae_now_us();
+            ft_add_input(t_loop0, t_frame0);
             # ⭐ FEED THE PANEL. `render_shell_panel` has drawn cpu/mem/disk/agents since 0.16.4 with
             # NOTHING behind them — `shell_new` seeded zeros and no code ever wrote another value.
             # ⚠ Sampled on a cadence, not per frame: this is a syscall for a number that moves on a
@@ -1636,11 +1644,19 @@ fn main(): i64 {
                     }
                 }
             }
+            # ⛔⛔ PRESENT ENDS HERE, BEFORE THE YIELD (0.16.27). `ft_pres_us` was always documented as "GPU
+            # submit + `#84` flip, or the CPU blit", but its sample was closed AFTER the yield below — so the
+            # CPU handed to puka while it re-rendered a typed-into grid was booked as the compositor's
+            # present, the exact reading the handoff maps to the client blit. The yield is its own phase.
+            ft_add_present(t_pres0, ae_now_us());
+            ft_blit_commit();
             # agnos: cede the CPU each frame so the spawned setu client (puka, a
             # spawn_path background proc) is scheduled to connect + present. The
             # foreground compositor otherwise spins its render loop and starves it.
             #ifdef CYRIUS_TARGET_AGNOS
+            var t_yield0 = ae_now_us();
             sys_sched_yield();
+            ft_add_yield(t_yield0, ae_now_us());
             #endif
             # --clients: stop as soon as the question is answered, or at the cap. ⚠ Placed with the
             # frame counter so it sees the SAME frame the accept block just ran.
@@ -1670,20 +1686,20 @@ fn main(): i64 {
                     }
                 }
             }
-            # ⭐ CLOSE THE FRAME SAMPLE, then report on a bounded cadence. One line per 240 frames:
+            # ⭐ CLOSE THE FRAME SAMPLE, then report on a bounded cadence. One line per 120 frames:
             # a healthy 30 s burn prints a handful, and the cap means a wedged one cannot bury them.
-            ft_add_present(t_pres0, ae_now_us());
             ft_add_frame(t_frame0, ae_now_us());
             if (ft_should_report(ft_frames, FT_REPORT_EVERY, ft_reported, FT_REPORT_MAX) == 1) {
                 ft_reported = ft_reported + 1;
                 # ⚠ -1 in ANY of these means "the clock did not answer", not "free". The banner in
                 # frametime.cyr says why that distinction is the whole point of this instrument.
-                println("aethersafha: frame cost us THIS WINDOW (frames, frame, clear, clear pct, dropped):");
+                println("aethersafha: frame cost us THIS WINDOW (frames, frame, clear, clear pct, dropped, period):");
                 println_int(ft_frames);
                 println_int(ft_win_frame_us());
                 println_int(ft_win_clear_us());
                 println_int(ft_win_clear_pct());
                 println_int(ft_dropped);
+                println_int(ft_win_period_us());
                 # ⭐ WHERE THE FRAME ACTUALLY GOES. Iron 2026-08-22 reported clear = 0 while the frame
                 # cost 63.8 -> 150.4 ms, so the clear was never the cost and the old instrument could
                 # not say what was. Cumulative means.
@@ -1691,6 +1707,15 @@ fn main(): i64 {
                 println_int(ft_mean_render_us());
                 println_int(ft_mean_present_us());
                 println_int(ft_mean_other_us());
+                # ⭐⭐ AND WHICH PART (0.16.27): blit and flip are INSIDE present; input, yield and the
+                # period are OUTSIDE the frame. -1 = not measured on this path (QEMU has no `#84`, the
+                # host has no yield), never "free".
+                println("aethersafha: cumulative us (client blit, #84 flip, input, yield, period):");
+                println_int(ft_mean_blit_us());
+                println_int(ft_mean_flip_us());
+                println_int(ft_mean_input_us());
+                println_int(ft_mean_yield_us());
+                println_int(ft_mean_period_us());
                 ft_window_close();
             }
             frame = frame + 1;
@@ -1737,6 +1762,12 @@ fn main(): i64 {
         println_int(ft_mean_present_us());
         println_int(ft_mean_other_us());
         println_int(ft_dropped);
+        println("aethersafha: AT EXIT, cumulative us (client blit, #84 flip, input, yield, period):");
+        println_int(ft_mean_blit_us());
+        println_int(ft_mean_flip_us());
+        println_int(ft_mean_input_us());
+        println_int(ft_mean_yield_us());
+        println_int(ft_mean_period_us());
         println("aethersafha: at exit — frames, then apps that connected:");
         println_int(frame);
         println_int(accepted);

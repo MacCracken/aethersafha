@@ -243,8 +243,9 @@ scans them out.**
   is 0xE0-prefixed in Set-1 and flat in evdev, so bhumi's existing table could never match here.
   ⚠ On Linux both streams share one fd and a read consumes, so bhumi drains ONCE and splits; and its
   device scan latched twice before it was right (see bhumi 1.4.0). Unplug is still unhandled.
-- **B5 — host client launch.** Today a client must be started by hand in another shell. `plp_spawn`
-  (`programs/puka_launch_probe.cyr:34-45`) already proves the fork+execve-then-accept shape on the host.
+- **B5 ✅ DONE 0.13.4 — host client launch.** `--client PATH` (repeatable) forks and execs a client after the
+  listener is up and hands it `SETU_SOCKET`. (agnos's counterpart is the launcher, `--clients` and, since
+  0.16.26, `--spawn NAME`.) Original entry: today a client must be started by hand in another shell.
 - **B6 ✅ CLOSED 0.13.6 / setu 0.8.5 — one rendezvous, named by setu.** `setu_un_path` resolves
   explicit path → `$SETU_SOCKET` → `SETU_UNIX_PATH`; all four callers pass **0** (this repo,
   crab 0.4.7, puka 0.6.12, setu's `present_probe`). Verified with no symlink: default **95**, override
@@ -483,6 +484,18 @@ consumer, which is the state the stack is already in.
     ⚠ Undecided: whether the per-frame commit is overhead to avoid or a damage signal worth having.
     That is a compositor-behaviour question — does aethersafha redraw from a live buffer without a
     commit — and it wants measuring before either path is chosen.
+    ✅ **ANSWERED 0.16.27, from the code: YES — every live surface is redrawn EVERY frame, commit or
+    not.** The GPU path blits the attached slot with `#87` / `#92` each frame (`ae_gpu_present_frame`);
+    the CPU path re-reads it with `setu_buf_read(bid, spix, w*h*4)` each frame and marks the content
+    damaged every frame (`render_window`, and the LIVE note in `rend_frame_damage`); and an ATTACH that
+    names the same slot at the same extent is SKIPPED as carrying no new information
+    (`setu_dispatch.cyr`, the `samebuf` guard). ⇒ **COMMIT carries nothing the compositor uses** beyond
+    the first attach and a resize, so `dh_client_present`'s ATTACH + COMMIT per frame is two messages of
+    pure overhead today, and crab's commit-less live buffer loses nothing. ⚠ The same fact is item 1's
+    structural cost: with no change signal, the compositor cannot skip an UNCHANGED surface, so a
+    maximized terminal is re-read or re-blitted in full every frame whether or not a key was typed.
+    Making COMMIT the change signal is the protocol decision that would let it skip — and it needs an
+    opt-in (crab never commits), so it is setu's, not a compositor-only change.
     ⚠ README scope is STALE and must not be planned from: it lists *"v0.6+ — next: the compositor-fd
     input source … the present path"* while the repo is at 0.9.3 with both long shipped (for TCP).
   - **C4b — LATER, AND HARD-GATED ON C4a. The EditorGUI (`murrahir`) port** — still Rust on GitHub, to be
@@ -511,14 +524,15 @@ closed with A4 burned.
   opaque `#87` path; a trap for whoever opts them in. See `planning/desktop.md:352-356`.
 
 ## Known cleanup
-- **Deferred deps** (mehman / agnostik / agnodrm): `cyrius build` auto-prepends
-  every `[deps.*]` module, so these unused-but-heavy bundles broke the build —
-  mehman→`[deps.kavach]` drags in `sandhi_server_*`/`thread_local_*` (reachable-
-  undefined), agnostik+agnodrm collide on `ERR_*`. Deferred (mapping kept in the
-  manifest). Re-enable each with a selective `modules = [...]` subset when the
-  code that needs it lands (mehman at Bite G; agnostik/agnodrm/mabda as consumed).
-- `cyrius lib sync --full` is required before `cyrius deps` (the declared stdlib
-  set + bhumi's needs exceed the incremental pin). Documented in CLAUDE.md.
+- ~~**Deferred deps** (mehman / agnostik / agnodrm)~~ — ✅ **STALE, corrected 0.16.27.** All three have
+  been ACTIVE since 0.2.x: the `ERR_*` collision ended when agnostik and agnodrm namespaced their error
+  families (1.3.3 / 1.4.5), and mehman → `[deps.kavach]` builds once its stdlib cascade is declared, which
+  `[deps] stdlib` does. There is no `[deps.mabda]` and there should not be (see the correction below).
+- ~~`cyrius lib sync --full` is required before `cyrius deps`~~ — ✅ **STALE, corrected 0.16.27.** `lib/`
+  holds the declared closure, not the full snapshot: a pin bump is `cyrius lib sync` (the declared
+  subset), then `cyrius deps`, then a file-by-file `cmp` against `~/.cyrius/versions/<pin>/lib` — `deps`
+  refreshes the undeclared-but-present files (`sys`, `bayan`, `hashseed`) that `lib sync` does not.
+  Since 0.16.26 every `path` line is dormant, so `cyrius deps` resolves from the tags.
 
 ## Out of scope (for v1.0)
 - Rust `system_tests.rs` port (verification code, not runtime) — re-expressed as
