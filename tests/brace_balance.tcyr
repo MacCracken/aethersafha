@@ -1,0 +1,119 @@
+# brace_balance.tcyr — every src/*.cyr balances its braces WITHOUT evaluating the preprocessor.
+#
+# ⛔ WHY (0.16.28). `src/main.cyr` opened its frame loop with two heads in complementary regions,
+# `#ifdef CYRIUS_TARGET_AGNOS / while (...) { / #endif` then `#ifndef CYRIUS_TARGET_AGNOS /
+# while (...) { / #endif`, both closed by ONE `}`. The compiler builds that on either target, since
+# it sees one region at a time. Every tool that reads the file for all targets at once counts two
+# `{` and one `}`: cyrius's declaration reader (cbt/srcscan.cyr), and through it coverage, the
+# header and distlib tools and the LSP, ended the file at depth 1 and never saw `fn _ae_entry`.
+# cyrfmt indented `main`'s whole body one level too deep. The fix is one loop head plus the
+# `ae_loop_go` helper. This test keeps the shape from coming back in any source file.
+#
+# The count skips string literals, char literals and `#` lines (comments and preprocessor
+# directives), the same text cbt/srcscan.cyr's `_src_blank_noncode` blanks. A file passes when
+# its depth never goes below zero and ends at zero.
+
+# Offset just past the string literal that opens at buf[p] (a `"`), honouring `\` escapes.
+fn bb_str_end(buf, p, n): i64 {
+    var i = p + 1;
+    while (i < n) {
+        var c = load8(buf + i);
+        if (c == 92) { i = i + 2; }
+        elif (c == 34) { return i + 1; }
+        else { i = i + 1; }
+    }
+    return n;
+}
+
+# Offset just past the char literal that opens at buf[p] (`'x'` or `'\x'`), or p + 1 when the
+# `'` opens no literal.
+fn bb_char_end(buf, p, n): i64 {
+    var close = p + 2;
+    if (p + 1 < n) { if (load8(buf + p + 1) == 92) { close = p + 3; } }
+    if (close < n) { if (load8(buf + close) == 39) { return close + 1; } }
+    return p + 1;
+}
+
+# Target-agnostic brace depth at the end of buf[0, n), or -1 if the depth ever went negative.
+fn bb_final_depth(buf, n): i64 {
+    var p = 0;
+    var d = 0;
+    while (p < n) {
+        var c = load8(buf + p);
+        if (c == 34) { p = bb_str_end(buf, p, n); }
+        elif (c == 39) { p = bb_char_end(buf, p, n); }
+        elif (c == 35) {
+            while (p < n) {
+                if (load8(buf + p) == 10) { break; }
+                p = p + 1;
+            }
+        } else {
+            if (c == 123) { d = d + 1; }
+            if (c == 125) {
+                d = d - 1;
+                if (d < 0) { return 0 - 1; }
+            }
+            p = p + 1;
+        }
+    }
+    return d;
+}
+
+# Depth of a source string (NUL-terminated), for the self-checks below.
+fn bb_depth_of(src): i64 {
+    return bb_final_depth(src, strlen(src));
+}
+
+var bb_path[512];
+
+fn main(): i64 {
+    alloc_init();
+
+    test_group("brace_balance — the counter itself");
+    assert_eq(bb_depth_of("fn f() { if (x) { y(); } }\n"), 0, "a balanced fn is depth 0");
+    assert_eq(bb_depth_of("fn f() {\n"), 1, "an unclosed fn is depth 1");
+    assert_eq(bb_depth_of("}\n{\n"), 0 - 1, "a close before any open is refused, not netted to 0");
+    assert_eq(bb_depth_of("var s = \"{\";\nvar c = '}';\n# {\n"), 0, "braces in strings, chars and comments do not count");
+    assert_eq(bb_depth_of("var s = \"\\\"{\";\n"), 0, "an escaped quote does not end the string early");
+    assert_eq(bb_depth_of("#ifdef A\nwhile (a) {\n#endif\n#ifndef A\nwhile (b) {\n#endif\n}\n"), 1,
+      "the retired split loop head counts as depth 1");
+
+    test_group("brace_balance — every src/*.cyr");
+    var names = vec_new();
+    var rc = dir_list_checked(str_from("src"), names);
+    assert_eq(rc, 0, "src/ could be listed");
+    var files = 0;
+    var i = 0;
+    while (i < vec_len(names)) {
+        var nm = vec_get(names, i);
+        var nl = str_len(nm);
+        var nd = str_data(nm);
+        var is_cyr = 0;
+        if (nl > 4) { if (memeq(nd + nl - 4, ".cyr", 4) == 1) { is_cyr = 1; } }
+        if (is_cyr == 1 && nl < 500) {
+            memcpy(&bb_path, "src/", 4);
+            memcpy(&bb_path + 4, nd, nl);
+            store8(&bb_path + 4 + nl, 0);
+            var len = 0;
+            var buf = file_read_whole(&bb_path, &len);
+            assert_neq(buf, 0, "a src/*.cyr file could be read");
+            if (buf != 0) {
+                var d = bb_final_depth(buf, len);
+                if (d != 0) {
+                    println("brace_balance: unbalanced without the preprocessor (depth, file):");
+                    println_int(d);
+                    println(&bb_path);
+                }
+                assert_eq(d, 0, "a src/*.cyr file balances its braces with no preprocessor model");
+            }
+            files = files + 1;
+        }
+        i = i + 1;
+    }
+    assert_gt(files, 20, "src/ held more than 20 .cyr files (a vacuous pass is refused)");
+
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);

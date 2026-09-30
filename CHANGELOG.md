@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.16.28] — 2026-09-30 — re-pin to Cyrius 6.6.11 on mehman 1.0.4; one frame-loop head
+
+> Cut as part of the Cyrius 6.6.12 repair batch, which scheduled this re-pin. The commit is local; the
+> tag and the push are the operator's.
+
+### Changed — Cyrius 6.6.6 → 6.6.11, mehman 1.0.3 → 1.0.4
+
+- **Why they move together.** Cyrius 6.6.11 checks the qualifier in `X.NAME`. Up to 6.6.10 the
+  compiler resolved only the member name. mehman 1.0.3's `src/sandbox.cyr`, vendored here as
+  `lib/mehman_sandbox.cyr`, spelled kavach's renamed members `Backend.PROCESS` (twice) and
+  `KavachError.OK`. 6.6.11 refuses all three (`'Backend' is not an enum`, `'OK' is not a variant
+  of 'KavachError'`), so this repo built only because it pinned 6.6.6. mehman 1.0.4 fixes the
+  spellings to `KavachBackend.PROCESS` and `KavachError.KAVACH_ERR_OK`. The vendored `lib/kavach.cyr` (3.13.1) already declares both enums,
+  so kavach does not move. ⚠ `KavachError.OK` never meant `KAVACH_ERR_OK`: it resolved to the last
+  global `OK`, `MehmanError.OK`, and worked only because both are 0 (mehman 1.0.4's CHANGELOG).
+- **`lib/`** is re-vendored under the new pin. `lib/mehman_{types,surface,sandbox}.cyr` are
+  byte-identical to mehman `1.0.4:src/*.cyr`, and every other dep bundle to its tag
+  (`scripts/check-dep-tags.sh`: 9 deps clean). **`cyrius.lock`**: 86 deps and 10 commit pins, with
+  mehman at its 1.0.4 commit and a trailing `cyrius 6.6.11`. The `# path = "../mehman"` line stays
+  dormant.
+- `src/` needed no edit for the pin. Both targets build: host and `--agnos`.
+
+### Fixed — `src/main.cyr` ended at brace depth 1 for every tool that reads it without a target
+
+The frame loop opened with **two** heads in complementary preprocessor regions, each closed by the same
+single `}`:
+
+```
+#ifdef CYRIUS_TARGET_AGNOS
+while (running == 1) {
+#endif
+#ifndef CYRIUS_TARGET_AGNOS
+while ((running == 1) && ((setu_cap == 0) || (frame < setu_cap))) {
+#endif
+```
+
+The compiler handles that, because it sees one region per target. A reader that covers every target at
+once counts two `{` and one `}`. cyrius's declaration reader (`cbt/srcscan.cyr`) did exactly that.
+Coverage, the header and distlib tools and the LSP all use that reader. It left `main` open to the end
+of the file (last depth-0 line 793), so `fn _ae_entry`, the process entry point, was invisible to all of
+them. cyrfmt modelled the same double count and indented `main`'s whole body one level too deep, with
+`fn _ae_entry` at 4 spaces at top level.
+
+**The fix: one loop head, `while (ae_loop_go(running, frame, setu_cap) == 1) {`.** The target split moves
+into `ae_loop_go` (agnos: until quit; host: also bounded by the cap, `0` = unbounded), which is an exact
+restatement of the two old conditions. `src/main.cyr` was then re-run through `cyrius fmt`. That diff is
+whitespace only apart from the loop head and the helper (`git diff -w`). A probe built on srcscan's own
+`_src_blank_noncode` + `_src_brace_delta` now ends the file at depth **0**, with the last depth-0 line at
+the end of the file (1853), where it used to end at depth 1 with the last at 793. Host A/B against the
+0.16.27 source: `--frames 7` runs 7 frames and the default runs 400, on both.
+
+**`tests/brace_balance.tcyr` (new, 68 assertions)** counts braces in every `src/*.cyr` with strings, char
+literals and `#` lines skipped, and no preprocessor model, and requires depth 0 at the end and never
+below 0. Its self-checks include the retired split head, which must count as depth 1. Mutation-verified:
+restoring the 0.16.27 `src/main.cyr` fails it and names the file, with depth 1.
+
+**28 suites, 2,056 assertions, 0 failed** (27 / 1,988 at 0.16.27, plus the new suite's 68).
+
 ## [0.16.27] — 2026-09-27 — the phase instrument can finally say WHY a frame is slow
 
 > `git describe --tags` answered `0.16.26` exactly before this was written; `[0.16.26]` below is a record.
