@@ -524,6 +524,11 @@ closed with A4 burned.
   opaque `#87` path; a trap for whoever opts them in. See `planning/desktop.md:352-356`.
 
 ## Known cleanup
+
+- **Recorded by cyrius 6.6.12 (2026-10-02):** 21 files are not `cyrius fmt`-clean on 6.6.11 and CI has no
+  fmt step — format them and add `cyrius fmt --check` to CI. Duplicate-fn warnings between the folded
+  sigil and the agnostik / agnodrm bundles (`_hex_nibble`, `result_print_err`, …): rename on the
+  aethersafha side or drop the copies.
 - ~~**Deferred deps** (mehman / agnostik / agnodrm)~~ — ✅ **STALE, corrected 0.16.27.** All three have
   been ACTIVE since 0.2.x: the `ERR_*` collision ended when agnostik and agnodrm namespaced their error
   families (1.3.3 / 1.4.5), and mehman → `[deps.kavach]` builds once its stdlib cascade is declared, which
