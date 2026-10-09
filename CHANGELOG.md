@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [Unreleased]
+
+> Toward 0.16.30, the repair the roadmap schedules before the 0.17.x arc.
+
+### Fixed — the declared license is AGPL-3.0-only everywhere
+
+`cyrius.cyml` and `CLAUDE.md` said GPL-3.0-only. `LICENSE` (the AGPL-3.0 text), `README.md`,
+`CONTRIBUTING.md` and the Rust original's `Cargo.toml` all said AGPL-3.0-only. Operator ruling, 2026-10-09:
+**AGPL-3.0-only**. Full user-facing projects such as this desktop are AGPL; component libraries are
+GPL-3.0-only. `CLAUDE.md` now records the policy, so the license is not "aligned" with the GPL library
+siblings again. Neither binary changes: both are byte-identical with the license field changed.
+
+### Found — three defects in the running desktop, to be fixed in 0.16.30
+
+A read-only parity audit (seven module groups, 2026-10-09) found these, and each was re-read in the code:
+- **A setu client can overflow the compositor's heap.** ATTACH checks only `0 < h·stride ≤ 16 MB`, and
+  every CPU-path frame reads `w·h·4` bytes into that `h·stride` cache, so `stride < 4·w` (or negative `h`
+  and `stride`) writes past it with bytes the client chose.
+- **Focus changes from a click or Ctrl+Tab never reach clients.** The detector compares stack indices,
+  and the focused window always sits at the top index.
+- **Minimize is one-way.** Nothing writes a window back from `WS_MINIMIZED`.
+
+### Docs
+
+- `roadmap.md` is rewritten (596 → 186 lines). Finished milestones shrink to one line each, the open desktop
+  work is one table, and the operator rulings are kept. It plans **0.17.x: close the Rust parity and delete
+  `rust-old/`**, sized by the audit's main finding: the Rust binary never created a window or rendered a
+  frame, so parity is library behaviour plus its status tick. It also plans the Super key replacing Ctrl as
+  the chrome modifier, as a desktop-track item. Operator decisions (2026-10-09): retire the app layer,
+  `theme_bridge`, `shell_integration`, quick settings and the HUD widgets; keep `gestures` dormant; port the
+  agent-list poll and accessibility mirroring.
+- `parity-plan.md` is now the parity matrix behind that arc: every Rust module's verdict, what is open, the
+  ADRs 0002–0004 to write, and every Rust test still to re-express, by name.
+- `state.md` records the three defects, re-checks the two agnos kernel defects against agnos 1.57.10 (the
+  `VFS_CHAN` close leak is still open; the keystroke loss has no owner), and adds a reference-coverage
+  baseline of 60% (791 of 1,297 fns).
+
 ## [0.16.29] — 2026-10-09 — the cyrius 6.6.12 follow-ups: a fmt gate, no duplicate-fn warnings, `M_SZ`; a manifest, not a ledger
 
 > The repairs cyrius 6.6.12 recorded for this repo (roadmap *Known cleanup*), plus the manifest cleanup.

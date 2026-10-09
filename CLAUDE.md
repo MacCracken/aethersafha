@@ -11,7 +11,9 @@
 **aethersafha** — Cyrius port of a Rust project (27207 lines preserved at `rust-old/`).
 
 - **Type**: Port (Rust → Cyrius)
-- **License**: GPL-3.0-only
+- **License**: AGPL-3.0-only. Full user-facing projects, such as this desktop, are AGPL; component libraries
+  are GPL-3.0-only (operator, 2026-10-09). Do not align this with the GPL siblings: `LICENSE`, `README.md`,
+  `CONTRIBUTING.md` and `cyrius.cyml` all say AGPL-3.0-only.
 - **Language**: Cyrius (toolchain pinned in `cyrius.cyml [package].cyrius`)
 - **Version**: `VERSION` at the project root is the source of truth — do not inline the number here
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md) · [First-Party Documentation](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-documentation.md)

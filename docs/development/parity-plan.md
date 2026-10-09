@@ -1,181 +1,157 @@
-# aethersafha — Parity Execution Plan (bite-level WBS)
+# aethersafha — parity matrix
 
-> Companion to [`roadmap.md`](roadmap.md) (the milestone view). This is the
-> **executable** breakdown: strategic "bites" sized for a session or a workflow,
-> with dependencies, execution mode, and acceptance criteria. Bar = parity with
-> `rust-old/` (27,207 lines). Updated after each bite lands.
+> **The gate for deleting `rust-old/`.** This is the 0.17.x arc's burn-down list; the sequence is
+> [`roadmap.md`](roadmap.md) § 0.17.x. Measured 2026-10-09 against the code by seven read-only audits, one
+> per module group; every defect named here was re-read before it was written down. A row is **CLOSED**
+> when its Rust behaviour is ported and its Rust tests are re-expressed in `.tcyr`, or when an ADR retires
+> it. This page replaces the post-0.1.0 bite plan that used to live here, whose bites are done or
+> superseded. It is deleted with `rust-old/`; the ADRs carry what outlives it.
 
-## Snapshot (post-0.1.0)
+## The fact that sizes the arc
 
-| Layer | Rust lines | Cyrius status |
-|---|---|---|
-| Core: compositor, renderer, input | 2565 + 1656 + — | **partial** — window CRUD/focus + minimal fill/loop done; depth pending (Bite A) |
-| Core: geom, window, main | — | ✅ done, runs on bhumi |
-| Leaf: theme_bridge, gestures, accessibility, ai_features, shell, security_ui | ~6900 | **structural** parity + smoke tests; behavioral tests + wiring pending (Bite B) |
-| Leaf: shell_integration, plugin_host | 516 + 848 | ⬜ not ported (Bite B1) |
-| Apps | 2986 | **C1+C2 ✅** framework + data-model apps + aggregate + Command Palette spawn (133 assertions); C3 (fs/net) pending |
-| Capture / recording | 1299 + 938 | **✅ Bite D done** — `screen_capture` (D1) + `screen_recording` (D2) ported + tested |
-| HUD widgets | ~1990 | ⬜ not ported (Bite E) |
-| **Native display protocol** (transport/surface/present/input) | — | ⬜ greenfield — designed from scratch (Bite F, redefined); Rust `wayland/` (~3360) **retired, not ported** |
-| foreign-app hosting → mehman (was `xwayland.rs`) | 823 | 🚧 mehman wired (Bite G); per-ABI shim + XRGB fidelity remain |
-| system_tests | 1477 | re-expressed as per-module `.tcyr` (cross-cutting) |
+**The Rust binary never created a window or rendered a frame.** `main.rs` built `DesktopEnvironment`, ran a
+5 s status tick (`main.rs:136-185`), honoured `--secure`, and exited on a signal. Compositor depth, the
+renderer, apps, capture and the HUD were library code reached only by tests. So parity is **library
+behaviour plus that tick**. A module that was library-only in Rust and is library-only here is at parity;
+wiring it into the running desktop is new work and is not part of the deletion gate.
 
-**Key decision (ADR 0001):** the native client protocol is a **sovereign
-protocol designed from first principles — Wayland refused, not ported**. The
-Rust `wayland/` surface is retired; Bite F is redefined as the greenfield design
-+ build of the native display protocol (see
-[`../adr/0001-native-display-protocol.md`](../adr/0001-native-display-protocol.md)
-and the ecosystem pivot in `agnosticos/docs/design-patterns.md`). Still the
-largest and highest-risk piece — now as design, not translation.
+## Matrix
 
----
+| Rust | Lines / tests | Cyrius home | At runtime | Verdict | Open before CLOSED | Bite |
+|---|---|---|---|---|---|---|
+| `compositor.rs` | 2565 / 99 | `compositor`, `window`, `geom`, `input`, routing in `main` | driven | PORT | close updates `WSP_ACTIVE` (2 Rust tests fail today); routing + drag/resize out of `main.cyr` with its 9 tests; workspaces (4 defaults, queries, context setter); L / BL resize grips; lifecycle and workspace tests | .1 .4 .5 |
+| `main.rs` | 630 / 26 | `main`, `desktop`, `sysprobe` | driven | PORT the tick and `--secure` | flags as a pure module with `--help` / `--version`; `UserPresent` each tick; welcome notice; Linux cpu / disk + `parse_cpu_line` (7 tests); SIGINT teardown on Linux | .2 |
+| `renderer.rs` | 1656 / 49 | `render`, `window`, `desktop`, `shell_render`, `wallpaper`, `theme`, `cursor` | driven | PORT | title truncation; CPU premultiplied blend + opacity (CPU frames differ from iron today); border outline; tests for overlap, minimized-not-drawn, text width, and the dead asserts | .1 .4 .5 |
+| `shell.rs` | 1396 / 60 | `shell`, `shell_render` | panel + cards painted | PORT | 8 missing + 7 partial tests; the app registry says `cmdpalette` where Rust said `terminal`; the net dot claims Connected with no producer; agent count unfed; `toggle_panel` honoured | .1 .2 .5 |
+| `accessibility.rs` | 729 / 30 | `accessibility` | synced once at boot | PORT, mirroring included | a node and an announcement on create / close, focus sync, an idempotent sync; 3 tests | .2 |
+| `ai_features.rs` | 1707 / 86 | `ai_features` | constructed only | PORT | `"terminal"` context match (silently `"cmdpalette"`); stable suggestion sort; null-checked date; `poll_agents` against daimon 2.4.3; 21 tests | .1 .3 |
+| `security_ui.rs` | 1858 / 77 | `security_ui` | constructed only | PORT | dashboard maximum starts at Low (Rust: Info); audit-log writer; SIGHUP / SIGKILL; Linux-only kill effects; 9 tests incl. 4 eviction | .1 .3 |
+| `plugin_host.rs` | 848 / 31 | `plugin_host` | constructed only | PORT | `PluginMessage` JSON (both directions `return 0`) and its 8 tests; delete the `plug_ipc_*` stubs (Rust had no transport) | .3 |
+| `screen_capture.rs` | 1299 / 31 | `screen_capture` (not linked) | library | PORT as library | alpha 0xFF; refuse w / h ≤ 0 (a null write today); decode round-trip over 64 KB; per-capture memory | .3 |
+| `screen_recording.rs` | 938 / 22 | `screen_recording` (not linked) | library | PORT as library | the ring frees what it evicts | .3 |
+| `gestures.rs` | 569 / 17 | `gestures` | constructed only | KEEP dormant (ADR 0004) | 1 test; record the rotate wrap and the floor-sqrt boundary | .0 .5 |
+| `apps.rs` | 2986 / 173 | `apps` (not linked) | dead in Rust too | RETIRE (ADR 0004) | delete `src/apps.cyr` + `tests/apps.tcyr` | .0 |
+| `theme_bridge.rs` | 372 / 18 | `theme_bridge` | dead | RETIRE (ADR 0004) | delete it and `desktop.cyr`'s `DSK_THEME` (whose call passes a colour as the focus-ring width) | .0 |
+| `shell_integration.rs` | 516 / 26 | `shell_integration` | one tray item at boot | RETIRE (ADR 0004) | delete it and the boot tray item (`main.cyr:943` passes the integer `1` as the id string) | .0 |
+| quick settings, `KeyboardNavConfig` (in `shell.rs`, `accessibility.rs`) | — | `shell`, `accessibility` | never read | RETIRE (ADR 0004) | delete the two surfaces and their tests | .0 |
+| `hud/*` | 1987 / 67 | — | never ported | RETIRE (ADR 0004, with the widget specs) | only the agent-list poll is ported (row `ai_features.rs`) | .0 .3 |
+| `wayland/*` | 4763 / 181 | setu | — | RETIRED (ADR 0001) | ADR 0002 lists what is dropped and what is owed a native design | .0 |
+| `xwayland.rs` | 823 / 34 | mehman, `foreign` | — | RETIRED (ADR 0001) | ADR 0002 lists what mehman owes | .0 |
+| `system_tests.rs` | 1477 / 40 | — | tests | re-express | 22 covered · 13 partly · 5 not (two of them are the 0.17.1 divergences) | .5 |
+| `tests/*.rs` | 422 / 29 | — | tests | re-express | compositor 7 / 13 covered, renderer 6 / 12, security 4 / 4 | .5 |
+| benches, `bench-history.csv`, `benchmarks.md` | 378 / — | `tests/aethersafha.bcyr` | — | PRESERVE the CSV | the CSV moves to `docs/benchmarks.md` ("machine unknown, not a target"); Cyrius benches for the same series | .5 |
+| `lib.rs`, `examples/`, Cargo / Makefile / deny / codecov / toolchain | — | — | — | OBSOLETE | map every `pub use` in `lib.rs:21-88` to its Cyrius home or its ADR, then drop | .6 |
 
-## Bites
+There are 1,096 Rust tests. The retired rows' tests (181 in `wayland/`, 34 in `xwayland.rs`, and those of
+`apps`, `theme_bridge`, `shell_integration` and the HUD) close by ADR. The PORT rows' open tests are listed
+by name under *Rust tests still to re-express* below.
 
-Legend — **Mode**: 🔁 workflow (parallel fan-out) · ➡️ serial (tight coupling) ·
-🔗 pipeline. **Size**: S (<1 session) · M (1 session/workflow) · L (multi) · XL (weeks).
+## What the ADRs carry
 
-### Bite 0 — Cross-cutting foundations · ➡️ · S
-Do alongside everything; unblocks the process gates.
-- **ADR-0001**: record the native sovereign display protocol (Wayland refused, not ported). ✅ [`../adr/0001-native-display-protocol.md`](../adr/0001-native-display-protocol.md).
-- **Benchmark harness**: real `.bcyr` for compositor create/focus + renderer fill
-  (the dev loop forbids claiming perf without numbers).
-- **ERR_\* overlap cleanup**: trim agnostik/agnodrm to selective `modules` so the
-  duplicate-symbol warnings go away.
-- **Accept**: ADR committed; `cyrius bench` produces a CSV row; clean build w/o ERR_ warnings.
+**ADR 0002 — retire the Rust protocol layer.** The Rust Wayland layer never ran end to end (its listener
+was dropped, accepted streams never reached dispatch, attach and damage were no-ops), so deleting it loses
+data models, not behaviour.
+- *Dropped:* the object-id map, globals and registry, seat-capability objects, configure serial / ack,
+  decoration negotiation and move / resize requests (server-side decorations are policy), regions, buffer
+  transform / scale, viewporter, output transform / subpixel, the X11 display number and socket,
+  `WM_HINTS`, the action queue, the feature stub.
+- *Owed a native design (setu):* title + app_id; client state requests (fullscreen for video and games);
+  min / max size hints; parent / transient (dialogs); popups + positioner (menus, tooltips, IME
+  candidates); clipboard + drag-and-drop (one global selection); text input / IME; output geometry,
+  refresh and scale; pointer leave + horizontal axis; modifier state on key events + a keymap (ADR 0001
+  promised one); damage + frame pacing; a HELLO version handshake; disconnect cleanup.
+- *mehman owes:* multi-window guests; guest-driven title, state, size and parent; input and focus;
+  clipboard; real pixels (mehman ADR 0004).
+- *Never present:* subsurfaces, layer-shell, security-context, agent-surface.
 
-### Bite A — Core depth to full parity · ➡️ (workflow-drafted) · L
-The load-bearing layer everything visual depends on. Rust: `compositor.rs` (2565),
-`renderer.rs` (1656), input routing.
-- **A1 compositor**: workspaces + move-window-to-workspace, drag/resize state
-  machines, input routing to the focused surface, secure_mode + agent-aware mode,
-  accessibility-tree bridge.
-- **A2 renderer**: premultiplied-alpha blend, damage tracker (dirty rects), scene
-  graph, window decorations (titlebar buttons, borders, resize edges), hit-testing,
-  bitmap font + text.
-- **A3 input**: HID→keysym/layout (xkb-equivalent), modifier state, key repeat.
-- **Mode**: workflow can draft each file, but integration is serial (shared state).
-- **Accept**: behavioral `.tcyr` mirroring rust compositor/renderer tests; binary
-  renders decorated, focus-routed, damage-tracked windows.
+**ADR 0003 — the port's substrate and numeric divergences.** bhumi instead of DRM/KMS + libinput +
+logind; the agnos GPU band (`#82`–`#94`) instead of mabda; an XRGB8888 framebuffer; rupa tokens instead of
+a palette; the kashi VGA 8×16 font instead of 5×7; a damage band instead of a region list; the kernel
+`#84` flip instead of a front / back swap; i64 ids, epoch seconds, permille, milliradians, sentinels and
+i64 error codes instead of Uuid, DateTime, f32, Option and error text; one thread and a frame loop
+instead of tokio and `Arc<RwLock>`; getters that return live objects, not clones; ASCII-only case folding;
+UNKNOWN (−1) gauges instead of 0; caller-supplied framebuffers for capture; cascade placement; the
+120×60 minimum window; the gesture rotate wrap and the floor-sqrt swipe boundary. (The Terminal →
+Command Palette rename is not recorded: `apps` retires and 0.17.1 restores `terminal` where it leaked
+into the AI context match and the shell registry.)
 
-### Bite B — Finish leaf parity · 🔁 + ➡️ · M
-- **B1** 🔁 (2 agents): port `shell_integration` (516) + `plugin_host` (848).
-- **B2** 🔁 (~8 agents): behavioral parity test suites (`.tcyr`) for all leaf
-  modules — port the relevant `rust-old` unit tests, assert against real behavior
-  (not just constructors).
-- **B3** ➡️: wire leaf modules into the compositor/shell surface (notifications,
-  quick settings, a11y tree from the window tree, ai suggestions, security prompts).
-- **Accept**: leaf modules behavior-tested + reachable from the running compositor.
+**ADR 0004 — the retired surface (operator, 2026-10-09).**
+- *The app layer:* `DesktopApplications`, `AppWindow`, `open_*`, FileManager, the Command Palette, the 8
+  browsers and Shruti, the Agent / Audit / Model managers. Client processes (puka, crab, thoth) and the
+  launcher own windows now; the managers return as client programs if wanted.
+- *theme_bridge:* there is no Flutter; rupa is the theme source.
+- *shell_integration:* tray items, window-management requests and external notifications never reached a
+  compositor in Rust, and agnos has no tray source; they return as setu message kinds if needed.
+- *Quick settings and `KeyboardNavConfig`:* no backing service and no reader in either codebase.
+- *The HUD widgets*, with their full specs (endpoints, JSON shapes, aliases, thresholds), because the
+  daimon they polled has changed: `POST /v1/mcp/tools/call` answers 405 (calls moved to `/v1/mcp/call`),
+  `agnostic_list_crews` survives only in secureyeoman's TypeScript server, nothing implements
+  `agnos_gpu_status`, and `GET /v1/agents` now returns integer ids and statuses.
+- *Test-only Rust features:* `ClipboardManager`, `tile_windows`, `render_hud_overlay` (a clipboard belongs
+  in setu, ADR 0002).
+- *Inert flags:* `--backend`, `--kiosk`, `--no-ai`, `--high-contrast`, `--accessibility` (logged or stored,
+  never acted on). SIGHUP reload and the goodbye notice. `Touch*` input events. The floating layer for
+  agent windows, which returns with agent-owned surfaces. `blit_clipped`, the `Layer` type, ResizeEdge
+  T / TL / TR (unreachable in Rust too). Rust derive behaviour (Clone, Debug, PartialEq, serde) and the
+  tests that only check it.
+- *Kept dormant:* `gestures` stays as tested library code; no touch path exists in bhumi or agnos.
 
-### Bite C — Built-in apps · 🔁 · L
-Rust: `apps.rs` (2986). Re-sliced by effect-danger during scoping:
-- **C1 ✅** app framework (`AppError`/`AppType`/`AppWindow`), the `DesktopApplications`
-  aggregate (open/close/list windows + live sub-app getters), the pure data-model apps
-  (FileManager, AgentManager, AuditViewer, ModelManager), and the data-only exec-app parts
-  (8 WebBrowser configs, Shruti, Command Palette allowlist + **basename-strip** path-traversal
-  neutralisation + pre-spawn validation). Effect bodies stubbed to clean-env fallback.
-  `tests/apps.tcyr` (125 assertions). Standalone; compositor wiring is follow-on.
-- **C2 ✅** the process-spawn bodies — Command Palette `execute_command` (PATH-resolve the allowlisted
-  bare name, direct fork+execve, capture stdout + real `WEXITSTATUS` → `Ok(stdout)` / WindowError),
-  WebBrowser/Shruti `launch` (is_installed guard → AppNotFound; detached env-injecting spawn).
-  **DIRECT** exec — faithful to Rust's unsandboxed `Command`; the allowlist + basename-strip are the
-  control. Routing through the kavach sandbox is an **ADR-gated future enhancement**, not parity.
-  `tests/apps.tcyr` runs real `echo`/`true`/`false`. fs/net effect bodies remain C3.
-- **C3** 🔗: the filesystem/network effect bodies — `list_agents` (agent-socket scan),
-  `get_logs` (audit-log parse), model-gateway `list/download/select`.
-- **Accept**: C1 — data model + security logic tested ✅; C2/C3 — real effects sandboxed + tested.
+## Rust tests still to re-express
 
-### Bite D — Screen capture + recording · 🔗 · M
-- **D1 ✅** `screen_capture` (1299) → `src/screen_capture.cyr`: per-agent permission model,
-  sliding-window rate limiting, secure-mode + system/agent authorization, capture-history
-  ring buffer, and full-screen/region(clamped)/window capture off a caller-supplied bhumi
-  framebuffer, with byte-exact **raw/BMP/PNG** encoders (real PNG — hand-rolled Adler-32 +
-  CRC-32 + zlib STORED — not a stub). `tests/screen_capture.tcyr` (90 assertions). Standalone;
-  compositor wiring is follow-on.
-- **D2 ✅** `screen_recording` (938) → `src/screen_recording.cyr`: recording sessions
-  (config target/format/interval/`max_frames`/`max_duration`), a start → capture-frame →
-  pause/resume → stop state machine, a per-session frame ring buffer (cap 100), one-
-  recording-per-agent, and `capture_frame` → D1 `scap_mgr_capture` → `RecordedFrame`.
-  `tests/screen_recording.tcyr` (72 assertions). Standalone; wiring follow-on.
-- **Accept**: capture — permission + rate-limit tested, reads the bhumi fb ✅ (D1); recording
-  — lifecycle + limits + ring buffer tested ✅ (D2). **Bite D complete.**
+As of 2026-10-09, for the PORT rows. Names are Rust's with any `test_` / module prefix dropped, so grep
+for the suffix; *partly* means a `.tcyr` suite covers the behaviour but not every assertion the Rust test
+made. Tests that only check enum variants, Debug or Clone output,
+or error text close under ADR 0004 and are not listed.
 
-### Bite E — HUD widgets · ➡️ substrate + 🔁 trio · M
-- **E1** ➡️: HTTP+JSON polling substrate (`lib/http`/sandhi + `lib/bayan`) replacing
-  reqwest/serde.
-- **E2** 🔁 (3 agents): `gpu_status`, `domain_filter`, `crew_status` on E1.
-- **Accept**: widgets poll a daimon MCP endpoint + parse JSON; band/status logic tested.
-
-### Bite F — Native display protocol (sovereign, greenfield) · ➡️ · XL (highest-risk)
-**Redefined** (ADR 0001): design + build a first-principles client↔compositor
-protocol — **not** a port of Wayland. The Rust `wayland/` surface (~3360) is
-retired. Prior art (surface/role separation, client-submits-buffer, damage,
-event ordering) is studied, then redesigned clean. Founder-led design gates this
-bite (transport, paradigm, contract-lib name) — see
-`dhancha/docs/development/sovereign-desktop.md`.
-- **F0** (design): the native protocol + the AGNOS desktop paradigm (design doc /
-  ADR beyond 0001's decision) + the shared contract-lib repo (founder-named).
-- **F1** 🔁: protocol types (pixel formats, output info, transforms) in the shared
-  contract lib — pure, headless RUN-testable.
-- **F2** ➡️ (hard): the sovereign wire codec — connection/handshake, message
-  marshal/unmarshal over the chosen transport (Unix socket *or* shm command ring,
-  `lib/net` if socket).
-- **F3** ➡️: protocol dispatch — surface lifecycle (create/configure/commit/close)
-  → the compositor `Window` model; **CPU buffer submit** (memfd/mmap, no GPU
-  first); input events → focused client.
-- **Mode**: its own mini-roadmap; scope a minimal surface first, grow.
-- **Accept**: a `dhancha` client connects, creates a surface, submits a CPU
-  buffer, sees it composited, and receives input — end-to-end on Linux via bhumi.
-
-### Bite G — mehman (foreign-app swallow backend) · 🚧 started
-mehman 0.3.1 + kavach 3.6.0 **wired** (`src/foreign.cyr`): guest-spec + foreign-surface
-descriptor + `desktop_host_foreign` → a compositor window; `main` hosts a demo guest;
-`foreign_run` → `mehman_sandbox_capture_guest` runs the guest AND captures its output
-into the surface buffer (M2 handoff — tested). **Presentation done**:
-`render_desktop_foreign` / `render_foreign_content` paint the captured surface as the
-hosted window's content (line-aware `draw_text_lines`); the desktop tracks foreign
-apps; pixel-tested. Remaining: per-ABI shim; real XRGB pixel fidelity (mehman ADR 0004).
-
-### ~~Bite H — GPU acceleration (mabda)~~ · ⛔ WRONG PREMISE, corrected 2026-08-01
-GPU acceleration **shipped** across 0.9.6–0.9.8 and it does **not** go through mabda. `src/gpu.cyr`
-talks to the agnos kernel's ring-3 GPU band (`#82`-`#94`) directly — `#87 gpu_blit_shm` per client
-surface, `#92 gpu_shader_op` op 0x01 for premultiplied blending, `#84 present` to flip. There is no
-`[deps.mabda]` in the manifest and none is needed; mabda's GPU surface rides Linux's driver stack.
-
-⚠ **What remains is consuming the rest of the band** (`#88 gpu_fill_rect`, `#92` op 0x03 glyphs,
-`#92` batching, `#90`/`#91`, the 3D ops `0x08`-`0x10`), and **validating any of it on iron** — no
-desktop binary has ever been staged to archaemenid, and QEMU cannot stand in for it. See
-[`roadmap.md`](roadmap.md).
-
----
-
-## Sequencing
-
-- **Phase 1 (make the core real + finish leaves)** — Bite 0, Bite A, Bite B. A (serial
-  core depth) and B (independent leaf modules) run in parallel tracks.
-- **Phase 2 (feature breadth)** — Bite C, D, E on top of the solid core. Highly
-  parallel: three workflows.
-- **Phase 3 (the native protocol)** — Bite F. The make-or-break; its own multi-week arc (founder-led design first — ADR 0001).
-- **Phase 4 (compat + accel)** — Bite G (when mehman ships), Bite H (when wanted).
-
-## Workflow catalog (fan-out opportunities)
-
-| WF | Bite | Shape | Agents |
-|---|---|---|---|
-| WF-1 | B1 | port 2 leaf modules | 2 |
-| WF-2 | B2 | behavioral test suites | ~8 |
-| WF-3 | C1 | one app per agent | 5 (+ Command Palette review) |
-| WF-4 | D | capture→recording pipeline | 2 stages |
-| WF-5 | E2 | one widget per agent | 3 |
-| WF-6 | A | core-depth translation drafts (serial integration after) | 3 |
-| WF-7 | F1 | protocol types (shared contract lib) | 1–2 |
-
-Each bite follows the dev loop: port → cleanliness (`fmt`/`lint`) → tests → bench →
-audit → docs (CHANGELOG, ADRs, source citations) → version/state sync.
-
-## Recommended first move
-
-Run **WF-1 + WF-2 in parallel** (finish the leaf surface: `shell_integration` +
-`plugin_host` + behavioral tests for all leaves) as the low-risk, high-parallelism
-win, while taking **Bite A (core depth)** as the serial focus — the compositor +
-renderer are what make everything else visible and testable.
+- **compositor.rs** —
+  lifecycle: `close_nonexistent_window`, `close_window_double_close_fails`,
+  `close_middle_window_preserves_others`, `create_multiple_windows_tracking`;
+  state: `set_window_state_nonexistent`, `set_all_window_states`, `window_state_transitions_full_cycle`;
+  workspaces: `has_4_default_workspaces`, `move_nonexistent_window`, `move_window_to_same_workspace`,
+  `move_window_to_last_workspace`, the four `get_active_windows*`, `windows_across_workspaces`,
+  `workspace_active_window_after_multiple_creates`, `close_updates_active_window` and
+  `close_last_window_clears_active` (both fail today), and the four workspace-context tests;
+  focus: `close_updates_focus`, `cascade_placement`, `with_resolution`;
+  routing, nine tests: the `route_input_*` set, `drag_workflow`, `end_interactive_clears_state`,
+  `mouse_move_no_drag`, `right_click_on_window`.
+- **main.rs** — the two Args tests; the seven `parse_cpu_line_*`; `desktop_environment_new_secure_mode`,
+  `_initialize`, `_update_system_status` (and `_new_no_ai` / `_shutdown` close with their flags).
+- **tests/compositor_integration.rs** — `close_nonexistent_window_fails`,
+  `workspace_switching_hides_windows`, `closing_focused_window_moves_focus`, `custom_resolution`,
+  `many_windows_cascade`; partly `window_appears_in_active_workspace`, `window_state_transitions`,
+  `input_routing_click_on_empty_is_none`.
+- **renderer.rs** — `blend_semi_transparent` (input rule changes with the CPU premultiplied blend),
+  framebuffer `new` / `out_of_bounds`, `draw_rect_outline`, `draw_text`'s returned width, hit-test
+  `fullscreen` (returns with fullscreen, ADR 0002) and `resize_edge_variants`, `overlapping_surfaces`,
+  `z_order`. Damage `flush` / `region_count` / `has_damage` close with the region list (ADR 0003).
+- **ai_features.rs** — `detect_context_type_development_terminal` (fails today),
+  `_development_editor`, `_design_gimp`, `_design_blender`, `_communication_discord`,
+  `_communication_mail`, `update_context_command_executed`, `dismiss_nonexistent_suggestion`,
+  `unregister_nonexistent_agent_no_panic`, `desktop_context_equality`; partly
+  `ai_suggestion_custom`, `resource_metrics`, the three `analyze_context*`,
+  `update_context_file_opened`, `_file_opened_cap_at_10`, `multiple_file_open_events_ordering`,
+  `update_agent_hud_updates_last_activity`.
+- **security_ui.rs** — `alert_eviction_at_max_capacity`, `alert_eviction_resolved_first`,
+  `permission_request_eviction`, `override_request_eviction`, `critical_alert_shows`,
+  `get_dashboard_with_info_level_alert` (fails today); partly `grant_permission_lockdown`,
+  `permission_definitions_initialized`.
+- **plugin_host.rs** — the seven `message_*_roundtrip` and `message_from_invalid_json` (vacuous until
+  the JSON stub is real: a parse failure and the stub both return 0).
+- **shell.rs** — `notification_default`, `launcher_item`, `launcher_action`,
+  `dismiss_multiple_notifications`, `search_launcher_by_description`, `notification_with_all_priorities`,
+  `notification_eviction_prefers_non_action`; partly `notification_custom`,
+  `launch_all_registered_apps` / `launch_each_registered_app` (3 of 14 ids), `multiple_notifications`,
+  `lock_unlock_round_trip`, `update_system_status_all_fields`. `initial_system_status` is the UNKNOWN
+  seed (ADR 0003).
+- **accessibility.rs** — `announcements_empty`; partly `announcements`, `accessibility_state_default`.
+- **gestures.rs** — `touch_point_fields`.
+- **screen_capture.rs** — partly `full_screen_capture_png` (asserted on 4×4, not 800×600) and
+  `grant_and_revoke_permission` (list length after revoke). **screen_recording.rs** — partly
+  `one_recording_per_agent` (the existing recording's id is not returned).
+- **system_tests.rs** (all `test_e2e_*` except the first) — `security_alert_escalation_flow` and
+  `smart_window_placement` (both fail today), `workspace_context_management`,
+  `screen_lock_blocks_interactions`; partly `workspace_switch`, `multi_window_workspace_management`,
+  `full_desktop_startup_sequence`, `full_teardown_sequence`, `security_and_ai_combined`,
+  `notification_flood_and_dismiss`, `ai_context_with_multiple_agents`, `compositor_window_operations`,
+  `multi_app_concurrent_operations`, `emergency_kill_switch_flow`, `system_status_propagation`. The apps,
+  HUD and quick-settings tests close with ADR 0004.

@@ -2,7 +2,7 @@
 name = "aethersafha"
 version = "${file:VERSION}"
 description = "aethersafha — AI-augmented AGNOS compositor (Cyrius port, from 27207 lines of Rust)"
-license = "GPL-3.0-only"
+license = "AGPL-3.0-only"
 language = "cyrius"
 cyrius = "6.6.11"
 
