@@ -123,7 +123,7 @@ fn main() {
     render_desktop(td, tfb);
     assert_eq(ae_theme_index(), 1, "cycling advances the variant");
     assert_eq(t_ne_d(bhumi_fb_get(tfb, 300, 220), bg0), 1,
-              "  ...and the BACKDROP actually repaints — the band did not hold the old colour");
+      "  ...and the BACKDROP actually repaints — the band did not hold the old colour");
 
     # ⛔ ALL FOUR ARE REACHABLE AND IT RETURNS HOME. A cycle that stops early, or one that never wraps,
     # strands variants that shipped — which is the state this rung exists to fix.
@@ -159,7 +159,7 @@ fn main() {
     var open_px = bhumi_fb_get(lfb, lpx, lpy);
     assert_eq(t_ne_d(open_px, closed_px), 1, "opening the launcher CHANGES those pixels");
     assert_eq(open_px, ae_bhumi(rupa_theme_accent(rupa_theme_active())),
-              "  ...to the accent seal the panel draws");
+      "  ...to the accent seal the panel draws");
 
     # ⛔ AND IT GOES AWAY AGAIN. A panel that paints but never un-paints looks identical on the frame
     # that matters and leaves the desktop permanently covered — the damage model does not repaint what

@@ -208,7 +208,7 @@ fn win_notify_resize(p): i64 {
     var fd = load64(p + W_CFD);
     if (fd == 0) { return 0; }                        # no client (the compositor's own window)
     return setu_send(fd, setu_configure(load64(p + W_ID), load64(p + W_W), load64(p + W_H),
-                                        load64(p + W_STATE)));
+        load64(p + W_STATE)));
 }
 
 fn win_buf_covers(p): i64 {

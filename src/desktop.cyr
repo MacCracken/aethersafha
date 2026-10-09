@@ -137,12 +137,12 @@ fn render_desktop(d, fb): i64 {
     var lnch_now = lnch_is_open();
     if (lnch_now == 1) {
         comp_retire_add(lnch_panel_x(bhumi_fb_width(fb)), lnch_panel_y(bhumi_fb_height(fb)),
-                        lnch_panel_w(), lnch_panel_h());
+          lnch_panel_w(), lnch_panel_h());
     }
     if (lnch_now == 0) { if (ae_lnch_was_open == 1) {
-        comp_retire_add(lnch_panel_x(bhumi_fb_width(fb)), lnch_panel_y(bhumi_fb_height(fb)),
-                        lnch_panel_w(), lnch_panel_h());
-    } }
+            comp_retire_add(lnch_panel_x(bhumi_fb_width(fb)), lnch_panel_y(bhumi_fb_height(fb)),
+              lnch_panel_w(), lnch_panel_h());
+        } }
     ae_lnch_was_open = lnch_now;
     rend_frame_damage(comp, fb, bg);
     # ⭐⭐ `AE-0a`: CLEAR THE BAND, NOT THE SCREEN. This was the single biggest cost in the frame —

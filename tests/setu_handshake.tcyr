@@ -97,15 +97,15 @@ fn main() {
     # Iron 2026-08-19: puka logged `grid 320x88 cells, 2560x1408 px` while the displayed area never
     # grew. A re-attach is the ONLY way the compositor can learn a new slot id.
     assert_eq(setu_hs_action(3, SETU_ATTACH), SetuHsAct.HS_ATTACH,
-              "state 3 + attach -> RE-ATTACH: this is how a resize is learned");
+      "state 3 + attach -> RE-ATTACH: this is how a resize is learned");
     # ⚠ A bare COMMIT asks for nothing new. SKIP, not BAD: a client whose ATTACH the ring ate must
     # not be torn down for it, and presenting clients send this pair every frame.
     assert_eq(setu_hs_action(3, SETU_COMMIT), SetuHsAct.HS_SKIP,
-              "state 3 + commit -> skip, nothing new is being asked for");
+      "state 3 + commit -> skip, nothing new is being asked for");
     assert_eq(setu_hs_action(3, SETU_CREATE_SURFACE), SetuHsAct.HS_BAD,
-              "state 3 + create_surface is still a protocol error");
+      "state 3 + create_surface is still a protocol error");
     assert_eq(setu_hs_action(3, SETU_CLOSE), SetuHsAct.HS_BAD,
-              "state 3 + close is still not a handshake record");
+      "state 3 + close is still not a handshake record");
 
     # -----------------------------------------------------------------------
     test_group("setu handshake — a lossless stream completes");

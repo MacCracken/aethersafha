@@ -32,8 +32,8 @@
 | DRM/KMS + libinput + logind (platform I/O) | **bhumi** 1.0.0 | `bhumi_backend_open/fb/poll/present`, seat/cap gating. MVP. |
 | Native protocol dispatch, surface tree, window mgmt | **aethersafha** | The compositor's own sovereign protocol — stays here (ADR 0001). |
 | Foreign-app surface hosting (was XWayland) | **mehman** 1.0.0 | kavach-sandboxed guests (swallow backend). Wired (Bite G). |
-| Shared domain primitives / errors / wire format | **agnostik** 1.3.3 | was Rust `agnostik`. |
-| udev + DRM/KMS device model | **agnodrm** 1.4.5 | was Rust `agnosys` (decomposed 2026-06-19). |
+| Shared domain primitives / errors / wire format | **agnostik** — not linked since 0.16.29 | was Rust `agnostik`. Nothing here calls it, and rust-old declared the crate without using it. Re-add `[deps.agnostik]` when a caller appears. |
+| udev + DRM/KMS device model | **agnodrm** — not linked since 0.16.29 | was Rust `agnosys` (decomposed 2026-06-19). Unused here, as above. Re-add `[deps.agnodrm]` when a caller appears. |
 
 ## Milestones
 
@@ -525,14 +525,22 @@ closed with A4 burned.
 
 ## Known cleanup
 
-- **Recorded by cyrius 6.6.12 (2026-10-02):** 21 files are not `cyrius fmt`-clean on 6.6.11 and CI has no
-  fmt step — format them and add `cyrius fmt --check` to CI. Duplicate-fn warnings between the folded
-  sigil and the agnostik / agnodrm bundles (`_hex_nibble`, `result_print_err`, …): rename on the
-  aethersafha side or drop the copies.
+- ~~**Recorded by cyrius 6.6.12 (2026-10-02):** 21 files not `cyrius fmt`-clean, no CI fmt step;
+  duplicate-fn warnings between the folded sigil and the agnostik / agnodrm bundles~~ — ✅ **DONE 0.16.29.**
+  The 21 files are formatted (whitespace only; both binaries byte-identical before and after) and CI has a
+  `Format check` step. The warnings could not be fixed by renaming here, because aethersafha defines none of
+  the four names. Both bundles were unused, so `[deps.agnostik]` and `[deps.agnodrm]` were dropped, and the
+  build has no duplicate-fn warnings left.
 - ~~**Deferred deps** (mehman / agnostik / agnodrm)~~ — ✅ **STALE, corrected 0.16.27.** All three have
   been ACTIVE since 0.2.x: the `ERR_*` collision ended when agnostik and agnodrm namespaced their error
   families (1.3.3 / 1.4.5), and mehman → `[deps.kavach]` builds once its stdlib cascade is declared, which
   `[deps] stdlib` does. There is no `[deps.mabda]` and there should not be (see the correction below).
+  ⚠ agnostik and agnodrm were then dropped at 0.16.29: they were linked but never called.
+- **`"sys"` can be declared on 6.6.11 (found 0.16.29).** `src/sysprobe.cyr` includes `lib/sys.cyr` by path
+  because declaring it in `[deps] stdlib` once compiled nothing in. On 6.6.11 the declared form builds
+  (scratch copy with the by-path include removed: host build green, same size, different hash; `--agnos`
+  and the suites not run). Moving to the declared form and correcting that file's comment is its own
+  change.
 - ~~`cyrius lib sync --full` is required before `cyrius deps`~~ — ✅ **STALE, corrected 0.16.27.** `lib/`
   holds the declared closure, not the full snapshot: a pin bump is `cyrius lib sync` (the declared
   subset), then `cyrius deps`, then a file-by-file `cmp` against `~/.cyrius/versions/<pin>/lib` — `deps`

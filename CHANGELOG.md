@@ -5,6 +5,84 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.16.29] — 2026-10-09 — the cyrius 6.6.12 follow-ups: a fmt gate, no duplicate-fn warnings, `M_SZ`; a manifest, not a ledger
+
+> The repairs cyrius 6.6.12 recorded for this repo (roadmap *Known cleanup*), plus the manifest cleanup.
+> The commit, the tag and the push are the operator's.
+
+### Changed — `cyrius.cyml` is a manifest, not a ledger (201 → 87 lines)
+
+Its comments had grown into a dated history: the `path`-beats-`tag` recurrences narrated release by
+release in `[deps.kavach]`, setu's protocol changes version by version, and a correction of a stale
+comment. Each block now says what the dep is for and any rule needed to edit it, in the present tense.
+The history stays where it already was: this file's earlier entries, the header of
+`scripts/check-dep-tags.sh`, and each dep's own CHANGELOG.
+
+- Verified comment-only. With comments and blank lines stripped, the manifest matched 0.16.28's. All nine
+  dormant `path` lines were kept, both binaries came out byte-identical, `cyrius.lock` and `lib/` did not
+  move, and `check-dep-tags.sh` parsed all nine blocks.
+- Two notes were dropped because they are no longer true. setu's `.deps` sidecar no longer under-reports
+  `args`, `net`, `chrono` and `result`: 0.8.11's lists all twelve leaves. And on Cyrius 6.6.11, declaring
+  `"sys"` in `[deps] stdlib` does compile it in: a scratch copy with the by-path include removed builds
+  green (same size, different hash). `lib/sys.cyr` stays included by path from `src/sysprobe.cyr`; moving
+  to the declared form is a roadmap item.
+
+### Removed — `[deps.agnostik]` and `[deps.agnodrm]`: linked, never called
+
+cyrius 6.6.12 recorded four duplicate-fn warnings, each a function the folded sigil also defines:
+`_hex_nibble` in agnostik, and `result_print_err`, `is_syscall_err` and `wrap_syscall` in agnodrm. The
+roadmap offered "rename on the aethersafha side or drop the copies". There was nothing to rename here:
+aethersafha defines none of the four.
+
+- Nothing in `src/`, `tests/`, `programs/` or any other vendored dep calls any of agnostik's 899
+  functions or agnodrm's 149. rust-old declared both crates in `Cargo.toml` and never used either.
+- Two of the four copies were not identical. Under "last definition wins", agnodrm's `wrap_syscall` and
+  `result_print_err` replaced sigil's, building `drm_err_*` values where sigil builds `sigil_err_*`. No
+  live caller could see it: sigil's one `wrap_syscall` call reads only the tag, and nothing calls
+  `result_print_err`.
+
+Both blocks are gone (operator, 2026-10-09: dropped until something needs them linked again), and so is
+`"trait"` from `[deps] stdlib`, whose only caller was agnostik. `"ct"` stays for sigil and kavach.
+`lib/agnostik.cyr`, `lib/agnodrm.cyr` and `lib/trait.cyr` are deleted, and `cyrius.lock` holds 83 files
+and 8 commit pins (86 and 10). The build has no duplicate-fn warnings left.
+
+### Fixed — `M_SZ` named two sizes
+
+`plugin_host.cyr`'s message record (72 B) and `shell_integration.cyr`'s tray-menu item (32 B) both called
+their size `M_SZ`. Enum members are global and the last definition wins, so the build used 72 for both.
+Every build includes shell_integration first, which only over-allocated its menu items; the opposite
+order would have allocated plugin_host's 72-byte record at 32 bytes. The members are now `PLG_M_SZ` and
+`SI_M_SZ`, like `SCAP_M_SZ` and `SREC_M_SZ`. `M_SZ` was the only enum member name defined in two `src/`
+modules, and the build now has no warning in `src/`.
+⇒ The binary differs from the same tree before the rename in exactly two bytes: `shint_menu_new`'s
+`alloc` immediate (72 → 32), and the address its startup code stores the menu-item size to (the shared
+`M_SZ` slot before, its own slot after).
+
+### Fixed — 21 files were not `cyrius fmt`-clean, and CI did not check
+
+12 files in `src/` and 9 in `tests/`, all continuation-indent drift: 156 lines, whitespace only
+(`git diff -w` is empty). Formatted with the pinned 6.6.11 `cyrfmt`. Both binaries were byte-identical
+before and after (host `bb7e8f74…`, `--agnos` `5b02e07f…`).
+CI has a new **Format check** step over `src/*.cyr`, `tests/*.tcyr` and `programs/*.cyr`. It runs one
+file per invocation, so it names every drifted file before failing. Verified both ways: green on this
+tree, and red naming all 21 files on the 0.16.28 sources.
+
+### Docs
+
+- `roadmap.md`: the 6.6.12 *Known cleanup* item is done, the backend-seam rows for agnostik and agnodrm
+  say they are not linked, and a new item records the `"sys"` finding.
+- `README.md`: the dependency list matches the manifest (it lacked rupa, chitra and setu).
+- `CLAUDE.md`: a new rule — `cyrius.cyml` is a manifest, not a ledger or a changelog.
+
+### Verified
+
+- **Host 4,158,624 B** (sha256 `4acd9f1e…`) · **`--agnos` 4,117,376 B** (sha256 `3eea9ab6…`): −285,336 B
+  and −250,792 B from 0.16.28, nearly all of it agnostik, agnodrm and `trait`.
+- **28 / 28 suites, 2,056 assertions, 0 failed**, after each step that moved code: the format, the drop
+  and the rename.
+- `scripts/check-dep-tags.sh` → 7 deps clean · `cyrius deps --verify` → 83 verified, 0 failed.
+- ⚠ Not run on QEMU or iron, and neither have the agnos-arm changes of 0.16.26 – 0.16.28.
+
 ## [0.16.28] — 2026-09-30 — re-pin to Cyrius 6.6.11 on mehman 1.0.4; one frame-loop head
 
 > Cut as part of the Cyrius 6.6.12 repair batch, which scheduled this re-pin. The commit is local; the

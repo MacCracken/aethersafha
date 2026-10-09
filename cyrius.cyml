@@ -10,192 +10,78 @@ cyrius = "6.6.11"
 entry = "src/main.cyr"
 output = "aethersafha"
 
-# Stdlib is OPT-IN: declare exactly what the project + every active [deps.*]
-# needs, reviewed from each dep's `dist/<name>.deps` sidecar + referenced symbols.
-# UNION covers: compositor + M2 leaf; agnostik (trait); agnodrm (ct); kashi
-# (freestanding, none); mehman → [deps.kavach] → sandhi → the tls_native TLS
-# stack + crypto (net/sandhi/thread_local/random/freelist + tls_native* + sha/keccak/sigil).
+# Stdlib is opt-in: list every module that src/ or any [deps.*] bundle calls. A dep's `.deps`
+# sidecar is a starting point; grep its bundle for the symbols it actually references.
 [deps]
 stdlib = [
     "syscalls", "string", "alloc", "atomic", "fmt", "vec", "str", "slice",
     "hashmap", "fnptr", "io", "fs", "process", "args", "tagged", "result",
-    "chrono", "math", "assert", "bench", "trait", "ct",
-    # mehman → kavach → sandhi → TLS cascade:
+    "chrono", "math", "assert", "bench", "ct",
+    # mehman → kavach → sandhi → the native TLS stack:
     "net", "sandhi", "thread_local", "random", "freelist", "sync",
     "async", "fdlopen", "dynlib", "mmap",
     "tls", "tls_native", "tls_native_conn", "tls_native_ctx", "tls_native_lowlevel",
     "tls_native_hs12", "tls_native_hs13", "tls_native_keysched",
     "sha1", "keccak", "sigil", "sakshi",
-    # chitra (image decode) → sankoch's zlib_decompress for PNG IDAT inflate; sankoch's
-    # _sankoch_lock/_unlock wrap mutex_lock/mutex_unlock, hence "thread".
+    # chitra → sankoch (PNG inflate); sankoch's lock calls mutex_lock, hence "thread":
     "sankoch", "thread",
 ]
-# ⛔ `lib/sys.cyr` IS NOT DECLARED HERE, DELIBERATELY — the entry was tried and is INERT. Adding
-# "sys" to the list above is accepted, `cyrius deps` reports success, and the module still never
-# enters the compile set (`sys_sysinfo` returns "reachable undefined"). A declaration that silently
-# does nothing is worse than none, so `src/sysprobe.cyr` includes it BY PATH instead, the way
-# `lib/bhumi.cyr` is included. ⚠ Do not "fix" this by re-adding the entry.
+# "sys" is not listed: src/sysprobe.cyr includes lib/sys.cyr by path.
 
-# ⛔ EVERY `path = "../sibling"` LINE BELOW IS DORMANT (0.16.26), AND STAYS THAT WAY IN A COMMIT.
-# `path` WINS over `tag` and skips the commit-pin verify. While one is live, `cyrius deps` — which
-# `cyrius build` and `cyrius test` run first — re-vendors `lib/` from whatever that checkout holds,
-# and `cyrius.lock` cannot pin the dep's commit. That recurred six times: four on kavach alone, five
-# tags at once on 2026-09-12, and then in a COMMIT (`0fdde56`), which vendored kavach's unreleased
-# HEAD and agnostik's uncommitted tree under 3.12.5 / 1.6.1 tags, so neither target built.
-# `scripts/check-dep-tags.sh` caught it each time it was run and could not stop a commit.
-# With all nine dormant, each dep resolves from its published tag and the lock pins its commit —
-# the graph CI has always built. Uncomment one line for cross-repo work on an unpushed sibling, and
-# put it back before the commit; the gate fails while one is live. dhancha 0.10.3 made the same move.
+# Every `path` line below stays commented out (dormant) in a commit. A live `path` wins over `tag`:
+# `cyrius deps`, which every build and test runs first, re-vendors lib/ from the sibling checkout and
+# cyrius.lock pins no commit for it. Uncomment one only while working against an unpushed sibling.
+# scripts/check-dep-tags.sh reads the dormant line as the sibling's location and fails on a live one.
 
-# --- Platform backend: DRM/KMS + libinput + logind → output/input/seat.
+# Platform backend: framebuffer scanout, keyboard and pointer input, seat.
 [deps.bhumi]
 git = "https://github.com/MacCracken/bhumi.git"
-# ⚠ dormant (0.16.26) — uncomment for local work on an unpushed sibling; never commit it live.
 # path = "../bhumi"
 tag = "1.4.5"
 modules = ["dist/bhumi.cyr"]
 
-# --- Desktop theme-token core: rupa (रूप — form / appearance). The ONE source of
-# the MUDRA / SHANTA palette; the compositor chrome packs its logical 0xRRGGBB
-# tokens to the bhumi framebuffer via ae_bhumi (src/theme.cyr). Extracted from the
-# compositor's own theme.cyr when dhancha became the second consumer.
+# Desktop theme tokens (the MUDRA / SHANTA palettes); src/theme.cyr packs them for the framebuffer.
 [deps.rupa]
 git = "https://github.com/MacCracken/rupa.git"
-# ⚠ dormant (0.16.26) — uncomment for local work on an unpushed sibling; never commit it live.
 # path = "../rupa"
 tag = "0.1.8"
 modules = ["dist/rupa.cyr"]
 
-# --- Shared AGNOS domain primitives (was Rust `agnostik` 0.90.0). Error family
-# namespaced STIK_ERR_*/stik_err_*/stik_syserr_* at 1.3.3 to end the ERR_*
-# collision with agnodrm.
-[deps.agnostik]
-git = "https://github.com/MacCracken/agnostik.git"
-# ⚠ dormant (0.16.26) — uncomment for local work on an unpushed sibling; never commit it live.
-# path = "../agnostik"
-tag = "1.6.4"
-modules = ["dist/agnostik.cyr"]
-
-# --- udev + DRM/KMS device model (was Rust `agnosys` 0.50.0; agnosys decomposed
-# 2026-06-19 → agnodrm). Error family namespaced DRM_ERR_*/drm_err_*/drm_syserr_*
-# at 1.4.5. bhumi also sits on agnodrm internally.
-[deps.agnodrm]
-git = "https://github.com/MacCracken/agnodrm.git"
-# ⚠ dormant (0.16.26) — uncomment for local work on an unpushed sibling; never commit it live.
-# path = "../agnodrm"
-tag = "1.6.2"
-modules = ["dist/agnodrm.cyr"]
-
-# --- Bitmap console fonts (the AGNOS font subsystem). We consume only the
-# freestanding font-data core (pure store8/load8, no stdlib): the IBM VGA 8x16 +
-# CGA 8x8 glyph tables + a row-query API. Replaces the hand-rolled 5x7 font.
+# Bitmap console fonts. Only the freestanding glyph-data core (kashi_font_init, kashi_glyph_row):
+# the library face (dist/kashi.cyr) adds font import and a runtime font registry that nothing here
+# calls (+183,360 B, measured on dhancha). Switch modules only when runtime font loading is needed.
 [deps.kashi]
 git = "https://github.com/MacCracken/kashi.git"
-# ⚠ dormant (0.16.26) — uncomment for local work on an unpushed sibling; never commit it live.
 # path = "../kashi"
-# 1.0.10: `src/font_data.cyr` is byte-identical to 1.0.7's (checked with `git diff 1.0.7 1.0.10`).
 tag = "1.0.10"
-# ⛔⛔ THE FREESTANDING CORE IS A MEASURED CHOICE, NOT A SHORTCUT (recorded 2026-08-17, kashi 1.0.6).
-# kashi's ADR 0001 says stdlib-linked consumers should take the LIBRARY FACE, and this project links
-# the full stdlib — so `src/font_data.cyr` looks like the wrong surface. Two reasons it is not:
-#   1. Until kashi 1.0.6 the library face was UNCONSUMABLE. `src/lib.cyr` opens with
-#      `include "src/font_data.cyr"`, a kashi-root-relative path that cannot resolve once vendored
-#      into this repo's `lib/` — `error: cannot open include file: src/font_data.cyr`. kashi 1.0.6
-#      adds `dist/kashi.cyr`, which fixes that, so the choice is now real.
-#   2. It is still the core. MEASURED on dhancha: core 364,640 B vs full face 548,000 B —
-#      **+183,360 (+50%)** for PSF/BDF/PCF import and a runtime font registry nothing here calls, and
-#      `CYRIUS_DCE=1` reclaims NONE of it. This project uses `kashi_font_init` + `kashi_glyph_row`.
-# ⇒ Switch to `modules = ["dist/kashi.cyr"]` only when this project needs runtime font LOADING.
 modules = ["src/font_data.cyr"]
 
-# --- Compat / "swallow" backend: does XWayland's job the sovereign way — hosts foreign-ABI app
-# surfaces in a kavach sandbox. We consume its library modules (error/caps/guest
-# vocabulary, the foreign-surface descriptor, and the kavach-sandboxed guest
-# runner + the M2 surface-capture handoff, mehman_sandbox_capture_guest).
-# Transitively pulls [deps.kavach] → sandhi → the tls_native TLS stack, declared
-# in [deps].stdlib above.
+# Foreign-app "swallow" backend: hosts foreign-ABI app surfaces in a kavach sandbox.
 [deps.mehman]
 git = "https://github.com/MacCracken/mehman.git"
-# ⚠ dormant (0.16.26) — uncomment for local work on an unpushed sibling; never commit it live.
 # path = "../mehman"
 tag = "1.0.4"
 modules = ["src/types.cyr", "src/surface.cyr", "src/sandbox.cyr"]
 
-# --- Sandbox execution surface (mehman's guest backend). Declared explicitly so
-# kavach's dist is prepended — mehman_sandbox.cyr names kavach's Backend / config
-# / sandbox_* surface directly.
+# mehman's sandbox backend. Declared so its bundle is prepended: mehman's src/sandbox.cyr names
+# kavach's types and sandbox_* functions directly.
 [deps.kavach]
 git = "https://github.com/MacCracken/kavach.git"
-# ⚠ dormant (0.16.26) — uncomment for local work on an unpushed sibling; never commit it live.
 # path = "../kavach"
-# ⚠ 3.11.7 → 3.11.10 (2026-08-12). The tag had been WRONG IN COMMITTED STATE for two cuts: HEAD vendored
-# 3.11.8 and any local build re-materialised 3.11.10 from `../kavach`, because the `path` override wins.
-# So the manifest declared a graph nothing here had built since 3.11.7. Verified before bumping: 3.11.10 is
-# a real tag on a clean kavach tree, so the declared graph is now fetchable and matches the vendored copy.
-# ⛔ 3.11.10 → 3.11.12 (2026-08-13) — AND IT HAPPENED AGAIN, EXACTLY AS THE NOTE ABOVE PREDICTS. The
-# sibling moved to 3.11.12; the first local build of this session silently re-materialised `lib/kavach.cyr`
-# (+61/-12 lines) and moved its `cyrius.lock` digest, while this line still said 3.11.10. Nothing warns:
-# `path` wins, so the build is green either way and the DECLARED graph is the only thing that is wrong.
-# ⚠ The comment above did not prevent the recurrence, and a third instance should not be met with a third
-# comment — this wants a gate that diffs every declared tag against its sibling VERSION at check time.
-# Verified before bumping: 3.11.12 is a real tag locally AND on the remote, on a clean tree.
-# ⛔ 3.11.14 → 3.12.2 (2026-08-21) — FOURTH recurrence, and the gate above is now BUILT rather than
-# re-described: `scripts/check-dep-tags.sh`. No fifth comment. Verified before bumping, all four ways
-# the earlier notes only claimed: 3.12.2 is a real tag locally AND on the remote (37f55c2), the sibling
-# tree is clean, and `lib/kavach.cyr` is **byte-identical to `dist/kavach.cyr` at that tag**
-# (sha `ee243978`, matching `cyrius.lock`). ⚠ kavach HEAD is 1 commit past the tag, but that commit does
-# not touch the one module consumed here — checked, not assumed.
-# ⛔ 3.12.5 → 3.13.1 (0.16.26) — the SIXTH recurrence reached a commit: `0fdde56` vendored kavach's
-# unreleased HEAD (3 commits past 3.13.1, written for cyrius 6.6.6) under this 3.12.5 tag and a 6.6.2
-# pin, so the host build refused 6 undefined stdlib fns and `--agnos` refused `O_NOFOLLOW`. Closed at the
-# mechanism: the `path` line above is dormant, so this tag is what resolves.
 tag = "3.13.1"
 modules = ["dist/kavach.cyr"]
 
-# --- Image decode: chitra (चित्र — image / picture). Pure-Cyrius CPU raster decoder — PNG (all bit
-# depths + Adam7) and JPEG (baseline, YCbCr, 4:4:4/4:2:2/4:2:0) → canonical RGBA8. This is what makes a
-# WALLPAPER A FILE.
-# ⛔ Do NOT hand-roll a decoder here. One was written for the C1a follow-on before this dep was found,
-# covering a strict subset (8-bit, RGB/RGBA, no Adam7) — a maintained sibling already did all of it and
-# more. Deleted rather than kept as a "lighter" path.
+# Image decode (PNG and JPEG to RGBA8) for the wallpaper. Use it; do not hand-roll a decoder here.
 [deps.chitra]
 git = "https://github.com/MacCracken/chitra.git"
-# ⚠ dormant (0.16.26) — uncomment for local work on an unpushed sibling; never commit it live.
 # path = "../chitra"
 tag = "1.0.3"
 modules = ["dist/chitra.cyr"]
 
-# --- DISPLAY plane contract: setu (सेतु — bridge). The dhancha client ↔ this
-# compositor wire — pure message TYPES + wire CODEC (pixel/input/surface
-# lifecycle). AGENT-FREE; shares no wire with any MCP endpoint. Transport (Unix
-# socket + memfd/SCM_RIGHTS) lives here in the compositor, NOT in setu. All fns
-# are `setu_*` (no collision); its stdlib needs {string,fmt,alloc,vec,str,io,
-# syscalls,assert} are already a subset of [deps].stdlib above.
+# Display-plane contract with clients: message types and the wire codec. The transport (Unix socket,
+# shared buffers, the agnos channel band) lives in this repo, not in setu.
 [deps.setu]
-# 0.8.0 — ⭐⭐ THE CHANNEL-BAND CUTOVER. On agnos setu no longer DIALS: `setu_connect` checks the kernel
-#         floor via `CH_CAPS`, reads `AGNOS_CHAN` out of its environment, and returns that fd. The TCP
-#         arm is DELETED on agnos (Linux keeps its own — a different target, not a fallback).
-#         ⛔ Hard floor: agnos >= 1.56.40 (`#97 chan_op`). A client built from it REFUSES on an older
-#         kernel rather than appearing to work — enforced by CH_CAPS, not documented.
-# ⚠ `args` must stay in [deps] stdlib above: the agnos arm calls `getenv`, which resolves to
-#   `_agnos_getenv` (agnos has no /proc). `dist/setu.deps` does NOT list it — that sidecar names 8
-#   leaves while setu itself needs 12 (`net`/`chrono`/`result` are missing too). Verified against a
-#   throwaway consumer built with exactly those 8: it fails on `_agnos_getenv`. Sidecar = starting
-#   point, not contract. (It is already present here for other reasons; do not remove it.)
-# ⚠ COMMENT CORRECTED 2026-08-01 — it said "Pinned to 0.5.0" over a `tag = "0.7.1"` line, and had
-# said so through two bumps. A stale pin comment is worse than none: it is what a reader checks
-# INSTEAD of the field below it. (puka and dhancha carry the same rotted comment, saying 0.3.0.)
-# 0.6.0 — client buffers are GPU-VISIBLE on agnos (`shm_create_gpu` #86 before `shm_create` #71).
-#         This is what makes a client surface blittable at all: #71 is system RAM, which the agnos
-#         GPU cannot reach, and the kernel rejects such a slot at both #87 and #92.
-# 0.7.0 — SETU_SURF_PREMULTIPLIED (flag bit 1), the opt-in this compositor routes to #92 op 0x01.
-# 0.5.0 — full key events (press + release); SETU_SURF_FULL_KEYS + the per-surface make/break
-#         forwarding this compositor honours.
 git = "https://github.com/MacCracken/setu.git"
-# ⚠ `path` added 2026-08-12 — setu was the ONE dep declaring a tag with no path override, which meant
-# a local setu change could not be built against at all. Every sibling dep here carries both. The
-# path-wins hazard applies as it does to the rest: re-verify tag vs sibling VERSION at each cut.
-# ⚠ dormant (0.16.26) — uncomment for local work on an unpushed sibling; never commit it live.
 # path = "../setu"
 tag = "0.8.11"
 modules = ["dist/setu.cyr"]

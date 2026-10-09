@@ -57,6 +57,9 @@ cyrius test                              # run tests/*.tcyr
 - Do not skip tests before claiming changes work
 - Do not modify `lib/` files (vendored stdlib / dep symlinks)
 - Do not hardcode toolchain versions in CI YAML — `cyrius = "X.Y.Z"` in `cyrius.cyml` is the source of truth
+- **`cyrius.cyml` is a manifest — NOT a ledger, NOT a changelog.** A comment there says what a dep is for
+  and any rule needed to edit it, in the present tense. Version history, recurrences and corrections go in
+  `CHANGELOG.md`.
 - **DO NOT CHASE THE CYRIUS PIN.** cyrius releases **constantly**, so the wrapper being ahead of
   `[package].cyrius` is the **normal, expected state — not drift, not a finding, not a task.** Bump the
   pin only when it is genuinely **necessary** (something the work needs is in the newer toolchain) or

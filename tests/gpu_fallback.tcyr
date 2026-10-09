@@ -77,9 +77,9 @@ fn main() {
     render_window(fb, wa, 1);
     # The body sits below the titlebar, exactly as render_window and gpu.cyr both place it.
     assert_eq(bhumi_fb_get(fb, 20 + 50, 20 + TITLEBAR_H + 50),
-              Sentinel.SENT_A, "on-screen window: client word reaches the framebuffer");
+      Sentinel.SENT_A, "on-screen window: client word reaches the framebuffer");
     assert_eq(bhumi_fb_get(fb, 20, 20 + TITLEBAR_H),
-              Sentinel.SENT_A, "on-screen window: top-left body pixel is the client's");
+      Sentinel.SENT_A, "on-screen window: top-left body pixel is the client's");
 
     # ── Case 2 — a window the GPU REFUSES (runs past the bottom edge) ──────────────
     # ⛔ This is the case that was silently blank. The kernel rejects rather than clips, so a
@@ -100,7 +100,7 @@ fn main() {
     ae_gpu_frame_plan(comp2, fb2);
     render_window(fb2, wb, 1);
     assert_eq(bhumi_fb_get(fb2, 10 + 40, 340 + TITLEBAR_H + 10),
-              Sentinel.SENT_B, "refused window: client word STILL reaches the framebuffer");
+      Sentinel.SENT_B, "refused window: client word STILL reaches the framebuffer");
 
     # ⚠ And the present must not issue a partial frame after declining.
     assert_eq(ae_gpu_present_frame(comp2, fb2), 0, "a declined frame is not presented on the GPU");
@@ -158,7 +158,7 @@ fn main() {
     win_set_premul(wedge, 1);
     ae_gpu_blend = 0;
     assert_eq(ae_gpu_window_admissible(wedge, 400, 400), 1,
-    "premultiplied, no shader envelope: ADMITTED (routing falls back to #87, the frame is not lost)");
+      "premultiplied, no shader envelope: ADMITTED (routing falls back to #87, the frame is not lost)");
     ae_gpu_blend = 1;
     assert_eq(ae_gpu_window_admissible(wedge, 400, 400), 1, "premultiplied, shader available: admitted");
     ae_gpu_blend = 0;
@@ -183,7 +183,7 @@ fn main() {
     ae_gpu_frame_plan(comp3, fb3);
     render_window(fb3, wc, 0);
     assert_eq(bhumi_fb_get(fb3, 10 + 30, 10 + TITLEBAR_H + 30),
-              Sentinel.SENT_A, "static surface: client word reaches the framebuffer");
+      Sentinel.SENT_A, "static surface: client word reaches the framebuffer");
 
     # ── Case 4 — W_PREMUL is initialised, not inherited ───────────────────
     # ⚠ lib/alloc.cyr is a bump allocator with no memset, so an uninitialised slot reads
@@ -292,9 +292,9 @@ fn main() {
     assert_eq(ae_gpu_chrome_cpu_needed(0, 1, 1), 0, "an OPAQUE frame keeps chrome on the GPU");
     assert_eq(ae_gpu_chrome_cpu_needed(0, 0, 0), 0, "  ...whatever the kernel advertises");
     assert_eq(ae_gpu_chrome_cpu_needed(1, 1, 1), 0,
-              "translucent + op 0x06 + op 0x02: chrome STAYS on the GPU (alpha rects take op 0x02)");
+      "translucent + op 0x06 + op 0x02: chrome STAYS on the GPU (alpha rects take op 0x02)");
     assert_eq(ae_gpu_chrome_cpu_needed(1, 1, 0), 1,
-              "translucent + op 0x06 but NO op 0x02: fill_rect_a has no route ⇒ chrome to the CPU");
+      "translucent + op 0x06 but NO op 0x02: fill_rect_a has no route ⇒ chrome to the CPU");
     # ⚠ NON-VACUITY / the row that is easy to get wrong: with no op 0x06 the whole frame demotes before
     # the chrome question exists, so answering 1 would claim a CPU-chrome GPU frame that never happens.
     assert_eq(ae_gpu_chrome_cpu_needed(1, 0, 0), 0, "no op 0x06 ⇒ the FRAME demotes; not a chrome answer");

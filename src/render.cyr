@@ -749,13 +749,13 @@ fn render_cursor(fb): i64 {
     # the CPU while the blit is skipped loses it just as silently. These two flags have to agree.
     if (ae_gpu_frame_ok == 1) {
         if (ae_text_gpu_ok == 1) {
-        if (ae_cursor_gpu_ok == 1) {
-            ae_cur_q = 1;
-            ae_cur_qx = x;
-            ae_cur_qy = y;
-            rend_cursor_mark_drawn(x, y);
-            return 0;
-        }
+            if (ae_cursor_gpu_ok == 1) {
+                ae_cur_q = 1;
+                ae_cur_qx = x;
+                ae_cur_qy = y;
+                rend_cursor_mark_drawn(x, y);
+                return 0;
+            }
         }
     }
     render_cursor_cpu(fb, x, y);
@@ -898,10 +898,10 @@ fn rend_frame_damage(comp, fb, bg): i64 {
             if (ae_frame_dmg != 0) {
                 if (win_px(w0) >= 0) {
                     rend_dmg_add(ae_frame_dmg, win_px(w0), win_py(w0),
-                    win_pw(w0), win_prev_total_h(w0));
+                      win_pw(w0), win_prev_total_h(w0));
                 }
                 rend_dmg_add(ae_frame_dmg, win_x(w0), win_y(w0),
-                win_w(w0), win_total_h(w0));
+                  win_w(w0), win_total_h(w0));
             }
         }
         wi = wi + 1;
@@ -937,7 +937,7 @@ fn rend_frame_damage(comp, fb, bg): i64 {
         if (dmg1 == 1) {
             if (ae_frame_dmg != 0) {
                 rend_dmg_add(ae_frame_dmg, win_x(w1), win_y(w1),
-                win_w(w1), win_total_h(w1));
+                  win_w(w1), win_total_h(w1));
             }
         }
         wi = wi + 1;
@@ -972,7 +972,7 @@ fn rend_frame_damage(comp, fb, bg): i64 {
     if (comp_retire_valid() == 1) {
         if (ae_frame_dmg != 0) {
             rend_dmg_add(ae_frame_dmg, comp_retire_x(), comp_retire_y(),
-            comp_retire_w(), comp_retire_h() + TITLEBAR_H);
+              comp_retire_w(), comp_retire_h() + TITLEBAR_H);
         }
         comp_retire_clear();
     }
@@ -1358,11 +1358,11 @@ fn draw_text(fb, s, x, y, color): i64 {
     if (ae_gpu_frame_ok == 1) {
         if (ae_text_gpu_ok == 1) {
             if (ae_text_fits(fb, s, x, y) == 1) {
-            if (ae_text_enqueue(s, x, y, color) == 1) {
-                var n = 0;
-                while (load8(s + n) != 0) { n = n + 1; }
-                return ae_text_width(n);
-            }
+                if (ae_text_enqueue(s, x, y, color) == 1) {
+                    var n = 0;
+                    while (load8(s + n) != 0) { n = n + 1; }
+                    return ae_text_width(n);
+                }
             }
         }
     }

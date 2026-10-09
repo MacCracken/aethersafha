@@ -111,7 +111,7 @@ fn srec_cfg_new(tkind, ta, tb, tc, td, interval_ms, max_frames, max_dur, fmt, ag
 # 60s, PNG, no agent.
 fn srec_cfg_default(): i64 {
     return srec_cfg_new(ScapKind.SCAP_KIND_FULLSCREEN, 0, 0, 0, 0, 100, 600, 60,
-    ScapFmt.SCAP_FMT_PNG, 0);
+      ScapFmt.SCAP_FMT_PNG, 0);
 }
 # srec_cfg_agent(agent): default config owned by an agent.
 fn srec_cfg_agent(agent): i64 {
@@ -279,7 +279,7 @@ fn srec_mgr_capture_frame(m, comp, scap, fb, id, now, err_out): i64 {
     }
     var seq = srec_sess_frame_count(sess);
     var frame = srec_frame_new(seq, scap_result_captured_at(result), scap_result_width(result),
-    scap_result_height(result), scap_result_data(result), scap_result_data_size(result));
+      scap_result_height(result), scap_result_data(result), scap_result_data_size(result));
     store64(sess + SREC_S_FRAME_COUNT, seq + 1);
     store64(sess + SREC_S_TOTAL_BYTES, srec_sess_total_bytes(sess) + srec_frame_data_size(frame));
     var frames = srec_sess_frames(sess);

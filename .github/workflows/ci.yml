@@ -33,6 +33,21 @@ jobs:
             CYRIUS_VERSION="$CYRIUS_VERSION" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
+      - name: Format check
+        # `cyrius fmt --check <file>` exits non-zero on drift and never rewrites the file. One
+        # invocation per file, so every drifted file is reported before the step fails.
+        run: |
+          fail=0
+          for f in src/*.cyr tests/*.tcyr programs/*.cyr; do
+            [ -f "$f" ] || continue
+            if ! out=$(cyrius fmt --check "$f" 2>&1); then
+              echo "needs fmt: $f"
+              [ -n "$out" ] && printf '%s\n' "$out" | sed 's/^/    /'
+              fail=1
+            fi
+          done
+          [ $fail -eq 0 ] || { echo "fmt: drift detected — run \`cyrius fmt <file>\`"; exit 1; }
+
       - name: Resolve dependencies
         run: cyrius deps
 

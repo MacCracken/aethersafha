@@ -172,7 +172,7 @@ fn main() {
     assert_eq(win_w(rw), WIN_MIN_W, "an over-drag inward clamps to the minimum width");
     assert_eq(win_h(rw), WIN_MIN_H, "  ...and the minimum height");
     assert_eq(win_resize_by(rw, Deco.DECO_RESIZE_BR, 0 - 100, 0 - 100, 2000, 2000), 0,
-              "  ...and once at the floor it reports NO change");
+      "  ...and once at the floor it reports NO change");
 
     # ⛔ AND THE OUTWARD CLAMP IS THE SAME HAZARD MIRRORED: growing past the bound is the out-of-range
     # rect the GPU refuses. The window keeps its origin, so the limit is bound - origin.
@@ -280,7 +280,7 @@ fn main() {
     # 24-47 and cannot touch bit 8, so the `pressed` check caught it and the guard was never exercised.
     # A mutant that survives means the test proved nothing; this one kills it.
     assert_eq(input_map(bhumi_motion_event(297, 0), 1), InputAction.IA_NONE,
-              "dx=297 does NOT map to IA_QUIT (bit 8 set + low byte 0x29 = Escape)");
+      "dx=297 does NOT map to IA_QUIT (bit 8 set + low byte 0x29 = Escape)");
     assert_eq(input_map(bhumi_motion_event(256 + 0x2B, 0), 1), InputAction.IA_NONE, "dx=299 is not TAB");
     assert_eq(input_map(bhumi_motion_event(256 + 0x40, 0), 1), InputAction.IA_NONE, "dx=320 is not F7");
     assert_eq(input_map(bhumi_motion_event(0, 41), 1), InputAction.IA_NONE, "dy=41 is inert either way");

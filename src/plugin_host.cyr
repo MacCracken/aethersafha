@@ -200,12 +200,12 @@ enum PLG_MsgOff {
     M_S0     = 48;   # pointer slot 0 (version / format / event_type)
     M_S1     = 56;   # pointer slot 1 (data)
     M_PTR    = 64;   # pointer slot  (capabilities vec / palette map)
-    M_SZ     = 72;
+    PLG_M_SZ = 72;   # not M_SZ: members are global, and shell_integration.cyr's record is 32
 }
 
 # plug_msg_alloc: zero-initialised message record of the given kind.
 fn plug_msg_alloc(kind): i64 {
-    var p = alloc(M_SZ);
+    var p = alloc(PLG_M_SZ);
     if (p == 0) { return 0; }
     store64(p + M_KIND, kind);
     store64(p + M_A, 0);

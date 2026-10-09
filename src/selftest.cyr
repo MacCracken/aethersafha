@@ -331,7 +331,7 @@ fn ae_selftest(): i64 {
     var desk = desktop_new();
     var comp = desk_comp(desk);
     var win = comp_create_window(comp, AE_ST_WIN_X, AE_ST_WIN_Y,
-    AE_ST_SURF_W, AE_ST_SURF_H, "selftest");
+      AE_ST_SURF_W, AE_ST_SURF_H, "selftest");
     win_set_client_buf(win, sid, AE_ST_SURF_W, AE_ST_SURF_H);
     # Premultiplied, like every real client surface — so this frame goes through `#92` op 0x01 on any box
     # with a shader envelope, and through the compositor's per-window `#87` fallback on any box without one.
@@ -392,7 +392,7 @@ fn ae_selftest(): i64 {
     println("aethersafha selftest: the window content is exactly what the client wrote");
 
     if (ae_st_scan_margin(&ae_st_cap, AE_ST_CAP_W, AE_ST_CAP_H,
-    AE_ST_MARGIN, AE_ST_MARGIN, AE_ST_SURF_W, AE_ST_SURF_H) == 1) {
+        AE_ST_MARGIN, AE_ST_MARGIN, AE_ST_SURF_W, AE_ST_SURF_H) == 1) {
         ae_gpu_capture_disarm();
         sys_shm_free(sid);
         sys_shm_free(cid);

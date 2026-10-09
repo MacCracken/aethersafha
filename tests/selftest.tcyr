@@ -107,19 +107,19 @@ fn main() {
     # alpha is 0xFF (what the shader writes) still compares equal to a sentinel whose alpha is 0x00.
     # ⛔ Negative control: the mask must not be so wide that it stops discriminating COLOUR.
     assert_eq(ae_st_px(psrc, 0, 0, AE_ST_SURF_W), ae_st_px(src, 0, 0, AE_ST_SURF_W),
-    "alpha 255 and alpha 0 sources compare EQUAL through the masked accessor");
+      "alpha 255 and alpha 0 sources compare EQUAL through the masked accessor");
     assert_neq(ae_st_px(psrc, 0, 0, AE_ST_SURF_W), ae_st_px(psrc, 0, 16, AE_ST_SURF_W),
-    "...but two different BANDS still compare unequal — the mask drops alpha, not colour");
+      "...but two different BANDS still compare unequal — the mask drops alpha, not colour");
 
     # ── A CORRECT composite passes ──────────────────────────────────────────
     test_group("selftest oracle — a correctly placed surface passes every check");
     var ok = st_new_capture();
     st_stamp(ok, AE_ST_MARGIN, AE_ST_MARGIN, AE_ST_SURF_W, AE_ST_SURF_H);
     assert_eq(ae_st_check_bands(ok, ST_CAPW, AE_ST_MARGIN, AE_ST_MARGIN), 0,
-    "a correct capture reports no bad band");
+      "a correct capture reports no bad band");
     assert_eq(ae_st_scan_margin(ok, ST_CAPW, ST_CAPH, AE_ST_MARGIN, AE_ST_MARGIN,
-    AE_ST_SURF_W, AE_ST_SURF_H), 0,
-    "a correct capture leaks nothing outside the window");
+        AE_ST_SURF_W, AE_ST_SURF_H), 0,
+      "a correct capture leaks nothing outside the window");
 
     # ── FAULT 1 — a one-row vertical shift ──────────────────────────────────
     # ⛔ This is the case the first draft of ae_st_check_bands MISSED. Sampling band middles
@@ -129,18 +129,18 @@ fn main() {
     var sh1 = st_new_capture();
     st_stamp(sh1, AE_ST_MARGIN, AE_ST_MARGIN + 1, AE_ST_SURF_W, AE_ST_SURF_H);
     assert_neq(ae_st_check_bands(sh1, ST_CAPW, AE_ST_MARGIN, AE_ST_MARGIN), 0,
-    "a surface one row too low fails the band check");
+      "a surface one row too low fails the band check");
     var sh2 = st_new_capture();
     st_stamp(sh2, AE_ST_MARGIN, AE_ST_MARGIN - 1, AE_ST_SURF_W, AE_ST_SURF_H);
     assert_neq(ae_st_check_bands(sh2, ST_CAPW, AE_ST_MARGIN, AE_ST_MARGIN), 0,
-    "a surface one row too high fails the band check");
+      "a surface one row too high fails the band check");
 
     # ── FAULT 2 — a gross shift names the band ──────────────────────────────
     test_group("selftest oracle — a gross shift names which band went wrong");
     var sh30 = st_new_capture();
     st_stamp(sh30, AE_ST_MARGIN, AE_ST_MARGIN + 16, AE_ST_SURF_W, AE_ST_SURF_H);
     assert_eq(ae_st_check_bands(sh30, ST_CAPW, AE_ST_MARGIN, AE_ST_MARGIN), 1,
-    "a full-band displacement is reported against band 1");
+      "a full-band displacement is reported against band 1");
 
     # ── FAULT 3 — a short row (wrong stride / truncated copy) ───────────────
     # ⚠ Every sampled ROW is still in the right band; only the far column is missing. A checker that
@@ -149,7 +149,7 @@ fn main() {
     var shortr = st_new_capture();
     st_stamp(shortr, AE_ST_MARGIN, AE_ST_MARGIN, AE_ST_SURF_W - 8, AE_ST_SURF_H);
     assert_neq(ae_st_check_bands(shortr, ST_CAPW, AE_ST_MARGIN, AE_ST_MARGIN), 0,
-    "a surface 8 columns short fails the band check");
+      "a surface 8 columns short fails the band check");
 
     # ── FAULT 4 — the whole-buffer smear ────────────────────────────────────
     # ⛔ THE CASE THE BAND CHECK ALONE CANNOT SEE. If the blit filled the entire back buffer with the
@@ -164,10 +164,10 @@ fn main() {
         sy = sy + AE_ST_SURF_H;
     }
     assert_eq(ae_st_check_bands(smear, ST_CAPW, AE_ST_MARGIN, AE_ST_MARGIN), 0,
-    "the smear is invisible to the band check — this is the point");
+      "the smear is invisible to the band check — this is the point");
     assert_eq(ae_st_scan_margin(smear, ST_CAPW, ST_CAPH, AE_ST_MARGIN, AE_ST_MARGIN,
-    AE_ST_SURF_W, AE_ST_SURF_H), 1,
-    "the margin scan rejects the smear");
+        AE_ST_SURF_W, AE_ST_SURF_H), 1,
+      "the margin scan rejects the smear");
 
     # ── FAULT 5 — a single stray pixel outside the window ───────────────────
     test_group("selftest oracle — one stray pixel outside the window is enough to fail");
@@ -175,8 +175,8 @@ fn main() {
     st_stamp(stray, AE_ST_MARGIN, AE_ST_MARGIN, AE_ST_SURF_W, AE_ST_SURF_H);
     store32(stray + (5 * ST_CAPW + 5) * 4, AE_ST_S2);
     assert_eq(ae_st_scan_margin(stray, ST_CAPW, ST_CAPH, AE_ST_MARGIN, AE_ST_MARGIN,
-    AE_ST_SURF_W, AE_ST_SURF_H), 1,
-    "a lone sentinel in the margin is caught");
+        AE_ST_SURF_W, AE_ST_SURF_H), 1,
+      "a lone sentinel in the margin is caught");
 
     # ── The contamination / far-control scan ────────────────────────────────
     # ⭐ This is the NULL CALIBRATION the driver runs before the first frame. If it ever answers 1 on
@@ -184,10 +184,10 @@ fn main() {
     test_group("selftest oracle — the null calibration is honest");
     var clean = st_new_capture();
     assert_eq(ae_st_scan_for_sentinel(clean, ST_CAPW, ST_CAPH), 0,
-    "a poisoned buffer holds no sentinel");
+      "a poisoned buffer holds no sentinel");
     store32(clean + (100 * ST_CAPW + 100) * 4, AE_ST_S1);
     assert_eq(ae_st_scan_for_sentinel(clean, ST_CAPW, ST_CAPH), 1,
-    "a single planted sentinel anywhere is found");
+      "a single planted sentinel anywhere is found");
 
     # ── The host arm of the driver ──────────────────────────────────────────
     # ⚠ 96 is "nothing was proven", NOT "pass". A host build has no sovereign GPU band, and the one

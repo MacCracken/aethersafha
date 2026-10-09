@@ -1,15 +1,11 @@
 commit	21ca348cd25f5ff847787a17b826d4ac2c7b8661	bhumi	https://github.com/MacCracken/bhumi.git	1.4.5
 commit	ddfc3d811bd234757d5f4e01a54afb80f6ff97a5	rupa	https://github.com/MacCracken/rupa.git	0.1.8
-commit	59d2f9614863373cc8ffb6a3ace37afb3331d632	agnostik	https://github.com/MacCracken/agnostik.git	1.6.4
-commit	00a8728722be36266d5fdd02df36ee8d364b0f10	agnodrm	https://github.com/MacCracken/agnodrm.git	1.6.2
 commit	f8f9c97b3c9b44b2098907ac739142dee03b91c7	kashi	https://github.com/MacCracken/kashi.git	1.0.10
 commit	59bed0c5bfcf271a309898bcc33ca02d9648a9f0	mehman	https://github.com/MacCracken/mehman.git	1.0.4
 commit	472d6ca7be8be40d53be242a311b69245e4a9d7d	kavach	https://github.com/MacCracken/kavach.git	3.13.1
 commit	833919c2bf0ec8943aaf8f04a0cdf5b4c80544e5	chitra	https://github.com/MacCracken/chitra.git	1.0.3
 commit	e194d01925d66069520fb9a473a5861207b76f38	setu	https://github.com/MacCracken/setu.git	0.8.11
 commit	eb6b92240ab0d6ae8a0509baa75d74984dc03630	sigil	https://github.com/MacCracken/sigil.git	3.12.18
-b3546959ab7a1d7d21c43924fb28d3b587c63ae6a70b78d460618e22867cb4a5  lib/agnodrm.cyr
-b04865412a715b9e190f5ebdd4316127460ff355bb11b09c4bc022a912962554  lib/agnostik.cyr
 b1593105548307531c309458f9b701acae223eea8878cf1b2197f07fc260f591  lib/alloc.cyr
 69e92cc4b67f1a936f94c92ce8a4c66673758b84dba385e96fbeaa46fa692b4c  lib/alloc_agnos.cyr
 62b090ca59dabcb9efc98677f495e04edf63a018105ccd0ac76f992e187cf4e6  lib/alloc_cx.cyr
@@ -92,6 +88,5 @@ bb432fe9a94d00a1e112db04730cf0e65d96b5a83d903977e3eb56956e6550c4  lib/tls_native
 79ca32e3a458700e60401cdda69bf4a10743b0086428449b3f65faa0a0ca48da  lib/tls_native_hs13.cyr
 7f09bdda201facfea22a870090584127af1cc1151a822dcf15aa737fe8329468  lib/tls_native_keysched.cyr
 dd083116c877c777f44f0d9e754dde477f6f42e99d5399fdc9e15ae4cf6fb06f  lib/tls_native_lowlevel.cyr
-29e02ec5776e1338c6a3cb382964ec922c90c52c46594672127141a2c3a01c08  lib/trait.cyr
 fa7a04f961c15fa76dac4ce799830f0a71a720d27da25867f4ca68e7ea21880a  lib/vec.cyr
 cyrius	6.6.11

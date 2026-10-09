@@ -58,10 +58,11 @@ oracle; do not edit it.
 ## Dependencies
 
 - **bhumi** — platform backend (output / input / seat).
-- **agnostik** — shared AGNOS domain primitives.
-- **agnodrm** — udev + DRM/KMS device model.
+- **rupa** — desktop theme tokens (the MUDRA / SHANTA palettes).
 - **kashi** — bitmap console fonts (VGA 8×16).
 - **mehman** + **kavach** — foreign-app swallow backend + sandbox execution.
+- **chitra** — PNG / JPEG decode, for the wallpaper.
+- **setu** — the native display protocol's message types and wire codec.
 
 Versions are pinned in [`cyrius.cyml`](cyrius.cyml); the toolchain pin lives in
 `[package].cyrius`.

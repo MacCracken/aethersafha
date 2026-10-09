@@ -271,7 +271,7 @@ fn main() {
     assert_eq(rend_band_valid(), 1, "after the move: a band was computed");
     assert(rend_band_y() <= 40, "after the move: the band reaches the window's OLD top");
     assert(rend_band_y() + rend_band_h() >= 200 + 100 + 30,
-           "after the move: ...and its NEW bottom + titlebar");
+      "after the move: ...and its NEW bottom + titlebar");
     if (rend_band_valid() == 1) {
         if (rend_band_h() > 0) { rend_clear_band(gfb, rend_band_y(), rend_band_h(), GBG); }
     }
@@ -450,7 +450,7 @@ fn main() {
     assert_eq(rend_band_valid(), 1, "close frame: a band was computed");
     assert(rend_band_y() <= 40, "close frame: the band reaches the closed window's top");
     assert(rend_band_y() + rend_band_h() >= 40 + 100 + 30,
-           "close frame: ...and its bottom, titlebar included");
+      "close frame: ...and its bottom, titlebar included");
     assert_eq(comp_retire_valid(), 0, "the retired rect is CONSUMED by the frame that folded it in");
     if (rend_band_h() > 0) { rend_clear_band(kfb, rend_band_y(), rend_band_h(), KBG); }
     assert_eq(bhumi_fb_get(kfb, 80, 100), KBG, "close frame: the vacated region is background");
@@ -459,9 +459,9 @@ fn main() {
     rend_frame_damage(kcomp, kfb, KBG);
     assert_eq(rend_band_valid(), 1, "frame after the close: a band was computed");
     assert(rend_band_y() <= 40,
-           "frame after the close: the band STILL reaches the old top — this is the OTHER buffer");
+      "frame after the close: the band STILL reaches the old top — this is the OTHER buffer");
     assert(rend_band_y() + rend_band_h() >= 40 + 100 + 30,
-           "frame after the close: ...and the old bottom. One frame of coverage is what flashed");
+      "frame after the close: ...and the old bottom. One frame of coverage is what flashed");
 
     # ---- frame 6: and now it may settle. Coverage must not persist forever either. ----
     rend_frame_damage(kcomp, kfb, KBG);
@@ -787,7 +787,7 @@ fn main() {
     var body_col = ae_bhumi(rupa_theme_widget(rupa_theme_active()));
     assert_eq(bhumi_fb_get(bfb, 100, win_body_y(bwin) + 2), body_col, "body is painted just below the titlebar");
     assert_eq(bhumi_fb_get(bfb, 100, win_bottom_y(bwin) - 2), body_col,
-              "body reaches the LAST content row — a short fill stops TITLEBAR_H above this");
+      "body reaches the LAST content row — a short fill stops TITLEBAR_H above this");
     assert_eq(bhumi_fb_get(bfb, 100, win_bottom_y(bwin) + 2), BBG, "and stops at the bottom edge");
     assert(bhumi_fb_get(bfb, 100, win_y(bwin) + 2) != body_col, "the titlebar is not the body colour");
 
@@ -893,9 +893,9 @@ fn main() {
     bhumi_fb_clear(cfb, 0);
     blit_rect(cfb, 0 - 2, 0 - 1, src, 4, 3);
     assert_eq(bhumi_fb_get(cfb, 0, 0), bhumi_xrgb(0, 2, 3),
-              "clipped top-left: (0,0) shows src (2,1), NOT src (0,0)");
+      "clipped top-left: (0,0) shows src (2,1), NOT src (0,0)");
     assert_eq(bhumi_fb_get(cfb, 1, 1), bhumi_xrgb(0, 3, 4),
-              "clipped top-left: (1,1) shows src (3,2)");
+      "clipped top-left: (1,1) shows src (3,2)");
     assert_eq(bhumi_fb_get(cfb, 2, 0), 0, "clipped top-left: nothing past the source's right edge");
 
     bhumi_fb_clear(cfb, 0);
@@ -1017,7 +1017,7 @@ fn main() {
         cy2 = cy2 + 1;
     }
     assert_eq(drawn, t_layer_count_r(CursorK.CUR_FILL) + t_layer_count_r(CursorK.CUR_OUTLINE),
-              "every fill AND outline pixel of the arrow reached the framebuffer");
+      "every fill AND outline pixel of the arrow reached the framebuffer");
     assert_eq(t_gt_r(t_layer_count_r(CursorK.CUR_OUTLINE), 0), 1, "  (and the outline count is non-zero)");
     # ⚠ Restore, or every later assertion inherits a retired cursor.
     ae_cursor_gpu_ok = 1;
@@ -1069,7 +1069,7 @@ fn main() {
     assert_eq(ae_chrome_on_gpu(), 1, "both enabled: chrome is on the GPU");
     ae_text_gpu_disable();
     assert_eq(ae_chrome_on_gpu(), 0,
-              "text retired ⇒ chrome retires too, so the #39 blit returns and CPU text is VISIBLE");
+      "text retired ⇒ chrome retires too, so the #39 blit returns and CPU text is VISIBLE");
     ae_text_gpu_ok = 1;
     assert_eq(ae_chrome_on_gpu(), 1, "and it comes back when text does");
     ae_gpu_frame_ok = 0;
@@ -1195,7 +1195,7 @@ fn main() {
     assert_eq(ae_chrome_on_gpu(), 1, "a TRANSLUCENT window KEEPS chrome on the GPU (op 0x02 exists)");
     assert_eq(t_gt_r(ae_rect_count(), 0), 1, "  its alpha chrome is QUEUED, not drawn");
     assert_eq(bhumi_fb_get(afb, 12, abody), ACS,
-              "  and NOTHING reached the userland framebuffer — no pixels for a skipped blit to lose");
+      "  and NOTHING reached the userland framebuffer — no pixels for a skipped blit to lose");
     # ⭐ THE ALPHA MUST SURVIVE INTO THE QUEUE, which is the whole point of the new lane. A rect queued
     # at 255 would be emitted through `#88` and paint the titlebar at FULL STRENGTH on a translucent
     # window — a wrong picture that looks deliberate, and invisible to a count-only assertion.
@@ -1229,7 +1229,7 @@ fn main() {
     var apix = bhumi_fb_get(afb, 12, abody);
     assert_eq(t_ne_r(apix, ACS), 1, "  the body fill IS in the framebuffer the blit will carry");
     assert_eq(t_ne_r(apix, ae_bhumi(rupa_theme_widget(rupa_theme_active()))), 1,
-              "  ...and blended against the backdrop, not painted at full strength");
+      "  ...and blended against the backdrop, not painted at full strength");
     ae_gpu_frame_ok = 0;
     ae_gpu_alpha_chrome = 0;
     win_set_opacity(aw, 255);
