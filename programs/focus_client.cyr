@@ -1,0 +1,106 @@
+# focus_client.cyr — a setu client for `scripts/qemu-linux-input.sh` (0.16.30).
+#
+# Presents a 240x160 surface with a 6-px border: BRIGHT green (0x00FF00) while it holds focus and DIM
+# green (0x003000) while it does not, driven ONLY by SETU_INPUT_FOCUS. A screendump therefore shows which
+# client the compositor TOLD has focus, and each change is also logged with the window id. That is the
+# oracle 0.16.29's index-keyed focus detector failed: a raised window kept its dim border.
+# ⚠ setu's own present_probe is no substitute on Linux: its redraw loop is agnos-only, so it presents
+# once and never reacts to focus.
+#
+# Built with `-D AE_HOSTILE` it attaches with stride 4 — a 640-byte cache for a 153,600-byte read, the
+# heap overflow 0.16.30 closed. 0.16.29 accepted it and was killed by SIGSEGV.
+
+fn fcl_say(s): i64 { return syscall(SYS_WRITE, 1, s, strlen(s)); }
+
+# "focus_client: window <id> <what>\n" in ONE write, so two clients on one console cannot interleave.
+fn fcl_report(id, what): i64 {
+    var buf = alloc(96);
+    var pre = "focus_client: window ";
+    var n = strlen(pre);
+    memcpy(buf, pre, n);
+    n = n + fmt_int_buf(id, buf + n);
+    store8(buf + n, 32);
+    n = n + 1;
+    var wl = strlen(what);
+    memcpy(buf + n, what, wl);
+    n = n + wl;
+    store8(buf + n, 10);
+    n = n + 1;
+    return syscall(SYS_WRITE, 1, buf, n);
+}
+
+fn fcl_frame(pix, w, h, focused): i64 {
+    var border = 0x00003000;                      # dim green: not focused
+    if (focused != 0) { border = 0x0000FF00; }    # bright green: focused
+    var y = 0;
+    while (y < h) {
+        var x = 0;
+        while (x < w) {
+            var c = 0x00202020;
+            if (x < 6) { c = border; }
+            if (y < 6) { c = border; }
+            if (x >= w - 6) { c = border; }
+            if (y >= h - 6) { c = border; }
+            store32(pix + (y * w + x) * 4, c);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    var w = 240;
+    var h = 160;
+    var nbytes = w * h * 4;
+    var pix = alloc(nbytes);
+    var c = setu_client_connect(0);
+    if (c == 0) { fcl_say("focus_client: connect failed\n"); return 1; }
+    var fd = setu_client_fd(c);
+    var buf_id = setu_buf_create(nbytes);
+    if (buf_id < 0) { fcl_say("focus_client: buf_create failed\n"); return 1; }
+    fcl_frame(pix, w, h, 0);
+    setu_buf_write(buf_id, pix, nbytes);
+    if (setu_send(fd, setu_create_surface(w, h, 0)) < 0) { return 1; }
+    var reply = setu_msg_new();
+    if (setu_read_msg(fd, reply) < 0) { return 1; }
+    var sid = setu_msg_arg(reply, 0);
+    var stride = w * 4;
+    #ifdef AE_HOSTILE
+    stride = 4;
+    fcl_report(sid, "HOSTILE attach: stride 4 for a 240-wide surface");
+    #endif
+    setu_send(fd, setu_attach_buf(sid, w, h, stride, 1, buf_id));
+    setu_send(fd, setu_commit(sid));
+    fcl_report(sid, "presented");
+
+    var focused = 0;
+    var m = setu_msg_new();
+    var live = 1;
+    var rounds = 0;
+    while (live == 1) {
+        var p = setu_poll_input(fd, m);
+        while (p == 1) {
+            var k = setu_msg_kind(m);
+            if (k == SETU_INPUT_FOCUS) {
+                focused = setu_msg_arg(m, 1);
+                if (focused != 0) { fcl_report(sid, "focus GAINED"); } else { fcl_report(sid, "focus lost"); }
+            }
+            if (k == SETU_CLOSE) { live = 0; }
+            p = setu_poll_input(fd, m);
+        }
+        if (p < 0) { live = 0; }                  # the compositor is gone
+        fcl_frame(pix, w, h, focused);
+        setu_buf_write(buf_id, pix, nbytes);
+        sleep_ms(20);
+        rounds = rounds + 1;
+        if (rounds > 4000) { live = 0; }          # an 80 s backstop
+    }
+    setu_buf_close(buf_id);
+    setu_client_close(c);
+    return 0;
+}
+
+fn _entry(): i64 { var r = main(); syscall(SYS_EXIT, r); return 0; }
+_entry();

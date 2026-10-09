@@ -19,7 +19,6 @@ fn main() {
     var sh = shell_new();
     assert(t_ok(sh), "shell_new returns non-null");
     assert_eq(shell_notification_count(sh), 0, "no notifications at start");
-    assert_eq(shell_quick_settings_count(sh), 5, "5 quick settings seeded");
     assert_eq(shell_is_locked(sh), 0, "not locked at start");
     assert_eq(shell_panel_visible(sh), 1, "panel visible at start");
     assert_eq(shell_registry_count(sh), 14, "14 app registry entries");
@@ -37,32 +36,6 @@ fn main() {
     assert_eq(shell_status_battery_is_none(st0), 1, "initial battery None");
     assert_eq(shell_status_net(st0), SH_NetStatus.SH_NET_CONNECTED, "initial net Connected");
     assert_eq(shell_status_agents(st0), 0, "initial agents 0");
-
-    # ============================================================
-    # Quick settings initial state + toggle
-    # (rust: test_desktop_shell_quick_settings_initial_state,
-    #  test_desktop_shell_toggle_quick_setting[_double_toggle/_nonexistent])
-    # ============================================================
-    test_group("shell — quick settings toggle");
-    var wifi = shell_qs_find(sh, "wifi");
-    assert(t_ok(wifi), "wifi setting found");
-    assert_eq(shell_qs_is_active(wifi), 1, "wifi active initially");
-    var bt = shell_qs_find(sh, "bluetooth");
-    assert(t_ok(bt), "bluetooth setting found");
-    assert_eq(shell_qs_is_active(bt), 0, "bluetooth inactive initially");
-
-    var tw = shell_toggle_quick_setting(sh, "wifi");
-    assert_eq(tw, SH_Err.SH_OK, "toggle wifi returns OK");
-    assert_eq(shell_qs_is_active(wifi), 0, "wifi flipped to inactive");
-
-    # double toggle bluetooth returns to original state
-    shell_toggle_quick_setting(sh, "bluetooth");
-    assert_eq(shell_qs_is_active(bt), 1, "bluetooth flipped active");
-    shell_toggle_quick_setting(sh, "bluetooth");
-    assert_eq(shell_qs_is_active(bt), 0, "bluetooth back to inactive");
-
-    var tmiss = shell_toggle_quick_setting(sh, "nonexistent");
-    assert_eq(tmiss, SH_Err.SH_ERR_APP_NOT_FOUND, "toggle unknown setting errors");
 
     # ============================================================
     # App launch + registry

@@ -63,3 +63,10 @@ jobs:
         # stub didn't exist (Issue 1) and also wouldn't ever exercise
         # tests/${proj}.tcyr.
         run: cyrius test
+
+      - name: Coverage floor
+        # Reference coverage (functions a test references) — a floor, not a correctness proof, and the
+        # tool says so. Set at the measured 61% (624 of 1,015 fns) when the 0.17.x parity arc opened;
+        # the arc's test bites raise it toward the v1.0 criterion of 80%. Never lower it to make a red
+        # run green. Verified it can fail: `--min 62` exits 1 on this tree.
+        run: cyrius coverage --min 61

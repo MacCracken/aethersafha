@@ -13,11 +13,12 @@
 # kernel and the draw needs a real screen, so anything left in those two places is untestable on a host,
 # and the failure would only ever show up on iron.
 #
-# ⚠ NOT `src/apps.cyr`'s Command Palette, and the difference is not cosmetic. That palette runs SHELL
-# UTILITIES — a 30-entry allowlist (`ls`, `cat`, `grep` …) executed with fork+execve to capture stdout.
-# This launches WINDOWED CLIENTS, which on agnos means the compositor must mint a `#97` channel, endow
-# one end to the child and announce it as `AGNOS_CHAN` before `spawn_path_env`. agnos has no fork, and a
-# captured stdout is not a window. Same word, different operation.
+# ⚠ NOT the Rust port's Command Palette (`src/apps.cyr`, retired at 0.17.0 by ADR 0004), and the
+# difference is not cosmetic. That palette ran SHELL UTILITIES — a 30-entry allowlist (`ls`, `cat`,
+# `grep` …) executed with fork+execve to capture stdout. This launches WINDOWED CLIENTS, which on agnos
+# means the compositor must mint a `#97` channel, endow one end to the child and announce it as
+# `AGNOS_CHAN` before `spawn_path_env`. agnos has no fork, and a captured stdout is not a window. Same
+# word, different operation.
 
 # ============================================================================================
 # THE REGISTRY — what can be launched

@@ -24,14 +24,12 @@ include "src/input.cyr"
 # (spawning a client, painting the panel) is in this file, because both need a kernel or a screen.
 include "src/launcher.cyr"
 # Leaf subsystems + the desktop aggregate that wires them into the compositor.
-include "src/theme_bridge.cyr"
 include "src/gestures.cyr"
 include "src/accessibility.cyr"
 include "src/ai_features.cyr"
 include "src/shell.cyr"
 include "src/shell_render.cyr"   # shell status-panel renderer (shell → render bridge)
 include "src/security_ui.cyr"
-include "src/shell_integration.cyr"
 include "src/plugin_host.cyr"
 include "src/desktop.cyr"
 include "src/foreign.cyr"
@@ -746,10 +744,9 @@ fn ae_flag_int(flag, dflt): i64 {
 # target. Until now the host arm launched NOTHING: `--clients` could only reach exit 95 if somebody
 # started two clients by hand in another shell, which is not a probe, it is a two-person job.
 #
-# ⛔ fork+execve, not `app_spawn_detached` — `src/apps.cyr` is in no build graph on either target
-# (0 callers repo-wide), so reaching its launcher means pulling a 976-line module and its stdlib
-# fallout into the compositor for six lines of process code. If apps.cyr is ever linked, this should
-# collapse into `app_launch_terminal`; the ⚠ in state.md tracks that.
+# ⛔ fork+execve here, by design. The Rust port's app layer (`src/apps.cyr`, with its own spawn helpers)
+# was never linked into this binary and was retired at 0.17.0 (ADR 0004): windowed clients are launched
+# here and by the launcher, not by a shadow app framework.
 # ⚠ The child inherits the listening fd (setu_listen sets no CLOEXEC). Harmless while clients are
 # short-lived children of a compositor that outlives them, but it means a client keeps the socket
 # node alive if the compositor dies first — a reason to prefer CLOEXEC in setu eventually.
@@ -940,7 +937,6 @@ fn main(): i64 {
     #   · It made every window count off by one, so `desktop up — windows: 1` before any client connected
     #     read as "something is up" when nothing was.
     # ⇒ The desktop now starts EMPTY and every window on screen belongs to a real process.
-    desktop_add_tray_item(desk, 1, "network", "Network");
     # Host a foreign-ABI app as a kavach-sandboxed guest (mehman "swallow" seam),
     # run it, and present its captured stdout as the window's content (M2 handoff).
     # Linux-only: the kavach sandbox forks (sys_fork), which agnos lacks by design

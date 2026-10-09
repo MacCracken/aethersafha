@@ -5,6 +5,94 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.17.0] — 2026-10-09 — the parity arc opens: the record written, the retired surface deleted
+
+> The first release of the 0.17.x arc, which closes Rust parity and then deletes `rust-old/` (roadmap
+> § 0.17.x, gate in `docs/development/parity-plan.md`). This one writes the record — three ADRs — and
+> deletes what they retire, so the gate shrinks to modules that do something. The commit, the tag and the
+> push are the operator's.
+
+### Added — ADRs 0002–0004, the record `rust-old/` would otherwise take with it
+
+- **[ADR 0002](docs/adr/0002-retire-the-rust-protocol-layer.md) — retire the Rust protocol layer.** ADR 0001
+  retired `wayland/` and `xwayland.rs` without saying what they carried. The audit found the layer never ran
+  end to end (its listener was dropped and accepted streams never reached dispatch), so deleting it loses
+  data models and 215 tests but no behaviour. The ADR lists what setu covers, what is dropped, what is owed
+  a native design (title, state requests, size hints, dialogs, popups, clipboard, IME, output scale, modifier
+  state and a keymap, damage, a version handshake, disconnect cleanup), and what mehman owes.
+- **[ADR 0003](docs/adr/0003-the-ports-divergences-from-rust.md) — the divergences that stay.** Until now
+  these were recorded only in file headers, comments and this CHANGELOG:
+  - substrate: bhumi, the agnos GPU band, an XRGB framebuffer, the `#84` flip, rupa, kashi, the damage band,
+    vector paint order, one thread;
+  - representation: `i64` ids, epoch seconds, permille, sentinels, error codes, live getters, ASCII folding;
+  - accepted behaviour: UNKNOWN gauges, caller-supplied capture framebuffers, cascade placement, the 120×60
+    minimum, and the gesture rotate wrap and floor-sqrt boundary.
+  The silent divergences the audit found are not recorded; they are fixed in 0.17.1–0.17.4.
+- **[ADR 0004](docs/adr/0004-the-retired-surface.md) — the retired surface (operator, 2026-10-09).** The
+  app layer, `theme_bridge`, `shell_integration`, quick settings and `KeyboardNavConfig`, the HUD widgets,
+  the test-only Rust features, the inert flags, `Touch*` events and the agent floating layer, each with its
+  reason and how it would come back. `gestures` stays dormant. It keeps the three HUD widgets' full specs
+  (endpoints, JSON shapes, aliases, thresholds) and what has since changed in daimon 2.4.3: the call
+  endpoint moved, the tools are gone, and `/v1/agents` returns integers.
+
+### Removed — the retired surface (ADR 0004)
+
+- `src/apps.cyr` and `tests/apps.tcyr`. Never linked: both binaries were byte-identical after the deletion.
+- `src/theme_bridge.cyr`, `tests/theme_bridge.tcyr`, the desktop's `DSK_THEME` and `desk_bg_color`. The
+  `theme_hc_new` call also passed a colour as the focus-ring width.
+- `src/shell_integration.cyr`, `tests/shell_integration.tcyr`, the desktop tray and the boot tray item, whose
+  id was the integer `1` where a string belonged.
+- Quick settings (`shell.cyr`) and `KeyboardNavConfig` (`accessibility.cyr`), with their tests.
+- `tests/leaf_modules.tcyr`, a smoke suite duplicating `tests/desktop.tcyr`.
+
+In all, 2,141 lines of source and 757 lines of tests. The host binary is 25,912 B smaller and `--agnos`
+21,816 B smaller.
+
+### Added — a CI coverage floor
+
+CI now runs `cyrius coverage --min 61`, the measured reference coverage (624 of 1,015 functions), checked to
+fail at 62. The arc's test bites raise it toward the v1.0 criterion of 80%.
+
+### Added — `scripts/qemu-linux-input.sh`: real key chords in QEMU, judged by what clients were told
+
+The input harness 0.16.30 was verified with, now in the tree. It boots the Linux build in QEMU like
+`qemu-linux-desktop.sh`, sends Ctrl+Tab and Ctrl+F6 chords through the emulated keyboard (the guest's real
+evdev path), and judges the emulated display and the serial log. Its clients are `programs/focus_client.cyr`:
+a client draws a bright border only after the compositor sends it `SETU_INPUT_FOCUS(1)`, so a screendump
+shows which client was told it has focus. Built with `-D AE_HOSTILE`, it attaches at stride 4.
+- `focus`: after Ctrl+Tab the client that lost focus is told and goes dim; Ctrl+F6 moves focus and tells a
+  client; two more Ctrl+Tabs bring the minimized window back where it was.
+- `hostile`: the compositor is not killed, refuses the surface, and keeps the honest client focused.
+- **It fails on 0.16.29 and passes on 0.16.30**, measured: on 0.16.29, 1,812 of 4,656 bright border pixels
+  stayed bright, Ctrl+F6 told nobody, the window never returned (1% match), and the hostile client got the
+  compositor killed by signal 11 (exit 1). On 0.16.30, 0 stayed bright, a 99% match, and the surface was
+  refused (exit 0). About 40 s for both scenarios.
+- `AE_INPUT_COMPOSITOR=<binary>` judges a prebuilt compositor, which is how the A/B was run. The Super-key
+  steps (roadmap SK1–SK3) need exactly this kind of check.
+
+### Fixed — `programs/qemu_init.cyr` reported a segfaulted compositor as `exit 0`
+
+It printed only WEXITSTATUS, which is 0 for a process killed by a signal, so a crash and a clean Ctrl+Q
+logged the same line. It now also prints `KILLED by signal N`. It also forwards 14 arguments instead of 5:
+`--frames 0 --client A --client B` is 6, and the second client was silently dropped.
+
+### Docs
+
+- `parity-plan.md`: seven rows are CLOSED (`apps`, `theme_bridge`, `shell_integration`, quick settings and
+  `KeyboardNavConfig`, the HUD, `wayland/`, `xwayland.rs`), and the ADR section points at the ADRs.
+- `README.md` and `docs/architecture/overview.md`: the module maps match the 27 modules in the tree, and the
+  native protocol is described as setu rather than "greenfield, contract lib TBD".
+- `roadmap.md`: 0.17.0 is shipped and the arc's next release is 0.17.1. The Super-key steps name the harness.
+
+### Verified
+
+- **Host 4,136,920 B** (sha256 `7416f887…`) · **`--agnos` 4,095,688 B** (sha256 `2cacc11b…`).
+- **25 / 25 suites, 1,858 assertions, 0 failed.** The four deleted suites and the retired assertions account
+  for the drop from 29 / 2,136. No compiler warning points at `src/`.
+- `scripts/qemu-linux-input.sh` → PASS on this binary (same hash) · `check-dep-tags.sh` → 7 deps clean ·
+  `cyrius deps --verify` → 83 verified · CI's format check clean · `cyrius coverage --min 61` passes.
+- ⚠ Not run on iron.
+
 ## [0.16.30] — 2026-10-09 — a client can no longer overflow the compositor's heap; focus and minimize repaired
 
 > The repair the roadmap scheduled before the 0.17.x arc: three defects in the running desktop, found by

@@ -9,8 +9,8 @@
 #
 # (aethersafha WAS the token home — the tokens were extracted to rupa at 0.9.4 when
 # dhancha became the second consumer; a toolkit can't depend on the compositor. The
-# legacy accessibility HighContrastTheme still lives in theme_bridge.cyr, distinct
-# from this aesthetic theme system.)
+# accessibility HighContrastTheme lives in accessibility.cyr, distinct from this
+# aesthetic theme system; theme_bridge.cyr's copy was retired at 0.17.0, ADR 0004.)
 
 # Pack a rupa 0xRRGGBB token into the bhumi framebuffer color (the compositor's format).
 fn ae_bhumi(c): i64 { return bhumi_xrgb(rupa_color_r(c), rupa_color_g(c), rupa_color_b(c)); }

@@ -5,13 +5,11 @@ include "src/frametime.cyr"   # render_desktop times the background clear throug
 include "src/geom.cyr"
 include "src/window.cyr"
 include "src/compositor.cyr"
-include "src/theme_bridge.cyr"
 include "src/gestures.cyr"
 include "src/accessibility.cyr"
 include "src/ai_features.cyr"
 include "src/shell.cyr"
 include "src/security_ui.cyr"
-include "src/shell_integration.cyr"
 include "src/plugin_host.cyr"
 include "src/desktop.cyr"
 # ⚠ Added for the z-order PIXEL test below: it renders a real frame through `render_desktop`, which
@@ -177,7 +175,6 @@ fn main() {
     assert(t_ok(desk_sec(d)), "security_ui");
     assert(t_ok(desk_a11y(d)), "accessibility");
     assert(t_ok(desk_gest(d)), "gestures");
-    assert(t_ok(desk_theme(d)), "theme");
     assert(t_ok(desk_plug(d)), "plugin_host");
 
     test_group("desktop — a11y tree mirrors the compositor window stack");
@@ -187,15 +184,6 @@ fn main() {
     comp_create_window(comp, 0, 0, 100, 100, "B");
     assert_eq(desktop_sync_accessibility(d), 2, "sync returns one node per window");
     assert_eq(a11y_tree_len(desk_a11y(d)), 2, "a11y tree has a node per window");
-
-    test_group("desktop — shell-integration tray");
-    assert_eq(desk_tray_count(d), 0, "tray starts empty");
-    desktop_add_tray_item(d, 1, "net", "Network");
-    desktop_add_tray_item(d, 2, "vol", "Volume");
-    assert_eq(desk_tray_count(d), 2, "two tray items registered");
-
-    test_group("desktop — theme → renderer background");
-    assert_eq(desk_bg_color(d), 0x121218, "desktop bg comes from the theme (alpha masked)");
 
     test_group("desktop — an open launcher renders without disturbing the frame");
     # ⛔⛔ WHAT THIS DOES **NOT** COVER, STATED SO NOBODY READS IT AS COVERAGE. The 2026-08-18 burn's

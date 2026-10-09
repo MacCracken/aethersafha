@@ -22,3 +22,6 @@ Decisions about aethersafha — what we chose, the context, and the consequences
 | ADR | Title | Status |
 |---|---|---|
 | [0001](0001-native-display-protocol.md) | Native display protocol (Wayland refused) | Accepted |
+| [0002](0002-retire-the-rust-protocol-layer.md) | Retire the Rust protocol layer, and record what it carried | Accepted |
+| [0003](0003-the-ports-divergences-from-rust.md) | The port's divergences from Rust: substrate, representation, and accepted behaviour | Accepted |
+| [0004](0004-the-retired-surface.md) | The retired surface: what the port does not carry over from Rust | Accepted |

@@ -125,14 +125,16 @@ fn main(): i64 {
     # ⇒ Hold the framebuffer up AFTER the child has exited, so the dump happens in a window whose
     # start is an observable event (`aethersafha exit`) rather than a guess.
     var hold = 0;
-    var argv = alloc(64);
+    # ⚠ Up to 14 forwarded args (0.17.0). It was 5, which silently dropped the second client of
+    # `--frames 0 --client A --client B` — the input harness needs exactly that.
+    var argv = alloc(128);
     store64(argv + 0, "/aethersafha");
     var n = argc();
     var w = 1;
     var i = 1;
     while (i < n) {
         if (streq(argv(i), "--hold") == 1) { hold = 1; }
-        else { if (w < 6) { store64(argv + w * 8, argv(i)); w = w + 1; } }
+        else { if (w < 15) { store64(argv + w * 8, argv(i)); w = w + 1; } }
         i = i + 1;
     }
     store64(argv + w * 8, 0);
@@ -159,6 +161,14 @@ fn main(): i64 {
     qi_say("qemu_init: aethersafha exit ");
     qi_num((raw / 256) & 0xFF);
     qi_say("\n");
+    # ⛔ A SIGNAL DEATH READ AS "exit 0" UNTIL 0.17.0. WEXITSTATUS is 0 for a process killed by a signal,
+    # so 0.16.29 segfaulting on a hostile client logged exactly what a clean Ctrl+Q logs. The low seven
+    # bits of the raw status are the terminating signal.
+    if ((raw & 0x7F) != 0) {
+        qi_say("qemu_init: aethersafha KILLED by signal ");
+        qi_num(raw & 0x7F);
+        qi_say("\n");
+    }
     if (hold == 1) {
         # ⚠ The harness watches for THIS line and dumps while we sit here. Nothing is redrawn during
         # the hold, so what the device holds is exactly the child's last frame.

@@ -200,7 +200,7 @@ enum PLG_MsgOff {
     M_S0     = 48;   # pointer slot 0 (version / format / event_type)
     M_S1     = 56;   # pointer slot 1 (data)
     M_PTR    = 64;   # pointer slot  (capabilities vec / palette map)
-    PLG_M_SZ = 72;   # not M_SZ: members are global, and shell_integration.cyr's record is 32
+    PLG_M_SZ = 72;   # not M_SZ: enum members are global, so a bare name collides across modules
 }
 
 # plug_msg_alloc: zero-initialised message record of the given kind.

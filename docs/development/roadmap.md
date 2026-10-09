@@ -14,7 +14,7 @@
 - [ ] CHANGELOG complete from v0.1.0
 - [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`)
 
-## 0.17.x — close the port, then delete `rust-old/` (next: 0.17.0)
+## 0.17.x — close the port, then delete `rust-old/` (next: 0.17.1)
 
 **Why the arc is smaller than 28,072 lines of Rust suggests.** The Rust *binary* never created a window or
 rendered a frame. It built the desktop, ran a 5 s status tick, honoured `--secure`, and exited on a signal.
@@ -33,7 +33,7 @@ gate, with every open item, is [`parity-plan.md`](parity-plan.md).
 
 | Release | Bite | What ships |
 |---|---|---|
-| **0.17.0** | The record | **ADR 0002** retires the Rust protocol layer and lists what is dropped and what is owed a native design. **ADR 0003** records the substrate and numeric divergences. **ADR 0004** records the retired surface, including the HUD widget specs (daimon has since moved). The retired code is deleted: `apps`, `theme_bridge`, `shell_integration`, quick settings, `KeyboardNavConfig`, and the redundant `tests/leaf_modules.tcyr`. A CI coverage floor is set at the measured value. |
+| **0.17.0** | The record | ✅ **Shipped.** ADRs 0002–0004 written; the retired surface deleted (`apps`, `theme_bridge`, `shell_integration`, quick settings, `KeyboardNavConfig`); a CI coverage floor at 61%; `scripts/qemu-linux-input.sh` and `programs/focus_client.cyr` in the tree. |
 | **0.17.1** | Correctness | Where the port silently diverged, restore Rust's behaviour and port the test that catches it. `"terminal"` returns to AI context detection (`ai_features.cyr:411` matches `"cmdpalette"`) and to the shell app registry. The security dashboard's maximum threat comes from the active alerts, so Info-only reads Info (`security_ui.cyr:699` starts at Low). `comp_close_window` updates the workspace's active window (`compositor.cyr:343`; two Rust tests fail today). Titles truncate with "…" like Rust's; by code reading this also fixes a title over 64 bytes (`render.cyr:1260`) that never reaches the screen on a GPU frame, because the CPU band is skipped (`gpu.cyr:1343`). `tests/aethersafha.tcyr:91` returns before 18 wallpaper asserts, which are made to run. Smaller fixes: a stable suggestion sort, a null-checked `epoch_to_date` (`ai_features.cyr:375`), and its own id namespace for `sec_ui_next_id`. |
 | **0.17.2** | What the Rust binary did | Flags move into a pure, testable module: `--secure` (secure mode plus `SEC_LVL_ELEVATED`), `--help` and `--version`. An unknown flag becomes an error instead of being ignored (`main.cyr:696`). The status tick sends `UserPresent`, and a welcome notification shows at start. Linux reads cpu and disk from `/proc/stat` and `statvfs`, with `parse_cpu_line`; agnos stays UNKNOWN because it has no source. The panel stops claiming things: the net dot is seeded Connected with no producer (`shell.cyr:338`), and nothing calls `shell_set_agent_count` (`shell.cyr:779`). Accessibility mirroring: a node and an announcement on create and close, focus sync, and an idempotent sync (today it runs once, before any client, `main.cyr:955`). SIGINT tears down on Linux as Ctrl+Q does. |
 | **0.17.3** | Stubs become real | `PluginMessage` JSON in both directions (`plugin_host.cyr:320,326` return 0) via bayan, which gets declared in `[deps] stdlib`. The `plug_ipc_*` stubs are deleted; Rust had no transport. security_ui gets the audit-log writer (a JSON line with an ISO-8601 time, `security_ui.cyr:865`), plus SIGHUP on revoke and SIGKILL on kill through `sys_kill` (`:830`, `:845`). `poll_agents` runs against daimon 2.4.3's `GET /v1/agents` (integer ids and statuses), off the frame loop, and feeds the agent HUD and the panel gauge (`ai_features.cyr:735`). screen_capture writes alpha 0xFF and refuses width or height ≤ 0 (today that is a null write, `screen_capture.cyr:425-429,502,509`); it gets a decode round-trip over 64 KB and per-capture memory that is freed (about 74 MB leak per 2560×1440 PNG today). screen_recording frees what its ring evicts (`screen_recording.cyr:286`). Both stay library code. |
@@ -43,7 +43,7 @@ gate, with every open item, is [`parity-plan.md`](parity-plan.md).
 
 **The gate for deleting `rust-old/`:**
 1. Every [`parity-plan.md`](parity-plan.md) row is CLOSED.
-2. ADRs 0002–0004 are accepted, and every divergence the matrix names cites one of them.
+2. ✅ ADRs 0002–0004 are accepted (0.17.0), and every divergence the matrix names cites one of them.
 3. Nothing of value is lost:
    - the bench CSV is in `docs/benchmarks.md`;
    - the HUD specs are in ADR 0004 and the deferred protocol concepts in ADR 0002;
@@ -74,9 +74,9 @@ agnos it comes from the boot report's modifier byte and has not yet been seen on
 
 | Step | What | Owner | Gate |
 |---|---|---|---|
-| SK1 | Super becomes a second chrome modifier: `input_mod_track` folds 0xE3 / 0xE7, and every chrome action answers Super as well as Ctrl. Settle the binding table first: keep the F-keys or move to Super + letters and arrows, and decide whether a bare Super tap opens the launcher. | here | 0.17.4's routing module |
+| SK1 | Super becomes a second chrome modifier: `input_mod_track` folds 0xE3 / 0xE7, and every chrome action answers Super as well as Ctrl. Settle the binding table first: keep the F-keys or move to Super + letters and arrows, and decide whether a bare Super tap opens the launcher. Verified with `scripts/qemu-linux-input.sh`. | here | 0.17.4's routing module |
 | SK2 | Modifier state on key events (ADR 0002 lists it as owed). puka turns Ctrl + letter into a control code, and dhancha exposes the mask. | setu, puka, dhancha | can run beside SK1 |
-| SK3 | The flip: the compositor stops claiming Ctrl, Ctrl chords reach clients with their modifiers, and Super is the only chrome modifier. The claimed set in the client contract changes for the third time, and the QEMU harness learns to send Super. | here and the clients | SK1 and SK2 |
+| SK3 | The flip: the compositor stops claiming Ctrl, Ctrl chords reach clients with their modifiers, and Super is the only chrome modifier. The claimed set in the client contract changes for the third time, and `scripts/qemu-linux-input.sh` gains Super chords (QMP qcode `meta_l`) plus a check that a Ctrl chord reaches the focused client. | here and the clients | SK1 and SK2 |
 | SK4 | On iron, the Keychron's GUI key through agnos's HID boot path: one keypress, declared in advance on a burn, like D8. | burn | before SK3 reaches iron |
 
 ### Open

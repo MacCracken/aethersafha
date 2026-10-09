@@ -850,8 +850,8 @@ fn render_window(fb, win, focused): i64 {
 # ⚠ THE MERGE DIRECTION WAS FORCED, NOT STYLISTIC: `render_desktop` paints the shell status panel
 # and `render_frame` does not, so making the loop call `render_frame` instead would silently have
 # dropped the panel. The damage half moved here, as a function `render_desktop` calls.
-# ⚠ The two paths also read DIFFERENT theme sources — `desk_bg_color` (the a11y HighContrastTheme,
-# via theme_bridge) versus `rupa_theme_bg`. rupa is the arc's shared token lib and the one the
+# ⚠ The two paths also read DIFFERENT theme sources — a `theme_bridge` high-contrast colour (that module
+# was retired at 0.17.0, ADR 0004) versus `rupa_theme_bg`. rupa is the arc's shared token lib and the one the
 # window chrome, dhancha, crab and jalwa all read, so rupa wins and the desktop background now
 # matches the windows drawn on it.
 fn rend_frame_damage(comp, fb, bg): i64 {

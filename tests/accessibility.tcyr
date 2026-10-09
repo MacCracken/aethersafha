@@ -226,17 +226,6 @@ fn main() {
     assert_eq(dscale_big, 1, "dark font_scale > 1.0");
 
     # ------------------------------------------------------------------
-    # test_keyboard_nav_config_defaults
-    # ------------------------------------------------------------------
-    test_group("a11y — keyboard nav defaults");
-    var kn = a11y_kbdnav_default();
-    assert(t_ok(kn), "kbdnav default non-null");
-    assert_eq(a11y_kbdnav_tab_cycle(kn), 1, "tab_cycle default true");
-    assert_eq(a11y_kbdnav_arrow_navigation(kn), 1, "arrow_navigation default true");
-    assert_eq(a11y_kbdnav_escape_closes_dialog(kn), 1, "escape_closes_dialog default true");
-    assert_eq(a11y_kbdnav_enter_activates(kn), 1, "enter_activates default true");
-
-    # ------------------------------------------------------------------
     # test_node_with_children_and_parent
     # ------------------------------------------------------------------
     test_group("a11y — children and parent");

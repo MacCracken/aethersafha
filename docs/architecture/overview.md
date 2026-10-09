@@ -11,35 +11,42 @@
 ```
 aethersafha
 ├── geom.cyr             — geometry primitives (rectangles, hit-tests)
-├── window.cyr           — window model + window state
-├── compositor.cyr       — window stack, focus, workspaces, CRUD, secure/agent modes
-├── render.cyr           — software renderer over the bhumi framebuffer: alpha blend,
-│                           damage tracking, decorations, bitmap text (kashi)
-├── input.cyr            — bhumi HID → compositor input actions, window-mgmt shortcuts
-├── main.cyr             — entry: open the bhumi backend, seed windows, frame loop
-├── desktop.cyr          — aggregate: owns the compositor + all leaf managers; the
-│                           unified frame (themed bg + windows + shell status panel)
-├── shell.cyr            — desktop shell: launcher, notifications, quick settings, status
-├── theme_bridge.cyr     — theme translation / synchronization
-├── ai_features.cyr      — context engine, AI suggestions, agent HUD, resource metrics
-├── accessibility.cyr    — accessibility tree, focus, announcements, high-contrast
-├── gestures.cyr         — touch / trackpad gesture recognition
-├── security_ui.cyr      — permission dialogs, threat alerts, security dashboard
-├── shell_integration.cyr — system tray, window management, notification bridge
-├── plugin_host.cyr      — plugin lifecycle, sandbox profiles, capability system
-├── apps.cyr             — built-in apps (file manager, agent manager, audit viewer,
-│                           model manager, command palette, browsers)
-├── screen_capture.cyr   — capture manager: per-agent permissions, rate limiting, encoders
-├── screen_recording.cyr — recording manager: sessions, frame ring buffer
+├── window.cyr           — window model + state, the restore rect, the client buffer's extent
+├── compositor.cyr       — window stack, focus (raise-on-focus), workspaces, CRUD, secure mode
+├── input.cyr            — bhumi HID → compositor actions: the Ctrl-chord window keys
+├── render.cyr           — CPU renderer over the bhumi framebuffer: blend, the damage band,
+│                           decorations, bitmap text (kashi)
+├── gpu.cyr              — the agnos GPU path (#82–#94): surfaces, chrome and glyphs on the GPU
+├── cursor.cyr           — the pointer bitmap: shape, clipping, 1bpp packing
+├── wallpaper.cyr        — the backdrop: a PNG/JPEG image (chitra), or a solid / gradient
+├── theme.cyr            — rupa tokens packed for the framebuffer
+├── frametime.cyr        — the frame-phase instrument
+├── sysprobe.cyr         — producers for the shell panel's gauges
+├── main.cyr             — entry: open the bhumi backend, listen for clients, frame loop
+├── desktop.cyr          — aggregate: owns the compositor + leaf managers; the one frame path
+├── launcher.cyr         — the Ctrl+F2 launcher and the registry of clients it can start
+├── setu_server.cyr      — setu transport (AF_UNIX on Linux, the #97 channel band on agnos)
+├── setu_dispatch.cyr    — setu → windows: the handshake, surface validation, keys, focus
+├── selftest.cyr         — `--selftest`: the iron verdict
+├── shell.cyr            — desktop shell: notifications, system status, app registry, search
+├── shell_render.cyr     — the status panel and notification cards
+├── ai_features.cyr      — context engine, AI suggestions, agent HUD state, resource metrics
+├── accessibility.cyr    — accessibility tree, focus, announcements, high-contrast theme
+├── gestures.cyr         — gesture recognition (dormant: no touch path yet)
+├── security_ui.cyr      — permissions, threat alerts, security dashboard, window badges
+├── plugin_host.cyr      — plugin lifecycle, sandbox profiles, capabilities, messages
+├── screen_capture.cyr   — capture manager: permissions, rate limiting, encoders (not wired)
+├── screen_recording.cyr — recording manager: sessions, frame ring (not wired)
 └── foreign.cyr          — mehman swallow path: host a foreign-ABI app as a
                             kavach-sandboxed guest, capture + present its surface
 ```
 
-The **native display protocol** surface (client↔compositor: transport, surface
-lifecycle, buffer submit, input dispatch) is greenfield — the redefined Bite F.
-Its contract will live in a shared sovereign library consumed by both
-aethersafha (server) and dhancha (client). See ADR 0001 and
-`dhancha/docs/development/sovereign-desktop.md`.
+The **native display protocol** is setu (ADR 0001). Its message types and wire
+codec live in the `setu` dependency, shared with dhancha (client); `setu_server.cyr`
+and `setu_dispatch.cyr` are the compositor's side. What a client can count on is
+[`001-setu-client-contract.md`](001-setu-client-contract.md); the protocol
+features still owed a design are listed in ADR 0002. The Rust port's `apps`,
+`theme_bridge` and `shell_integration` modules were retired at 0.17.0 (ADR 0004).
 
 ## Data flow
 

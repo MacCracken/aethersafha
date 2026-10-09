@@ -573,36 +573,4 @@ fn a11y_theme_default_dark_high_contrast(): i64 {
     return a11y_theme_make(0xFF000000, 0xFFFFFFFF, 0xFF00CCFF, 0xFFFF4444, 0xFFFFCC00, 3, 1250);
 }
 
-# ============================================================================
-# Keyboard navigation config (Rust struct → heap object)
-# ============================================================================
-
-enum AxKbdNavOff {
-    AX_K_TAB_CYCLE            = 0;    # bool 0/1
-    AX_K_ARROW_NAVIGATION     = 8;
-    AX_K_ESCAPE_CLOSES_DIALOG = 16;
-    AX_K_ENTER_ACTIVATES      = 24;
-    AX_K_SZ                   = 32;
-}
-
-# Default keyboard-nav config (everything enabled). Parity:
-# KeyboardNavConfig::default.
-fn a11y_kbdnav_default(): i64 {
-    var k = alloc(AX_K_SZ);
-    if (k == 0) { return 0; }
-    store64(k + AX_K_TAB_CYCLE, 1);
-    store64(k + AX_K_ARROW_NAVIGATION, 1);
-    store64(k + AX_K_ESCAPE_CLOSES_DIALOG, 1);
-    store64(k + AX_K_ENTER_ACTIVATES, 1);
-    return k;
-}
-
-fn a11y_kbdnav_tab_cycle(k)            { return load64(k + AX_K_TAB_CYCLE); }
-fn a11y_kbdnav_arrow_navigation(k)     { return load64(k + AX_K_ARROW_NAVIGATION); }
-fn a11y_kbdnav_escape_closes_dialog(k) { return load64(k + AX_K_ESCAPE_CLOSES_DIALOG); }
-fn a11y_kbdnav_enter_activates(k)      { return load64(k + AX_K_ENTER_ACTIVATES); }
-
-fn a11y_kbdnav_set_tab_cycle(k, v)            { store64(k + AX_K_TAB_CYCLE, v); return 0; }
-fn a11y_kbdnav_set_arrow_navigation(k, v)     { store64(k + AX_K_ARROW_NAVIGATION, v); return 0; }
-fn a11y_kbdnav_set_escape_closes_dialog(k, v) { store64(k + AX_K_ESCAPE_CLOSES_DIALOG, v); return 0; }
-fn a11y_kbdnav_set_enter_activates(k, v)      { store64(k + AX_K_ENTER_ACTIVATES, v); return 0; }
+# KeyboardNavConfig was retired at 0.17.0 (ADR 0004): no backing service and no reader in either codebase.

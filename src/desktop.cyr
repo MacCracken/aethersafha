@@ -2,11 +2,12 @@
 # Parity: the assembly the Rust lib.rs / main.rs did across the subsystems.
 #
 # Wires the compositor together with the leaf subsystems — shell, AI features,
-# security UI, accessibility, gestures, theme, shell-integration tray, plugin
-# host — so they are instantiated, reachable, and connected from the running
-# binary (not just standalone modules). The one live cross-subsystem connection
-# so far is compositor → accessibility (the a11y tree mirrors the window stack);
-# deeper wiring (shell panel, notifications, input→gestures) follows.
+# security UI, accessibility, gestures, plugin host — so they are instantiated,
+# reachable, and connected from the running binary (not just standalone modules).
+# The one live cross-subsystem connection so far is compositor → accessibility (the
+# a11y tree mirrors the window stack); deeper wiring (shell panel, notifications,
+# input→gestures) follows. theme_bridge and the shell_integration tray were retired
+# at 0.17.0 (ADR 0004).
 
 enum DeskOff {
     DSK_COMP  = 0;    # *Compositor
@@ -15,11 +16,9 @@ enum DeskOff {
     DSK_SEC   = 24;   # SecurityUI
     DSK_A11Y  = 32;   # AccessibilityTree
     DSK_GEST  = 40;   # GestureRecognizer
-    DSK_THEME = 48;   # HighContrastTheme
-    DSK_PLUG  = 56;   # PluginHost
-    DSK_TRAY  = 64;   # vec of *TrayItem (shell_integration)
-    DSK_FOREIGN = 72; # vec of *Foreign (mehman "swallow" seam)
-    DSK_SZ    = 80;
+    DSK_PLUG  = 48;   # PluginHost
+    DSK_FOREIGN = 56; # vec of *Foreign (mehman "swallow" seam)
+    DSK_SZ    = 64;
 }
 
 # Default gesture-recognizer config: tap 300ms, double-tap 400ms, long-press
@@ -39,9 +38,7 @@ fn desktop_new(): i64 {
     store64(d + DSK_SEC, sec_ui_new());   # sec_ui_new seeds the permission definitions
     store64(d + DSK_A11Y, a11y_tree_new());
     store64(d + DSK_GEST, desk_default_gestures());
-    store64(d + DSK_THEME, theme_hc_new(0x121218, 0xFFFFFF, 0x3366FF, 0xFF0000, 0xFFAA00, 0x00FF00, 1250));
     store64(d + DSK_PLUG, plug_host_new(16));
-    store64(d + DSK_TRAY, vec_new());
     store64(d + DSK_FOREIGN, vec_new());
     return d;
 }
@@ -52,9 +49,7 @@ fn desk_ai(d)    { return load64(d + DSK_AI); }
 fn desk_sec(d)   { return load64(d + DSK_SEC); }
 fn desk_a11y(d)  { return load64(d + DSK_A11Y); }
 fn desk_gest(d)  { return load64(d + DSK_GEST); }
-fn desk_theme(d) { return load64(d + DSK_THEME); }
 fn desk_plug(d)  { return load64(d + DSK_PLUG); }
-fn desk_tray(d)  { return load64(d + DSK_TRAY); }
 fn desk_foreign(d) { return load64(d + DSK_FOREIGN); }
 fn desk_foreign_count(d): i64 { return vec_len(desk_foreign(d)); }
 
@@ -73,21 +68,6 @@ fn desktop_sync_accessibility(d): i64 {
     return n;
 }
 
-# desktop_add_tray_item(d, id, app, tooltip): register a system-tray item
-# (shell_integration) into the desktop's tray. -> *TrayItem
-fn desktop_add_tray_item(d, id, app, tooltip): i64 {
-    var item = shint_tray_item_new(id, app, "", tooltip, 1, vec_new());
-    vec_push(desk_tray(d), item);
-    return item;
-}
-fn desk_tray_count(d) { return vec_len(desk_tray(d)); }
-
-# desk_bg_color(d): the desktop background as a bhumi XRGB pixel — the theme's
-# high-contrast background with its alpha byte masked off. (theme → renderer)
-fn desk_bg_color(d): i64 {
-    return theme_hc_background(desk_theme(d)) & 0xFFFFFF;
-}
-
 # render_desktop(d, fb): the full desktop frame — compute damage, clear to the themed
 # background, paint the window stack (focus-tinted), then the shell status panel on top.
 #
@@ -99,8 +79,7 @@ fn desk_bg_color(d): i64 {
 # cleared to the a11y HighContrastTheme's background while the windows drawn on top of it were
 # already themed from rupa, so the desktop void and its windows came from different palettes.
 # rupa is the shared token core every consumer reads (compositor chrome, dhancha, crab, jalwa),
-# so it wins. `desk_bg_color` is retained — the accessibility profile is a real, separate concern
-# and theme_bridge is still its home — it is simply no longer what paints the desktop.
+# so it wins. (`desk_bg_color` and theme_bridge, which held the old colour, were retired at 0.17.0.)
 # Was the launcher up on the PREVIOUS frame? The close needs one more damaged frame than the open.
 var ae_lnch_was_open = 0;
 

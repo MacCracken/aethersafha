@@ -22,21 +22,21 @@ wiring it into the running desktop is new work and is not part of the deletion g
 | `compositor.rs` | 2565 / 99 | `compositor`, `window`, `geom`, `input`, routing in `main` | driven | PORT | close updates `WSP_ACTIVE` (2 Rust tests fail today); routing + drag/resize out of `main.cyr` with its 9 tests; workspaces (4 defaults, queries, context setter); L / BL resize grips; lifecycle and workspace tests | .1 .4 .5 |
 | `main.rs` | 630 / 26 | `main`, `desktop`, `sysprobe` | driven | PORT the tick and `--secure` | flags as a pure module with `--help` / `--version`; `UserPresent` each tick; welcome notice; Linux cpu / disk + `parse_cpu_line` (7 tests); SIGINT teardown on Linux | .2 |
 | `renderer.rs` | 1656 / 49 | `render`, `window`, `desktop`, `shell_render`, `wallpaper`, `theme`, `cursor` | driven | PORT | title truncation; CPU premultiplied blend + opacity (CPU frames differ from iron today); border outline; tests for overlap, minimized-not-drawn, text width, and the dead asserts | .1 .4 .5 |
-| `shell.rs` | 1396 / 60 | `shell`, `shell_render` | panel + cards painted | PORT | 8 missing + 7 partial tests; the app registry says `cmdpalette` where Rust said `terminal`; the net dot claims Connected with no producer; agent count unfed; `toggle_panel` honoured | .1 .2 .5 |
+| `shell.rs` | 1396 / 60 | `shell`, `shell_render` | panel + cards painted | PORT | 7 missing + 7 partial tests; the app registry says `cmdpalette` where Rust said `terminal`; the net dot claims Connected with no producer; agent count unfed; `toggle_panel` honoured | .1 .2 .5 |
 | `accessibility.rs` | 729 / 30 | `accessibility` | synced once at boot | PORT, mirroring included | a node and an announcement on create / close, focus sync, an idempotent sync; 3 tests | .2 |
 | `ai_features.rs` | 1707 / 86 | `ai_features` | constructed only | PORT | `"terminal"` context match (silently `"cmdpalette"`); stable suggestion sort; null-checked date; `poll_agents` against daimon 2.4.3; 21 tests | .1 .3 |
 | `security_ui.rs` | 1858 / 77 | `security_ui` | constructed only | PORT | dashboard maximum starts at Low (Rust: Info); audit-log writer; SIGHUP / SIGKILL; Linux-only kill effects; 9 tests incl. 4 eviction | .1 .3 |
 | `plugin_host.rs` | 848 / 31 | `plugin_host` | constructed only | PORT | `PluginMessage` JSON (both directions `return 0`) and its 8 tests; delete the `plug_ipc_*` stubs (Rust had no transport) | .3 |
 | `screen_capture.rs` | 1299 / 31 | `screen_capture` (not linked) | library | PORT as library | alpha 0xFF; refuse w / h ≤ 0 (a null write today); decode round-trip over 64 KB; per-capture memory | .3 |
 | `screen_recording.rs` | 938 / 22 | `screen_recording` (not linked) | library | PORT as library | the ring frees what it evicts | .3 |
-| `gestures.rs` | 569 / 17 | `gestures` | constructed only | KEEP dormant (ADR 0004) | 1 test; record the rotate wrap and the floor-sqrt boundary | .0 .5 |
-| `apps.rs` | 2986 / 173 | `apps` (not linked) | dead in Rust too | RETIRE (ADR 0004) | delete `src/apps.cyr` + `tests/apps.tcyr` | .0 |
-| `theme_bridge.rs` | 372 / 18 | `theme_bridge` | dead | RETIRE (ADR 0004) | delete it and `desktop.cyr`'s `DSK_THEME` (whose call passes a colour as the focus-ring width) | .0 |
-| `shell_integration.rs` | 516 / 26 | `shell_integration` | one tray item at boot | RETIRE (ADR 0004) | delete it and the boot tray item (`main.cyr:943` passes the integer `1` as the id string) | .0 |
-| quick settings, `KeyboardNavConfig` (in `shell.rs`, `accessibility.rs`) | — | `shell`, `accessibility` | never read | RETIRE (ADR 0004) | delete the two surfaces and their tests | .0 |
-| `hud/*` | 1987 / 67 | — | never ported | RETIRE (ADR 0004, with the widget specs) | only the agent-list poll is ported (row `ai_features.rs`) | .0 .3 |
-| `wayland/*` | 4763 / 181 | setu | — | RETIRED (ADR 0001) | ADR 0002 lists what is dropped and what is owed a native design | .0 |
-| `xwayland.rs` | 823 / 34 | mehman, `foreign` | — | RETIRED (ADR 0001) | ADR 0002 lists what mehman owes | .0 |
+| `gestures.rs` | 569 / 17 | `gestures` | constructed only | KEEP dormant (ADR 0004) | 1 test (`touch_point_fields`); the rotate wrap and the floor-sqrt boundary are recorded in ADR 0003 | .5 |
+| `apps.rs` | 2986 / 173 | — | dead in Rust too | ✅ **CLOSED 0.17.0** — retired by ADR 0004, `src/apps.cyr` deleted | — | .0 |
+| `theme_bridge.rs` | 372 / 18 | — | dead | ✅ **CLOSED 0.17.0** — retired by ADR 0004, deleted with `DSK_THEME` | — | .0 |
+| `shell_integration.rs` | 516 / 26 | — | one tray item at boot | ✅ **CLOSED 0.17.0** — retired by ADR 0004, deleted with the desktop tray | — | .0 |
+| quick settings, `KeyboardNavConfig` (in `shell.rs`, `accessibility.rs`) | — | — | never read | ✅ **CLOSED 0.17.0** — retired by ADR 0004, deleted | — | .0 |
+| `hud/*` | 1987 / 67 | — | never ported | ✅ **CLOSED 0.17.0** — retired by ADR 0004, which keeps the widget specs | the agent-list poll is ported under `ai_features.rs` | .0 .3 |
+| `wayland/*` | 4763 / 181 | setu | — | ✅ **CLOSED 0.17.0** — ADR 0001 + ADR 0002 (what is dropped, what is owed a native design) | — | .0 |
+| `xwayland.rs` | 823 / 34 | mehman, `foreign` | — | ✅ **CLOSED 0.17.0** — ADR 0001 + ADR 0002 (what mehman owes) | — | .0 |
 | `system_tests.rs` | 1477 / 40 | — | tests | re-express | 22 covered · 13 partly · 5 not (two of them are the 0.17.1 divergences) | .5 |
 | `tests/*.rs` | 422 / 29 | — | tests | re-express | compositor 7 / 13 covered, renderer 6 / 12, security 4 / 4 | .5 |
 | benches, `bench-history.csv`, `benchmarks.md` | 378 / — | `tests/aethersafha.bcyr` | — | PRESERVE the CSV | the CSV moves to `docs/benchmarks.md` ("machine unknown, not a target"); Cyrius benches for the same series | .5 |
@@ -46,55 +46,14 @@ There are 1,096 Rust tests. The retired rows' tests (181 in `wayland/`, 34 in `x
 `apps`, `theme_bridge`, `shell_integration` and the HUD) close by ADR. The PORT rows' open tests are listed
 by name under *Rust tests still to re-express* below.
 
-## What the ADRs carry
+## The ADRs (written at 0.17.0)
 
-**ADR 0002 — retire the Rust protocol layer.** The Rust Wayland layer never ran end to end (its listener
-was dropped, accepted streams never reached dispatch, attach and damage were no-ops), so deleting it loses
-data models, not behaviour.
-- *Dropped:* the object-id map, globals and registry, seat-capability objects, configure serial / ack,
-  decoration negotiation and move / resize requests (server-side decorations are policy), regions, buffer
-  transform / scale, viewporter, output transform / subpixel, the X11 display number and socket,
-  `WM_HINTS`, the action queue, the feature stub.
-- *Owed a native design (setu):* title + app_id; client state requests (fullscreen for video and games);
-  min / max size hints; parent / transient (dialogs); popups + positioner (menus, tooltips, IME
-  candidates); clipboard + drag-and-drop (one global selection); text input / IME; output geometry,
-  refresh and scale; pointer leave + horizontal axis; modifier state on key events + a keymap (ADR 0001
-  promised one); damage + frame pacing; a HELLO version handshake; disconnect cleanup.
-- *mehman owes:* multi-window guests; guest-driven title, state, size and parent; input and focus;
-  clipboard; real pixels (mehman ADR 0004).
-- *Never present:* subsurfaces, layer-shell, security-context, agent-surface.
-
-**ADR 0003 — the port's substrate and numeric divergences.** bhumi instead of DRM/KMS + libinput +
-logind; the agnos GPU band (`#82`–`#94`) instead of mabda; an XRGB8888 framebuffer; rupa tokens instead of
-a palette; the kashi VGA 8×16 font instead of 5×7; a damage band instead of a region list; the kernel
-`#84` flip instead of a front / back swap; i64 ids, epoch seconds, permille, milliradians, sentinels and
-i64 error codes instead of Uuid, DateTime, f32, Option and error text; one thread and a frame loop
-instead of tokio and `Arc<RwLock>`; getters that return live objects, not clones; ASCII-only case folding;
-UNKNOWN (−1) gauges instead of 0; caller-supplied framebuffers for capture; cascade placement; the
-120×60 minimum window; the gesture rotate wrap and the floor-sqrt swipe boundary. (The Terminal →
-Command Palette rename is not recorded: `apps` retires and 0.17.1 restores `terminal` where it leaked
-into the AI context match and the shell registry.)
-
-**ADR 0004 — the retired surface (operator, 2026-10-09).**
-- *The app layer:* `DesktopApplications`, `AppWindow`, `open_*`, FileManager, the Command Palette, the 8
-  browsers and Shruti, the Agent / Audit / Model managers. Client processes (puka, crab, thoth) and the
-  launcher own windows now; the managers return as client programs if wanted.
-- *theme_bridge:* there is no Flutter; rupa is the theme source.
-- *shell_integration:* tray items, window-management requests and external notifications never reached a
-  compositor in Rust, and agnos has no tray source; they return as setu message kinds if needed.
-- *Quick settings and `KeyboardNavConfig`:* no backing service and no reader in either codebase.
-- *The HUD widgets*, with their full specs (endpoints, JSON shapes, aliases, thresholds), because the
-  daimon they polled has changed: `POST /v1/mcp/tools/call` answers 405 (calls moved to `/v1/mcp/call`),
-  `agnostic_list_crews` survives only in secureyeoman's TypeScript server, nothing implements
-  `agnos_gpu_status`, and `GET /v1/agents` now returns integer ids and statuses.
-- *Test-only Rust features:* `ClipboardManager`, `tile_windows`, `render_hud_overlay` (a clipboard belongs
-  in setu, ADR 0002).
-- *Inert flags:* `--backend`, `--kiosk`, `--no-ai`, `--high-contrast`, `--accessibility` (logged or stored,
-  never acted on). SIGHUP reload and the goodbye notice. `Touch*` input events. The floating layer for
-  agent windows, which returns with agent-owned surfaces. `blit_clipped`, the `Layer` type, ResizeEdge
-  T / TL / TR (unreachable in Rust too). Rust derive behaviour (Clone, Debug, PartialEq, serde) and the
-  tests that only check it.
-- *Kept dormant:* `gestures` stays as tested library code; no touch path exists in bhumi or agnos.
+- [ADR 0002](../adr/0002-retire-the-rust-protocol-layer.md) retires the Rust protocol layer and lists what it
+  carried: covered natively, dropped, owed a native design (setu), owed by mehman, never present.
+- [ADR 0003](../adr/0003-the-ports-divergences-from-rust.md) records the divergences that stay: substrate,
+  representation, and accepted behaviour. A port row's Rust tests are re-expressed under its mappings.
+- [ADR 0004](../adr/0004-the-retired-surface.md) records the retired surface, with the HUD widget specs and
+  what changed in daimon. Every CLOSED-by-retirement row above cites it.
 
 ## Rust tests still to re-express
 

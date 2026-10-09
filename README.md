@@ -25,16 +25,16 @@ when wanted, through the **mehman** swallow backend (kavach-sandboxed).
   kavach-sandboxed guests whose surfaces are hosted as compositor windows (the
   compat lane that does XWayland's job the sovereign way — firewalled from the
   native path).
-- **AI desktop features** — context-aware suggestions, agent HUD, resource
-  metrics, agent-owned windows.
+- **AI desktop features** — context-aware suggestions, agent HUD state,
+  resource metrics.
 - **Plugin host** — sandboxed plugin loading with capability-based security.
 - **Screen capture / recording** — per-agent permissions, rate limiting,
   byte-exact RAW/BMP/PNG encoding.
 - **Accessibility** — accessibility tree, tab navigation, screen-reader
   announcements, high-contrast theme.
 - **Security UI** — permission dialogs, threat alerts, agent audit dashboard.
-- **Built-in apps** — file manager, agent manager, audit viewer, model manager,
-  terminal (allowlisted spawn), browsers.
+- **Launcher** — Ctrl+F2 opens a launcher for windowed clients (puka, crab,
+  thoth). Every window on the desktop belongs to a real client process.
 
 ## Architecture
 
@@ -44,13 +44,14 @@ full module map. In brief, the Cyrius source (`src/`) is:
 - **Core** — `geom`, `window`, `compositor`, `render`, `input`, `main`: the
   window model, software renderer over the bhumi framebuffer, input routing, and
   the frame loop.
-- **Shell + leaf** — `desktop`, `shell`, `theme_bridge`, `gestures`,
-  `accessibility`, `ai_features`, `security_ui`, `shell_integration`,
-  `plugin_host`.
-- **Apps + capture** — `apps`, `screen_capture`, `screen_recording`.
+- **Shell + leaf** — `desktop`, `shell`, `shell_render`, `launcher`,
+  `gestures`, `accessibility`, `ai_features`, `security_ui`, `plugin_host`.
+- **Capture** — `screen_capture`, `screen_recording` (library code, not yet
+  wired into the desktop).
 - **Foreign** — `foreign`: the mehman swallow path.
-- **Native display protocol** — greenfield (the redefined Bite F); the shared
-  contract lib is TBD.
+- **Native display protocol** — setu (ADR 0001): `setu_server` and
+  `setu_dispatch` here, the message types and wire codec in the `setu`
+  dependency.
 
 The Rust original is preserved at `rust-old/` (27,207 lines) as the parity
 oracle; do not edit it.

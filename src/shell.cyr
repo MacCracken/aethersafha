@@ -1,6 +1,6 @@
 # aethersafha — desktop shell
-# Parity: rust-old/src/shell.rs  (DesktopShell + notifications, quick
-# settings, system status, app registry, launcher).
+# Parity: rust-old/src/shell.rs  (DesktopShell + notifications, system status,
+# app registry, launcher). Quick settings were retired at 0.17.0 (ADR 0004).
 #
 # Heap-object idiom: every Rust struct is arena-allocated with a named-offset
 # enum; fields via load64/store64 (same convention as src/window.cyr,
@@ -9,7 +9,6 @@
 #
 # Parity substitutions (no clean Cyrius analog):
 #   - Uuid notification id           -> monotonic i64 (SH_ counter in the shell)
-#   - Box<dyn Fn> QuickSetting cb     -> action-id i64 (on_action)
 #   - chrono::DateTime<Utc> timestamp -> i64 epoch (caller passes `now`)
 #   - f32 relevance_score / usages    -> integer permille (1.0 == 1000)
 #   - Option<u8> battery_level        -> i64, sentinel -1 == None
@@ -113,36 +112,6 @@ fn shell_notif_priority(p)      { return load64(p + N_PRIORITY); }
 fn shell_notif_timestamp(p)     { return load64(p + N_TIMESTAMP); }
 fn shell_notif_requires_action(p) { return load64(p + N_REQ_ACTION); }
 fn shell_notif_is_agent(p)      { return load64(p + N_IS_AGENT); }
-
-# ================================================================
-# QuickSetting (rust: struct QuickSetting). Box<dyn Fn> -> on_action i64.
-# ================================================================
-enum SH_QsOff {
-    Q_ID        = 0;    # cstr pointer (setting id, e.g. "wifi")
-    Q_NAME      = 8;    # cstr pointer (display name)
-    Q_ICON      = 16;   # cstr pointer
-    Q_IS_ACTIVE = 24;   # bool (0/1)
-    Q_ON_ACTION = 32;   # i64 action-id (parity: on_activate closure)
-    Q_SZ        = 40;
-}
-
-fn shell_qs_new(id, name, icon, is_active, on_action): i64 {
-    var p = alloc(Q_SZ);
-    if (p == 0) { return 0; }
-    store64(p + Q_ID, id);
-    store64(p + Q_NAME, name);
-    store64(p + Q_ICON, icon);
-    store64(p + Q_IS_ACTIVE, is_active);
-    store64(p + Q_ON_ACTION, on_action);
-    return p;
-}
-
-fn shell_qs_id(p)        { return load64(p + Q_ID); }
-fn shell_qs_name(p)      { return load64(p + Q_NAME); }
-fn shell_qs_icon(p)      { return load64(p + Q_ICON); }
-fn shell_qs_is_active(p) { return load64(p + Q_IS_ACTIVE); }
-fn shell_qs_on_action(p) { return load64(p + Q_ON_ACTION); }
-fn shell_qs_set_active(p, v) { store64(p + Q_IS_ACTIVE, v); return 0; }
 
 # ================================================================
 # SystemStatus (rust: struct SystemStatus). f32 -> permille, Option<u8>
@@ -314,23 +283,22 @@ fn shell_item_clone(p): i64 {
 # ================================================================
 enum SH_ShellOff {
     SH_NOTIFS      = 0;    # vec of *Notification (rust: HashMap<Uuid,_>)
-    SH_QSETTINGS   = 8;    # vec of *QuickSetting
-    SH_STATUS      = 16;   # *SystemStatus
-    SH_ITEMS       = 24;   # vec of *LauncherItem
-    SH_REGISTRY    = 32;   # cstr-keyed map: app id -> *AppEntry
-    SH_LOCKED      = 40;   # bool (0/1) is_locked
-    SH_PANEL       = 48;   # bool (0/1) panel_visible
-    SH_NEXT_NOTIF  = 56;   # monotonic notification id counter (parity: Uuid)
-    SH_SZ          = 64;
+    SH_STATUS      = 8;    # *SystemStatus
+    SH_ITEMS       = 16;   # vec of *LauncherItem
+    SH_REGISTRY    = 24;   # cstr-keyed map: app id -> *AppEntry
+    SH_LOCKED      = 32;   # bool (0/1) is_locked
+    SH_PANEL       = 40;   # bool (0/1) panel_visible
+    SH_NEXT_NOTIF  = 48;   # monotonic notification id counter (parity: Uuid)
+    SH_SZ          = 56;
 }
 
-# shell_new(): rust DesktopShell::new() — build state, then seed quick
-# settings, app registry, launcher items. -> *DesktopShell (0 on OOM)
+# shell_new(): rust DesktopShell::new() — build state, then seed the app registry
+# and launcher items. -> *DesktopShell (0 on OOM). Quick settings were retired at
+# 0.17.0 (ADR 0004): no backing service and no reader in either codebase.
 fn shell_new(): i64 {
     var sh = alloc(SH_SZ);
     if (sh == 0) { return 0; }
     store64(sh + SH_NOTIFS, vec_new());
-    store64(sh + SH_QSETTINGS, vec_new());
     # initial SystemStatus: cpu/mem/disk 0, no battery, Connected, 0 agents
     # ⛔ SEEDED UNKNOWN, NOT ZERO. These were literal zeros since the port and NOTHING ever
     # overwrote them, so the panel asserted "cpu 0%, mem 0%, disk 0%" on every burn. -1 renders as
@@ -344,14 +312,12 @@ fn shell_new(): i64 {
     store64(sh + SH_PANEL, 1);
     store64(sh + SH_NEXT_NOTIF, 1);
 
-    shell_init_quick_settings(sh);
     shell_init_app_registry(sh);
     shell_populate_launcher_items(sh);
     return sh;
 }
 
 fn shell_notifs(sh)    { return load64(sh + SH_NOTIFS); }
-fn shell_qsettings(sh) { return load64(sh + SH_QSETTINGS); }
 fn shell_status(sh)    { return load64(sh + SH_STATUS); }
 fn shell_items(sh)     { return load64(sh + SH_ITEMS); }
 fn shell_registry(sh)  { return load64(sh + SH_REGISTRY); }
@@ -361,18 +327,6 @@ fn shell_next_notif_id(sh): i64 {
     var id = load64(sh + SH_NEXT_NOTIF);
     store64(sh + SH_NEXT_NOTIF, id + 1);
     return id;
-}
-
-# rust: initialize_quick_settings — five toggles. on_activate closures
-# become action-ids 0..4 (parity substitute).
-fn shell_init_quick_settings(sh): i64 {
-    var qs = load64(sh + SH_QSETTINGS);
-    vec_push(qs, shell_qs_new("wifi",       "Wi-Fi",          "wifi",       1, 0));
-    vec_push(qs, shell_qs_new("bluetooth",  "Bluetooth",      "bluetooth",  0, 1));
-    vec_push(qs, shell_qs_new("airplane",   "Airplane Mode",  "airplane",   0, 2));
-    vec_push(qs, shell_qs_new("dnd",        "Do Not Disturb", "dnd",        0, 3));
-    vec_push(qs, shell_qs_new("nightlight", "Night Light",    "nightlight", 1, 4));
-    return 0;
 }
 
 # shell_registry_put: helper — insert one AppEntry keyed by its id cstr.
@@ -564,48 +518,6 @@ fn shell_get_notifications(sh): i64 {
 
 fn shell_notification_count(sh): i64 {
     return vec_len(load64(sh + SH_NOTIFS));
-}
-
-# ================================================================
-# Quick settings
-# ================================================================
-
-# shell_qs_find: linear scan for a setting whose id (cstr) equals setting_id.
-# -> *QuickSetting or 0.
-fn shell_qs_find(sh, setting_id): i64 {
-    var v = load64(sh + SH_QSETTINGS);
-    var n = vec_len(v);
-    var i = 0;
-    while (i < n) {
-        var s = vec_get(v, i);
-        var eq = streq(shell_qs_id(s), setting_id);
-        if (eq == 1) { return s; }
-        i = i + 1;
-    }
-    return 0;
-}
-
-# rust: toggle_quick_setting — flip is_active and fire on_activate. The
-# closure has no Cyrius analog; we just return the action-id via out state
-# (caller can dispatch). -> SH_OK / SH_ERR_APP_NOT_FOUND.
-fn shell_toggle_quick_setting(sh, setting_id): i64 {
-    var s = shell_qs_find(sh, setting_id);
-    if (s == 0) { return SH_Err.SH_ERR_APP_NOT_FOUND; }
-    var cur = shell_qs_is_active(s);
-    var next = 1;
-    if (cur == 1) { next = 0; }
-    shell_qs_set_active(s, next);
-    # parity: (setting.on_activate)() — action-id substitute; no-op dispatch.
-    return SH_Err.SH_OK;
-}
-
-# rust: get_quick_settings — returns the live vec of *QuickSetting.
-fn shell_get_quick_settings(sh): i64 {
-    return load64(sh + SH_QSETTINGS);
-}
-
-fn shell_quick_settings_count(sh): i64 {
-    return vec_len(load64(sh + SH_QSETTINGS));
 }
 
 # ================================================================
