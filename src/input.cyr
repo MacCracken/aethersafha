@@ -443,7 +443,10 @@ fn input_apply(comp, action, bound_w, bound_h): i64 {
         # window would simply stay on screen as a ghost. `#84` FLIPS, so the rect needs two frames of
         # coverage, which is what putting it in `cur` buys.
         comp_retire_add(win_x(win), win_y(win), win_w(win), win_total_h(win));
-        win_set_state(win, WinState.WS_MINIMIZED);
+        win_minimize(win);
+        # ⛔ 0.16.30 — AND GIVE UP FOCUS. Focus stayed on the window just minimized, so every key typed
+        # afterwards went into a window nobody could see. Ctrl+Tab reaches it again and restores it.
+        comp_focus_topmost_visible(comp);
         return 0;
     }
     if (action == InputAction.IA_MOVE_LEFT)  { return input_move(win, 0 - AE_MOVE_STEP, 0, bound_w, bound_h); }

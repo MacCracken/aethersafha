@@ -161,13 +161,18 @@ fn comp_create_window(c, x, y, w, h, title): i64 {
 # `comp_focused_window` is the safe accessor and is what everything uses.
 # ⚠ Already-on-top is a genuine no-op, not a special case: `comp_add` focuses `count-1` immediately, and
 # re-raising the last element would otherwise churn the vector on every click.
+# ⛔ 0.16.30 — A MINIMIZED WINDOW NEVER HOLDS FOCUS, so focusing one restores it. This is the way back
+# from minimize (Ctrl+Tab reaches it); before, Ctrl+Tab focused it and keys went into a window nobody
+# could see. Its rect is damaged like a vacated one: a window reappearing where it was is invisible to the
+# rect-change detector, and only client windows are re-damaged every frame regardless.
 fn comp_focus(c, i): i64 {
     if (i < 0) { return 0 - 1; }
     var n = comp_count(c);
     if (i >= n) { return 0 - 1; }
-    if (i == n - 1) { store64(c + C_FOCUSED, i); return 0; }
     var v = load64(c + C_WINDOWS);
     var win = vec_get(v, i);
+    if (win_unminimize(win) == 1) { comp_retire_add(win_x(win), win_y(win), win_w(win), win_h(win)); }
+    if (i == n - 1) { store64(c + C_FOCUSED, i); return 0; }
     vec_remove(v, i);
     vec_push(v, win);
     store64(c + C_FOCUSED, comp_count(c) - 1);
@@ -180,6 +185,32 @@ fn comp_focused_window(c): i64 {
     if (f < 0) { return 0; }
     if (f >= comp_count(c)) { return 0; }
     return comp_get(c, f);
+}
+
+# comp_focus_topmost_visible(c): focus the highest window that is not minimized, or nothing (-1) when
+# every window is minimized. -> its index, or -1. ⭐ 0.16.30: where focus goes when the focused window
+# is minimized or closed — never onto a window nobody can see.
+fn comp_focus_topmost_visible(c): i64 {
+    var v = load64(c + C_WINDOWS);
+    var i = vec_len(v) - 1;
+    while (i >= 0) {
+        if (win_state(vec_get(v, i)) != WinState.WS_MINIMIZED) {
+            comp_focus(c, i);
+            return comp_count(c) - 1;
+        }
+        i = i - 1;
+    }
+    store64(c + C_FOCUSED, 0 - 1);
+    return 0 - 1;
+}
+
+# comp_focused_id(c) -> the focused window's id, 0 if none (ids start at 1).
+# ⛔ USE THIS, NOT `comp_focused`, TO TELL WHETHER FOCUS MOVED. `comp_focus` raises what it focuses, so
+# the focused INDEX is `count - 1` after almost every focus change and does not move when focus does.
+fn comp_focused_id(c): i64 {
+    var win = comp_focused_window(c);
+    if (win == 0) { return 0; }
+    return win_id(win);
 }
 
 # comp_find_by_id(c, id) -> index, or -1
@@ -361,9 +392,14 @@ fn comp_close_window(c, id): i64 {
         var wi = vec_find(wsp_windows(aw), id);
         if (wi >= 0) { vec_remove(wsp_windows(aw), wi); }
     }
-    # keep focus in range
+    # ⛔ 0.16.30 — HAND FOCUS TO A WINDOW SOMEONE CAN SEE. This clamped the focused index to the new top,
+    # and the new top can be minimized: closing the last visible window focused an invisible one.
     var f = load64(c + C_FOCUSED);
-    if (f >= vec_len(v)) { store64(c + C_FOCUSED, vec_len(v) - 1); }
+    if (idx == f) {
+        comp_focus_topmost_visible(c);
+    } else {
+        if (idx < f) { store64(c + C_FOCUSED, f - 1); }   # the focused window moved down one slot
+    }
     return 0;
 }
 

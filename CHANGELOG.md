@@ -5,9 +5,58 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
-## [Unreleased]
+## [0.16.30] — 2026-10-09 — a client can no longer overflow the compositor's heap; focus and minimize repaired
 
-> Toward 0.16.30, the repair the roadmap schedules before the 0.17.x arc.
+> The repair the roadmap scheduled before the 0.17.x arc: three defects in the running desktop, found by
+> the 2026-10-09 parity audit. Each fix has a unit test that fails against the old code, and each was
+> checked in QEMU on the Linux build, A/B against 0.16.29. The commit, the tag and the push are the
+> operator's.
+
+### Fixed — a setu client could overflow the compositor's heap (security)
+
+Surface geometry comes from the client, and the compositor trusted it. Both handshake paths checked only
+`0 < h·stride ≤ 16 MB`. Every CPU-path frame then re-reads `w·h·4` bytes into that `h·stride` cache
+(`render_window`). So `stride < 4·w`, or a negative `h` with a negative `stride` (whose product is
+positive), wrote past the cache with bytes the client chose. A negative CREATE_SURFACE width or height did
+the same, because the read's clamp only bounds from above. The wire carries signed 64-bit words, so every
+case was reachable. Linux and QEMU always take the CPU path; iron takes it whenever a frame demotes.
+
+- `setu_surface_dims_ok` and `setu_attach_ok` (`src/setu_dispatch.cyr`) enforce Rust's
+  `ShmBufferInfo::validate` rule: dimensions non-zero, `stride ≥ 4·w`. The bounds (sides ≤ 16384,
+  `stride` and `h·stride` ≤ 16 MB) keep every product overflow-free; the old check accepted
+  `h = 2^62 + 1` at stride 4, because the product wraps to 4.
+- Both paths check CREATE_SURFACE before a window is minted and ATTACH before anything is allocated or
+  recorded, so a hostile re-attach on a live window changes nothing on screen. A refusal is `-12`, as before.
+  It now has a named log line on the Linux accept path too, which printed nothing for any failure.
+- **QEMU, 0.16.29:** a client attaching a 240×160 surface at stride 4 had its surface accepted, and the
+  compositor was **killed by signal 11** about half a second later. **0.16.30:** `surface refused`, and the
+  desktop runs on with the other client focused.
+
+### Fixed — clients never heard about focus changes from a click or Ctrl+Tab
+
+The frame loop decided "focus moved" by comparing `comp_focused` indices. `comp_focus` raises the window it
+focuses to `count − 1`, so after the first client a click or Ctrl+Tab left the index where it was and no
+client was told. When the detector did fire, the old index could already name a different window. Now
+`setu_srv_focus_sync` compares window ids (`comp_focused_id`) and notifies by id.
+- **QEMU, 0.16.29:** after Ctrl+Tab the raised window kept its dim border and the one that lost focus kept
+  its bright one. The serial log showed no focus message after the first three. **0.16.30:** every move is
+  told to both clients, and the borders follow.
+
+### Fixed — minimize was one-way, and the minimized window kept focus
+
+Nothing wrote a window back from `WS_MINIMIZED`. Focus also stayed on the window just minimized, so keys
+typed after Ctrl+F6 went into a window nobody could see. Ctrl+Tab could do the same to any minimized
+window. The rule now is that a minimized window never holds focus:
+- focusing one restores it, through `comp_focus`, which is how Ctrl+Tab reaches it;
+- minimizing it hands focus to the topmost visible window;
+- closing the focused window does the same, and when every window is minimized nothing is focused.
+
+`W_PREMIN` records the state a window was minimized from, so a maximized window comes back maximized, with
+its restore rect intact. A restored window's rect is damaged for two frames, like a vacated one. An existing
+assertion in `tests/input.tcyr` checked that the focused window *was* the minimized one, which is the defect
+itself; it now checks the opposite.
+- **QEMU, 0.16.29:** the minimized window never came back. **0.16.30:** Ctrl+F6 handed focus to a visible
+  window, and the next Ctrl+Tab that reached the minimized window restored it.
 
 ### Fixed — the declared license is AGPL-3.0-only everywhere
 
@@ -17,15 +66,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 GPL-3.0-only. `CLAUDE.md` now records the policy, so the license is not "aligned" with the GPL library
 siblings again. Neither binary changes: both are byte-identical with the license field changed.
 
-### Found — three defects in the running desktop, to be fixed in 0.16.30
+### Found — a refused surface leaves an empty window behind (Linux accept path)
 
-A read-only parity audit (seven module groups, 2026-10-09) found these, and each was re-read in the code:
-- **A setu client can overflow the compositor's heap.** ATTACH checks only `0 < h·stride ≤ 16 MB`, and
-  every CPU-path frame reads `w·h·4` bytes into that `h·stride` cache, so `stride < 4·w` (or negative `h`
-  and `stride`) writes past it with bytes the client chose.
-- **Focus changes from a click or Ctrl+Tab never reach clients.** The detector compares stack indices,
-  and the focused window always sits at the top index.
-- **Minimize is one-way.** Nothing writes a window back from `WS_MINIMIZED`.
+The QEMU hostile run showed it. `setu_srv_commit_from_create` mints the window at CREATE_SURFACE, so a
+client refused at ATTACH, or failing any later step, leaves an empty window that nothing removes. It is not
+memory-unsafe, and it is the same family as roadmap D3 ("a client that exits leaves its window behind"),
+where it is recorded.
 
 ### Docs
 
@@ -38,9 +84,29 @@ A read-only parity audit (seven module groups, 2026-10-09) found these, and each
   agent-list poll and accessibility mirroring.
 - `parity-plan.md` is now the parity matrix behind that arc: every Rust module's verdict, what is open, the
   ADRs 0002–0004 to write, and every Rust test still to re-express, by name.
-- `state.md` records the three defects, re-checks the two agnos kernel defects against agnos 1.57.10 (the
-  `VFS_CHAN` close leak is still open; the keystroke loss has no owner), and adds a reference-coverage
-  baseline of 60% (791 of 1,297 fns).
+- `state.md` re-checks the two agnos kernel defects against agnos 1.57.10 (the `VFS_CHAN` close leak is
+  still open; the keystroke loss has no owner) and records reference coverage.
+- `roadmap.md`: 0.16.30 moves to *Done*, the arc's next release is 0.17.0, and D3 records the refused-surface
+  window.
+
+### Verified
+
+- **Host 4,162,832 B** (sha256 `ec961563…`) · **`--agnos` 4,117,504 B** (sha256 `ad54e32d…`). The QEMU runs
+  used this exact host binary (same hash).
+- **29 / 29 suites, 2,136 assertions, 0 failed.** At 0.16.29 it was 28 / 2,056. `setu_handshake` went from 50
+  to 92 assertions, `input` from 237 to 256, and `setu_focus` (19) is new. The handshake and focus groups
+  drive the real dispatch over an `AF_UNIX` / `SOCK_SEQPACKET` socketpair.
+- **Mutation-checked, each fix separately:**
+  - Restoring 0.16.29's product check fails 10 assertions (7 on the agnos path, 3 on the accept path).
+  - The index detector fails 5, including the two "told it gained / lost focus" checks.
+  - No restore on focus fails 6. Keeping focus on minimize fails 8 or more. The old close clamp fails 1.
+- `check-dep-tags.sh` → 7 deps clean · `cyrius deps --verify` → 83 verified · every changed file passes
+  `cyrius fmt --check` · reference coverage 61% (800 of 1,304 fns; `setu_dispatch` 1 → 6).
+- **QEMU** (Linux build, OVMF, KVM): two clients that draw their border bright or dim from
+  `SETU_INPUT_FOCUS`, driven by Ctrl+Tab and Ctrl+F6 chords through QMP, with screendumps after each step;
+  and a client attaching at stride 4. The probe client and the driver are throwaway, not in the tree.
+- ⚠ Not run on iron or in an agnos QEMU guest. The agnos path's ATTACH and focus changes are covered by the
+  unit suites only.
 
 ## [0.16.29] — 2026-10-09 — the cyrius 6.6.12 follow-ups: a fmt gate, no duplicate-fn warnings, `M_SZ`; a manifest, not a ledger
 

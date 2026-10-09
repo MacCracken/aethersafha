@@ -18,6 +18,7 @@ include "lib/bhumi.cyr"
 include "src/geom.cyr"
 include "src/window.cyr"
 include "src/compositor.cyr"
+include "src/setu_server.cyr"     # the transport the step reads and writes through
 include "src/setu_dispatch.cyr"
 
 fn t_gt(a, b): i64 {
@@ -62,6 +63,31 @@ fn hs_present_stream(n, off): i64 {
     }
     return s;
 }
+
+# A connected AF_UNIX / SOCK_SEQPACKET pair: Linux's setu transport, one record per write. The test
+# plays the client on `hs_cli` and hands `hs_srv` to the compositor's own dispatch, so the REAL
+# handshake code runs — not a model of it.
+var hs_srv = 0;
+var hs_cli = 0;
+fn hs_pair(): i64 {
+    var fds = alloc(16);
+    if (sys_socketpair(SETU_AF_UNIX, SETU_SOCK_SEQPACKET, 0, fds) != 0) { return 0 - 1; }
+    hs_srv = load32(fds);           # socketpair fills int[2]
+    hs_cli = load32(fds + 4);
+    return 0;
+}
+fn hs_unpair(): i64 {
+    syscall(SYS_CLOSE, hs_srv);
+    syscall(SYS_CLOSE, hs_cli);
+    return 0;
+}
+fn hs_st_new(): i64 {               # the caller-owned 6-word handshake scratch, zeroed
+    var st = alloc(48);
+    var i = 0;
+    while (i < 6) { store64(st + i * 8, 0); i = i + 1; }
+    return st;
+}
+fn hs_step(st, comp): i64 { return setu_srv_handshake_step(st, hs_srv, comp, 0, 0, "probe"); }
 
 fn main() {
     alloc_init();
@@ -148,6 +174,106 @@ fn main() {
     var oi = 0;
     while (oi < 8) { store64(orphans + oi * 8, SETU_COMMIT); oi = oi + 1; }
     assert_eq(hs_sim(1, orphans, 8), 0 - 2, "all-commits from state 1 is incomplete, NOT an error");
+
+    # -----------------------------------------------------------------------
+    # ⛔⛔ 0.16.30: SURFACE GEOMETRY IS CLIENT INPUT. Both handshake paths checked only
+    # `0 < h * stride <= 16 MB`, and every CPU frame re-reads `w * h * 4` bytes into that `h * stride`
+    # cache — so a client could make the compositor write past its own heap block.
+    test_group("setu handshake — the geometry rule (Rust's ShmBufferInfo::validate)");
+    assert_eq(setu_surface_dims_ok(100, 50), 1, "100x50 is a surface");
+    assert_eq(setu_surface_dims_ok(0, 50), 0, "zero width is not");
+    assert_eq(setu_surface_dims_ok(100, 0), 0, "zero height is not");
+    assert_eq(setu_surface_dims_ok(0 - 100, 50), 0, "negative width is not (it slipped under the read's clamp)");
+    assert_eq(setu_surface_dims_ok(100, 0 - 50), 0, "negative height is not");
+    assert_eq(setu_surface_dims_ok(16384, 16384), 1, "16384 a side is the limit");
+    assert_eq(setu_surface_dims_ok(16385, 1), 0, "one past it in width is refused");
+    assert_eq(setu_surface_dims_ok(1, 16385), 0, "one past it in height is refused");
+    assert_eq(setu_attach_ok(100, 50, 400), 1, "packed rows (stride = 4w)");
+    assert_eq(setu_attach_ok(100, 50, 512), 1, "padded rows are allowed, as Rust allowed them");
+    assert_eq(setu_attach_ok(100, 50, 399), 0, "a row one byte short is refused");
+    assert_eq(setu_attach_ok(1000, 600, 4), 0,
+      "THE OVERFLOW: a 2,400-byte cache for a 2,400,000-byte read is refused");
+    assert_eq(setu_attach_ok(100, 0 - 50, 0 - 400), 0,
+      "negative h and stride are refused, though their product (+20000) passed the old check");
+    assert_eq(setu_attach_ok(2048, 2048, 8192), 1, "exactly 16 MB is the cap");
+    assert_eq(setu_attach_ok(2048, 2049, 8192), 0, "one row over the cap is refused");
+    assert_eq(setu_attach_ok(100, 1, 16777217), 0, "a stride over the cap is refused");
+    # ⚠ h = 2^62 + 1 at stride 4: h * stride WRAPS to 4, which the old `0 < nbytes <= 16 MB` accepted.
+    assert_eq(setu_attach_ok(1, 4611686018427387905, 4), 0, "a product that wraps i64 is refused");
+
+    #ifndef CYRIUS_TARGET_AGNOS
+    # -----------------------------------------------------------------------
+    # ⭐ THE REAL STEP OVER A REAL SOCKET. The rule above is pure, so on its own it cannot catch a call
+    # site that stops using it; this drives `setu_srv_handshake_step` itself. Before 0.16.30 each hostile
+    # ATTACH below passed the product check, allocated, and tried to read buffer 7, coming back -14
+    # (no such buffer) instead of -12 — and only because buffer 7 did not exist. A client that made one
+    # had its bytes written past the cache every frame.
+    test_group("setu handshake — a hostile surface is refused before anything is read or kept");
+    assert_eq(hs_pair(), 0, "socketpair(AF_UNIX, SOCK_SEQPACKET)");
+    var hcomp = comp_new();
+    var hst = hs_st_new();
+    setu_send(hs_cli, setu_create_surface(100, 50, 0));
+    assert_eq(hs_step(hst, hcomp), 0, "a sane create_surface is taken");
+    assert_eq(load64(hst), 1, "-> state 1, awaiting attach");
+    var hrep = setu_msg_new();
+    setu_read_msg(hs_cli, hrep);
+    var hsid = setu_msg_arg(hrep, 0);
+    setu_send(hs_cli, setu_attach_buf(hsid, 100, 50, 4, 1, 7));
+    assert_eq(hs_step(hst, hcomp), 0 - 12, "stride 4 on a 100-wide surface is refused (-12, not -14)");
+    setu_send(hs_cli, setu_attach_buf(hsid, 100, 0 - 50, 0 - 400, 1, 7));
+    assert_eq(hs_step(hst, hcomp), 0 - 12, "negative h and stride are refused (-12, not -14)");
+    assert_eq(load64(hst), 1, "a refused attach leaves the state alone");
+    assert_eq(load64(hst + 16), 0, "and allocates no cache");
+    assert_eq(win_bufid(load64(hst + 8)), 0, "and attaches nothing to the window");
+
+    # A sane attach still lands, so the refusal is the rule and not a broken path.
+    var hnb = 100 * 50 * 4;
+    var hbid = setu_buf_create(hnb);
+    assert_eq(t_gt(hbid, 0), 1, "a real shared buffer");
+    setu_buf_write(hbid, alloc(hnb), hnb);
+    setu_send(hs_cli, setu_attach_buf(hsid, 100, 50, 400, 1, hbid));
+    assert_eq(hs_step(hst, hcomp), 0, "a sane attach is taken");
+    assert_eq(load64(hst), 2, "-> state 2");
+    setu_send(hs_cli, setu_commit(hsid));
+    assert_eq(t_gt(hs_step(hst, hcomp), 0), 1, "commit completes with a window id");
+    var hwin = load64(hst + 8);
+    assert_eq(win_buf_w(hwin), 100, "the attached width is recorded");
+    assert_eq(win_buf_h(hwin), 50, "the attached height is recorded");
+
+    # ⛔ A LIVE WINDOW CANNOT BE TURNED HOSTILE. State 3 accepts a re-attach (that is how a resize lands),
+    # so the rule has to hold there too.
+    setu_send(hs_cli, setu_attach_buf(hsid, 100, 50, 4, 1, hbid));
+    assert_eq(hs_step(hst, hcomp), 0 - 12, "a hostile re-attach on a live window is refused");
+    assert_eq(load64(hst), 3, "the window stays live");
+    assert_eq(win_buf_w(hwin), 100, "with the extent it validly attached");
+    assert_eq(win_bufid(hwin), hbid, "and its buffer");
+
+    # A hostile CREATE_SURFACE never mints a window.
+    var hst2 = hs_st_new();
+    var hn0 = comp_count(hcomp);
+    setu_send(hs_cli, setu_create_surface(0 - 100, 50, 0));
+    assert_eq(hs_step(hst2, hcomp), 0 - 12, "a negative width is refused at create_surface");
+    setu_send(hs_cli, setu_create_surface(100, 16385, 0));
+    assert_eq(hs_step(hst2, hcomp), 0 - 12, "so is a side over 16384");
+    assert_eq(comp_count(hcomp), hn0, "and neither minted a window");
+    setu_buf_close(hbid);
+    hs_unpair();
+
+    # -----------------------------------------------------------------------
+    test_group("setu handshake — the accept path refuses the same surfaces");
+    assert_eq(hs_pair(), 0, "socketpair(AF_UNIX, SOCK_SEQPACKET)");
+    var acomp = comp_new();
+    var aout = alloc(32);
+    setu_send(hs_cli, setu_attach_buf(1, 100, 50, 4, 1, 7));
+    setu_send(hs_cli, setu_commit(1));
+    assert_eq(setu_srv_commit_from_create(setu_create_surface(100, 50, 0), hs_srv, acomp, aout), 0 - 12,
+      "stride 4 on a 100-wide surface is refused (-12, not -14)");
+    var an0 = comp_count(acomp);
+    assert_eq(setu_srv_commit_from_create(setu_create_surface(100, 0 - 50, 0), hs_srv, acomp, aout), 0 - 12,
+      "a negative height is refused at create_surface");
+    assert_eq(comp_count(acomp), an0, "without minting a window");
+    hs_unpair();
+    #endif
 
     return assert_summary();
 }

@@ -6,6 +6,11 @@ include "src/window.cyr"
 include "src/compositor.cyr"
 include "src/input.cyr"
 
+fn t_same(a, b): i64 {
+    if (a == b) { return 1; }
+    return 0;
+}
+
 fn main() {
     alloc_init();
 
@@ -118,8 +123,12 @@ fn main() {
     assert_eq(win_state(comp_focused_window(c)), WinState.WS_MAXIMIZED, "maximize focused");
     input_apply(c, InputAction.IA_MAXIMIZE_FOCUSED, 800, 600);
     assert_eq(win_state(comp_focused_window(c)), WinState.WS_NORMAL, "maximize toggles back");
+    var minw = comp_focused_window(c);
     input_apply(c, InputAction.IA_MINIMIZE_FOCUSED, 800, 600);
-    assert_eq(win_state(comp_focused_window(c)), WinState.WS_MINIMIZED, "minimize focused");
+    assert_eq(win_state(minw), WinState.WS_MINIMIZED, "minimize focused");
+    # ⛔ 0.16.30: this line used to assert that the FOCUSED window was the minimized one — which is the
+    # defect itself: every key typed after Ctrl+F6 went into a window nobody could see.
+    assert_eq(t_same(comp_focused_window(c), minw), 0, "  ...and focus LEAVES the minimized window");
     input_apply(c, InputAction.IA_CLOSE_FOCUSED, 800, 600);
     assert_eq(comp_count(c), 2, "close focused removes a window");
 
@@ -598,6 +607,61 @@ fn main() {
     sq = input_mod_track(0, bhumi_key_event(1, 0xE0));
     sq = input_mod_track(sq, bhumi_key_event(0, 0xE0));
     assert_eq(input_mod_ctrl(sq), 0, "Ctrl released first: the key's release will be forwarded as a bare release");
+
+    # -----------------------------------------------------------------------
+    # ⛔⛔ 0.16.30 — MINIMIZE WAS ONE-WAY, AND THE MINIMIZED WINDOW KEPT FOCUS. Nothing wrote a window
+    # back from WS_MINIMIZED, and Ctrl+Tab could focus one and route keys into it while it stayed
+    # invisible. The rule now: a minimized window never holds focus.
+    test_group("input — minimize gives up focus, and focusing a minimized window restores it (0.16.30)");
+    var mc = comp_new();
+    var mna = comp_create_window(mc, 10, 10, 100, 80, "A");
+    var mnb = comp_create_window(mc, 20, 20, 100, 80, "B");
+    input_apply(mc, InputAction.IA_MINIMIZE_FOCUSED, 800, 600);
+    assert_eq(win_state(mnb), WinState.WS_MINIMIZED, "Ctrl+F6 minimizes B");
+    assert_eq(t_same(comp_focused_window(mc), mna), 1, "and focus moves to A, the topmost window still visible");
+    comp_retire_clear();
+    input_apply(mc, InputAction.IA_FOCUS_NEXT, 800, 600);
+    assert_eq(t_same(comp_focused_window(mc), mnb), 1, "Ctrl+Tab reaches B");
+    assert_eq(win_state(mnb), WinState.WS_NORMAL, "and focusing it RESTORES it");
+    assert_eq(comp_retire_valid(), 1, "with its rect damaged, so it is redrawn where it was");
+
+    # A maximized window comes back maximized, with the rect it un-maximizes to intact.
+    win_move(mnb, 37, 41);
+    win_resize(mnb, 120, 90);
+    input_apply(mc, InputAction.IA_MAXIMIZE_FOCUSED, 800, 600);
+    input_apply(mc, InputAction.IA_MINIMIZE_FOCUSED, 800, 600);
+    assert_eq(t_same(comp_focused_window(mc), mna), 1, "minimizing maximized B hands focus to A");
+    input_apply(mc, InputAction.IA_FOCUS_NEXT, 800, 600);
+    assert_eq(win_state(mnb), WinState.WS_MAXIMIZED, "B comes back MAXIMIZED, not normal at maximized size");
+    input_apply(mc, InputAction.IA_MAXIMIZE_FOCUSED, 800, 600);
+    assert_eq(win_x(mnb), 37, "and un-maximizes to its old x");
+    assert_eq(win_w(mnb), 120, "  ...and width");
+
+    test_group("input — with every window minimized, no window holds focus");
+    input_apply(mc, InputAction.IA_MINIMIZE_FOCUSED, 800, 600);
+    input_apply(mc, InputAction.IA_MINIMIZE_FOCUSED, 800, 600);
+    assert_eq(win_state(mna), WinState.WS_MINIMIZED, "A minimized");
+    assert_eq(win_state(mnb), WinState.WS_MINIMIZED, "B minimized");
+    assert_eq(comp_focused_window(mc), 0, "focus is nobody's");
+    input_apply(mc, InputAction.IA_CLOSE_FOCUSED, 800, 600);
+    assert_eq(comp_count(mc), 2, "so Ctrl+F4 closes nothing it cannot see");
+    input_apply(mc, InputAction.IA_FOCUS_NEXT, 800, 600);
+    assert_eq(win_state(comp_focused_window(mc)), WinState.WS_NORMAL, "and Ctrl+Tab brings one back, focused");
+
+    test_group("input — closing the focused window hands focus to a VISIBLE one");
+    var cc = comp_new();
+    var c1 = comp_create_window(cc, 0, 0, 50, 50, "1");
+    var c2 = comp_create_window(cc, 0, 0, 50, 50, "2");
+    var c3 = comp_create_window(cc, 0, 0, 50, 50, "3");
+    comp_focus(cc, comp_find_by_id(cc, win_id(c2)));
+    input_apply(cc, InputAction.IA_MINIMIZE_FOCUSED, 800, 600);
+    assert_eq(t_same(comp_focused_window(cc), c3), 1, "minimizing 2 focuses 3");
+    input_apply(cc, InputAction.IA_CLOSE_FOCUSED, 800, 600);
+    assert_eq(t_same(comp_focused_window(cc), c1), 1, "closing 3 focuses 1, the topmost VISIBLE window");
+    assert_eq(win_state(c2), WinState.WS_MINIMIZED, "minimized 2 stays minimized");
+    var c4 = comp_create_window(cc, 0, 0, 50, 50, "4");
+    comp_close_window(cc, win_id(c1));
+    assert_eq(t_same(comp_focused_window(cc), c4), 1, "closing a window below the focused one leaves focus where it was");
 
     return assert_summary();
 }

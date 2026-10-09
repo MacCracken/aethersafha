@@ -15,6 +15,39 @@
 # migration should not touch the dispatch logic at all. Where a comment below names TCP
 # specifically (e.g. the TCP_RX_RING deadlock note), read it as a property of the OLD wire.
 
+# ⛔⛔ SURFACE GEOMETRY IS CLIENT INPUT, AND UNTIL 0.16.30 IT WAS TRUSTED. Both handshake paths checked
+# only `0 < h * stride <= 16 MB`, while every CPU-path frame re-reads `w * h * 4` bytes into that
+# `h * stride` cache (`render_window`). A `stride < 4 * w`, or a negative `h` with a negative `stride`
+# (their product is positive), made the compositor write past its own heap block with bytes the client
+# chose; a negative CREATE_SURFACE width or height did the same by slipping under the read's clamp,
+# which only bounds from above. The wire carries signed 64-bit words, so all of it was reachable.
+# ⭐ Rust's `ShmBufferInfo::validate` enforced exactly this rule: dimensions non-zero, `stride >= width
+# * bpp`, overflow-checked products. The bounds below make every product here overflow-free:
+# w, h <= 16384 and stride <= 16 MB give h * stride <= 2^38.
+enum SetuSurfK {
+    SURF_MAX_DIM   = 16384;      # a side, in pixels — above 8K (7680x4320)
+    SURF_MAX_BYTES = 16777216;   # one attached buffer, h * stride: the cap both paths already had
+}
+
+# 1 when a CREATE_SURFACE extent is one the compositor can hold, else 0.
+fn setu_surface_dims_ok(w, h): i64 {
+    if (w <= 0) { return 0; }
+    if (h <= 0) { return 0; }
+    if (w > SetuSurfK.SURF_MAX_DIM) { return 0; }
+    if (h > SetuSurfK.SURF_MAX_DIM) { return 0; }
+    return 1;
+}
+
+# 1 when an ATTACH's `w x h` at `stride` bytes per row is a buffer the compositor may read, else 0.
+# `stride` may exceed `4 * w` (padded rows), as Rust allowed; it may never be less.
+fn setu_attach_ok(w, h, stride): i64 {
+    if (setu_surface_dims_ok(w, h) == 0) { return 0; }
+    if (stride < w * 4) { return 0; }
+    if (stride > SetuSurfK.SURF_MAX_BYTES) { return 0; }
+    if (h * stride > SetuSurfK.SURF_MAX_BYTES) { return 0; }
+    return 1;
+}
+
 # Close the client + listening fds and remove the socket file.
 fn setu_srv_dispatch_close(cfd, sfd, path): i64 {
     syscall(SYS_CLOSE, cfd);
@@ -27,7 +60,7 @@ fn setu_srv_dispatch_close(cfd, sfd, path): i64 {
 # already-accepted `cfd`, minting a Window on `comp`. Fills `out4` (a 32-byte
 # scratch = 4 i64 slots): [+0]=*Window, [+8]=*pixels, [+16]=w, [+24]=h. Returns
 # nbytes (> 0) or a negative code (-6 read · -7 reply · -8 not CREATE · -9 window
-# alloc · -11 not ATTACH · -12 bad payload size · -13 not COMMIT). Byte-exact
+# alloc · -11 not ATTACH · -12 surface geometry refused (setu_attach_ok) · -13 not COMMIT). Byte-exact
 # framing throughout (setu_srv_read_msg for frames, setu_srv_read_exact for the
 # raw payload).
 fn setu_srv_recv_committed(cfd, comp, out4): i64 {
@@ -52,6 +85,7 @@ fn setu_srv_recv_committed(cfd, comp, out4): i64 {
 # for no gain.
 fn setu_srv_commit_from_create(m, cfd, comp, out4): i64 {
     if (setu_msg_kind(m) != SETU_CREATE_SURFACE) { return 0 - 8; }
+    if (setu_surface_dims_ok(setu_msg_arg(m, 0), setu_msg_arg(m, 1)) == 0) { return 0 - 12; }
     var win = comp_create_window(comp, 0, 0, setu_msg_arg(m, 0), setu_msg_arg(m, 1), "setu-surface");
     if (win == 0) { return 0 - 9; }
     win_set_keymode(win, setu_msg_arg(m, 2) & SETU_SURF_FULL_KEYS);   # CREATE_SURFACE flags: full-key opt-in
@@ -70,9 +104,8 @@ fn setu_srv_commit_from_create(m, cfd, comp, out4): i64 {
     var ah = setu_msg_arg(am, 2);
     var stride = setu_msg_arg(am, 3);
     var buf_id = setu_msg_arg(am, 5);           # arg5: 0 = inline pixels, >0 = shared buffer
+    if (setu_attach_ok(w, ah, stride) == 0) { return 0 - 12; }
     var nbytes = ah * stride;
-    if (nbytes <= 0) { return 0 - 12; }
-    if (nbytes > 16777216) { return 0 - 12; }   # 16 MB cap
     var pix = alloc(nbytes);
     if (pix == 0) { return 0 - 14; }
     if (buf_id > 0) {
@@ -432,6 +465,7 @@ fn setu_srv_handshake_step(st, cfd, comp, dstx, dsty, title): i64 {
         # SPAWNED these clients and therefore already knows what each one is — the name rides down from the
         # spawn site instead of needing a protocol change. ⚠ A client that arrives some other way (the
         # accept paths below) still gets "setu-surface"; that is honest, because nothing there knows better.
+        if (setu_surface_dims_ok(setu_msg_arg(m, 0), setu_msg_arg(m, 1)) == 0) { return 0 - 12; }
         var win = comp_create_window(comp, 0, 0, setu_msg_arg(m, 0), setu_msg_arg(m, 1), title);
         if (win == 0) { return 0 - 9; }
         win_set_keymode(win, setu_msg_arg(m, 2) & SETU_SURF_FULL_KEYS);
@@ -449,9 +483,10 @@ fn setu_srv_handshake_step(st, cfd, comp, dstx, dsty, title): i64 {
         var ah = setu_msg_arg(m, 2);
         var stride = setu_msg_arg(m, 3);
         var buf_id = setu_msg_arg(m, 5);
+        # ⛔ Refused BEFORE anything is allocated or recorded, so a live window keeps the last buffer it
+        # validly attached: a hostile ATTACH in state 3 changes nothing on screen.
+        if (setu_attach_ok(w2, ah, stride) == 0) { return 0 - 12; }
         var nbytes = ah * stride;
-        if (nbytes <= 0) { return 0 - 12; }
-        if (nbytes > 16777216) { return 0 - 12; }
         # ⛔ SHM ONLY on this path. The inline-pixel branch streamed the surface down the control
         # connection, which a record channel cannot carry — and `setu_read_exact` correctly refuses on
         # agnos rather than emulating a stream. A client that presents inline here is a protocol error,
@@ -593,29 +628,39 @@ fn setu_srv_forward_key(comp, ev): i64 {
     return 1;
 }
 
-# Notify setu clients that focus MOVED from window index `old_idx` to `new_idx`:
-# send SETU_INPUT_FOCUS(id, 0) to the window losing focus and (id, 1) to the one
-# gaining it. No-op for a non-client window (win_cfd == 0) or an out-of-range index
-# (old_idx == -1 on the first-ever focus). This is the client-visible focus indicator
-# — clients render bright/dim from it, so focus is legible without a keypress.
-fn setu_srv_notify_focus(comp, old_idx, new_idx): i64 {
-    if (old_idx >= 0) {
-        if (old_idx < comp_count(comp)) {
-            var ow = comp_get(comp, old_idx);
-            if (ow != 0) {
-                var ocfd = win_cfd(ow);
-                if (ocfd != 0) { setu_send(ocfd, setu_input_focus(win_id(ow), 0)); }
-            }
+# Notify setu clients that focus MOVED from window `old_id` to `new_id`: send SETU_INPUT_FOCUS(id, 0)
+# to the window losing focus and (id, 1) to the one gaining it. No-op for a window that has no client
+# (win_cfd == 0) or no longer exists (closed, or -1 / 0 on the first-ever focus). This is the
+# client-visible focus indicator — clients render bright/dim from it, so focus is legible without a
+# keypress.
+fn setu_srv_notify_focus(comp, old_id, new_id): i64 {
+    var oi = comp_find_by_id(comp, old_id);
+    if (oi >= 0) {
+        var ow = comp_get(comp, oi);
+        if (ow != 0) {
+            var ocfd = win_cfd(ow);
+            if (ocfd != 0) { setu_send(ocfd, setu_input_focus(old_id, 0)); }
         }
     }
-    if (new_idx >= 0) {
-        if (new_idx < comp_count(comp)) {
-            var nw = comp_get(comp, new_idx);
-            if (nw != 0) {
-                var ncfd = win_cfd(nw);
-                if (ncfd != 0) { setu_send(ncfd, setu_input_focus(win_id(nw), 1)); }
-            }
+    var ni = comp_find_by_id(comp, new_id);
+    if (ni >= 0) {
+        var nw = comp_get(comp, ni);
+        if (nw != 0) {
+            var ncfd = win_cfd(nw);
+            if (ncfd != 0) { setu_send(ncfd, setu_input_focus(new_id, 1)); }
         }
     }
     return 0;
+}
+
+# Once per frame: if focus has moved since `prev_id`, tell both clients. Returns the id now focused
+# (0 = none), which the caller passes back next frame; pass -1 the first time to force a notification.
+# ⛔⛔ KEYED BY WINDOW ID, NOT STACK INDEX (0.16.30). The detector compared `comp_focused` indices, and
+# `comp_focus` raises what it focuses to `count - 1` — so after the first client a click or Ctrl+Tab
+# left the index where it was, and NO client was told its focus changed. When it did fire, the old
+# index could already name a different window.
+fn setu_srv_focus_sync(comp, prev_id): i64 {
+    var cur = comp_focused_id(comp);
+    if (cur != prev_id) { setu_srv_notify_focus(comp, prev_id, cur); }
+    return cur;
 }

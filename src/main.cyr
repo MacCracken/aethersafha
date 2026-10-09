@@ -1170,7 +1170,7 @@ fn main(): i64 {
     var frame = 0;
     var running = 1;
     var accepted = 0;  # count of setu clients composited so far — cascades each new one
-    var prev_focus = 0 - 1;  # last-notified focus index; -1 forces the first notification
+    var prev_focus = 0 - 1;  # last-notified focused window ID (0 = none); -1 forces the first notification
     var ae_loop_prev = 0 - 1;  # the previous iteration's start, for the loop PERIOD; -1 = none yet
     ae_probe_t0 = ae_now_ms();
     ae_probe_next_report = AE_PROBE_REPORT_MS;
@@ -1567,7 +1567,7 @@ fn main(): i64 {
                     if (psid == 0 - 8) { println("aethersafha: placed client: first frame was not create_surface"); pnamed = 1; }
                     if (psid == 0 - 7) { println("aethersafha: placed client: could not write surface_created back"); pnamed = 1; }
                     if (psid == 0 - 9) { println("aethersafha: placed client: the compositor could not create a window -- table full"); pnamed = 1; }
-                    if (psid == 0 - 12) { println("aethersafha: placed client: attach refused -- surface geometry or buffer id out of range"); pnamed = 1; }
+                    if (psid == 0 - 12) { println("aethersafha: placed client: surface refused -- create/attach geometry or buffer id out of range"); pnamed = 1; }
                     # ⚠ NO LONGER "the second/third frame" — the machine resyncs past records the
                     # channel ring dropped, so these fire only on a kind that is wrong in a way LOSS
                     # cannot explain: neither attach nor commit at a point where one of them is due.
@@ -1599,6 +1599,8 @@ fn main(): i64 {
                 var sid = setu_srv_serve_accepted_at(cfd, comp, fb, cx, cy);
                 # NOTE: cfd is NOT closed — serve_accepted_at stored it on the Window
                 # (win_set_cfd) so the compositor can forward input to this client.
+                # ⚠ A refused surface must say so here too — this path printed nothing for any failure.
+                if (sid == 0 - 12) { println("aethersafha: accepted client: surface refused -- create/attach geometry or buffer id out of range"); }
                 if (sid > 0) {
                     println("aethersafha: setu client presented surface");
                     println_int(sid);
@@ -1621,15 +1623,11 @@ fn main(): i64 {
                 }
             }
         }
-        # Focus-change detector: if focus moved this frame — a TAB in the input loop above,
-        # or a newly-connected client taking focus in the accept block — notify the affected
+        # Focus-change detector: if focus moved this frame — a click or Ctrl+Tab in the input loop
+        # above, or a newly-connected client taking focus in the accept block — notify the affected
         # setu clients (SETU_INPUT_FOCUS) so they re-render their focus indicator. One detector
-        # covers both focus sources.
-        var cur_focus = comp_focused(comp);
-        if (cur_focus != prev_focus) {
-            setu_srv_notify_focus(comp, prev_focus, cur_focus);
-            prev_focus = cur_focus;
-        }
+        # covers every focus source. ⛔ By window id since 0.16.30 (see setu_srv_focus_sync).
+        prev_focus = setu_srv_focus_sync(comp, prev_focus);
         # Hardware compositing first: gpu.cyr blits the chrome layer DEFERRED, composites each
         # client surface with gpu_blit_shm #87 straight out of its GPU-visible shm slot, and flips
         # once with #84. Returns 0 on any refusal (no GPU, an off-screen window, a failed blit) and

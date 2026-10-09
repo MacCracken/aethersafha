@@ -1,0 +1,108 @@
+# aethersafha — setu focus notifications reach the right clients.
+#
+# ⛔⛔ WHY THIS SUITE EXISTS (0.16.30). The frame loop decided "focus moved" by comparing
+# `comp_focused` INDICES, and `comp_focus` raises the window it focuses to the top of the stack —
+# so the focused index is `count - 1` after almost every focus change and does not move when focus
+# does. After the first client, a click or Ctrl+Tab told NO client that it had gained or lost focus,
+# and a client's focus indicator (setu's present_probe draws a bright or dim border from it) went
+# stale. Found by the 2026-10-09 parity audit.
+#
+# ⭐ THE ORACLE IS WHAT EACH CLIENT IS SENT, read off a real socket — not the compositor's own state.
+#
+# Stdlib + [deps.*] auto-included via cyrius.cyml.
+include "lib/bhumi.cyr"
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/setu_server.cyr"
+include "src/setu_dispatch.cyr"
+
+# A window with a real client connection: a SOCK_SEQPACKET pair whose server end is the window's cfd.
+# Returns the CLIENT end, which the test reads to see what the compositor sent.
+fn fc_client_window(comp, title): i64 {
+    var fds = alloc(16);
+    if (sys_socketpair(SETU_AF_UNIX, SETU_SOCK_SEQPACKET, 0, fds) != 0) { return 0 - 1; }
+    var win = comp_create_window(comp, 0, 0, 100, 50, title);
+    if (win == 0) { return 0 - 1; }
+    win_set_cfd(win, load32(fds));
+    return load32(fds + 4);
+}
+
+# Drain everything a client has been sent and report its LAST focus message: 1 gained, 0 lost,
+# -1 when it was sent no focus message at all.
+fn fc_last_focus(cli): i64 {
+    var m = setu_msg_new();
+    var last = 0 - 1;
+    while (setu_poll_input(cli, m) == 1) {
+        if (setu_msg_kind(m) == SETU_INPUT_FOCUS) { last = setu_msg_arg(m, 1); }
+    }
+    return last;
+}
+
+fn fc_index_of(comp, cli_win_id): i64 { return comp_find_by_id(comp, cli_win_id); }
+
+fn main() {
+    alloc_init();
+
+    #ifndef CYRIUS_TARGET_AGNOS
+    var comp = comp_new();
+    var ca = fc_client_window(comp, "a");
+    var ida = comp_focused_id(comp);
+    var cb = fc_client_window(comp, "b");
+    var cc = fc_client_window(comp, "c");
+    var idc = comp_focused_id(comp);
+    assert_eq(t_pos(ca), 1, "client a connected");
+    assert_eq(t_pos(cb), 1, "client b connected");
+    assert_eq(t_pos(cc), 1, "client c connected");
+
+    # -----------------------------------------------------------------------
+    test_group("setu focus — the first notification goes to the focused window only");
+    var prev = setu_srv_focus_sync(comp, 0 - 1);
+    assert_eq(prev, idc, "the newest window (c) holds focus");
+    assert_eq(fc_last_focus(cc), 1, "c is told it gained focus");
+    assert_eq(fc_last_focus(ca), 0 - 1, "a is told nothing");
+    assert_eq(fc_last_focus(cb), 0 - 1, "b is told nothing");
+
+    # -----------------------------------------------------------------------
+    test_group("setu focus — a raise to the top is a focus change (the 0.16.30 defect)");
+    var top = comp_focused(comp);
+    comp_focus(comp, fc_index_of(comp, ida));      # what a click on a, or Ctrl+Tab, does
+    # ⚠ The reason an index detector saw nothing: the focused INDEX did not move.
+    assert_eq(comp_focused(comp), top, "the focused index is unchanged by the raise");
+    assert_eq(comp_focused_id(comp), ida, "but the focused window is now a");
+    prev = setu_srv_focus_sync(comp, prev);
+    assert_eq(prev, ida, "sync reports a as focused");
+    assert_eq(fc_last_focus(ca), 1, "a is told it GAINED focus");
+    assert_eq(fc_last_focus(cc), 0, "c is told it LOST focus");
+    assert_eq(fc_last_focus(cb), 0 - 1, "b, untouched, is told nothing");
+
+    # -----------------------------------------------------------------------
+    test_group("setu focus — no change, no messages");
+    prev = setu_srv_focus_sync(comp, prev);
+    assert_eq(fc_last_focus(ca), 0 - 1, "a is not re-told");
+    assert_eq(fc_last_focus(cb), 0 - 1, "b is not told");
+    assert_eq(fc_last_focus(cc), 0 - 1, "c is not told");
+
+    # -----------------------------------------------------------------------
+    test_group("setu focus — closing the focused window hands focus on, and says so");
+    comp_close_window(comp, ida);
+    var after = comp_focused_id(comp);
+    assert_eq(t_pos(after), 1, "some window holds focus after the close");
+    prev = setu_srv_focus_sync(comp, prev);
+    assert_eq(prev, after, "sync reports the new holder");
+    var gained = 0;
+    if (fc_last_focus(cb) == 1) { gained = gained + 1; }
+    if (fc_last_focus(cc) == 1) { gained = gained + 1; }
+    assert_eq(gained, 1, "exactly one survivor is told it gained focus");
+    #endif
+
+    return assert_summary();
+}
+
+fn t_pos(v): i64 {
+    if (v > 0) { return 1; }
+    return 0;
+}
+
+var ec = main();
+syscall(60, ec);

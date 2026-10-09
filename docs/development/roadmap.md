@@ -14,25 +14,7 @@
 - [ ] CHANGELOG complete from v0.1.0
 - [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`)
 
-## Next — 0.16.30, a repair before the arc
-
-Three defects in the running desktop, found by the 2026-10-09 parity audit and each re-read in the code:
-
-- **A setu client can overflow the compositor's heap (security).** The client chooses `w`, `h` and `stride`.
-  Both ATTACH paths check only `0 < h·stride ≤ 16 MB` (`setu_dispatch.cyr:73-75`, `:452-454`), and every
-  CPU-path frame reads `w·h·4` bytes into that `h·stride` cache (`render.cyr:833`). A `stride < 4·w`, or a
-  negative `h` with a negative `stride`, writes past the cache with bytes the client chose. Linux and QEMU
-  always take the CPU path, and iron does whenever a frame demotes. Fix: require `w > 0`, `h > 0` and
-  `stride ≥ 4·w` (the rule Rust's `ShmBufferInfo::validate` enforced), and add a hostile-ATTACH test.
-- **Clients never hear about focus changes from a click or Ctrl+Tab.** The detector compares stack indices
-  (`main.cyr:1628`). `comp_focus` always leaves the focused window at the top index, so raising another
-  window changes nothing the detector can see. When it does fire, the old index may already name a
-  different window. Fix: track the focused window's id.
-- **Minimize is one-way.** `input.cyr:446` is the only place that writes `WS_MINIMIZED` and nothing writes
-  it back. Ctrl+Tab can focus a minimized window, which then takes keys while it stays invisible. Fix: give
-  it a way back; the smallest is that focusing a minimized window restores it.
-
-## 0.17.x — close the port, then delete `rust-old/`
+## 0.17.x — close the port, then delete `rust-old/` (next: 0.17.0)
 
 **Why the arc is smaller than 28,072 lines of Rust suggests.** The Rust *binary* never created a window or
 rendered a frame. It built the desktop, ran a 5 s status tick, honoured `--secure`, and exited on a signal.
@@ -52,7 +34,7 @@ gate, with every open item, is [`parity-plan.md`](parity-plan.md).
 | Release | Bite | What ships |
 |---|---|---|
 | **0.17.0** | The record | **ADR 0002** retires the Rust protocol layer and lists what is dropped and what is owed a native design. **ADR 0003** records the substrate and numeric divergences. **ADR 0004** records the retired surface, including the HUD widget specs (daimon has since moved). The retired code is deleted: `apps`, `theme_bridge`, `shell_integration`, quick settings, `KeyboardNavConfig`, and the redundant `tests/leaf_modules.tcyr`. A CI coverage floor is set at the measured value. |
-| **0.17.1** | Correctness | Where the port silently diverged, restore Rust's behaviour and port the test that catches it. `"terminal"` returns to AI context detection (`ai_features.cyr:411` matches `"cmdpalette"`) and to the shell app registry. The security dashboard's maximum threat comes from the active alerts, so Info-only reads Info (`security_ui.cyr:699` starts at Low). `comp_close_window` updates the workspace's active window (`compositor.cyr:312`; two Rust tests fail today). Titles truncate with "…" like Rust's; by code reading this also fixes a title over 64 bytes (`render.cyr:1260`) that never reaches the screen on a GPU frame, because the CPU band is skipped (`gpu.cyr:1343`). `tests/aethersafha.tcyr:91` returns before 18 wallpaper asserts, which are made to run. Smaller fixes: a stable suggestion sort, a null-checked `epoch_to_date` (`ai_features.cyr:375`), and its own id namespace for `sec_ui_next_id`. |
+| **0.17.1** | Correctness | Where the port silently diverged, restore Rust's behaviour and port the test that catches it. `"terminal"` returns to AI context detection (`ai_features.cyr:411` matches `"cmdpalette"`) and to the shell app registry. The security dashboard's maximum threat comes from the active alerts, so Info-only reads Info (`security_ui.cyr:699` starts at Low). `comp_close_window` updates the workspace's active window (`compositor.cyr:343`; two Rust tests fail today). Titles truncate with "…" like Rust's; by code reading this also fixes a title over 64 bytes (`render.cyr:1260`) that never reaches the screen on a GPU frame, because the CPU band is skipped (`gpu.cyr:1343`). `tests/aethersafha.tcyr:91` returns before 18 wallpaper asserts, which are made to run. Smaller fixes: a stable suggestion sort, a null-checked `epoch_to_date` (`ai_features.cyr:375`), and its own id namespace for `sec_ui_next_id`. |
 | **0.17.2** | What the Rust binary did | Flags move into a pure, testable module: `--secure` (secure mode plus `SEC_LVL_ELEVATED`), `--help` and `--version`. An unknown flag becomes an error instead of being ignored (`main.cyr:696`). The status tick sends `UserPresent`, and a welcome notification shows at start. Linux reads cpu and disk from `/proc/stat` and `statvfs`, with `parse_cpu_line`; agnos stays UNKNOWN because it has no source. The panel stops claiming things: the net dot is seeded Connected with no producer (`shell.cyr:338`), and nothing calls `shell_set_agent_count` (`shell.cyr:779`). Accessibility mirroring: a node and an announcement on create and close, focus sync, and an idempotent sync (today it runs once, before any client, `main.cyr:955`). SIGINT tears down on Linux as Ctrl+Q does. |
 | **0.17.3** | Stubs become real | `PluginMessage` JSON in both directions (`plugin_host.cyr:320,326` return 0) via bayan, which gets declared in `[deps] stdlib`. The `plug_ipc_*` stubs are deleted; Rust had no transport. security_ui gets the audit-log writer (a JSON line with an ISO-8601 time, `security_ui.cyr:865`), plus SIGHUP on revoke and SIGKILL on kill through `sys_kill` (`:830`, `:845`). `poll_agents` runs against daimon 2.4.3's `GET /v1/agents` (integer ids and statuses), off the frame loop, and feeds the agent HUD and the panel gauge (`ai_features.cyr:735`). screen_capture writes alpha 0xFF and refuses width or height ≤ 0 (today that is a null write, `screen_capture.cyr:425-429,502,509`); it gets a decode round-trip over 64 KB and per-capture memory that is freed (about 74 MB leak per 2560×1440 PNG today). screen_recording frees what its ring evicts (`screen_recording.cyr:286`). Both stay library code. |
 | **0.17.4** | Compositor and renderer depth | Pointer routing and the drag / resize state move out of `main.cyr` (`:383-678`) into a module a test can include, along with Rust's nine routing tests; the Super key builds on this module. Workspaces work as in Rust: four defaults, the active and agent window queries, and a context setter. Left and bottom-left resize grips are added (Rust reached both). The CPU path blends premultiplied surfaces and applies window opacity, so a QEMU or Linux frame matches iron's. Windows get a border (Rust's `draw_rect_outline`). Lifecycle edge tests come from a `.tcyr` version of `examples/headless_compositor.rs`. |
@@ -103,7 +85,7 @@ agnos it comes from the boot report's modifier byte and has not yet been seen on
 |---|---|---|---|
 | D1 | **Burn the phase instrument**, reading 0.16.27's `cumulative us (client blit, #84 flip, input, yield, period)` line. It decides D2: blit points to damage rects, flip to vblank pacing, yield to the clients, input to the drain. Iron measured 7–15 fps on 2026-08-22, and the clear is exonerated. | burn | needs iron |
 | D2 | **Present-protocol damage.** setu has no damage concept, and every live surface is re-read or re-blitted every frame whether or not it committed. A maximized 2560×1408 terminal moves about 28.8 MB per frame. This needs COMMIT as an opt-in change signal, plus dirty rects. | setu, then here | after D1 |
-| D3 | **A client that exits leaves its window behind.** A dead channel only sets `chan_dead` (`main.cyr:1555`). Its window stays focusable, and its dead buffer is re-read every frame. A client's own `SETU_CLOSE` is rejected (`setu_dispatch.cyr:391-395`). | here | open |
+| D3 | **A client that exits leaves its window behind.** A dead channel only sets `chan_dead` (`main.cyr` frame loop). Its window stays focusable, and its dead buffer is re-read every frame. A client's own `SETU_CLOSE` is rejected (`setu_hs_action`, state 3). Same family, seen in QEMU at 0.16.30: on the Linux accept path a surface refused at ATTACH, or any later handshake failure, leaves the empty window minted at CREATE_SURFACE (`setu_srv_commit_from_create`). | here | open |
 | D4 | **Per-PTY window size.** There is no TIOCSWINSZ on the `#97` band, so `ls` lays out columns for the console grid instead of puka's window. | agnos, puka | open |
 | D5 | **Theme repaint on the GPU path**, reported 2026-08-18 and not reproduced. QEMU covers only the CPU path; re-test on the next burn. | burn | unconfirmed |
 | D6 | **crab has no maximize view.** | crab | open |
@@ -175,6 +157,7 @@ it** until C4a closes (operator, 2026-08-16).
 - **M6-C1, C3:** the wallpaper is an image; per-window opacity runs on the GPU (op 0x06, op 0x02), iron-proven.
 - **M7:** the toolkit carries the apps (LIST, TEXTINPUT, the motion language, crab and puka on the widget tree, runtime theme switching, the shell panel).
 - **0.16.26–0.16.29:** deps resolve from tags with every `path` dormant; the phase instrument attributes a slow frame; the cyrius 6.6.12 follow-ups shipped (a fmt gate, unused agnostik and agnodrm dropped, `M_SZ`).
+- **0.16.30:** a client can no longer overflow the compositor's heap (surface geometry validated, as Rust's `ShmBufferInfo::validate` did); focus notices follow window ids; a minimized window never holds focus and comes back when focused.
 
 ## Out of scope for v1.0
 
