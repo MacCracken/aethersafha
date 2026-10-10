@@ -1,0 +1,505 @@
+# aethersafha — input routing and the drag / resize state machine (src/route.cyr, 0.17.4).
+#
+# ⭐ WHY THIS SUITE EXISTS. Pointer routing lived in main.cyr's frame loop until 0.17.4, where nothing but a
+# burn could drive it: the glued titlebar drag, the release no client got and the titlebar coordinates sent
+# to a client were all found on hardware. It is a module now, and this drives it the way the frame loop
+# does — bhumi event values in, a compositor to act on — with no device, framebuffer or socket.
+#
+# Rust's routing tests, re-expressed (rust-old/src/compositor.rs:1989-2320, renderer.rs:1532,
+# tests/compositor_integration.rs:133). Under ADR 0003's mappings: the window's chrome sits ABOVE its
+# content rect (TITLEBAR_H 30, Rust's 24 was inside), the floor is 120x60 (Rust 200x100), a button is a
+# press and a release (Rust's MouseClick was a press), and the wire numbers buttons by the kernel's bit
+# order (right = 2; Rust's X11 3).
+#
+# Stdlib + [deps.*] auto-included via cyrius.cyml.
+include "lib/bhumi.cyr"
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/theme.cyr"        # render.cyr packs its colours through it
+include "src/cursor.cyr"
+include "src/render.cyr"       # deco_hit
+include "src/gpu.cyr"          # wallpaper.cyr's image arm asks ae_gpu_wp_on(): linked, never reached here
+include "src/wallpaper.cyr"    # render.cyr reads wp_serial()
+include "src/input.cyr"
+include "src/route.cyr"
+
+# Rust's `Compositor::with_resolution(800, 600)`.
+var T_SW = 800;
+var T_SH = 600;
+
+# A left press at (x, y): the pointer is placed there, then the button goes down. -> outcomes.
+fn t_press_at(comp, x, y): i64 {
+    input_ptr_set(x, y);
+    return route_pointer(comp, bhumi_button_event(1, 1), T_SW, T_SH);
+}
+# Every button up. ⚠ `seen` 0 on purpose: (0, 1) on a button believed UP is a FOLDED click, press and all.
+fn t_release(comp): i64 { return route_pointer(comp, bhumi_button_event(0, 0), T_SW, T_SH); }
+fn t_move(comp, dx, dy): i64 { return route_pointer(comp, bhumi_motion_event(dx, dy), T_SW, T_SH); }
+
+fn main(): i64 {
+    alloc_init();
+
+    # -----------------------------------------------------------------------
+    test_group("route — Rust's route_input: a click on the background is None");
+    var cbg = comp_new();
+    assert_eq(t_press_at(cbg, 0, 0), 1, "a left press yields one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_NONE, "a click on the background is None (route_input_click_on_background)");
+    assert_eq(route_out_btn(0), INPUT_BTN_LEFT, "  ...and it names the left button");
+    assert_eq(route_out_val(0), 1, "  ...going down");
+    assert_eq(t_release(cbg), 1, "the release yields one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_NONE, "  ...None again");
+    assert_eq(route_out_val(0), 0, "  ...going up");
+    t_press_at(cbg, 5000, 5000);
+    assert_eq(route_out_kind(0), RouteAct.RA_NONE, "a click far from anything is None (input_routing_click_on_empty_is_none)");
+    t_release(cbg);
+    assert_eq(route_out_kind(7), 0 - 1, "an outcome index past the end reads -1, not a plausible RA_NONE");
+    assert_eq(route_out_kind(0 - 1), 0 - 1, "  ...and so does a negative one");
+
+    # -----------------------------------------------------------------------
+    # Rust's window for an 800x600 output: (50, 50), 400x300.
+    test_group("route — Rust's route_input: a titlebar press begins a drag");
+    var ct = comp_new();
+    var wt = comp_create_window(ct, 50, 50, 400, 300, "W");
+    var idt = win_id(wt);
+    assert_eq(t_press_at(ct, 70, 60), 1, "a titlebar press yields one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_BEGIN_DRAG, "it begins a drag (route_input_click_on_titlebar)");
+    assert_eq(route_out_win(0), idt, "  ...of that window");
+    assert_eq(route_out_x(0), 20, "  ...grabbed 20 px right of its origin (Rust's drag_state offset)");
+    assert_eq(route_out_y(0), 10, "  ...and 10 px down");
+    assert_eq(route_drag_id(), idt, "the drag state names the window");
+    assert_eq(route_resize_id(), 0, "  ...and no resize is in progress");
+    assert_eq(route_grip(), Deco.DECO_TITLEBAR, "  ...the titlebar is the grip that moves it");
+    assert_eq(t_release(ct), 1, "the release yields one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_END_INTERACTIVE, "  ...it ends the drag");
+    assert_eq(route_out_win(0), idt, "  ...of that window");
+    assert_eq(route_drag_id(), 0, "  ...and clears the state");
+    assert_eq(route_grip(), 0, "  ...grip and all");
+
+    # -----------------------------------------------------------------------
+    test_group("route — Rust's route_input: a press on the content is the client's");
+    assert_eq(t_press_at(ct, 100, 50 + TITLEBAR_H + 10), 1, "a content press yields one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_CLIENT_CLICK, "it is a client click (route_input_click_on_client)");
+    assert_eq(route_out_win(0), idt, "  ...for that window");
+    assert_eq(route_out_x(0), 50, "  ...at x relative to the content");
+    assert_eq(route_out_y(0), 10, "  ...and y relative to the CONTENT, not the window — the titlebar is chrome");
+    assert_eq(route_out_btn(0), INPUT_BTN_LEFT, "  ...the left button");
+    assert_eq(route_out_val(0), 1, "  ...going down");
+    assert_eq(route_drag_id(), 0, "a content press starts no gesture");
+    assert_eq(t_release(ct), 1, "the release yields one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_CLIENT_CLICK, "  ...the client gets the release too");
+    assert_eq(route_out_val(0), 0, "  ...going up");
+    assert_eq(route_out_y(0), 10, "  ...at the same point");
+
+    # -----------------------------------------------------------------------
+    test_group("route — Rust's route_input: a key goes to the focused window, or nowhere");
+    var ck = comp_new();
+    assert_eq(route_key(ck, bhumi_key_event(1, 65)), RouteAct.RA_NONE, "with nothing focused a key goes nowhere (route_input_key_press_no_focus)");
+    assert_eq(route_out_n(), 1, "  ...one outcome");
+    var wk = comp_create_window(ck, 10, 10, 200, 100, "K");
+    assert_eq(route_key(ck, bhumi_key_event(1, 65)), RouteAct.RA_KEY_TO_FOCUSED, "with a window focused the key is its (route_input_key_press_with_focus)");
+    assert_eq(route_out_kind(0), RouteAct.RA_KEY_TO_FOCUSED, "  ...as the outcome says");
+    assert_eq(route_out_win(0), win_id(wk), "  ...the focused window");
+    assert_eq(route_out_x(0), 65, "  ...keycode 65 (HID F8: bare, a client's key since 0.16.25)");
+    assert_eq(route_out_y(0), 0, "  ...no modifiers — Rust's KeyToFocused(65, 0)");
+    assert_eq(route_out_val(0), 1, "  ...pressed");
+    assert_eq(route_key(ck, bhumi_key_event(0, 65)), RouteAct.RA_KEY_TO_FOCUSED, "its release is the window's too");
+    assert_eq(route_out_val(0), 0, "  ...released");
+
+    # ⭐ THE LATCH LIVES HERE, and the chord is the port's own (Rust had no compositor keys).
+    test_group("route — the held-modifier latch, and the chord it makes");
+    assert_eq(route_key(ck, bhumi_key_event(1, 0xE0)), RouteAct.RA_KEY_TO_FOCUSED, "LCtrl's own press still reaches the client — it is how a client learns a modifier");
+    assert_eq(route_chrome_mod(), 1, "  ...and the chrome modifier is held");
+    assert_eq(route_mods(), 1, "  ...as bit 0 of the latch");
+    assert_eq(route_key(ck, bhumi_key_event(1, 65)), RouteAct.RA_CHORD, "Ctrl+F8 is a chord: the compositor's, never the client's");
+    assert_eq(route_out_x(0), 65, "  ...naming the key");
+    assert_eq(route_out_y(0), 1, "  ...and the held modifiers");
+    assert_eq(route_out_win(0), 0, "  ...and no window");
+    assert_eq(route_key(ck, bhumi_key_event(1, 0x04)), RouteAct.RA_CHORD, "an unclaimed Ctrl+A is swallowed too: the wire carries no modifier, so it would arrive as a bare a");
+    assert_eq(route_key(ck, bhumi_key_event(0, 65)), RouteAct.RA_CHORD, "  ...and so is a release under Ctrl");
+    assert_eq(route_key(ck, bhumi_key_event(1, 0xE1)), RouteAct.RA_KEY_TO_FOCUSED, "Shift under Ctrl is a modifier's own edge, not a chord");
+    assert_eq(route_mods(), 3, "  ...and both are held");
+    route_key(ck, bhumi_key_event(0, 0xE1));
+    assert_eq(route_key(ck, bhumi_key_event(0, 0xE0)), RouteAct.RA_KEY_TO_FOCUSED, "LCtrl's release reaches the client");
+    assert_eq(route_chrome_mod(), 0, "  ...and the chrome modifier is down no longer");
+    assert_eq(route_key(ck, bhumi_key_event(1, 65)), RouteAct.RA_KEY_TO_FOCUSED, "F8 is bare again: the client's");
+    route_key(ck, bhumi_key_event(1, 0xE4));
+    assert_eq(route_chrome_mod(), 1, "RCtrl is the chrome modifier as well");
+    route_key(ck, bhumi_key_event(0, 0xE4));
+    assert_eq(route_chrome_mod(), 0, "  ...until it is released");
+    # ⛔ The 297-px shape: dx = 256 + 0xE0 has bit 8 set and a low byte of LCtrl.
+    assert_eq(route_key(ck, bhumi_motion_event(256 + 0xE0, 0)), RouteAct.RA_NONE, "a motion whose low byte reads as a pressed LCtrl is not a key");
+    assert_eq(route_out_n(), 0, "  ...it yields nothing");
+    assert_eq(route_chrome_mod(), 0, "  ...and holds no modifier");
+    route_key(ck, bhumi_key_event(1, 0xE3));
+    assert_eq(route_mods(), 8, "the latch folds Super (LGui, 0xE3) too");
+    assert_eq(route_chrome_mod(), 0, "  ...which is not a chrome modifier until SK1 says so, here");
+    route_key(ck, bhumi_key_event(0, 0xE3));
+    assert_eq(route_mods(), 0, "  ...and lets it go");
+
+    # -----------------------------------------------------------------------
+    test_group("route — Rust's drag_workflow: the window follows the pointer, then stops");
+    var cd = comp_new();
+    var wd = comp_create_window(cd, 50, 50, 400, 300, "D");
+    t_press_at(cd, 70, 60);
+    assert_eq(route_out_kind(0), RouteAct.RA_BEGIN_DRAG, "the titlebar press begins it");
+    assert_eq(t_move(cd, 100, 50), 1, "a motion over the dragged titlebar yields the pointer move alone");
+    assert_eq(route_out_kind(0), RouteAct.RA_POINTER_MOVE, "  ...PointerMove");
+    assert_eq(win_x(wd), 150, "the window followed: start x + 100 (drag_workflow)");
+    assert_eq(win_y(wd), 100, "  ...and start y + 50");
+    assert_eq(t_release(cd), 1, "the release yields one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_END_INTERACTIVE, "  ...the end of the drag, and no client click: the press was the compositor's");
+    t_move(cd, 30, 30);
+    assert_eq(win_x(wd), 150, "after the release a motion moves the pointer, not the window");
+    assert_eq(win_y(wd), 100, "  ...in either axis");
+
+    # ⭐ THE ANCHOR — the drag puts the origin at the pointer minus the grab offset, every motion.
+    test_group("route — a drag keeps its grab point: the clamp holds the window, the anchor brings it back");
+    var cg = comp_new();
+    var wg = comp_create_window(cg, 100, 100, 300, 200, "G");
+    t_press_at(cg, 200, 110);
+    assert_eq(route_out_x(0), 100, "grabbed 100 px in");
+    t_move(cg, 0 - 1000, 0);
+    assert_eq(win_x(wg), 0, "dragged off the left of the screen, the window stops at x = 0");
+    t_move(cg, 50, 0);
+    assert_eq(win_x(wg), 0, "  ...and stays while its grab point would still be off-screen (a drag fed one delta at a time moved it here)");
+    t_move(cg, 100, 0);
+    assert_eq(win_x(wg), 50, "  ...then moves with the pointer once it is back in range");
+    assert_eq(input_ptr_x() - win_x(wg), 100, "  ...with the grab point under the pointer again");
+    t_move(cg, 0, 5000);
+    assert_eq(win_bottom_y(wg), T_SH, "dragged off the bottom, the window stops with its last row on the screen's");
+    t_release(cg);
+
+    # -----------------------------------------------------------------------
+    test_group("route — Rust's end_interactive clears both states");
+    var ce = comp_new();
+    var we = comp_create_window(ce, 50, 50, 400, 300, "E");
+    t_press_at(ce, 70, 60);
+    assert_eq(route_drag_id(), win_id(we), "a drag is in progress");
+    route_end_interactive();
+    assert_eq(route_drag_id(), 0, "end_interactive clears the drag (end_interactive_clears_state)");
+    assert_eq(route_resize_id(), 0, "  ...and the resize");
+    t_move(ce, 40, 0);
+    assert_eq(win_x(we), 50, "a motion after it moves nothing");
+    assert_eq(t_release(ce), 1, "the release yields one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_NONE, "  ...nobody's: the press was the compositor's, with or without a gesture");
+    assert_eq(t_press_at(ce, 50 + 400 - 2, 200), 1, "a press on the right strip yields one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_BEGIN_RESIZE, "  ...a resize");
+    assert_eq(route_resize_id(), win_id(we), "the resize state names the window");
+    assert_eq(route_drag_id(), 0, "  ...and it is not a drag");
+    route_end_interactive();
+    assert_eq(route_resize_id(), 0, "end_interactive clears the resize");
+    assert_eq(route_drag_id(), 0, "  ...and the drag");
+    t_release(ce);
+
+    # -----------------------------------------------------------------------
+    test_group("route — Rust's mouse_move_no_drag: a motion is a PointerMove");
+    var cm = comp_new();
+    input_ptr_set(40, 60);
+    assert_eq(t_move(cm, 60, 40), 1, "over an empty desktop a motion yields exactly one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_POINTER_MOVE, "PointerMove (mouse_move_no_drag)");
+    assert_eq(route_out_x(0), 100, "  ...to x 100");
+    assert_eq(route_out_y(0), 100, "  ...and y 100");
+    t_move(cm, 5000, 5000);
+    assert_eq(route_out_x(0), T_SW - 1, "the cursor clamps to the last column");
+    assert_eq(route_out_y(0), T_SH - 1, "  ...and the last row");
+
+    # -----------------------------------------------------------------------
+    test_group("route — Rust's right_click_on_window: the client's, and it focuses nothing");
+    var cr = comp_new();
+    var wr1 = comp_create_window(cr, 50, 50, 400, 300, "R1");
+    var wr2 = comp_create_window(cr, 500, 50, 200, 200, "R2");
+    input_ptr_set(100, 100);
+    assert_eq(route_pointer(cr, bhumi_button_event(2, 2), T_SW, T_SH), 1, "a right press yields one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_CLIENT_CLICK, "a right-click on a window is the client's (right_click_on_window)");
+    assert_eq(route_out_win(0), win_id(wr1), "  ...the window under it");
+    assert_eq(route_out_btn(0), INPUT_BTN_RIGHT, "  ...as wire button 2, the kernel's bit order (Rust's X11 3)");
+    assert_eq(route_out_x(0), 50, "  ...at content-relative x (Rust sent the screen point)");
+    assert_eq(route_out_y(0), 50 - TITLEBAR_H, "  ...and content-relative y");
+    assert_eq(comp_focused_id(cr), win_id(wr2), "a right-click focuses nothing: window management is the left button's");
+    assert_eq(route_drag_id(), 0, "  ...and starts nothing");
+    assert_eq(route_pointer(cr, bhumi_button_event(0, 0), T_SW, T_SH), 1, "its release yields one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_CLIENT_CLICK, "  ...the client's");
+    assert_eq(route_out_val(0), 0, "  ...going up");
+    input_ptr_set(100, 60);
+    route_pointer(cr, bhumi_button_event(2, 2), T_SW, T_SH);
+    assert_eq(route_out_kind(0), RouteAct.RA_NONE, "a right-click on the titlebar is nobody's: chrome is not the client's surface");
+    assert_eq(route_out_btn(0), INPUT_BTN_RIGHT, "  ...naming the right button");
+    route_pointer(cr, bhumi_button_event(0, 0), T_SW, T_SH);
+
+    # -----------------------------------------------------------------------
+    # Rust's resize_window(id, w, h) keeps the origin and sets the size, floored. In the port that is the
+    # bottom-right grip's resize from where the window is.
+    test_group("route — Rust's resize_window and its minimum");
+    var cz = comp_new();
+    var wz = comp_create_window(cz, 50, 50, 400, 300, "Z");
+    assert_eq(win_resize_by(wz, Deco.DECO_RESIZE_BR, 500 - win_w(wz), 400 - win_h(wz), 1920, 1080), 1, "a resize reports the change");
+    assert_eq(win_w(wz), 500, "the width is 500 (resize_window)");
+    assert_eq(win_h(wz), 400, "  ...the height 400");
+    assert_eq(win_x(wz), 50, "  ...and the origin is kept");
+    assert_eq(win_y(wz), 50, "  ...in both axes");
+    win_resize_by(wz, Deco.DECO_RESIZE_BR, 50 - win_w(wz), 30 - win_h(wz), 1920, 1080);
+    assert_eq(win_w(wz), WIN_MIN_W, "asked for 50 wide, it stops at the floor (resize_enforces_minimum)");
+    assert_eq(win_h(wz), WIN_MIN_H, "  ...and 30 high, the same");
+    assert_eq(WIN_MIN_W, 120, "the floor is 120 wide (Rust's 200; ADR 0003)");
+    assert_eq(WIN_MIN_H, 60, "  ...and 60 high (Rust's 100)");
+
+    # -----------------------------------------------------------------------
+    # Rust's eight ResizeEdge values, of which five were reachable. A window at (100, 100), 400x300, spans
+    # x 100..499 and y 100..429; its content starts at y 130.
+    test_group("route — renderer.rs resize_edge_variants: the five reachable edges");
+    var ev = win_new(1, 100, 100, 400, 300, "V");
+    assert_eq(deco_hit(ev, 497, 250), Deco.DECO_RESIZE_R, "Right");
+    assert_eq(deco_hit(ev, 102, 250), Deco.DECO_RESIZE_L, "Left");
+    assert_eq(deco_hit(ev, 300, 427), Deco.DECO_RESIZE_B, "Bottom");
+    assert_eq(deco_hit(ev, 497, 427), Deco.DECO_RESIZE_BR, "BottomRight");
+    assert_eq(deco_hit(ev, 102, 427), Deco.DECO_RESIZE_BL, "BottomLeft");
+    var eg = 0;
+    var ngrips = 0;
+    while (eg <= Deco.DECO_RESIZE_BL) {
+        ngrips = ngrips + win_grip_is_resize(eg);
+        eg = eg + 1;
+    }
+    assert_eq(ngrips, 5, "exactly those five are grips (Rust's Top, TopLeft and TopRight are retired, ADR 0004)");
+    assert_eq(win_grip_is_resize(Deco.DECO_RESIZE_L), 1, "Left is a grip");
+    assert_eq(win_grip_is_resize(Deco.DECO_RESIZE_BL), 1, "BottomLeft is a grip");
+    assert_eq(deco_hit(ev, 300, 100), Deco.DECO_TITLEBAR, "the top row is the titlebar's: there is no Top edge");
+    assert_eq(deco_hit(ev, 102, 100), Deco.DECO_RESIZE_L, "the top-left corner is the left strip, not TopLeft");
+    assert_eq(deco_hit(ev, 497, 100), Deco.DECO_RESIZE_R, "the top-right corner is the right strip, not TopRight");
+
+    test_group("route — the left grips' boundaries, and the buttons they leave alone");
+    assert_eq(deco_hit(ev, 99, 250), Deco.DECO_NONE, "the column left of the window is outside it");
+    assert_eq(deco_hit(ev, 100, 250), Deco.DECO_RESIZE_L, "the window's first column is the left strip");
+    assert_eq(deco_hit(ev, 105, 250), Deco.DECO_RESIZE_L, "  ...through x + RESIZE_M - 1");
+    assert_eq(deco_hit(ev, 106, 250), Deco.DECO_BODY, "x + RESIZE_M is content");
+    assert_eq(deco_hit(ev, 106, 110), Deco.DECO_TITLEBAR, "  ...and in the titlebar rows, the drag strip");
+    assert_eq(deco_hit(ev, 105, 424), Deco.DECO_RESIZE_BL, "the corner starts RESIZE_M rows up");
+    assert_eq(deco_hit(ev, 105, 423), Deco.DECO_RESIZE_L, "  ...above it is the side");
+    assert_eq(deco_hit(ev, 106, 424), Deco.DECO_RESIZE_B, "  ...and right of it the bottom");
+    assert_eq(deco_hit(ev, 100, 429), Deco.DECO_RESIZE_BL, "the window's last row and first column is the corner");
+    assert_eq(deco_hit(ev, 100, 430), Deco.DECO_NONE, "  ...one row lower is outside");
+    var en = win_new(2, 100, 100, WIN_MIN_W, WIN_MIN_H, "N");
+    assert_eq(deco_hit(en, deco_min_x(en), deco_btn_y(en)), Deco.DECO_MIN, "at the floor the minimize button is still a button");
+    assert_eq(deco_hit(en, deco_close_x(en) + BTN_W - 1, deco_btn_y(en)), Deco.DECO_CLOSE, "the close button's last column is the close button");
+    assert_eq(deco_hit(en, deco_close_x(en) + BTN_W, deco_btn_y(en)), Deco.DECO_RESIZE_R, "  ...the next is the right strip");
+    assert_eq(deco_hit(en, 100 + RESIZE_M, deco_btn_y(en)), Deco.DECO_TITLEBAR, "and the strip left of the buttons drags");
+
+    # -----------------------------------------------------------------------
+    # A window at (200, 100), 300x200: x 200..499, right edge 500.
+    test_group("route — the left grip: x moves, the right edge stays, and the floor does not slide");
+    var cl = comp_new();
+    var wl = comp_create_window(cl, 200, 100, 300, 200, "L");
+    var idl = win_id(wl);
+    assert_eq(t_press_at(cl, 202, 200), 1, "a press on the left strip yields one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_BEGIN_RESIZE, "  ...a resize, and nothing for the client: the strip is chrome (Rust: BeginResize alone)");
+    assert_eq(route_out_x(0), Deco.DECO_RESIZE_L, "  ...on the left grip");
+    assert_eq(route_resize_id(), idl, "the resize state names the window");
+    t_move(cl, 0 - 50, 30);
+    assert_eq(win_x(wl), 150, "dragging the left edge out moves x with the pointer");
+    assert_eq(win_w(wl), 350, "  ...and widens the window by as much");
+    assert_eq(win_x(wl) + win_w(wl), 500, "  ...so the right edge has not moved");
+    assert_eq(win_h(wl), 200, "  ...and a side grip ignores dy");
+    assert_eq(win_y(wl), 100, "  ...for y as well");
+    t_move(cl, 400, 0);
+    assert_eq(win_w(wl), WIN_MIN_W, "dragged past the floor, the width stops at the minimum");
+    assert_eq(win_x(wl), 500 - WIN_MIN_W, "  ...and x stops where that leaves the right edge");
+    assert_eq(win_x(wl) + win_w(wl), 500, "  ...the right edge STILL has not moved (Rust's window slid right here)");
+    t_move(cl, 100, 0);
+    assert_eq(win_x(wl), 380, "further right, the window does not follow the pointer");
+    assert_eq(win_w(wl), WIN_MIN_W, "  ...nor shrink");
+    t_move(cl, 0 - 250, 0);
+    assert_eq(win_x(wl), 380, "back towards the window, the edge waits until the pointer reaches it");
+    t_move(cl, 0 - 100, 0);
+    assert_eq(win_x(wl), 300, "  ...then it is under the pointer again, at the grab offset");
+    assert_eq(win_w(wl), 200, "  ...and the width is what the right edge leaves");
+    t_move(cl, 0 - 1000, 0);
+    assert_eq(win_x(wl), 0, "at the screen's left edge x stops at 0");
+    assert_eq(win_w(wl), 500, "  ...and the right edge is where it always was");
+    assert_eq(t_release(cl), 1, "the release yields one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_END_INTERACTIVE, "  ...the end of the resize, and no client click");
+    assert_eq(route_out_x(0), Deco.DECO_RESIZE_L, "  ...naming the grip");
+    assert_eq(route_resize_id(), 0, "the resize state is clear");
+    t_move(cl, 50, 0);
+    assert_eq(win_x(wl), 0, "after the release a motion resizes nothing");
+    assert_eq(win_w(wl), 500, "  ...in width either");
+
+    test_group("route — the bottom-left grip: both axes, right edge held, both floors");
+    var cb = comp_new();
+    var wb = comp_create_window(cb, 200, 100, 300, 200, "BL");
+    t_press_at(cb, 202, 327);
+    assert_eq(route_out_kind(0), RouteAct.RA_BEGIN_RESIZE, "a press in the bottom-left corner begins a resize");
+    assert_eq(route_out_x(0), Deco.DECO_RESIZE_BL, "  ...on the corner grip");
+    t_move(cb, 0 - 40, 20);
+    assert_eq(win_x(wb), 160, "the left edge follows the pointer");
+    assert_eq(win_w(wb), 340, "  ...the width grows by as much");
+    assert_eq(win_h(wb), 220, "  ...and the bottom follows it down");
+    assert_eq(win_x(wb) + win_w(wb), 500, "  ...with the right edge held");
+    assert_eq(win_y(wb), 100, "  ...and the top too");
+    t_move(cb, 1000, 0 - 1000);
+    assert_eq(win_w(wb), WIN_MIN_W, "pushed in both ways at once: the width floors");
+    assert_eq(win_h(wb), WIN_MIN_H, "  ...and the height floors");
+    assert_eq(win_x(wb) + win_w(wb), 500, "  ...and the right edge has not moved");
+    assert_eq(win_y(wb), 100, "  ...nor the top");
+    assert_eq(t_release(cb), 1, "the release yields one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_END_INTERACTIVE, "  ...ending the resize");
+
+    # ⭐ The right and bottom grips work from the anchor too.
+    test_group("route — the right and bottom grips: from the anchor, to the screen's edge");
+    var cR = comp_new();
+    var wR = comp_create_window(cR, 100, 100, 300, 200, "RR");
+    t_press_at(cR, 397, 200);
+    assert_eq(route_out_x(0), Deco.DECO_RESIZE_R, "a press on the right strip begins a right resize");
+    assert_eq(route_out_n(), 1, "  ...and that is ALL it yields: the strip lies over the content, and the press used to reach the client too");
+    t_move(cR, 0 - 400, 0);
+    assert_eq(win_w(wR), WIN_MIN_W, "the right edge pushed past the floor stops at the minimum");
+    assert_eq(win_x(wR), 100, "  ...with the origin kept");
+    t_move(cR, 150, 0);
+    assert_eq(win_w(wR), WIN_MIN_W, "coming back, the edge waits for the pointer (a resize fed one delta at a time grew here)");
+    t_move(cR, 200, 0);
+    assert_eq(win_w(wR), 253, "  ...then follows it");
+    assert_eq(win_x(wR) + win_w(wR) - input_ptr_x(), 3, "  ...3 px past the pointer, where it was grabbed");
+    t_move(cR, 1000, 0);
+    assert_eq(win_w(wR), T_SW - 100, "growth stops at the screen's right edge");
+    t_release(cR);
+    t_press_at(cR, 300, 328);
+    assert_eq(route_out_x(0), Deco.DECO_RESIZE_B, "a press on the bottom strip begins a bottom resize");
+    t_move(cR, 0, 100);
+    assert_eq(win_h(wR), 300, "the bottom follows the pointer down");
+    t_move(cR, 0, 1000);
+    assert_eq(win_bottom_y(wR), T_SH, "  ...and stops with the window's last row on the screen's");
+    assert_eq(win_y(wR), 100, "  ...the top kept");
+    t_release(cR);
+
+    # -----------------------------------------------------------------------
+    test_group("route — a gesture ends cleanly when its window goes away");
+    var cx = comp_new();
+    var wa = comp_create_window(cx, 100, 100, 300, 200, "A");
+    var wa2 = comp_create_window(cx, 150, 150, 300, 200, "B");
+    var ida = win_id(wa);
+    t_press_at(cx, 200, 160);
+    assert_eq(route_out_kind(0), RouteAct.RA_BEGIN_DRAG, "B's titlebar press begins a drag");
+    assert_eq(route_out_win(0), win_id(wa2), "  ...of B");
+    comp_close_window(cx, win_id(wa2));
+    assert_eq(t_move(cx, 10, 10), 2, "the next motion routes as any motion does");
+    assert_eq(route_drag_id(), 0, "  ...and finds B gone, so the drag is over");
+    assert_eq(win_x(wa), 100, "A, now under the pointer, is not dragged in B's place");
+    assert_eq(win_y(wa), 100, "  ...in either axis");
+    assert_eq(t_release(cx), 1, "the release yields one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_NONE, "  ...nobody's: NOT a release for A's client, which never got the press");
+    t_press_at(cx, 102, 200);
+    assert_eq(route_out_kind(0), RouteAct.RA_BEGIN_RESIZE, "A's left strip begins a resize");
+    comp_close_window(cx, ida);
+    t_move(cx, 0 - 30, 0);
+    assert_eq(route_resize_id(), 0, "A is gone: the resize is over");
+    assert_eq(route_out_n(), 1, "  ...and the motion is a pointer move alone");
+    assert_eq(t_release(cx), 1, "the release yields one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_NONE, "  ...nobody's");
+    var wc = comp_create_window(cx, 100, 100, 300, 200, "C");
+    t_press_at(cx, 200, 110);
+    comp_close_window(cx, win_id(wc));
+    assert_eq(t_release(cx), 1, "released with no motion after its window closed");
+    assert_eq(route_out_kind(0), RouteAct.RA_END_INTERACTIVE, "  ...the release still ends the gesture");
+    assert_eq(route_drag_id(), 0, "  ...and clears it");
+
+    # -----------------------------------------------------------------------
+    # U lies under T, and T's close button sits over U's content.
+    test_group("route — a window action's press and release are the compositor's");
+    var cc = comp_new();
+    var wu = comp_create_window(cc, 0, 0, 600, 400, "U");
+    var wt2 = comp_create_window(cc, 100, 100, 300, 200, "T");
+    var idt2 = win_id(wt2);
+    assert_eq(t_press_at(cc, deco_close_x(wt2) + 2, deco_btn_y(wt2) + 2), 1, "a close-button press yields one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_CLOSE, "  ...Close");
+    assert_eq(route_out_win(0), idt2, "  ...of T");
+    assert_eq(comp_find_by_id(cc, idt2), 0 - 1, "T is closed");
+    assert_eq(t_release(cc), 1, "the release, a frame later, yields one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_NONE, "  ...nobody's: NOT a release for U's client, now under the pointer");
+    var wt3 = comp_create_window(cc, 100, 100, 300, 200, "T3");
+    input_ptr_set(deco_close_x(wt3) + 2, deco_btn_y(wt3) + 2);
+    assert_eq(route_pointer(cc, bhumi_button_event(2, 3), T_SW, T_SH), 1, "a folded close click with a right press in the same drain yields one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_CLOSE, "  ...the Close: the right press is not handed to U at a point the user never clicked in it");
+    route_pointer(cc, bhumi_button_event(0, 0), T_SW, T_SH);
+    assert_eq(comp_focused_id(cc), win_id(wu), "and U, the window left, holds focus");
+
+    # -----------------------------------------------------------------------
+    test_group("route — click to focus, and the maximize and minimize buttons");
+    var cf = comp_new();
+    var f1 = comp_create_window(cf, 0, 0, 300, 200, "F1");
+    var f2 = comp_create_window(cf, 400, 0, 300, 200, "F2");
+    t_press_at(cf, 50, 100);
+    assert_eq(route_out_kind(0), RouteAct.RA_CLIENT_CLICK, "a press on F1's content is its client's");
+    assert_eq(comp_focused_id(cf), win_id(f1), "  ...and it focuses F1");
+    assert_eq(comp_get(cf, comp_count(cf) - 1), f1, "  ...and raises it to the top");
+    t_release(cf);
+    t_press_at(cf, deco_max_x(f1) + 2, deco_btn_y(f1) + 2);
+    assert_eq(route_out_kind(0), RouteAct.RA_TOGGLE_MAX, "the maximize button toggles maximize");
+    assert_eq(win_state(f1), WinState.WS_MAXIMIZED, "  ...F1 is maximized");
+    assert_eq(win_w(f1), T_SW, "  ...to the screen's width");
+    assert_eq(win_h(f1), T_SH - TITLEBAR_H, "  ...and its height less the titlebar");
+    assert_eq(input_last_action(), InputAction.IA_MAXIMIZE_FOCUSED, "  ...through the same action Ctrl+F5 applies");
+    assert_eq(input_last_src(), IA_SRC_BUTTON, "  ...recorded as a button");
+    assert_eq(t_release(cf), 1, "its release yields one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_NONE, "  ...nobody's");
+    t_press_at(cf, deco_min_x(f1) + 2, deco_btn_y(f1) + 2);
+    assert_eq(route_out_kind(0), RouteAct.RA_MINIMIZE, "the minimize button minimizes");
+    assert_eq(win_state(f1), WinState.WS_MINIMIZED, "  ...F1 is minimized");
+    assert_eq(comp_focused_id(cf), win_id(f2), "  ...and focus moves to the window still visible");
+    assert_eq(input_last_action(), InputAction.IA_MINIMIZE_FOCUSED, "  ...through Ctrl+F6's action");
+    t_release(cf);
+
+    # -----------------------------------------------------------------------
+    # A window at (100, 100), 300x200: content x 100..399, y 130..329.
+    test_group("route — the wheel and motion go to the content under the cursor");
+    var cs = comp_new();
+    var ws = comp_create_window(cs, 100, 100, 300, 200, "S");
+    input_ptr_set(150, 200);
+    assert_eq(route_pointer(cs, bhumi_scroll_event(3), T_SW, T_SH), 1, "a scroll yields one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_CLIENT_SCROLL, "  ...for the client under the cursor");
+    assert_eq(route_out_win(0), win_id(ws), "  ...that window");
+    assert_eq(route_out_x(0), 50, "  ...at content-relative x");
+    assert_eq(route_out_y(0), 70, "  ...and y");
+    assert_eq(route_out_val(0), 3, "  ...carrying the delta");
+    assert_eq(route_out_btn(0), 0, "  ...and no button");
+    route_pointer(cs, bhumi_scroll_event(0 - 2), T_SW, T_SH);
+    assert_eq(route_out_val(0), 0 - 2, "a scroll down carries a negative delta");
+    assert_eq(route_pointer(cs, bhumi_scroll_event(0), T_SW, T_SH), 0, "a zero delta is no event at all");
+    input_ptr_set(150, 110);
+    route_pointer(cs, bhumi_scroll_event(3), T_SW, T_SH);
+    assert_eq(route_out_kind(0), RouteAct.RA_NONE, "a scroll over the titlebar is nobody's");
+    assert_eq(route_out_val(0), 3, "  ...and still says how far");
+    assert_eq(t_move(cs, 0, 30), 2, "a motion onto the content yields two outcomes");
+    assert_eq(route_out_kind(0), RouteAct.RA_POINTER_MOVE, "  ...the pointer move first");
+    assert_eq(route_out_kind(1), RouteAct.RA_CLIENT_MOVE, "  ...then the client's");
+    assert_eq(route_out_win(1), win_id(ws), "  ...that window");
+    assert_eq(route_out_x(1), 50, "  ...at content-relative x");
+    assert_eq(route_out_y(1), 10, "  ...and y");
+    assert_eq(t_move(cs, 0, 0 - 20), 1, "a motion back onto the titlebar is the pointer move alone");
+
+    # -----------------------------------------------------------------------
+    test_group("route — the button machine, driven through the router");
+    var co = comp_new();
+    var wo = comp_create_window(co, 100, 100, 300, 200, "O");
+    input_ptr_set(150, 200);
+    assert_eq(route_pointer(co, bhumi_button_event(0, 1), T_SW, T_SH), 2, "a folded click on the content yields its press AND its release");
+    assert_eq(route_out_val(0), 1, "  ...the press first");
+    assert_eq(route_out_val(1), 0, "  ...then the release");
+    assert_eq(route_out_win(1), win_id(wo), "  ...both for the window's client");
+    assert_eq(route_pointer(co, bhumi_button_event(1, 1), T_SW, T_SH), 1, "a press after it is not swallowed");
+    assert_eq(route_pointer(co, bhumi_button_event(1, 1), T_SW, T_SH), 0, "a button still held is no transition");
+    assert_eq(t_release(co), 1, "  ...and it releases once");
+    input_ptr_set(150, 110);
+    assert_eq(route_pointer(co, bhumi_button_event(0, 1), T_SW, T_SH), 2, "a folded titlebar click yields two outcomes");
+    assert_eq(route_out_kind(0), RouteAct.RA_BEGIN_DRAG, "  ...the drag begins");
+    assert_eq(route_out_kind(1), RouteAct.RA_END_INTERACTIVE, "  ...and ends in the same event");
+    assert_eq(route_drag_id(), 0, "  ...leaving no gesture behind");
+    assert_eq(route_pointer(co, bhumi_button_event(4, 4), T_SW, T_SH), 1, "a middle press yields one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_NONE, "  ...over the titlebar, nobody's");
+    assert_eq(route_out_btn(0), INPUT_BTN_MIDDLE, "  ...naming the middle button, wire 3");
+    assert_eq(route_drag_id(), 0, "  ...and it starts no drag: only the left button manages windows");
+    t_release(co);
+
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);

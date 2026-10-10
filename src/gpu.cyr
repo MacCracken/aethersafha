@@ -753,9 +753,9 @@ fn ae_gpu_alpha_ok(): i64 {
 # ⇒ The upload happens when the ALPHA or the high-water SIZE changes — not per rect and not per frame.
 #
 # ⚠ PRECISION, STATED: `blend_cov.s` documents itself as within 1 of exact rational arithmetic (two
-# rounding sites: the coverage multiply and the final pack), while `rend_blend` is integer-exact. So
-# GPU chrome and CPU chrome may differ by ±1 per channel. That is invisible and it is NOT a licence to
-# compare the two paths pixel-for-pixel in a test.
+# rounding sites: the coverage multiply and the final pack). Since 0.17.4 the CPU arm (`rend_blend`,
+# render.cyr) runs the shader's own f32 steps exactly, in integers, so GPU chrome and CPU chrome are the
+# same bytes rather than ±1 per channel apart — until 0.17.3 the CPU blended straight colour and truncated.
 var ae_gpu_cov_slot  = 0;      # #86 slot holding the constant coverage mask (0 = none yet)
 var ae_gpu_cov_buf   = 0;      # host staging buffer, ae_gpu_cov_cap bytes
 var ae_gpu_cov_cap   = 0;      # bytes currently allocated AND uploaded

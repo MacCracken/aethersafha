@@ -164,6 +164,50 @@ fix.
     `srec_mgr_remove_recording`.
   - Getters hand out the live record (the representation table above) rather than Rust's clones.
 
+- **Pointer routing** (0.17.4, `src/route.cyr`; Rust's `route_input`, drag and resize state):
+  - A gesture is anchored at the press, as Rust's `drag_state` and `resize_state` were, and keeps the
+    grab offset. Rust's `apply_resize` snapped the moving edge onto the pointer, which with the port's
+    6 px grips would jump up to 6 px.
+  - A left or bottom-left resize keeps the RIGHT edge fixed at the 120×60 floor and at the screen edge.
+    Rust floored only the width, so the window slid.
+  - Dragged and resized windows stay on screen: the GPU ops refuse an out-of-range rect, which would
+    drop the frame. This predates 0.17.4 but was never recorded.
+  - The grips are 6 px strips over the content's outer pixels; the left and right strips run the full
+    height. Rust's border was 1 px and started below the title bar. T / TL / TR stay retired (ADR 0004).
+  - Buttons are routed as press AND release. The release of a press the compositor took (title bar,
+    buttons, a grip) goes to no client, and a grip press is never forwarded. Rust's border press only
+    began a resize.
+  - Right and middle buttons reach a client only over its content, in content coordinates, and never
+    move focus. Rust's right click carried the screen point anywhere on the surface; its middle button
+    did nothing.
+  - Keys under the chrome modifier are claimed by the compositor (the Super-key plan). Rust sent every
+    key to the focused window.
+- **Workspaces and window state** (0.17.4): four default workspaces, as in Rust. Differences:
+  - The compositor holds no output rect. Callers pass the screen bounds, so `with_resolution` and
+    `custom_resolution` are re-expressed as maximize-to-bounds.
+  - `comp_set_window_state` refuses FULLSCREEN (owed by setu, ADR 0002) and FLOATING (retired, ADR
+    0004), where Rust stored both.
+  - NORMAL restores a maximized window's restore rect; Rust kept the maximized geometry. Minimizing
+    the focused window hands focus to the topmost visible one; Rust left focus on it.
+  - `comp_set_workspace_context` refuses a value no Rust `ContextType` could be. An invalid workspace
+    id still returns success and changes nothing, as in Rust.
+  - `comp_create_workspace` is port-only: Rust's set was fixed at four.
+- **The CPU blend is the kernel's `#92` arithmetic** (0.17.4), so a CPU frame and a GPU frame of one scene
+  are word-identical. Rust's `blend()` truncated where op 0x01 rounds to nearest, and returned the
+  destination for a zero-alpha source where op 0x01 adds its colour. Over all 2²⁴ premultiplied inputs
+  the two differ on about half, by at most 1. op 0x06 and op 0x02 follow the shader's f32 steps with
+  ties to even; the 128.5 tie is the kernel's declared rounding mode, not yet confirmed on iron. A CPU
+  frame now carries the alpha lane in the framebuffer's X byte, which scanout ignores and capture
+  replaces with 0xFF.
+- **Window opacity** has no Rust behaviour to port: Rust stored `SceneSurface.opacity` and never read it.
+  The port applies it as the kernel does: a premultiplied surface is scaled by α/255 through op 0x06,
+  so window and client alpha multiply, and chrome goes through op 0x02. A non-premultiplied surface is
+  copied opaquely at any opacity, because `#87` has no alpha.
+- **The window border** (0.17.4) is Rust's 1 px `COLOR_BORDER` outline in rupa's `line` token, one colour
+  whether or not the window is focused, as in Rust. Rust inset its content by the border; the port draws
+  the ring one pixel OUTSIDE the window rect and moves nothing. Off screen the ring is dropped rather
+  than clamped onto the edge, and it is not a hit region (Rust's 1 px border was).
+
 ## Consequences
 
 - **Positive**:

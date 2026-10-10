@@ -63,7 +63,10 @@ enum CompOff {
     C_SZ         = 64;
 }
 
-# comp_new() -> *Compositor (0 on OOM). Starts with one default workspace.
+# comp_new() -> *Compositor (0 on OOM). Starts with Rust's four default workspaces
+# (compositor.rs:148-157): ids 0..3, named "Workspace 1".."Workspace 4", all General, 0 active.
+# ⚠ The port's comp_new used to make ONE workspace named "Main", so a move to workspace 1..3 had no
+# target and `switch_workspace(3)` was refused where Rust accepted it.
 fn comp_new(): i64 {
     var c = alloc(C_SZ);
     if (c == 0) { return 0; }
@@ -72,7 +75,10 @@ fn comp_new(): i64 {
     store64(c + C_NEXTID, 1);
     store64(c + C_ACTIVE_WS, 0);
     var wss = vec_new();
-    vec_push(wss, wsp_new(0, "Main", CtxType.CTX_GENERAL));
+    vec_push(wss, wsp_new(0, "Workspace 1", CtxType.CTX_GENERAL));
+    vec_push(wss, wsp_new(1, "Workspace 2", CtxType.CTX_GENERAL));
+    vec_push(wss, wsp_new(2, "Workspace 3", CtxType.CTX_GENERAL));
+    vec_push(wss, wsp_new(3, "Workspace 4", CtxType.CTX_GENERAL));
     store64(c + C_WORKSPACES, wss);
     store64(c + C_AGENT, 0);
     store64(c + C_SECURE, 0);
@@ -113,6 +119,7 @@ fn comp_get_workspace(c, i): i64 {
 }
 
 # comp_create_workspace(c, name, context) -> new workspace index.
+# ⚠ Port-only: Rust's set is fixed at the four defaults and has no way to add one. Nothing in src/ calls it.
 fn comp_create_workspace(c, name, context): i64 {
     var wss = load64(c + C_WORKSPACES);
     var id = vec_len(wss);
@@ -145,6 +152,63 @@ fn comp_move_window_to_workspace(c, win_id, ws_id): i64 {
         vec_push(wsp_windows(target), win_id);
         store64(target + WSP_ACTIVE, win_id);
     }
+    return 0;
+}
+
+# comp_active_windows(c) -> a new vec of the *Window in the active workspace (parity: get_active_windows,
+# compositor.rs:490-509). Each window appears ONCE, however many times its id is listed (Rust filtered the
+# window map by a HashSet of the workspace's ids), in stack order bottom-to-top where Rust's order was a
+# HashMap's. A stale id (a window closed while listed elsewhere) matches no window and is skipped.
+fn comp_active_windows(c): i64 {
+    var out = vec_new();
+    var ws = comp_get_workspace(c, load64(c + C_ACTIVE_WS));
+    if (ws == 0) { return out; }
+    var ids = wsp_windows(ws);
+    var v = load64(c + C_WINDOWS);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var win = vec_get(v, i);
+        if (vec_find(ids, win_id(win)) >= 0) { vec_push(out, win); }
+        i = i + 1;
+    }
+    return out;
+}
+
+# comp_agent_windows(c) -> a new vec of every agent-owned *Window, on any workspace (parity:
+# get_agent_windows, compositor.rs:974-982). ⚠ ADR 0004 retires the floating LAYER agent windows went to,
+# not the flag: `W_AGENT` is a window fact this query reads. Nothing sets it over setu today, so at
+# runtime the answer is empty.
+fn comp_agent_windows(c): i64 {
+    var out = vec_new();
+    var v = load64(c + C_WINDOWS);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        var win = vec_get(v, i);
+        if (win_is_agent(win) != 0) { vec_push(out, win); }
+        i = i + 1;
+    }
+    return out;
+}
+
+# comp_workspace_context(c, ws_id) -> its CtxType, or -1 for an invalid id (parity:
+# get_workspace_context, compositor.rs:984-997, which errs).
+fn comp_workspace_context(c, ws_id): i64 {
+    var ws = comp_get_workspace(c, ws_id);
+    if (ws == 0) { return 0 - 1; }
+    return wsp_context(ws);
+}
+
+# comp_set_workspace_context(c, ws_id, ctx) -> 0 (parity: set_workspace_context, compositor.rs:998-1010).
+# ⚠ An invalid workspace id is NOT an error: Rust returns Ok and changes nothing, and so does this.
+# ⚠ A ctx that is no CtxType is refused (-1) and stored nowhere — no Rust value could be one, and storing
+# it would hand the getter a context outside its range.
+fn comp_set_workspace_context(c, ws_id, ctx): i64 {
+    if (ctx < CtxType.CTX_DEVELOPMENT) { return 0 - 1; }
+    if (ctx > CtxType.CTX_USER) { return 0 - 1; }
+    var ws = comp_get_workspace(c, ws_id);
+    if (ws != 0) { store64(ws + WSP_CONTEXT, ctx); }
     return 0;
 }
 
@@ -257,6 +321,59 @@ fn comp_find_by_id(c, id): i64 {
         i = i + 1;
     }
     return 0 - 1;
+}
+
+# comp_set_window_state(c, id, state, bound_w, content_h) -> 0 / -1 (parity: set_window_state,
+# compositor.rs:352-409). -1 when the id is absent (Rust's WindowNotFound) or the state is one the port
+# does not carry; the window is then untouched.
+# ⭐ The state DRIVES GEOMETRY, through the same helpers F5/F6 use, because a flag nothing acts on is not a
+# state (window.cyr's maximize note). `bound_w` / `content_h` are the usable extent the caller already
+# threads to the mover — the compositor holds no output rect of its own (Rust's `current_output`):
+#   - MAXIMIZED fills it (`win_maximize`). Rust filled the whole output; here the content stops
+#     TITLEBAR_H short, because chrome sits above the content (window.cyr's vertical convention).
+#   - NORMAL puts a maximized window back at its restore rect (`win_unmaximize`); Rust kept the
+#     maximized geometry. A minimized window comes back first, to the state it was minimized from.
+#   - MINIMIZED keeps its state to return to (`win_minimize`), and a focused window hands focus to the
+#     topmost visible one: a minimized window never holds focus (`comp_focus`). Rust left focus alone.
+# ⛔ FULLSCREEN and FLOATING are refused. Fullscreen is a client state request setu owes (ADR 0002), and
+# the floating layer is retired (ADR 0004): accepting either would store a flag nothing reads.
+# ⚠ Every geometry change retires the old rect and tells the client its new size, as `input_apply` does.
+fn comp_set_window_state(c, id, state, bound_w, content_h): i64 {
+    var idx = comp_find_by_id(c, id);
+    if (idx < 0) { return 0 - 1; }
+    var ok = 0;
+    if (state == WinState.WS_NORMAL) { ok = 1; }
+    if (state == WinState.WS_MINIMIZED) { ok = 1; }
+    if (state == WinState.WS_MAXIMIZED) { ok = 1; }
+    if (ok == 0) { return 0 - 1; }
+    var win = comp_get(c, idx);
+    if (state == WinState.WS_MINIMIZED) {
+        if (win_state(win) == WinState.WS_MINIMIZED) { return 0; }
+        comp_retire_add(win_x(win), win_y(win), win_w(win), win_total_h(win));
+        var was_focused = 0;
+        if (comp_focused_id(c) == id) { was_focused = 1; }
+        win_minimize(win);
+        if (was_focused == 1) { comp_focus_topmost_visible(c); }
+        return 0;
+    }
+    # NORMAL or MAXIMIZED: off the minimized state first. A window reappearing where it was is invisible
+    # to the rect-change detector, so its rect is damaged like a vacated one (as in `comp_focus`).
+    if (win_unminimize(win) == 1) { comp_retire_add(win_x(win), win_y(win), win_w(win), win_total_h(win)); }
+    if (state == WinState.WS_MAXIMIZED) {
+        if (win_state(win) == WinState.WS_MAXIMIZED) { return 0; }
+        comp_retire_add(win_x(win), win_y(win), win_w(win), win_total_h(win));
+        win_maximize(win, bound_w, content_h);
+        win_notify_resize(win);
+        return 0;
+    }
+    if (win_state(win) == WinState.WS_MAXIMIZED) {
+        comp_retire_add(win_x(win), win_y(win), win_w(win), win_total_h(win));
+        win_unmaximize(win);
+        win_notify_resize(win);
+    }
+    # A state set by `win_set_state` directly (fullscreen, floating) has no geometry to undo.
+    if (win_state(win) != WinState.WS_NORMAL) { win_set_state(win, WinState.WS_NORMAL); }
+    return 0;
 }
 
 # ⛔⛔ THE RETIRED RECT — where a CLOSED window's pixels are remembered after the window is gone.

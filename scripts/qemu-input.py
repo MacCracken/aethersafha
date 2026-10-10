@@ -9,6 +9,8 @@ usage: qemu-input.py <bindir> <outdir> <scenario>
   scenario `hostile` — a hostile_client (stride 4) and one focus_client; one screendump
   scenario `sigint`  — two focus_clients, then SIGINT from PID 1 instead of Ctrl+Q: the teardown must run
     (0.17.1 fails it: KILLED by signal 2; with the child's mask reset removed, the clients read SigBlk 2)
+  scenario `drag`    — two focus_clients and a USB mouse; the focused window is dragged by its titlebar,
+    then pressed on its left edge (0.17.4: pointer routing moved to src/route.cyr)
 Exit: 0 PASS · 1 FAIL · 2 could not run.
 
 ⭐ THE ORACLES ARE OUTSIDE THE COMPOSITOR. QEMU's `screendump` reads the emulated VGA device, and each
@@ -28,6 +30,10 @@ KERNEL = os.environ.get("AE_QEMU_KERNEL", "/boot/vmlinuz-linux")
 OVMF = os.environ.get("AE_QEMU_OVMF", "/usr/share/edk2/x64/OVMF.4m.fd")
 BRIGHT, DIM = b"\x00\xff\x00", b"\x00\x30\x00"
 PANEL_ROWS = 40          # the shell panel's gauges change on their own; never judge pixels up there
+DRAG_DX, DRAG_DY = 120, 70   # the `drag` scenario's titlebar drag: small enough that no clamp is reached
+LEFT_DX = -60            # ...and its drag of the window's left edge, outwards
+HOME = -4000             # a relative move this far left and up parks the cursor on (0, 0): it clamps there
+TITLEBAR_H = 30          # src/window.cyr: the titlebar is the rows ABOVE a window's content rect
 
 
 def cpio_newc(entries):
@@ -89,6 +95,16 @@ class QMP:
         # ⭐ One send-key with several qcodes presses them TOGETHER: a chord through the guest's evdev.
         self.cmd("send-key", keys=[{"type": "qcode", "data": k} for k in keys], **{"hold-time": 250})
 
+    # ⭐ The pointer goes through QEMU's own input layer too (`input-send-event`, as qemu-sendkey.py does):
+    # the emulated USB mouse -> the guest's evdev -> bhumi. ⚠ It is RELATIVE, so a position is reached by
+    # parking the cursor at (0, 0) first (`HOME`) and moving from there.
+    def rel(self, dx, dy):
+        self.cmd("input-send-event", events=[{"type": "rel", "data": {"axis": "x", "value": dx}},
+                                             {"type": "rel", "data": {"axis": "y", "value": dy}}])
+
+    def btn(self, down):
+        self.cmd("input-send-event", events=[{"type": "btn", "data": {"down": down, "button": "left"}}])
+
     def dump(self, path):
         if os.path.exists(path):
             os.remove(path)
@@ -132,6 +148,16 @@ def pixels_of(img, rgb):
             start = k + 1
 
 
+def bbox(img, rgb):
+    """(x0, y0, x1, y1), inclusive, of the pixels of this colour below the panel; None when there are none."""
+    w = img[0]
+    pts = pixels_of(img, rgb)
+    if not pts:
+        return None
+    xs, ys = [i % w for i in pts], [i // w for i in pts]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
 def changed(a, b):
     """Pixel indices (below the panel) whose colour differs between two shots of one size."""
     w, h, pa = a
@@ -144,6 +170,20 @@ def same_fraction(a, b, region):
         return 0.0
     pa, pb = a[2], b[2]
     return sum(1 for i in region if pa[3 * i:3 * i + 3] == pb[3 * i:3 * i + 3]) / len(region)
+
+
+def same_shifted(a, b, x0, y0, w, h, dx):
+    """The fraction of the w x h rect at (x0, y0) in shot `a` that reappears in shot `b` dx columns over."""
+    wa, ha, pa = a
+    pb = b[2]
+    n = same = 0
+    for y in range(y0, y0 + h):
+        for x in range(x0, x0 + w):
+            if 0 <= x < wa and 0 <= x + dx < wa and 0 <= y < ha:
+                n += 1
+                i, j = 3 * (y * wa + x), 3 * (y * wa + x + dx)
+                same += pa[i:i + 3] == pb[j:j + 3]
+    return same / n if n else 0.0
 
 
 def montage(shots, path):
@@ -166,7 +206,7 @@ def main():
     serial = os.path.join(outdir, "serial.log")
     if os.path.exists(serial):
         os.remove(serial)
-    if scenario == "focus":
+    if scenario in ("focus", "drag"):
         gargs = "--frames 0 --client /focus_client --client /focus_client"
     elif scenario == "hostile":
         gargs = "--frames 0 --client /hostile_client --client /focus_client"
@@ -185,6 +225,10 @@ def main():
     qmp_path = tempfile.mktemp(prefix="ae-input-qmp.")
     sig_path = tempfile.mktemp(prefix="ae-input-sig.")
     extra = ["-serial", "unix:%s,server,nowait" % sig_path] if scenario == "sigint" else []
+    if scenario == "drag":
+        # ⚠ A USB mouse, because the guest kernel builds usbhid in and psmouse as a module the initramfs
+        # does not carry. Only this scenario gets one, so the others boot exactly as they always have.
+        extra = ["-device", "qemu-xhci,id=xhci", "-device", "usb-mouse,bus=xhci.0"]
     q = subprocess.Popen([
         "qemu-system-x86_64", "-enable-kvm", "-m", "512", "-smp", "2", "-bios", OVMF,
         "-kernel", KERNEL, "-initrd", ird,
@@ -214,6 +258,24 @@ def main():
             marks.append(len(log()))
             shots.append(p if ok else None)
 
+        def gesture(x, y, dx, dy):
+            # From the parked cursor to (x, y): press, move by (dx, dy), release, and park it again.
+            # ⚠ A pause after each, so no two land in one bhumi poll: a press folded into the same poll as
+            # the motion after it is a press at the wrong place.
+            for step in ((qmp.rel, x, y), (qmp.btn, True), (qmp.rel, dx, dy), (qmp.btn, False),
+                         (qmp.rel, HOME, HOME)):
+                try:
+                    step[0](*step[1:])
+                except OSError:
+                    pass
+                time.sleep(0.8)
+
+        if scenario == "drag":
+            try:
+                qmp.rel(HOME, HOME)                  # park the cursor at (0, 0), clear of every window
+            except OSError:
+                pass
+            time.sleep(1.0)
         steps = [("1-start", None)]
         if scenario == "focus":
             steps += [("2-ctrl-tab", ("ctrl", "tab")), ("3-ctrl-f6", ("ctrl", "f6")),
@@ -226,6 +288,17 @@ def main():
                     pass
                 time.sleep(1.5)
             shot(name)
+        if scenario == "drag":
+            # ⭐ AIM FROM THE PICTURE. The focused client's bright border is its content rect, so its
+            # titlebar is the 30 rows above it and its left strip the first columns of it.
+            box = bbox(read_ppm(shots[0]), BRIGHT) if shots[0] else None
+            if box:
+                gesture(box[0] + 60, box[1] - 15, DRAG_DX, DRAG_DY)
+                shot("2-dragged")
+                box2 = bbox(read_ppm(shots[1]), BRIGHT) if shots[1] else None
+                if box2:
+                    gesture(box2[0] + 2, box2[1] + 80, LEFT_DX, 0)
+                    shot("3-left-edge")
         if scenario == "sigint":
             try:
                 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -318,6 +391,34 @@ def main():
                  if l.startswith("qemu_init: ") and "HOLDS A SIGNALFD" in l]
         check("compositor" in holds, "the fd scan sees the compositor's own signalfd (the detector works)")
         check("child" not in holds, "no client inherited the compositor's signalfd")
+    elif scenario == "drag":
+        img = [read_ppm(p) if p else None for p in shots]
+        a = bbox(img[0], BRIGHT) if img and img[0] else None
+        b = bbox(img[1], BRIGHT) if len(img) > 1 and img[1] else None
+        check(a is not None, "start: the focused client is on screen, told it has focus (bright)")
+        want = (a[0] + DRAG_DX, a[1] + DRAG_DY, a[2] + DRAG_DX, a[3] + DRAG_DY) if a else None
+        check(b is not None and b == want,
+              "a titlebar drag moved the window by exactly the pointer's travel, +%d +%d (%s -> %s)"
+              % (DRAG_DX, DRAG_DY, a, b))
+        flat = full.replace("\r", "")
+        check("drag started -- a titlebar press was caught" in flat, "the compositor caught the titlebar press")
+        check("drag released -- the window stopped, frames held:" in flat, "  ...and the release ended the drag")
+        check("a grip press was caught, region:\n9\n" in flat,
+              "a press on the window's left edge began a LEFT resize (region 9, DECO_RESIZE_L)")
+        # ⭐ JUDGED ON THE COMPOSITOR'S OWN CHROME, not the client: focus_client never re-attaches at the new
+        # size, so its surface says nothing about the window's. The titlebar does — its buttons sit at the
+        # RIGHT edge and its title at the LEFT, and both are in the TITLEBAR_H rows above the content.
+        c = img[2] if len(img) > 2 else None
+        if b and c:
+            held = same_shifted(img[1], c, b[2] - 70, b[1] - TITLEBAR_H, 71, TITLEBAR_H, 0)
+            moved = same_shifted(img[1], c, b[0], b[1] - TITLEBAR_H, 100, TITLEBAR_H, LEFT_DX)
+            check(held >= 0.99, "the left-edge drag held the RIGHT edge: the titlebar buttons did not move "
+                  "(%.0f%% unchanged)" % (100 * held))
+            check(moved >= 0.99, "  ...and moved the LEFT edge with the pointer: the title is %d px further "
+                  "left (%.0f%% match)" % (-LEFT_DX, 100 * moved))
+        else:
+            check(False, "every screendump was taken (the guest died mid-run, or the window was not found)")
+        montage([p for p in shots if p], os.path.join(outdir, "montage.png"))
     else:
         check("HOSTILE attach" in full, "the hostile client ran (stride 4 on a 240-wide surface)")
         check("surface refused" in full, "the compositor refused its surface")
@@ -326,7 +427,8 @@ def main():
     print("  --- serial (clients and verdict lines) ---")
     for line in full.splitlines():
         if any(k in line for k in ("focus_client", "presented surface", "surface refused",
-                                   "qemu_init: aethersafha", "KILLED", "SIGINT", "SigBlk", "SIGNALFD")):
+                                   "qemu_init: aethersafha", "KILLED", "SIGINT", "SigBlk", "SIGNALFD",
+                                   "drag started", "drag released", "resize started", "pointer ")):
             print("    " + line.rstrip())
     print("  %s %s (screendumps and montage in %s)" % (
         "PASS" if not failures else "FAIL", scenario, outdir))

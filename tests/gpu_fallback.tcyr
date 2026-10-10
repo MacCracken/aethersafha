@@ -111,6 +111,110 @@ fn gf_gt(a, b): i64 {
     return 0;
 }
 
+# ⭐ A GPU FRAME'S CHROME AND TEXT, REPLAYED ON THE HOST — `ae_gpu_emit_chrome_range` and `ae_gpu_emit_text_range`
+# are agnos-only. Every queued rect in queue order, painted as the kernel paints it: an opaque one as `#88` (its
+# colour, verbatim), a translucent one as op 0x02 — the colour made opaque, at a constant coverage — through
+# `rend_blend`, that op's per-pixel form (tests/render.tcyr checks it against a model of blend_cov.s). Then every
+# text run in its own colour, as op 0x03 paints it. -> the number of rects replayed.
+fn gf_emit_frame(fb): i64 {
+    var i = 0;
+    while (i < ae_rect_count()) {
+        var a = ae_rect_get_a(i);
+        var col = ae_rect_get_col(i);
+        var y = ae_rect_get_y(i);
+        while (y < ae_rect_get_y(i) + ae_rect_get_h(i)) {
+            var x = ae_rect_get_x(i);
+            while (x < ae_rect_get_x(i) + ae_rect_get_w(i)) {
+                if (a < 255) { bhumi_fb_set(fb, x, y, rend_blend(bhumi_fb_get(fb, x, y), col, a)); }
+                else { bhumi_fb_set(fb, x, y, col); }
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+        i = i + 1;
+    }
+    var cap = ae_text_bytes(AE_TEXT_CHARS);
+    var slot = alloc(cap);
+    var t = 0;
+    while (t < ae_text_count()) {
+        var len = ae_text_run_len(t);
+        var w = ae_text_pack_1bpp(slot, ae_text_run_ptr(t), len);
+        var stride = ae_text_stride(len);
+        var gy = 0;
+        while (gy < FONT_H) {
+            var gx = 0;
+            while (gx < w) {
+                if ((load8(slot + gy * stride + gx / 8) & (1 << (7 - (gx % 8)))) != 0) {
+                    bhumi_fb_set(fb, ae_text_run_x(t) + gx, ae_text_run_y(t) + gy, ae_text_run_col(t));
+                }
+                gx = gx + 1;
+            }
+            gy = gy + 1;
+        }
+        t = t + 1;
+    }
+    return ae_rect_count();
+}
+
+# Render `win` once on a CPU frame into `fbc` and once on a GPU frame into `fbg` (queued, then replayed), both from
+# the same backdrop. -> the pixels that differ.
+fn gf_window_diff(fbc, fbg, win, focused): i64 {
+    var BD = 0x00101018;
+    bhumi_fb_clear(fbc, BD);
+    bhumi_fb_clear(fbg, BD);
+    ae_gpu_frame_ok = 0;
+    render_window(fbc, win, focused);
+    ae_gpu_frame_ok = 1;
+    ae_text_gpu_ok = 1;
+    ae_cursor_gpu_ok = 1;
+    ae_chrome_gpu_ok = 1;
+    ae_gpu_alpha_chrome = 0;
+    ae_rect_reset();
+    ae_text_reset();
+    render_window(fbg, win, focused);
+    gf_emit_frame(fbg);
+    ae_gpu_frame_ok = 0;
+    var diff = 0;
+    var y = 0;
+    while (y < bhumi_fb_height(fbc)) {
+        var x = 0;
+        while (x < bhumi_fb_width(fbc)) {
+            if (bhumi_fb_get(fbc, x, y) != bhumi_fb_get(fbg, x, y)) { diff = diff + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return diff;
+}
+
+# Queued rects of colour `c`, and (through *area) the pixels they cover.
+fn gf_rects_of(c, area): i64 {
+    var n = 0;
+    var px = 0;
+    var i = 0;
+    while (i < ae_rect_count()) {
+        if (ae_rect_get_col(i) == c) { n = n + 1; px = px + ae_rect_get_w(i) * ae_rect_get_h(i); }
+        i = i + 1;
+    }
+    store64(area, px);
+    return n;
+}
+
+# Pixels of colour `c` anywhere on `fb`.
+fn gf_count(fb, c): i64 {
+    var n = 0;
+    var y = 0;
+    while (y < bhumi_fb_height(fb)) {
+        var x = 0;
+        while (x < bhumi_fb_width(fb)) {
+            if (bhumi_fb_get(fb, x, y) == c) { n = n + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return n;
+}
+
 # Fill a w*h XRGB8888 client surface with one word, the way a setu client would.
 fn seed_surface(w, h, word): i64 {
     var px = alloc(w * h * 4);
@@ -428,6 +532,63 @@ fn main() {
     assert_eq(ae_text_bytes(ae_text_run_len(0)), ae_text_bytes(AE_TEXT_CHARS), "  which fills the glyph slot exactly");
     assert_eq(gf_gt(load64(gtink), 1000), 1, "  (63 'é' of ink)");
     ae_text_reset();
+
+    # ⭐⭐ 0.17.4 — A CPU FRAME AND A GPU FRAME DRAW THE SAME WINDOW CHROME, BORDER INCLUDED, WORD FOR WORD. The GPU
+    # side is the queue `render_window` fills, replayed as the kernel paints it (`gf_emit_frame`). Opaque and
+    # translucent windows, and windows the screen cuts on either side — the ring's clip has to agree too.
+    test_group("gpu — a CPU frame and a GPU frame draw the same chrome and border, word for word");
+    var LINE = ae_bhumi(rupa_theme_line(rupa_theme_active()));
+    var bfc = bhumi_fb_new(400, 240);
+    var bfg = bhumi_fb_new(400, 240);
+    var barea = alloc(8);
+    var bw1 = win_new(81, 30, 40, 150, 90, "Ünïcödé border");
+    assert_eq(gf_window_diff(bfc, bfg, bw1, 1), 0, "an opaque focused window: no pixel differs");
+    assert_eq(gf_rects_of(LINE, barea), 4, "  (the GPU frame queued its ring as 4 rects)");
+    assert_eq(load64(barea), 2 * 152 + 2 * 122 - 4, "  (covering its 544 ring pixels once)");
+    assert_eq(gf_count(bfc, LINE), 544, "  (and the CPU frame drew those 544 in the line colour)");
+    win_set_opacity(bw1, 128);
+    assert_eq(gf_window_diff(bfc, bfg, bw1, 0), 0, "a translucent window at 128: no pixel differs — op 0x02 on both");
+    assert_eq(gf_rects_of(LINE, barea), 4, "  (its ring queued at the window's alpha)");
+    assert_eq(gf_count(bfc, LINE), 0, "  (and blended: no ring pixel is the bare line colour)");
+    var bw2 = win_new(82, 300, 60, 150, 90, "past the right edge");
+    win_set_opacity(bw2, 77);
+    assert_eq(gf_window_diff(bfc, bfg, bw2, 1), 0, "a translucent window past the RIGHT edge: no pixel differs");
+    assert_eq(gf_rects_of(LINE, barea), 3, "  (its right side is off screen and queued nothing)");
+    var bw3 = win_new(83, 0 - 20, 30, 150, 90, "past the left edge");
+    assert_eq(gf_window_diff(bfc, bfg, bw3, 0), 0, "an opaque window past the LEFT edge: no pixel differs");
+    assert_eq(gf_rects_of(LINE, barea), 3, "  (its left side is off screen and queued nothing)");
+    # ⚠ At y = 0, not past it: a caption row above the screen is refused by the glyph queue and drawn on the CPU
+    # instead (render_title's note), which a replayed GPU frame would then paint the titlebar over.
+    var bw4 = win_new(84, 10, 0, 150, 90, "at the top");
+    assert_eq(gf_window_diff(bfc, bfg, bw4, 1), 0, "a window at the TOP edge: no pixel differs");
+    assert_eq(gf_rects_of(LINE, barea), 3, "  (its top side is off screen and queued nothing)");
+    ae_rect_reset();
+    ae_text_reset();
+
+    # ⭐ THE INVARIANT AT THE TOP OF THIS FILE, FOR A PREMULTIPLIED CLIENT. A CPU frame now BLENDS a premultiplied
+    # surface (`#92` op 0x01, as iron does) instead of copying it — and an opaque word under op 0x01 IS the word, so
+    # the client's word still reaches its coordinates exactly. Under a window opacity it must not: op 0x06 blends it.
+    test_group("gpu fallback — a premultiplied surface's opaque words reach the framebuffer exactly");
+    var fb6 = bhumi_fb_new(200, 200);
+    bhumi_fb_clear(fb6, 0);
+    var comp6 = comp_new();
+    var wpm = comp_create_window(comp6, 10, 10, 60, 60, "P");
+    var popq = Sentinel.SENT_A | 0xFF000000;
+    win_set_pix(wpm, seed_surface(60, 60, popq));
+    win_set_premul(wpm, 1);
+    ae_gpu_mode = 1;
+    ae_gpu_frame_plan(comp6, fb6);
+    render_window(fb6, wpm, 1);
+    assert_eq(bhumi_fb_get(fb6, 10 + 30, 10 + TITLEBAR_H + 30), popq, "premultiplied, opaque words: the client's word, exactly");
+    assert_eq(bhumi_fb_get(fb6, 10, 10 + TITLEBAR_H), popq, "  at the body's first pixel too");
+    win_set_opacity(wpm, 128);
+    bhumi_fb_clear(fb6, 0);
+    render_window(fb6, wpm, 1);
+    var under6 = rend_blend(0, ae_bhumi(rupa_theme_widget(rupa_theme_active())), 128);
+    assert_eq(bhumi_fb_get(fb6, 40, 70), rend_blend_alpha_px(popq, under6, 128),
+      "at window opacity 128 the word is op 0x06's blend over the translucent body, as on iron");
+    assert_eq(gf_gt(gf_count(fb6, popq), 0), 0, "  so no pixel carries the bare word");
+    ae_gpu_mode = 0;
 
     # ⛔⛔ THIS FILE HAD NO `assert_summary()` AND WAS THEREFORE NOT A GATE AT ALL.
     # It was the only suite in tests/ missing it. Every assertion above ran, a failure printed its

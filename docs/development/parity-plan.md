@@ -19,9 +19,9 @@ wiring it into the running desktop is new work and is not part of the deletion g
 
 | Rust | Lines / tests | Cyrius home | At runtime | Verdict | Open before CLOSED | Bite |
 |---|---|---|---|---|---|---|
-| `compositor.rs` | 2565 / 99 | `compositor`, `window`, `geom`, `input`, routing in `main` | driven | PORT | routing + drag/resize out of `main.cyr` with its 9 tests; workspaces (4 defaults, queries, context setter); L / BL resize grips; lifecycle and workspace tests. (0.17.1: close updates `WSP_ACTIVE`; close and move drop every entry, as `retain` did) | .4 .5 |
+| `compositor.rs` | 2565 / 99 | `compositor`, `window`, `geom`, `input`, `route` | driven | ✅ **CLOSED 0.17.4** — routing and drag / resize in `src/route.cyr` with Rust's 9 routing tests, four default workspaces with the queries and context setter, the L / BL grips, the lifecycle / state / workspace / focus tests; divergences in ADR 0003 | — | .1 .4 |
 | `main.rs` | 630 / 26 | `main`, `desktop`, `sysprobe`, `flags`, `sigint` | driven | ✅ **CLOSED 0.17.2** — the strict flag parser with `--secure` / `--help` / `--version`, the welcome notice, the 5 s tick with `UserPresent`, cpu / mem / disk as Rust read them, SIGINT through the Ctrl+Q teardown; divergences in ADR 0003 | — | .2 |
-| `renderer.rs` | 1656 / 49 | `render`, `window`, `desktop`, `shell_render`, `wallpaper`, `theme`, `cursor` | driven | PORT | CPU premultiplied blend + opacity (CPU frames differ from iron today); border outline; tests for overlap and minimized-not-drawn. (0.17.1: title truncation; the dead asserts run. 0.17.2: UTF-8 text, text width in scalars, the `…` glyph) | .4 .5 |
+| `renderer.rs` | 1656 / 49 | `render`, `window`, `desktop`, `shell_render`, `wallpaper`, `theme`, `cursor` | driven | ✅ **CLOSED 0.17.4** — the CPU blend is the kernel's `#92` arithmetic (CPU and GPU frames word-identical), window opacity, the border, the overlap / z-order / minimized tests. `hit-test fullscreen` returns with fullscreen (ADR 0002). (0.17.1: title truncation. 0.17.2: UTF-8 text) | — | .1 .2 .4 |
 | `shell.rs` | 1396 / 60 | `shell`, `shell_render` | panel + cards painted | PORT | 6 missing + 4 partial tests; `toggle_panel` honoured. (0.17.1: the registry's `terminal` entry; launch and search tests. 0.17.2: the net dot reads UNKNOWN, the agent count is fed, cards cut to their width) | .5 |
 | `accessibility.rs` | 729 / 30 | `accessibility` | mirrored live | ✅ **CLOSED 0.17.2** — a node and an announcement on create / close, focus sync, an idempotent reconcile, the 3 tests; divergences in ADR 0003 | — | .2 |
 | `ai_features.rs` | 1707 / 86 | `ai_features` | constructed only | PORT | 13 tests. (0.17.1: the `"terminal"` context match; stable suggestion sort; null-checked hour. 0.17.3: `poll_agents` against daimon 2.4.3, feeding the HUD and the panel gauge on Linux) | .5 |
@@ -38,7 +38,7 @@ wiring it into the running desktop is new work and is not part of the deletion g
 | `wayland/*` | 4763 / 181 | setu | — | ✅ **CLOSED 0.17.0** — ADR 0001 + ADR 0002 (what is dropped, what is owed a native design) | — | .0 |
 | `xwayland.rs` | 823 / 34 | mehman, `foreign` | — | ✅ **CLOSED 0.17.0** — ADR 0001 + ADR 0002 (what mehman owes) | — | .0 |
 | `system_tests.rs` | 1477 / 40 | — | tests | re-express | 24 covered · 13 partly · 3 not | .5 |
-| `tests/*.rs` | 422 / 29 | — | tests | re-express | compositor 7 / 13 covered, renderer 6 / 12, security 4 / 4 | .5 |
+| `tests/*.rs` | 422 / 29 | — | tests | re-express | compositor 13 / 13 covered (0.17.4), renderer 6 / 12, security 4 / 4 | .5 |
 | benches, `bench-history.csv`, `benchmarks.md` | 378 / — | `tests/aethersafha.bcyr` | — | PRESERVE the CSV | the CSV moves to `docs/benchmarks.md` ("machine unknown, not a target"); Cyrius benches for the same series | .5 |
 | `lib.rs`, `examples/`, Cargo / Makefile / deny / codecov / toolchain | — | — | — | OBSOLETE | map every `pub use` in `lib.rs:21-88` to its Cyrius home or its ADR, then drop | .6 |
 
@@ -62,24 +62,8 @@ for the suffix; *partly* means a `.tcyr` suite covers the behaviour but not ever
 made. Tests that only check enum variants, Debug or Clone output,
 or error text close under ADR 0004 and are not listed.
 
-- **compositor.rs** —
-  lifecycle: `close_nonexistent_window`, `close_window_double_close_fails`,
-  `close_middle_window_preserves_others`, `create_multiple_windows_tracking`;
-  state: `set_window_state_nonexistent`, `set_all_window_states`, `window_state_transitions_full_cycle`;
-  workspaces: `has_4_default_workspaces`, `move_nonexistent_window`, `move_window_to_same_workspace`,
-  `move_window_to_last_workspace`, the four `get_active_windows*`, `windows_across_workspaces`,
-  `workspace_active_window_after_multiple_creates`, and the four workspace-context tests;
-  focus: `close_updates_focus`, `cascade_placement`, `with_resolution`;
-  routing, nine tests: the `route_input_*` set, `drag_workflow`, `end_interactive_clears_state`,
-  `mouse_move_no_drag`, `right_click_on_window`.
-- **tests/compositor_integration.rs** — `close_nonexistent_window_fails`,
-  `workspace_switching_hides_windows`, `closing_focused_window_moves_focus`, `custom_resolution`,
-  `many_windows_cascade`; partly `window_appears_in_active_workspace`, `window_state_transitions`,
-  `input_routing_click_on_empty_is_none`.
-- **renderer.rs** — `blend_semi_transparent` (input rule changes with the CPU premultiplied blend),
-  framebuffer `new` / `out_of_bounds`, `draw_rect_outline`, hit-test
-  `fullscreen` (returns with fullscreen, ADR 0002) and `resize_edge_variants`, `overlapping_surfaces`,
-  `z_order`. Damage `flush` / `region_count` / `has_damage` close with the region list (ADR 0003).
+- **renderer.rs** — hit-test `fullscreen` returns with fullscreen (ADR 0002). Damage `flush` /
+  `region_count` / `has_damage` close with the region list (ADR 0003).
 - **ai_features.rs** — `update_context_command_executed`, `dismiss_nonexistent_suggestion`,
   `unregister_nonexistent_agent_no_panic`, `desktop_context_equality`; partly
   `ai_suggestion_custom`, `resource_metrics`, the three `analyze_context*`,

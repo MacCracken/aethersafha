@@ -5,6 +5,80 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.17.4] — 2026-10-10 — compositor and renderer depth
+
+> The arc's fifth bite (roadmap § 0.17.x). Pointer routing leaves the frame loop for a module a test can
+> drive, workspaces and window state work as in Rust, and a CPU frame now blends exactly as the GPU does.
+> compositor.rs and renderer.rs close in the parity plan. Each change has tests that fail when it is
+> reverted. The commit, the tag and the push are the operator's.
+
+### Changed — pointer routing lives in `src/route.cyr`
+
+- **The module.** main.cyr's pointer handling (~330 lines) moved into a module that takes bhumi events,
+  a compositor and the screen size. It returns Rust-shaped outcomes such as `RA_BEGIN_DRAG`,
+  `RA_CLIENT_CLICK` and `RA_END_INTERACTIVE`. main.cyr keeps the plumbing, every log line and the setu
+  forwarding. The chrome-modifier latch moved there too, so the Super key (SK1) has one place to extend.
+- **Anchored gestures.** A drag or resize is anchored at the press, as Rust's `drag_state` and
+  `resize_state` were. An edge pushed into the minimum size or the screen edge no longer trails the
+  pointer when it comes back.
+- **Releases and grips.** The release of a press the compositor took (title bar, buttons, a grip) goes
+  to no client. This also fixes a close-button release reaching the window underneath a frame later. A
+  grip press is no longer forwarded to the client, matching Rust.
+- **Left and bottom-left grips** (Rust reached both). The right edge stays fixed at the 120×60 floor,
+  where Rust's window slid.
+- **Tests.** Ported: Rust's nine routing tests, `resize_window`, `resize_enforces_minimum` and
+  `resize_edge_variants` (`tests/route.tcyr`).
+- **`qemu-linux-input.sh` gains a `drag` scenario** with a USB mouse in the guest. A titlebar drag must
+  move the window by exactly the pointer's travel, and a left-edge drag must keep the title-bar buttons
+  where they are. 0.17.3 fails the left-edge checks.
+
+### Changed — workspaces and window state as in Rust
+
+- **Four default workspaces**, "Workspace 1" to "Workspace 4", replace the single "Main".
+- **The queries and setter:** `comp_active_windows`, `comp_agent_windows`, and the workspace context
+  getter and setter with Rust's error behaviour.
+- **`comp_set_window_state`** with the port's geometry rules (ADR 0003).
+- Ported (`tests/compositor.tcyr`): every compositor.rs lifecycle, state, workspace and focus test,
+  `tests/compositor_integration.rs`, and the edge cases of `examples/headless_compositor.rs`.
+- Nothing at runtime changes: every window still lands in workspace 0. Switching workspaces at runtime
+  is Super-key work.
+
+### Changed — a CPU frame blends exactly as a GPU frame does
+
+- **The kernel's arithmetic.** The CPU blend is now the agnos kernel's `#92` math: op 0x01 for
+  premultiplied surfaces, op 0x06 with window opacity, op 0x02 for alpha chrome. That includes the
+  shader's f32 steps and ties to even. So a QEMU or Linux frame is word-identical to an iron frame of
+  the same scene. Before, the CPU path used a straight-colour blend, and the two differed.
+- **Window opacity** (`--opacity`) applies on both frame kinds. Rust stored opacity and never read it.
+- **Windows get a border:** Rust's 1 px outline, in rupa's `line` token, drawn one pixel outside the
+  window so nothing inside moves. It is drawn on CPU frames and GPU frames alike.
+- **The GPU chrome queue grows from 256 to 768 rects.** The border took a window from about 6 rects to
+  about 10, and at 256 the queue would have overflowed at about 24 windows, losing chrome on a GPU frame.
+  A new test ties the size to what a window enqueues times the 64-window mark table, and it fails at 256.
+- **Tests.** Ported: `blend_semi_transparent`, framebuffer `new` / `out_of_bounds`, `draw_rect_outline`,
+  `overlapping_surfaces`, `z_order`, and a minimized window not drawn. The CPU blend is checked against
+  fixtures computed from the kernel's formula.
+
+### Docs
+
+- ADR 0003 gains entries for pointer routing, workspaces and window state, the kernel-exact blend, window
+  opacity and the border.
+- `parity-plan.md`: compositor.rs and renderer.rs are CLOSED. `roadmap.md`: 0.17.4 is shipped, and D13
+  records a review finding: a keyboard chord that changes a window mid-gesture is undone by the next
+  motion.
+
+### Verified
+
+- **Host 4,273,424 B** (sha256 `f8c58402…`) · **`--agnos` 4,227,896 B** (sha256 `d7d2c596…`).
+- **31 / 31 suites, 4,088 assertions, 0 failed** (0.17.3: 29 / 3,486). No compiler warning points at `src/`.
+- `scripts/qemu-linux-input.sh` → PASS for focus, hostile, sigint and the new drag, on this binary (same
+  hash). The drag screendumps show the window moved by the pointer's travel, the left edge pulled out 60 px
+  with the title-bar buttons in place, and the 1 px border round every window.
+- `check-dep-tags.sh` → 7 deps clean · `cyrius deps --verify` → 83 verified · CI's format check clean ·
+  reference coverage 66% (824 of 1,235 functions), so CI's floor stays at 66.
+- ⚠ Not run on iron. The premultiplied surface path (op 0x01 / 0x06) is verified by unit tests only: the
+  harness's `focus_client` surfaces are not premultiplied.
+
 ## [0.17.3] — 2026-10-10 — the stubs become real
 
 > The arc's fourth bite (roadmap § 0.17.x). Every remaining stub that stood in for a Rust effect now does

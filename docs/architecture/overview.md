@@ -14,6 +14,8 @@ aethersafha
 ├── window.cyr           — window model + state, the restore rect, the client buffer's extent
 ├── compositor.cyr       — window stack, focus (raise-on-focus), workspaces, CRUD, secure mode
 ├── input.cyr            — bhumi HID → compositor actions: the Ctrl-chord window keys
+├── route.cyr            — pointer routing and the drag / resize gesture (Rust's route_input),
+│                           and the chrome-modifier latch
 ├── render.cyr           — CPU renderer over the bhumi framebuffer: blend, the damage band,
 │                           decorations, bitmap text (kashi), the GPU glyph queue
 ├── utf8.cyr             — UTF-8 decoding for text (Unicode §3.9 maximal subparts → U+FFFD)

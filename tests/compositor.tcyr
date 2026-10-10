@@ -1,0 +1,450 @@
+# aethersafha — compositor lifecycle, state, workspace and focus tests.
+# Parity: rust-old/src/compositor.rs tests (:1145-2310), rust-old/tests/compositor_integration.rs, and the
+# lifecycle of rust-old/examples/headless_compositor.rs — re-expressed under ADR 0003's mappings (i64 ids
+# from 1, -1 for Err / None, getters hand out live windows). Each group names the Rust test it ports.
+# Stdlib + [deps.*] auto-included via cyrius.cyml.
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+
+# 1 when `win` is in vec `v` (a vec of *Window).
+fn t_has_win(v, win): i64 {
+    if (vec_find(v, win) >= 0) { return 1; }
+    return 0;
+}
+# 1 when workspace `ws_id` of `c` lists window id `id`.
+fn t_ws_has(c, ws_id, id): i64 {
+    var ws = comp_get_workspace(c, ws_id);
+    if (ws == 0) { return 0; }   # no such workspace: an assertion failure, not a crash
+    if (vec_find(wsp_windows(ws), id) >= 0) { return 1; }
+    return 0;
+}
+
+fn t_lifecycle(): i64 {
+    # compositor.rs test_compositor_close_nonexistent_window (:1252) +
+    # compositor_integration.rs close_nonexistent_window_fails
+    test_group("compositor — lifecycle");
+    var c = comp_new();
+    assert_eq(comp_close_window(c, 1), 0 - 1, "close_nonexistent_window: an absent id is refused");
+    var w = comp_create_window(c, 0, 0, 100, 100, "W");
+    assert_eq(comp_close_window(c, 999), 0 - 1, "  ...and an id never minted is refused beside a live one");
+    assert_eq(comp_count(c), 1, "  ...leaving the live window alone");
+
+    # compositor.rs test_compositor_close_window_double_close_fails (:1809)
+    assert_eq(comp_close_window(c, win_id(w)), 0, "close_window_double_close_fails: the first close succeeds");
+    assert_eq(comp_close_window(c, win_id(w)), 0 - 1, "  ...the second is refused");
+    assert_eq(comp_count(c), 0, "  ...and the registry is empty");
+
+    # compositor.rs test_compositor_close_middle_window_preserves_others (:1717)
+    var cm = comp_new();
+    var m1 = comp_create_window(cm, 0, 0, 100, 100, "W1");
+    var m2 = comp_create_window(cm, 0, 0, 100, 100, "W2");
+    var m3 = comp_create_window(cm, 0, 0, 100, 100, "W3");
+    assert_eq(comp_close_window(cm, win_id(m2)), 0, "close_middle_window_preserves_others: close W2");
+    assert_eq(comp_count(cm), 2, "  ...two windows remain");
+    assert_eq(t_has_win(comp_windows(cm), m1), 1, "  ...W1 remains");
+    assert_eq(t_has_win(comp_windows(cm), m3), 1, "  ...W3 remains");
+    assert_eq(comp_find_by_id(cm, win_id(m2)), 0 - 1, "  ...W2 is gone");
+
+    # compositor.rs test_compositor_create_multiple_windows_tracking (:1700): windows 0, 2, 4 are agent.
+    var ct = comp_new();
+    var i = 0;
+    var last = 0;
+    while (i < 5) {
+        last = comp_create_window(ct, 0, 0, 100, 100, "Win");
+        if (i % 2 == 0) { win_set_agent(last, 1); }
+        i = i + 1;
+    }
+    assert_eq(comp_count(ct), 5, "create_multiple_windows_tracking: five windows");
+    assert_eq(vec_len(comp_agent_windows(ct)), 3, "  ...three of them agent-owned");
+    assert_eq(wsp_active(comp_get_workspace(ct, 0)), win_id(last), "  ...the last created is active");
+    return 0;
+}
+
+fn t_state(): i64 {
+    test_group("compositor — window state");
+    var c = comp_new();
+    # compositor.rs test_set_window_state_nonexistent (:1546)
+    assert_eq(comp_set_window_state(c, 42, WinState.WS_MAXIMIZED, 800, 570), 0 - 1,
+        "set_window_state_nonexistent: an absent id is refused");
+
+    # compositor.rs test_compositor_set_window_state (:1259) and test_compositor_set_all_window_states
+    # (:1616). ⚠ Fullscreen (owed by setu, ADR 0002) and Floating (retired, ADR 0004) are refused and
+    # leave the state as it was; the three the port carries each take.
+    var w = comp_create_window(c, 10, 20, 300, 200, "W");
+    var id = win_id(w);
+    assert_eq(comp_set_window_state(c, id, WinState.WS_MINIMIZED, 800, 570), 0, "set_all_window_states: minimize");
+    assert_eq(win_state(w), WinState.WS_MINIMIZED, "  ...state Minimized");
+    assert_eq(comp_set_window_state(c, id, WinState.WS_MAXIMIZED, 800, 570), 0, "  maximize");
+    assert_eq(win_state(w), WinState.WS_MAXIMIZED, "  ...state Maximized");
+    assert_eq(comp_set_window_state(c, id, WinState.WS_FULLSCREEN, 800, 570), 0 - 1, "  fullscreen is refused");
+    assert_eq(win_state(w), WinState.WS_MAXIMIZED, "  ...and the state is unchanged");
+    assert_eq(comp_set_window_state(c, id, WinState.WS_FLOATING, 800, 570), 0 - 1, "  floating is refused");
+    assert_eq(win_state(w), WinState.WS_MAXIMIZED, "  ...and the state is unchanged");
+    assert_eq(comp_set_window_state(c, id, 77, 800, 570), 0 - 1, "  a value that is no WinState is refused");
+    assert_eq(comp_set_window_state(c, id, WinState.WS_NORMAL, 800, 570), 0, "  normal");
+    assert_eq(win_state(w), WinState.WS_NORMAL, "  ...state Normal");
+
+    # compositor.rs test_compositor_window_state_transitions_full_cycle (:1746) +
+    # compositor_integration.rs window_state_transitions (partly): Normal -> Maximized -> Fullscreen ->
+    # Minimized -> Floating -> Normal, with the geometry the port's states drive.
+    var c2 = comp_new();
+    var g = comp_create_window(c2, 10, 20, 300, 200, "G");
+    var gid = win_id(g);
+    comp_set_window_state(c2, gid, WinState.WS_MAXIMIZED, 800, 570);
+    assert_eq(win_x(g), 0, "full_cycle: maximized x 0");
+    assert_eq(win_y(g), 0, "  ...maximized y 0");
+    assert_eq(win_w(g), 800, "  ...maximized fills the bound width");
+    assert_eq(win_h(g), 570, "  ...and the content height");
+    assert_eq(comp_set_window_state(c2, gid, WinState.WS_FULLSCREEN, 800, 570), 0 - 1, "  fullscreen refused");
+    comp_set_window_state(c2, gid, WinState.WS_MINIMIZED, 800, 570);
+    assert_eq(win_state(g), WinState.WS_MINIMIZED, "  ...minimized");
+    assert_eq(comp_focused_id(c2), 0, "  ...a minimized window gives up focus (none left to take it)");
+    assert_eq(comp_set_window_state(c2, gid, WinState.WS_FLOATING, 800, 570), 0 - 1, "  floating refused");
+    assert_eq(win_state(g), WinState.WS_MINIMIZED, "  ...still minimized");
+    comp_set_window_state(c2, gid, WinState.WS_NORMAL, 800, 570);
+    assert_eq(win_state(g), WinState.WS_NORMAL, "  normal: off minimized AND off maximized");
+    assert_eq(win_x(g), 10, "  ...back at the restore x");
+    assert_eq(win_y(g), 20, "  ...restore y");
+    assert_eq(win_w(g), 300, "  ...restore w");
+    assert_eq(win_h(g), 200, "  ...restore h");
+    # Minimizing a maximized window and maximizing it again keeps the restore rect it already had.
+    comp_set_window_state(c2, gid, WinState.WS_MAXIMIZED, 800, 570);
+    comp_set_window_state(c2, gid, WinState.WS_MINIMIZED, 800, 570);
+    comp_set_window_state(c2, gid, WinState.WS_MAXIMIZED, 800, 570);
+    assert_eq(win_state(g), WinState.WS_MAXIMIZED, "  minimized-from-maximized maximizes again");
+    assert_eq(win_restore_w(g), 300, "  ...with the original restore rect, not the maximized one");
+    # A fullscreen flag set directly (no geometry) still returns to Normal.
+    win_set_state(g, WinState.WS_FULLSCREEN);
+    comp_set_window_state(c2, gid, WinState.WS_NORMAL, 800, 570);
+    assert_eq(win_state(g), WinState.WS_NORMAL, "  a directly-set fullscreen flag returns to Normal");
+
+    # Minimize hands focus on; minimizing an unfocused window leaves focus where it is.
+    var c3 = comp_new();
+    var f1 = comp_create_window(c3, 0, 0, 100, 100, "F1");
+    var f2 = comp_create_window(c3, 0, 0, 100, 100, "F2");
+    comp_set_window_state(c3, win_id(f1), WinState.WS_MINIMIZED, 800, 570);
+    assert_eq(comp_focused_id(c3), win_id(f2), "minimizing an unfocused window leaves focus alone");
+    comp_set_window_state(c3, win_id(f2), WinState.WS_MINIMIZED, 800, 570);
+    assert_eq(comp_focused_id(c3), 0, "minimizing the focused one with nothing visible left focuses nothing");
+    comp_set_window_state(c3, win_id(f1), WinState.WS_NORMAL, 800, 570);
+    assert_eq(win_state(f1), WinState.WS_NORMAL, "normal restores a minimized window");
+    assert_eq(comp_focused_id(c3), 0, "  ...without focusing it (Rust's set_window_state never focused)");
+    return 0;
+}
+
+fn t_workspaces(): i64 {
+    test_group("compositor — workspaces");
+    # compositor.rs test_compositor_has_4_default_workspaces (:1564)
+    var c = comp_new();
+    assert_eq(comp_workspace_count(c), 4, "has_4_default_workspaces: four");
+    var i = 0;
+    while (i < 4) {
+        var ws = comp_get_workspace(c, i);
+        assert_eq(wsp_id(ws), i, "  ...id is its index");
+        assert_eq(wsp_context(ws), CtxType.CTX_GENERAL, "  ...context General");
+        assert_eq(wsp_count(ws), 0, "  ...no windows");
+        assert_eq(wsp_active(ws), 0 - 1, "  ...no active window");
+        i = i + 1;
+    }
+    assert_eq(streq(wsp_name(comp_get_workspace(c, 0)), "Workspace 1"), 1, "  ...named Workspace 1");
+    assert_eq(streq(wsp_name(comp_get_workspace(c, 1)), "Workspace 2"), 1, "  ...named Workspace 2");
+    assert_eq(streq(wsp_name(comp_get_workspace(c, 2)), "Workspace 3"), 1, "  ...named Workspace 3");
+    assert_eq(streq(wsp_name(comp_get_workspace(c, 3)), "Workspace 4"), 1, "  ...named Workspace 4");
+    assert_eq(comp_active_workspace(c), 0, "  ...and workspace 0 is active");
+    assert_eq(comp_get_workspace(c, 4), 0, "  ...there is no fifth");
+
+    # compositor.rs test_compositor_switch_workspace (:1272) / _switch_workspace_boundary (:1737)
+    assert_eq(comp_switch_workspace(c, 0), 0, "switch_workspace_boundary: 0 ok");
+    assert_eq(comp_switch_workspace(c, 3), 0, "  ...3 ok");
+    assert_eq(comp_switch_workspace(c, 4), 0 - 1, "  ...4 refused");
+    assert_eq(comp_switch_workspace(c, 100), 0 - 1, "  ...100 refused");
+    assert_eq(comp_active_workspace(c), 3, "  ...a refused switch leaves the active one");
+    comp_switch_workspace(c, 0);
+
+    # compositor.rs test_compositor_window_added_to_active_workspace (:1578) +
+    # compositor_integration.rs window_appears_in_active_workspace (partly)
+    var wa = comp_create_window(c, 0, 0, 100, 100, "W");
+    assert_eq(t_ws_has(c, 0, win_id(wa)), 1, "window_added_to_active_workspace: listed in ws0");
+    assert_eq(wsp_active(comp_get_workspace(c, 0)), win_id(wa), "  ...and active there");
+    var act = comp_active_windows(c);
+    assert_eq(vec_len(act), 1, "window_appears_in_active_workspace: one active window");
+    assert_eq(win_id(vec_get(act, 0)), win_id(wa), "  ...and it is the one created");
+
+    # compositor.rs test_compositor_move_nonexistent_window (:1289)
+    assert_eq(comp_move_window_to_workspace(c, 999, 1), 0 - 1, "move_nonexistent_window: refused");
+
+    # compositor.rs test_compositor_move_window_to_workspace (:1280) / _move_window_removes_from_source (:1636)
+    assert_eq(comp_move_window_to_workspace(c, win_id(wa), 2), 0, "move_window_removes_from_source: move to 2");
+    assert_eq(t_ws_has(c, 0, win_id(wa)), 0, "  ...gone from ws0");
+    assert_eq(t_ws_has(c, 2, win_id(wa)), 1, "  ...listed in ws2");
+
+    # compositor.rs test_compositor_move_window_to_last_workspace (:1784)
+    var c2 = comp_new();
+    var wl = comp_create_window(c2, 0, 0, 100, 100, "W");
+    comp_move_window_to_workspace(c2, win_id(wl), 3);
+    assert_eq(t_ws_has(c2, 3, win_id(wl)), 1, "move_window_to_last_workspace: listed in ws3");
+    assert_eq(wsp_active(comp_get_workspace(c2, 3)), win_id(wl), "  ...and active there");
+
+    # compositor.rs test_compositor_move_window_to_same_workspace (:1771): Rust's comment says the id
+    # "might be duplicated" — `retain` then `push` on one list gives exactly one entry.
+    var c3 = comp_new();
+    var ws_ = comp_create_window(c3, 0, 0, 100, 100, "W");
+    assert_eq(comp_move_window_to_workspace(c3, win_id(ws_), 0), 0, "move_window_to_same_workspace: ok");
+    assert_eq(t_ws_has(c3, 0, win_id(ws_)), 1, "  ...still listed in ws0");
+    assert_eq(wsp_count(comp_get_workspace(c3, 0)), 1, "  ...once");
+
+    # compositor.rs test_compositor_workspace_active_window_after_multiple_creates (:1844)
+    var c4 = comp_new();
+    comp_create_window(c4, 0, 0, 100, 100, "W1");
+    comp_create_window(c4, 0, 0, 100, 100, "W2");
+    var w3 = comp_create_window(c4, 0, 0, 100, 100, "W3");
+    assert_eq(wsp_active(comp_get_workspace(c4, 0)), win_id(w3),
+        "workspace_active_window_after_multiple_creates: the last created");
+    return 0;
+}
+
+fn t_active_windows(): i64 {
+    test_group("compositor — active and agent window queries");
+    # compositor.rs test_compositor_get_active_windows (:1328)
+    var c = comp_new();
+    comp_create_window(c, 0, 0, 100, 100, "W1");
+    comp_create_window(c, 0, 0, 100, 100, "W2");
+    assert_eq(vec_len(comp_active_windows(c)), 2, "get_active_windows: both windows");
+
+    # compositor.rs test_compositor_get_active_windows_after_workspace_switch (:1648)
+    var c2 = comp_new();
+    comp_create_window(c2, 0, 0, 100, 100, "W1");
+    comp_switch_workspace(c2, 1);
+    comp_create_window(c2, 0, 0, 100, 100, "W2");
+    var a2 = comp_active_windows(c2);
+    assert_eq(vec_len(a2), 1, "get_active_windows_after_workspace_switch: one");
+    assert_eq(streq(win_title(vec_get(a2, 0)), "W2"), 1, "  ...and it is W2");
+
+    # compositor.rs test_compositor_get_active_windows_empty_workspace (:1820)
+    var c3 = comp_new();
+    comp_switch_workspace(c3, 2);
+    assert_eq(vec_len(comp_active_windows(c3)), 0, "get_active_windows_empty_workspace: none");
+
+    # compositor_integration.rs workspace_switching_hides_windows
+    var c4 = comp_new();
+    comp_create_window(c4, 0, 0, 100, 100, "WS1");
+    comp_switch_workspace(c4, 1);
+    assert_eq(vec_len(comp_active_windows(c4)), 0, "workspace_switching_hides_windows: none on ws1");
+    comp_switch_workspace(c4, 0);
+    assert_eq(vec_len(comp_active_windows(c4)), 1, "  ...and back on ws0");
+
+    # compositor.rs test_compositor_windows_across_workspaces (:1869)
+    var c5 = comp_new();
+    comp_switch_workspace(c5, 0);
+    var x0 = comp_create_window(c5, 0, 0, 100, 100, "WS0");
+    comp_switch_workspace(c5, 1);
+    comp_create_window(c5, 0, 0, 100, 100, "WS1");
+    assert_eq(comp_count(c5), 2, "windows_across_workspaces: every window, any workspace");
+    var a5 = comp_active_windows(c5);
+    assert_eq(vec_len(a5), 1, "  ...one active on ws1");
+    assert_eq(streq(win_title(vec_get(a5, 0)), "WS1"), 1, "  ...WS1");
+    # Rust removes from the ACTIVE workspace (ws1 here), so ws0 keeps its stale entry, as in Rust.
+    comp_move_window_to_workspace(c5, win_id(x0), 1);
+    assert_eq(vec_len(comp_active_windows(c5)), 2, "  ...moving WS0 to ws1 makes two");
+
+    # ⚠ Rust collected the workspace's ids into a HashSet: an id listed twice is ONE active window.
+    var c6 = comp_new();
+    var d1 = comp_create_window(c6, 0, 0, 100, 100, "D");
+    comp_move_window_to_workspace(c6, win_id(d1), 1);
+    comp_move_window_to_workspace(c6, win_id(d1), 1);
+    comp_switch_workspace(c6, 1);
+    assert_eq(wsp_count(comp_get_workspace(c6, 1)), 2, "an id listed twice in a workspace...");
+    assert_eq(vec_len(comp_active_windows(c6)), 1, "  ...is still one active window");
+    # ⚠ A stale id (closed while listed on another workspace) matches no window.
+    comp_switch_workspace(c6, 0);
+    var d2 = comp_create_window(c6, 0, 0, 100, 100, "E");
+    comp_move_window_to_workspace(c6, win_id(d2), 1);
+    comp_close_window(c6, win_id(d2));   # closes from ws0 only (as in Rust); ws1 keeps the dead id
+    comp_switch_workspace(c6, 1);
+    assert_eq(vec_len(comp_active_windows(c6)), 1, "a stale id in the workspace is not a window");
+
+    # compositor.rs test_compositor_create_agent_window (:1229) / _agent_windows_filter (:1664)
+    var c7 = comp_new();
+    comp_create_window(c7, 0, 0, 100, 100, "Normal");
+    var g1 = comp_create_window(c7, 0, 0, 100, 100, "Agent1");
+    win_set_agent(g1, 1);
+    comp_switch_workspace(c7, 2);
+    var g2 = comp_create_window(c7, 0, 0, 100, 100, "Agent2");
+    win_set_agent(g2, 1);
+    var ag = comp_agent_windows(c7);
+    assert_eq(vec_len(ag), 2, "agent_windows_filter: two agent windows (any workspace)");
+    assert_eq(comp_count(c7), 3, "  ...of three");
+    assert_eq(t_has_win(ag, g1), 1, "  ...Agent1");
+    assert_eq(t_has_win(ag, g2), 1, "  ...Agent2");
+    assert_eq(vec_len(comp_agent_windows(comp_new())), 0, "  no windows, no agent windows");
+    return 0;
+}
+
+fn t_context(): i64 {
+    test_group("compositor — workspace context");
+    var c = comp_new();
+    # compositor.rs test_compositor_get_workspace_context (:1310)
+    assert_eq(comp_workspace_context(c, 0), CtxType.CTX_GENERAL, "get_workspace_context: General");
+    assert_eq(comp_workspace_context(c, 10), 0 - 1, "  ...an invalid id errs");
+    assert_eq(comp_workspace_context(c, 0 - 1), 0 - 1, "  ...a negative id errs");
+
+    # compositor.rs test_compositor_set_workspace_context (:1318)
+    assert_eq(comp_set_workspace_context(c, 0, CtxType.CTX_DEVELOPMENT), 0, "set_workspace_context: ok");
+    assert_eq(comp_workspace_context(c, 0), CtxType.CTX_DEVELOPMENT, "  ...reads back Development");
+    assert_eq(comp_workspace_context(c, 1), CtxType.CTX_GENERAL, "  ...and touches no other workspace");
+
+    # compositor.rs test_compositor_set_workspace_context_all_types (:1680)
+    var ctxs = vec_new();
+    vec_push(ctxs, CtxType.CTX_DEVELOPMENT);
+    vec_push(ctxs, CtxType.CTX_COMMUNICATION);
+    vec_push(ctxs, CtxType.CTX_DESIGN);
+    vec_push(ctxs, CtxType.CTX_AGENT_OP);
+    vec_push(ctxs, CtxType.CTX_WINDOW);
+    vec_push(ctxs, CtxType.CTX_APPLICATION);
+    vec_push(ctxs, CtxType.CTX_SYSTEM);
+    vec_push(ctxs, CtxType.CTX_USER);
+    var i = 0;
+    while (i < 8) {
+        var ctx = vec_get(ctxs, i);
+        assert_eq(comp_set_workspace_context(c, i % 4, ctx), 0, "set_workspace_context_all_types: set");
+        assert_eq(comp_workspace_context(c, i % 4), ctx, "  ...reads back");
+        i = i + 1;
+    }
+
+    # compositor.rs test_compositor_set_workspace_context_out_of_bounds_silent (:1861)
+    assert_eq(comp_set_workspace_context(c, 100, CtxType.CTX_DEVELOPMENT), 0,
+        "set_workspace_context_out_of_bounds_silent: Ok, as in Rust");
+    assert_eq(comp_workspace_count(c), 4, "  ...and no workspace is made for it");
+    # ⚠ Port-only: a value that is no CtxType is refused and stored nowhere.
+    assert_eq(comp_set_workspace_context(c, 0, 9), 0 - 1, "a ctx past CTX_USER is refused");
+    assert_eq(comp_set_workspace_context(c, 0, 0 - 1), 0 - 1, "a negative ctx is refused");
+    assert_eq(comp_workspace_context(c, 0), CtxType.CTX_WINDOW, "  ...and the stored context is unchanged");
+    return 0;
+}
+
+fn t_focus(): i64 {
+    test_group("compositor — focus and placement");
+    # compositor.rs test_compositor_close_updates_focus (:1959) +
+    # compositor_integration.rs closing_focused_window_moves_focus
+    var c = comp_new();
+    var w1 = comp_create_window(c, 0, 0, 100, 100, "W1");
+    var w2 = comp_create_window(c, 0, 0, 100, 100, "W2");
+    assert_eq(comp_focused_id(c), win_id(w2), "close_updates_focus: the newest is focused");
+    comp_close_window(c, win_id(w2));
+    assert_eq(comp_focused_id(c), win_id(w1), "  ...closing it focuses W1");
+
+    # ⚠ ADR 0003: close focuses the topmost window that is NOT minimized. Rust took the last id in the
+    # active workspace's list, which after M3 closes is [M1, M2] — the minimized M2 — so Rust focused a
+    # window nobody could see.
+    var c2 = comp_new();
+    var m1 = comp_create_window(c2, 0, 0, 100, 100, "M1");
+    var m2 = comp_create_window(c2, 0, 0, 100, 100, "M2");
+    var m3 = comp_create_window(c2, 0, 0, 100, 100, "M3");
+    comp_set_window_state(c2, win_id(m2), WinState.WS_MINIMIZED, 800, 570);
+    comp_focus(c2, comp_find_by_id(c2, win_id(m3)));
+    comp_close_window(c2, win_id(m3));
+    assert_eq(comp_focused_id(c2), win_id(m1), "close skips a minimized window for focus (ADR 0003)");
+    comp_close_window(c2, win_id(m1));
+    assert_eq(comp_focused_id(c2), 0, "  ...and focuses nothing when only a minimized one is left");
+    assert_eq(win_state(m2), WinState.WS_MINIMIZED, "  ...without restoring it");
+
+    # compositor.rs test_compositor_cascade_placement (:2254), compositor_integration.rs many_windows_cascade.
+    # ⚠ ADR 0003: the cascade is computed in the frame loop from spawn coordinates, not by
+    # create_window; the compositor's half of the contract is that a window lands where it is put.
+    # ⚠ The offsets below are RUST'S rule computed here, so these asserts check that create stores the
+    # x/y it is given — not the port's own cascade (main.cyr: every third client, steps of a sixth of
+    # the screen), which does not wrap at 300.
+    var c3 = comp_new();
+    var k = 0;
+    while (k < 20) {
+        var off = (k * 30) % 300;   # Rust's own rule, compositor.rs:191
+        comp_create_window(c3, 50 + off, 50 + off, 400, 300, "Win");
+        k = k + 1;
+    }
+    assert_eq(win_x(comp_get(c3, 0)), 50, "cascade_placement: the first lands at its spawn x");
+    assert_eq(win_x(comp_get(c3, 1)), 80, "  ...the second at its own, so their x differ");
+    assert_eq(win_y(comp_get(c3, 1)), 80, "  ...and their y differ");
+    assert_eq(win_x(comp_get(c3, 10)), 50, "many_windows_cascade: the 11th lands at the x it was given (Rust's wrap)");
+    var closed = 0;
+    var id = 1;
+    while (id <= 20) {
+        if (comp_close_window(c3, id) == 0) { closed = closed + 1; }
+        id = id + 1;
+    }
+    assert_eq(closed, 20, "  ...every one of the twenty closes");
+    assert_eq(comp_count(c3), 0, "  ...and none is left");
+
+    # compositor.rs test_compositor_with_resolution (:1894), compositor_integration.rs custom_resolution.
+    # ⚠ The port's compositor holds no output rect: the resolution is the backend's geometry, which the
+    # caller passes as the usable bounds. A maximized window is where that resolution reaches a window.
+    var c4 = comp_new();
+    var r = comp_create_window(c4, 50, 50, 400, 300, "4K");
+    comp_set_window_state(c4, win_id(r), WinState.WS_MAXIMIZED, 3840, 2160 - TITLEBAR_H);
+    assert_eq(win_w(r), 3840, "custom_resolution: maximized to the 3840 width");
+    assert_eq(win_total_h(r), 2160, "  ...and, chrome included, the 2160 height");
+    comp_set_window_state(c4, win_id(r), WinState.WS_NORMAL, 3840, 2160 - TITLEBAR_H);
+    comp_set_window_state(c4, win_id(r), WinState.WS_MAXIMIZED, 800, 600 - TITLEBAR_H);
+    assert_eq(win_w(r), 800, "with_resolution: 800 wide");
+    assert_eq(win_total_h(r), 600, "  ...600 high");
+    assert_eq(comp_close_window(c4, win_id(r)), 0, "  ...and it closes");
+
+    # compositor_integration.rs input_routing_click_on_empty_is_none (partly): nothing is hit there.
+    var c5 = comp_new();
+    comp_create_window(c5, 0, 0, 100, 100, "W");
+    assert_eq(comp_window_at(c5, 5000, 5000), 0, "input_routing_click_on_empty_is_none: no window there");
+    return 0;
+}
+
+# rust-old/examples/headless_compositor.rs, as assertions: three windows at 1920x1080, the browser
+# maximized, the active-window listing, then every window closed in creation order.
+fn t_headless(): i64 {
+    test_group("compositor — headless_compositor example");
+    var c = comp_new();
+    var term = comp_create_window(c, 50, 50, 960, 540, "AGNOS Terminal");
+    var brow = comp_create_window(c, 80, 80, 960, 540, "Web Browser");
+    var agent = comp_create_window(c, 110, 110, 960, 540, "Agent Monitor");
+    win_set_agent(agent, 1);
+    assert_eq(comp_count(c), 3, "headless: created 3 windows");
+    assert_eq(comp_set_window_state(c, win_id(brow), WinState.WS_MAXIMIZED, 1920, 1080 - TITLEBAR_H), 0,
+        "  maximize the browser");
+    assert_eq(win_w(brow), 1920, "  ...it spans the width");
+    assert_eq(win_total_h(brow), 1080, "  ...and the height");
+    assert_eq(win_x(term), 50, "  ...the terminal has not moved");
+    var act = comp_active_windows(c);
+    assert_eq(vec_len(act), 3, "  all three are active");
+    assert_eq(vec_len(comp_agent_windows(c)), 1, "  ...one of them the agent");
+    assert_eq(comp_focused_id(c), win_id(agent), "  ...the last created holds focus");
+    assert_eq(comp_find_by_id(c, win_id(agent)), 2, "  ...maximizing did not raise the browser over it");
+    # Edge: close the BOTTOM window while the top is focused; focus must follow the shifted index.
+    assert_eq(comp_close_window(c, win_id(term)), 0, "  close the terminal");
+    assert_eq(comp_focused_id(c), win_id(agent), "  ...focus stays on the agent");
+    assert_eq(wsp_active(comp_get_workspace(c, 0)), win_id(agent), "  ...so does the workspace's active window");
+    assert_eq(comp_close_window(c, win_id(brow)), 0, "  close the browser");
+    assert_eq(comp_focused_id(c), win_id(agent), "  ...focus still on the agent");
+    assert_eq(comp_close_window(c, win_id(agent)), 0, "  close the agent");
+    assert_eq(comp_count(c), 0, "  all windows closed");
+    assert_eq(comp_focused(c), 0 - 1, "  ...nothing focused");
+    assert_eq(wsp_active(comp_get_workspace(c, 0)), 0 - 1, "  ...no active window");
+    assert_eq(vec_len(comp_active_windows(c)), 0, "  ...no active windows");
+    assert_eq(comp_close_window(c, win_id(term)), 0 - 1, "  ...and a closed id cannot be closed again");
+    var again = comp_create_window(c, 0, 0, 100, 100, "Again");
+    assert_eq(win_id(again), 4, "  a new window after teardown gets a fresh id, never a reused one");
+    assert_eq(comp_focused_id(c), 4, "  ...and takes focus");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    t_lifecycle();
+    t_state();
+    t_workspaces();
+    t_active_windows();
+    t_context();
+    t_focus();
+    t_headless();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -315,7 +315,8 @@ fn win_maximize(p, sw, content_h): i64 {
 # ============================================================================================
 # ⭐⭐ M7 — RESIZE. The regions existed; nothing consumed them.
 # ============================================================================================
-# ⛔ `deco_hit` has returned DECO_RESIZE_R / _B / _BR since it was written, and the pointer handler
+# (Since 0.17.4 the grips are R / B / BR and L / BL — Rust reached all five; its top edges are retired, ADR 0004.)
+# ⛔ `deco_hit` returned DECO_RESIZE_R / _B / _BR from the start, and the pointer handler
 # consumed CLOSE, MAX, MIN and TITLEBAR — so the grips were hit-tested on every frame and the answer
 # thrown away. Same shape as the maximize/minimize buttons, which were PAINTED and inert until wired:
 # a control that responds to nothing reads as a broken desktop, which is worse than one that is absent.
@@ -337,36 +338,71 @@ enum Deco {
     DECO_RESIZE_R  = 6;
     DECO_RESIZE_B  = 7;
     DECO_RESIZE_BR = 8;
+    # ⭐ 0.17.4 — THE LEFT GRIPS. Rust reached Left and BottomLeft too (renderer.rs:656, :659). Its Top,
+    # TopLeft and TopRight lay inside the titlebar rows, were unreachable, and are retired (ADR 0004).
+    DECO_RESIZE_L  = 9;
+    DECO_RESIZE_BL = 10;
 }
 
 var WIN_MIN_W = 120;
 var WIN_MIN_H = 60;
 
-# Resize by a pointer delta on the given grip. `bound_w`/`bound_h` are the same usable extent the mover
-# clamps to. -> 1 if the size actually changed.
-# ⚠ ONLY RIGHT/BOTTOM GRIPS EXIST, so x/y never move and the window cannot walk off the top-left while
-# being resized. Left/top grips would have to move the origin AND resize in one step; that is a second
-# behaviour with its own clamp interactions, and it is not written here rather than half-written.
+# Resize by a pointer delta on the given grip, from where the window is now. `bound_w`/`bound_h` are the
+# same usable extent the mover clamps to. -> 1 if the rect actually changed.
 fn win_resize_by(p, grip, dx, dy, bound_w, bound_h): i64 {
-    var w = load64(p + W_W);
-    var h = load64(p + W_H);
-    var nw = w;
-    var nh = h;
-    if (grip == Deco.DECO_RESIZE_R)  { nw = w + dx; }
-    if (grip == Deco.DECO_RESIZE_B)  { nh = h + dy; }
-    if (grip == Deco.DECO_RESIZE_BR) { nw = w + dx; nh = h + dy; }
+    return win_apply_resize(p, grip, load64(p + W_X), load64(p + W_Y), load64(p + W_W), load64(p + W_H),
+      dx, dy, bound_w, bound_h);
+}
+
+# win_apply_resize(p, grip, ox, oy, ow, oh, dx, dy, bound_w, bound_h): put `p` at the rect (ox, oy, ow, oh)
+# resized by (dx, dy) on `grip` — Rust's `apply_resize` (compositor.rs:704-786), which also works from the
+# rect the gesture started with. -> 1 if the rect changed.
+# ⭐ FROM THE START RECT, NOT FROM LAST FRAME'S. A drag that pushes an edge into the floor and comes back
+# must not move that edge until the pointer is back where the edge stopped. Fed one delta at a time, the
+# floor swallows the inward deltas and the outward ones move the edge at once, so the edge trails the pointer
+# by however far it overshot. `win_resize_by` is this with the current rect as the start.
+# ⭐ A LEFT GRIP MOVES THE ORIGIN, AND THE RIGHT EDGE STAYS WHERE IT WAS. That is the whole of a left-edge
+# drag, so the width is floored first and `x` is derived from the right edge afterwards.
+# ⛔ RUST SLID HERE. Its Left arm sets `x = mx` and floors only the width (compositor.rs:729-733, :761), so
+# dragging past the floor carried the whole window right with the pointer. The port holds the right edge
+# (a divergence for ADR 0003, like the 120x60 floor itself).
+fn win_apply_resize(p, grip, ox, oy, ow, oh, dx, dy, bound_w, bound_h): i64 {
+    var nw = ow;
+    var nh = oh;
+    var left = 0;
+    if (grip == Deco.DECO_RESIZE_R)  { nw = ow + dx; }
+    if (grip == Deco.DECO_RESIZE_B)  { nh = oh + dy; }
+    if (grip == Deco.DECO_RESIZE_BR) { nw = ow + dx; nh = oh + dy; }
+    if (grip == Deco.DECO_RESIZE_L)  { nw = ow - dx; left = 1; }
+    if (grip == Deco.DECO_RESIZE_BL) { nw = ow - dx; nh = oh + dy; left = 1; }
     if (nw < WIN_MIN_W) { nw = WIN_MIN_W; }
     if (nh < WIN_MIN_H) { nh = WIN_MIN_H; }
     # ⛔ CLAMP TO THE EDGE, not to the screen: the window keeps its origin, so the most it may grow is
     # the distance from that origin to the bound. Growing past it is the out-of-range rect the GPU
     # refuses, and the failure would be a dropped FRAME, not a clipped window.
-    var maxw = bound_w - load64(p + W_X);
-    var maxh = bound_h - load64(p + W_Y);
+    # ⚠ A left grip grows towards x = 0 instead, so its limit is the right edge itself.
+    var maxw = bound_w - ox;
+    if (left == 1) { maxw = ox + ow; }
+    var maxh = bound_h - oy;
     if (nw > maxw) { nw = maxw; }
     if (nh > maxh) { nh = maxh; }
     if (nw < WIN_MIN_W) { nw = WIN_MIN_W; }
     if (nh < WIN_MIN_H) { nh = WIN_MIN_H; }
-    if (nw == w) { if (nh == h) { return 0; } }
+    var nx = ox;
+    if (left == 1) {
+        nx = ox + ow - nw;
+        # ⚠ Only a window already narrower than the floor and near x = 0 gets here: the floor wins and the
+        # right edge gives, because a negative x is the rect the GPU refuses.
+        if (nx < 0) { nx = 0; }
+    }
+    var changed = 0;
+    if (nx != load64(p + W_X)) { changed = 1; }
+    if (oy != load64(p + W_Y)) { changed = 1; }
+    if (nw != load64(p + W_W)) { changed = 1; }
+    if (nh != load64(p + W_H)) { changed = 1; }
+    if (changed == 0) { return 0; }
+    store64(p + W_X, nx);
+    store64(p + W_Y, oy);
     store64(p + W_W, nw);
     store64(p + W_H, nh);
     return 1;
@@ -377,6 +413,8 @@ fn win_grip_is_resize(hit): i64 {
     if (hit == Deco.DECO_RESIZE_R)  { return 1; }
     if (hit == Deco.DECO_RESIZE_B)  { return 1; }
     if (hit == Deco.DECO_RESIZE_BR) { return 1; }
+    if (hit == Deco.DECO_RESIZE_L)  { return 1; }
+    if (hit == Deco.DECO_RESIZE_BL) { return 1; }
     return 0;
 }
 

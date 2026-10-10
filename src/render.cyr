@@ -1,9 +1,10 @@
 # aethersafha — software renderer over the bhumi framebuffer
 # Parity: rust-old/src/renderer.rs  (Framebuffer, window decorations, damage)
 #
-# Draws the compositor's window stack into the bhumi XRGB8888 framebuffer.
-# Minimal skeleton: solid desktop bg + per-window body + titlebar (focus-tinted).
-# Damage tracking / scene graph / bitmap text are follow-on parity work.
+# Draws the compositor's window stack into the bhumi XRGB8888 framebuffer: per window a themed body, a
+# focus-tinted titlebar with its caption and buttons, a 1 px border, and the client surface — blended with the
+# kernel's own `#92` arithmetic, so a CPU frame holds the words a GPU frame does. Plus the damage band, the
+# chrome rect and glyph queues the GPU frame drains, and the kashi bitmap text.
 
 # ⚠ THE DECODER IS INCLUDED BY THE MODULE THAT NEEDS IT, NOT BY EVERY UNIT THAT COMPILES THIS ONE. All text
 # below decodes through it, and render.cyr is compiled by main.cyr, the test and bench files that exercise
@@ -23,6 +24,7 @@ enum RenderK {
     BTN_MARGIN = 6;    # gap from the window's right edge to the close button
     RESIZE_M   = 6;    # resize-edge grab margin
     TITLE_PAD  = 6;    # title inset from the left edge, and its clearance before the minimize button
+    BORDER_W   = 1;    # the window border's thickness — Rust's BORDER_WIDTH (renderer.rs:477); see render_border
 }
 
 # Which part of a window's decoration a point hits (parity: renderer.rs DecorationHit).
@@ -58,10 +60,11 @@ enum RenderK {
 # fill_rect_a: fill with `color` at opacity `a` (0..255), blending against what is already there.
 # ⭐ M6-C3. `a == 255` delegates to `fill_rect` UNCHANGED — including its `#88` GPU enqueue — so an
 # opaque window costs exactly what it did before and the common path is untouched.
-# ⛔ NO GPU ENQUEUE FOR THE TRANSLUCENT CASE, and that is not laziness: `#88 gpu_fill_rect` writes a
-# flat colour with no read-modify-write, so it cannot blend. `ae_gpu_frame_plan` demotes a frame that
-# contains a translucent window for the same reason a non-solid wallpaper demotes it — `AE-9` deleted
-# the `#39` blit, so there is no CPU layer left to mix into a GPU frame.
+# ⭐ THE CPU ARM IS THE KERNEL'S op 0x02, byte for byte (0.17.4): the colour at a constant coverage `a`, each
+# destination byte looked up in the colour's rows of the opaque-source table (`rend_blend_utab`). It used to
+# blend straight colour and TRUNCATE, so a translucent titlebar on a CPU frame sat up to one step per channel
+# off the same titlebar on iron, with an alpha byte of 0 where iron's holds the kernel's. ⚠ Clamped once and
+# walked by rows like `fill_rect`; it was a `bhumi_fb_get` / `bhumi_fb_set` pair per pixel.
 fn fill_rect_a(fb, x, y, w, h, color, a): i64 {
     if (a >= 255) { return fill_rect(fb, x, y, w, h, color); }
     if (a <= 0) { return 0; }
@@ -84,13 +87,33 @@ fn fill_rect_a(fb, x, y, w, h, color, a): i64 {
     var fh = bhumi_fb_height(fb);
     if (x1 > fw) { x1 = fw; }
     if (y1 > fh) { y1 = fh; }
-    var yy = y0;
+    if (x1 <= x0) { return 0; }
+    if (y1 <= y0) { return 0; }
+    var u = rend_blend_utab(a);
+    # the colour's three rows of U, and row 255 for the alpha lane — gpu.cyr makes the colour opaque
+    var r0 = u + ((color & 0xFF) << 8);
+    var r1 = u + (((color >> 8) & 0xFF) << 8);
+    var r2 = u + (((color >> 16) & 0xFF) << 8);
+    var r3 = u + 65280;
+    var pitch = bhumi_fb_pitch(fb);
+    var bpp   = bhumi_fb_bpp(fb);
+    var row   = (bhumi_fb_pixels(fb) + y0 * pitch) + x0 * bpp;
+    var span  = (x1 - x0) * bpp;
+    var yy    = y0;
     while (yy < y1) {
-        var xx = x0;
-        while (xx < x1) {
-            bhumi_fb_set(fb, xx, yy, rend_blend(bhumi_fb_get(fb, xx, yy), color, a));
-            xx = xx + 1;
+        var p = row;
+        var e = row + span;
+        while (p < e) {
+            var d = load32(p);
+            if (u == 0) { store32(p, rend_blend(d, color, a)); }
+            else {
+                var lo = (load8(r1 + ((d >> 8) & 0xFF)) << 8) | load8(r0 + (d & 0xFF));
+                var hi = (load8(r3 + ((d >> 24) & 0xFF)) << 24) | (load8(r2 + ((d >> 16) & 0xFF)) << 16);
+                store32(p, hi | lo);
+            }
+            p = p + bpp;
         }
+        row = row + pitch;
         yy = yy + 1;
     }
     return 0;
@@ -230,20 +253,263 @@ fn blit_rect(fb, dx, dy, src, sw, sh): i64 {
     return 0;
 }
 
-# rend_blend(dst, src, a): alpha-blend src over dst, a in 0..255. XRGB8888.
-# Parity: renderer.rs blend() (premultiplied-alpha compositing).
-fn rend_blend(dst, src, a): i64 {
-    var ia = 255 - a;
-    var dr = (dst >> 16) & 0xFF;
-    var dg = (dst >> 8) & 0xFF;
-    var db = dst & 0xFF;
-    var sr = (src >> 16) & 0xFF;
-    var sg = (src >> 8) & 0xFF;
-    var sb = src & 0xFF;
-    var r = (sr * a + dr * ia) / 255;
-    var g = (sg * a + dg * ia) / 255;
-    var b = (sb * a + db * ia) / 255;
-    return (r << 16) | (g << 8) | b;
+# rend_composite_surface(fb, dx, dy, src, sw, sh, premul, alpha): put a client surface on a CPU frame the way
+# gpu.cyr's per-window routing puts it on a GPU frame (`ae_gpu_present_frame` step 2). A PREMULTIPLIED surface
+# is blended — `#92` op 0x01 at full opacity, op 0x06 at the window's `alpha` — and any other surface is
+# copied, as `#87` copies it, at any opacity: `#87` has no alpha, and neither does this copy.
+# ⚠ The GPU arm falls back to `#87` for a premultiplied surface on a boot with no shader envelope; a CPU frame
+# always blends, i.e. it draws what iron with the envelope draws, which is the iron-proven configuration.
+fn rend_composite_surface(fb, dx, dy, src, sw, sh, premul, alpha): i64 {
+    if (premul == 1) { return rend_composite_premul(fb, dx, dy, src, sw, sh, alpha); }
+    return blit_rect(fb, dx, dy, src, sw, sh);
+}
+
+# rend_composite_premul(fb, dx, dy, src, sw, sh, alpha): src-over a premultiplied sw x sh surface at (dx,dy),
+# clipped exactly as `blit_rect` clips — source pixels skipped by the amount the destination was clipped.
+# ⭐ Exact shortcuts keep the common case cheap: a pixel with alpha 255 IS the op 0x01 result (ia = 0) and is
+# four lookups in the opaque-source table under op 0x06, and a zero pixel leaves the destination as it was
+# under either op (sa = sc = 0). Measured on the host, 1280x720, per frame: a copy 2.2 ms; op 0x01 over
+# opaque pixels 3.3 ms, over sa = 128 pixels 19.2 ms; op 0x06 at alpha 128 over opaque pixels 11.4 ms.
+fn rend_composite_premul(fb, dx, dy, src, sw, sh, alpha): i64 {
+    if (src == 0) { return 0; }
+    if (sw <= 0) { return 0; }
+    if (sh <= 0) { return 0; }
+    if (alpha <= 0) { return 0; }                # op 0x06 at alpha 0: fa = 0, so every pixel stays as it was
+    var sx0 = 0;
+    var sy0 = 0;
+    var x0 = dx;
+    var y0 = dy;
+    if (x0 < 0) { sx0 = 0 - x0; x0 = 0; }
+    if (y0 < 0) { sy0 = 0 - y0; y0 = 0; }
+    var x1 = dx + sw;
+    var y1 = dy + sh;
+    var fw = bhumi_fb_width(fb);
+    var fh = bhumi_fb_height(fb);
+    if (x1 > fw) { x1 = fw; }
+    if (y1 > fh) { y1 = fh; }
+    if (x1 <= x0) { return 0; }
+    if (y1 <= y0) { return 0; }
+    var u = 0;
+    if (alpha < 255) { u = rend_blend_utab(alpha); }       # also builds the per-alpha tables
+    var pitch = bhumi_fb_pitch(fb);
+    var bpp   = bhumi_fb_bpp(fb);
+    var drow  = (bhumi_fb_pixels(fb) + y0 * pitch) + x0 * bpp;
+    var srow  = (src + sy0 * sw * 4) + sx0 * 4;
+    var n     = x1 - x0;
+    var yy    = y0;
+    while (yy < y1) {
+        var d = drow;
+        var s = srow;
+        var i = 0;
+        while (i < n) {
+            var sp = load32(s);
+            if (sp != 0) {
+                if (alpha >= 255) {
+                    if ((sp >> 24) == 255) { store32(d, sp); }
+                    else { store32(d, rend_px_premul(sp, load32(d))); }
+                }
+                else {
+                    var dp = load32(d);
+                    if ((sp >> 24) == 255) {
+                        if (u != 0) {
+                            # four lookups in U, the alpha lane in row 255 — inline: a call cost more than they do
+                            var b0 = load8(u + ((sp & 0xFF) << 8) + (dp & 0xFF));
+                            var b1 = load8(u + (((sp >> 8) & 0xFF) << 8) + ((dp >> 8) & 0xFF));
+                            var b2 = load8(u + (((sp >> 16) & 0xFF) << 8) + ((dp >> 16) & 0xFF));
+                            var b3 = load8(u + 65280 + ((dp >> 24) & 0xFF));
+                            store32(d, ((b3 << 24) | (b2 << 16)) | ((b1 << 8) | b0));
+                        }
+                        else { store32(d, rend_px_alpha(sp, dp)); }
+                    }
+                    else { store32(d, rend_px_alpha(sp, dp)); }
+                }
+            }
+            d = d + bpp;
+            s = s + 4;
+            i = i + 1;
+        }
+        drow = drow + pitch;
+        srow = srow + sw * 4;
+        yy = yy + 1;
+    }
+    return 0;
+}
+
+# ============================================================================================
+# ⭐⭐ THE CPU BLEND IS THE KERNEL'S BLEND — `#92` op 0x01, op 0x06 and op 0x02, byte for byte (0.17.4)
+# ============================================================================================
+# On iron the kernel composites a premultiplied client surface with `#92` op 0x01 (op 0x06 under a window
+# opacity) and every alpha chrome rect with op 0x02. A CPU frame — QEMU, Linux, a demoted agnos frame — copied
+# every surface opaquely and blended chrome straight-colour with truncation, so one scene was two pictures.
+# These functions compute what the shaders compute, ALL FOUR BYTES (the alpha lane included), so the two frame
+# kinds hold the same words. The oracle is agnos, read-only: kernel/shaders/blend_rect.s, blend_alpha.s and
+# blend_cov.s; `blend_ref_px` in kernel/core/gpu.cyr; and the shader interpreter, tests/gpu/shaderexec.cyr.
+#
+# ⭐ op 0x02 AND op 0x06 ARE ONE COMPUTATION. blend_cov.s with a constant mask `a` over the opaque colour
+# gpu.cyr forms (`colour | 0xFF000000`) runs, instruction for instruction, what blend_alpha.s runs at alpha `a`
+# over an opaque source pixel: f = R(a·INV), sa' = R(255·f), ia = R(1 − sa'·INV), sc' = R(c·f) and
+# out = cvt(R(d·ia + sc')), where R is f32 rounding and INV = 0x3B808081 is f32's 1/255.
+#
+# ⭐⭐ EVERY f32 THESE SHADERS FORM IS AN INTEGER IN 2^-31 UNITS, which is what lets a CPU run them exactly in
+# integers. INV is 8421505·2^-31. fa = R(α·INV) and sa' = sc' = R(fa·v) are 0 or ≥ 2^-8, whose last bit is
+# ≥ 2^-31. ia ≥ 1/256 for any α < 255, and at α = 255 fa is exactly 1.0, so ia = R((2^31 − 8421505·sa)·2^-31).
+# Only `1 − sa'·INV` itself needs 2^-62 units, and it is rounded straight back. The final d·ia + sc' is below
+# 510·2^31 < 2^40, so nothing here comes near i64's range.
+# ⚠ CHECKED, NOT JUST DERIVED (0.17.4): an IEEE-f32 model of the three shaders (numpy's float32 multiply, the
+# FMA rounded once from its exact value) was run over all 2^32 (α, sa, sc, d) lane inputs, and its 64-bit
+# digest per alpha equals this file's for all 256 alphas; the same model of blend_rect.s equals `blend_ref_px`
+# input for input on all 2^24 of its own. tests/render.tcyr carries the model's words and digests.
+
+# The f32 constants of op 0x06 / 0x02 for one alpha, in 2^-31 units. Rebuilt only when the alpha changes.
+# ⚠ MODULE SCOPE, so `var X[256]` is 256 x u64; a function-local one would be 256 BYTES.
+var ae_bl_alpha = 0 - 1;     # the alpha the two tables were built for (-1 = none yet)
+var ae_bl_s2[256];           # R(fa·v): v_mul_f32 of a source byte — sc' for a colour byte, sa' for the alpha
+var ae_bl_ia[256];           # R(1 − sa'·INV): v_fma_f32's destination weight, indexed by the source alpha
+
+# rend_f32_round(n): the integer n > 0 rounded to 24 significant bits, ties to even — f32's RNE rounding of
+# n·2^-k for any fixed k, because a power-of-two scale only moves the binary point. Below 2^24 n is exact.
+fn rend_f32_round(n): i64 {
+    if (n < 16777216) { return n; }
+    var s = 0;
+    var t = n;
+    while (t >= 16777216) { t = t >> 1; s = s + 1; }
+    var q = n >> s;
+    var r = n - (q << s);
+    var h = 1 << (s - 1);
+    if (r > h) { q = q + 1; }
+    if (r == h) { q = q + (q & 1); }
+    return q << s;
+}
+
+# rend_u8_of(v): what v_cvt_pk_u8_f32 makes of the FMA's result, where `v` is the EXACT d·ia + sc' in 2^-31
+# units: R(v) saturated to 0..255 and rounded to the nearest integer, ties to EVEN.
+# ⭐ R only matters within half an f32 ulp of a half-integer — at most 2^15 units below 512 — so outside that
+# window the exact value rounds the same way and the 24-bit rounding is skipped; inside it, it runs.
+# ⛔ TIES TO EVEN IS THE KERNEL'S ASSUMPTION, NOT A BURNED FACT. op 0x01 never reaches a tie; op 0x06 does
+# (agnos tests/gpu/shaderexec.cyr gate 4: α = 4, sa = sc = 64, d = 128 lands on 128.5 exactly, RTNE 128,
+# half-away 129). The shaders declare `.amdhsa_float_round_mode_32 0` (round to nearest even) and the
+# kernel's interpreter models RTNE; no burn has discriminated it. A burn that overturns it changes this.
+fn rend_u8_of(v): i64 {
+    if (v <= 0) { return 0; }
+    var q = v >> 31;
+    if (q >= 255) { return 255; }
+    var dh = (v & 0x7FFFFFFF) - 0x40000000;
+    if (dh > 32768) { return q + 1; }
+    if (dh < 0 - 32768) { return q; }
+    var f = rend_f32_round(v);
+    q = f >> 31;
+    var r = f & 0x7FFFFFFF;
+    if (r > 0x40000000) { return q + 1; }
+    if (r < 0x40000000) { return q; }
+    return q + (q & 1);
+}
+
+# Build the per-alpha tables (no-op when they already hold `alpha`). -> 1 if rebuilt.
+fn rend_blend_tables(alpha): i64 {
+    var al = alpha;
+    if (al < 0) { al = 0; }
+    if (al > 255) { al = 255; }
+    if (al == ae_bl_alpha) { return 0; }
+    var fa = rend_f32_round(al * 8421505);                  # v_mul_f32 INV, f32(alpha)
+    var v = 0;
+    while (v < 256) {
+        var s2 = rend_f32_round(fa * v);                    # v_mul_f32 fa, f32(byte)
+        store64(&ae_bl_s2 + v * 8, s2);
+        # v_fma_f32 sa', -INV, 1.0: exact in 2^-62 units, rounded once; the result is a whole 2^-31 unit
+        var e = (1 << 62) - s2 * 8421505;
+        var ia = 0;
+        if (e > 0) { ia = rend_f32_round(e) >> 31; }
+        if (e < 0) { ia = 0 - (rend_f32_round(0 - e) >> 31); }   # only at α = 255, sa = 255: −127·2^-31
+        store64(&ae_bl_ia + v * 8, ia);
+        v = v + 1;
+    }
+    ae_bl_alpha = al;
+    return 1;
+}
+
+# rend_px_premul(src, dst): `#92` op 0x01 BLEND_RECT for one pixel — premultiplied src-over, all four bytes.
+# ⭐ The kernel's own integer reference, `blend_ref_px` (kernel/core/gpu.cyr):
+#     out = min(255, sc + round_half_up(d·(255 − sa) / 255))
+# which its burned f32 shader matches on all 2^24 (sa, sc, d) — and a tie is unreachable, since 2·d·(255 − sa)
+# is even and 255·(2k + 1) is odd.
+# Parity: renderer.rs:46-69 `blend()` is the same premultiplied src-over, but it TRUNCATES (`d * inv / 255`)
+# and returns `dst` for any zero-alpha source; the kernel rounds to nearest and ADDS a zero-alpha source's
+# colour (the additive ghost of a client that writes alpha 0). The two agree on every opaque and every
+# transparent-black pixel and differ by one step in a channel elsewhere (ADR 0003).
+fn rend_px_premul(src, dst): i64 {
+    var ia2 = (255 - ((src >> 24) & 0xFF)) * 2;
+    var out = 0;
+    var sh = 0;
+    while (sh < 32) {
+        var r = ((src >> sh) & 0xFF) + ((((dst >> sh) & 0xFF) * ia2) + 255) / 510;
+        if (r > 255) { r = 255; }
+        out = out | (r << sh);
+        sh = sh + 8;
+    }
+    return out;
+}
+
+# rend_px_alpha(src, dst): `#92` op 0x06 BLEND_ALPHA for one pixel at the alpha `rend_blend_tables` holds —
+# the source's four bytes scaled by fa = R(α/255), then src-over.
+# ⭐ HOW WINDOW OPACITY COMPOSES WITH THE CLIENT'S ALPHA: they multiply. A premultiplied pixel (sa, sc) under
+# window opacity α composites as (sa·α/255, sc·α/255), so premultiplication (sc ≤ sa) survives the scaling.
+fn rend_px_alpha(src, dst): i64 {
+    var ia = load64(&ae_bl_ia + ((src >> 24) & 0xFF) * 8);
+    var out = 0;
+    var sh = 0;
+    while (sh < 32) {
+        var v = ((dst >> sh) & 0xFF) * ia + load64(&ae_bl_s2 + ((src >> sh) & 0xFF) * 8);
+        out = out | (rend_u8_of(v) << sh);
+        sh = sh + 8;
+    }
+    return out;
+}
+
+# rend_blend_alpha_px(src, dst, alpha): op 0x06 for one pixel at any alpha 0..255 (255 equals op 0x01).
+fn rend_blend_alpha_px(src, dst, alpha): i64 {
+    rend_blend_tables(alpha);
+    return rend_px_alpha(src, dst);
+}
+
+# rend_blend(dst, color, a): `#92` op 0x02 BLEND_COV for one pixel — the opaque `color` at a constant coverage
+# `a`, over `dst`, all four bytes. The per-pixel form of what `fill_rect_a` does to a rect.
+# ⚠ THE COLOUR IS MADE OPAQUE HERE because gpu.cyr makes it opaque at the emit (`| 0xFF000000`): op 0x02 forms
+# sa' from the colour's alpha byte, and a theme colour arrives with a 0 there.
+# ⚠ Not Rust: renderer.rs had no alpha fill — `fill_rect` overwrote with the ARGB colour, alpha and all.
+fn rend_blend(dst, color, a): i64 {
+    return rend_blend_alpha_px(color | 0xFF000000, dst, a);
+}
+
+# ⭐ THE OPAQUE-SOURCE TABLE: op 0x06's output byte for every (source byte, destination byte), U[(s << 8) | d],
+# at one alpha — for a source pixel whose alpha byte is 255, which shares one destination weight ia(255). That
+# is every chrome fill (an opaque colour) and nearly every pixel of a client surface, so both walks become four
+# lookups per pixel. Measured on the host, a 1280x720 rect at alpha 128: an opaque surface 36 ns/px through
+# `rend_px_alpha` and 12 through U (11.4 ms a frame); a chrome fill 6.3 ns/px (5.8 ms), where 0.17.3's
+# straight-colour `bhumi_fb_get` / `bhumi_fb_set` walk took 34 (31.4 ms).
+# ⚠ 64 KB, ALLOCATED ONCE and rebuilt (65,536 conversions) only when the alpha changes. One alpha at a time:
+# `--opacity` gives every window the same one. An allocation per build would leak — the allocator never frees.
+var ae_bl_u = 0;
+var ae_bl_u_alpha = 0 - 1;   # the alpha U holds (-1 = none yet)
+# -> U for `alpha`, or 0 if it could not be allocated (the caller then blends per pixel, as exactly).
+fn rend_blend_utab(alpha): i64 {
+    rend_blend_tables(alpha);
+    if (ae_bl_u_alpha == ae_bl_alpha) { return ae_bl_u; }
+    if (ae_bl_u == 0) { ae_bl_u = alloc(65536); }
+    if (ae_bl_u == 0) { return 0; }
+    var ia = load64(&ae_bl_ia + 255 * 8);
+    var sv = 0;
+    while (sv < 256) {
+        var s2 = load64(&ae_bl_s2 + sv * 8);
+        var row = ae_bl_u + (sv << 8);
+        var dv = 0;
+        while (dv < 256) {
+            store8(row + dv, rend_u8_of(dv * ia + s2));
+            dv = dv + 1;
+        }
+        sv = sv + 1;
+    }
+    ae_bl_u_alpha = ae_bl_alpha;
+    return ae_bl_u;
 }
 
 # ⛔ DECLARED HERE, NOT IN gpu.cyr, AND THE PLACEMENT IS LOAD-BEARING.
@@ -428,6 +694,13 @@ fn rend_dmg_add(d, x, y, w, h): i64 {
     if (y1 > load64(d + D_Y1)) { store64(d + D_Y1, y1); }
     return 0;
 }
+# Damage a window's whole on-screen extent: its rect, titlebar included (`total_h`), AND the BORDER_W ring
+# `render_border` draws OUTSIDE that rect. ⚠ Every window rect the damage pass folds goes through here, or
+# the ring's rows fall outside the band: a moved window leaves its old ring behind, and a translucent one
+# re-blends its ring over itself every frame.
+fn rend_dmg_add_win(d, x, y, w, total_h): i64 {
+    return rend_dmg_add(d, x - BORDER_W, y - BORDER_W, w + 2 * BORDER_W, total_h + 2 * BORDER_W);
+}
 fn rend_dmg_x(d) { return load64(d + D_X0); }
 fn rend_dmg_y(d) { return load64(d + D_Y0); }
 fn rend_dmg_w(d) { return load64(d + D_X1) - load64(d + D_X0); }
@@ -605,8 +878,9 @@ fn deco_in_btn(px, py, bx, by): i64 {
     return 1;
 }
 
-# deco_hit(win, px, py): which decoration part of the window is under the point.
-# Used by input routing to dispatch clicks (close/min/max/drag/resize).
+# deco_hit(win, px, py): which decoration part of the window is under the point (parity: renderer.rs
+# decoration_hit_test, :607-669). Used by input routing (src/route.cyr) to dispatch clicks
+# (close/min/max/drag/resize).
 fn deco_hit(win, px, py): i64 {
     var x = win_x(win);
     var y = win_y(win);
@@ -622,13 +896,22 @@ fn deco_hit(win, px, py): i64 {
     if (py < y) { return Deco.DECO_NONE; }
     if (px >= x + w) { return Deco.DECO_NONE; }
     if (py >= yb) { return Deco.DECO_NONE; }
-    # resize edges — bottom-right corner takes priority
+    # resize edges — the bottom corners take priority, then the sides, then the bottom strip.
+    # ⭐ THE LEFT GRIPS (0.17.4) mirror the right ones exactly: the side strips run the full height, titlebar
+    # rows included, as the right one always has. Neither covers a button — the close button stops
+    # BTN_MARGIN (= RESIZE_M) short of the right edge and the other two sit left of it, far from the left
+    # strip at any width the floor allows. ⚠ Rust tested the titlebar FIRST, so its 1-px side borders began
+    # below it (renderer.rs:624-666); there is no top grip in either (ADR 0004).
+    var nl = 0;
     var nr = 0;
     var nb = 0;
+    if (px < x + RESIZE_M) { nl = 1; }
     if (px >= x + w - RESIZE_M) { nr = 1; }
     if (py >= yb - RESIZE_M) { nb = 1; }
     if ((nr == 1) && (nb == 1)) { return Deco.DECO_RESIZE_BR; }
+    if ((nl == 1) && (nb == 1)) { return Deco.DECO_RESIZE_BL; }
     if (nr == 1) { return Deco.DECO_RESIZE_R; }
+    if (nl == 1) { return Deco.DECO_RESIZE_L; }
     if (nb == 1) { return Deco.DECO_RESIZE_B; }
     # titlebar: buttons first, else the draggable strip
     if (py < win_body_y(win)) {
@@ -860,6 +1143,10 @@ fn render_title(fb, win, color): i64 {
 }
 
 fn render_window(fb, win, focused): i64 {
+    # ⛔ A MINIMIZED WINDOW IS NOT DRAWN — said by the drawing site itself (0.17.4). `render_desktop` skips one and
+    # so does the GPU present loop; this guard means no caller draws one by forgetting to. Rust dropped a hidden
+    # surface in `surfaces_in_order` (renderer.rs:749-758), so `render_frame` never saw it.
+    if (win_state(win) == WinState.WS_MINIMIZED) { return 0; }
     var x = win_x(win);
     var y = win_y(win);
     var w = win_w(win);
@@ -890,6 +1177,9 @@ fn render_window(fb, win, focused): i64 {
     fill_rect(fb, deco_close_x(win), by, BTN_W, BTN_H, ae_bhumi(rupa_theme_alert(th)));
     fill_rect(fb, deco_max_x(win), by, BTN_W, BTN_H, ae_bhumi(rupa_theme_held(th)));
     fill_rect(fb, deco_min_x(win), by, BTN_W, BTN_H, ae_bhumi(rupa_theme_faint(th)));
+    # the border, last of the chrome as in Rust (renderer.rs:602-603) — the theme's hairline, at the window's
+    # opacity like the rest of its chrome. ⛔ After the body, never before it: see render_border.
+    render_border(fb, win, ae_bhumi(rupa_theme_line(th)), wa);
     # Composite the client's PRESENTED surface (setu shared-buffer pixels), if any, into the
     # window body below the titlebar. Re-run EVERY frame from the cached buffer so the surface
     # persists on screen — the desktop redraw above would otherwise overwrite it (it did: the
@@ -930,9 +1220,57 @@ fn render_window(fb, win, focused): i64 {
         }
         # Row-walking copy (blit_rect) rather than the per-pixel bhumi_fb_set loop this used to be.
         # Same pixels, same clipping; measured 23.974 ms -> see blit_rect's header for the numbers.
-        if (spix != 0) { blit_rect(fb, x, win_body_y(win), spix, w, h); }
+        # ⭐ 0.17.4: routed as gpu.cyr routes it — a premultiplied surface is BLENDED with the kernel's op 0x01
+        # / op 0x06 arithmetic at this window's opacity, anything else copied as `#87` copies it. A CPU frame
+        # copied every surface, so the same window was opaque here and translucent on iron.
+        if (spix != 0) { rend_composite_surface(fb, x, win_body_y(win), spix, w, h, win_premul(win), wa); }
     }
     return 0;
+}
+
+# ============================================================================================
+# ⭐ THE WINDOW BORDER — Rust's `draw_rect_outline(rect, COLOR_BORDER)` (renderer.rs:174-198, :602-603)
+# ============================================================================================
+# Rust outlined every window in ONE colour, focused or not (COLOR_BORDER, :78; focus changed only the titlebar),
+# BORDER_WIDTH = 1 px (:477), as the last of its decorations. Ported with the rupa hairline token (`line`).
+#
+# ⚠ OUTSIDE THE WINDOW RECT, WHERE RUST'S WAS INSIDE IT. Rust's ring lay on its rect's outermost pixels with the
+# content inset by BORDER_WIDTH (renderer.rs:890-892). Here the content and the titlebar are NOT inset — the
+# client surface is at the window origin, and setu, input routing and the GPU blit all place it there — so a
+# ring inside would paint over the client's own edge pixels. The ring is drawn BORDER_W outside the rect
+# instead, and nothing inside it moves. The damage model covers it (`rend_dmg_add_win`).
+# ⚠ AND IT DROPS ITS OFF-SCREEN PART. Rust clamped an off-screen edge onto the framebuffer's edge (`x0 =
+# rect.x.max(0)`, then the left edge drawn at x0), so a window dragged past the left edge got a line at x = 0
+# over its content. Here each side is a clipped `fill_rect`, as every other chrome fill is — and as the GPU
+# queue clips (`ae_rect_enqueue_a`), so both frame kinds draw the same ring.
+#
+# rend_outline(fb, x, y, w, h, t, color, a): a ring `t` px thick on the rect's outermost pixels, at opacity
+# `a`. Four DISJOINT rects — top and bottom carry the corners, the sides run between them — so no pixel of a
+# translucent ring is blended twice. A rect no wider or taller than 2t is all ring.
+fn rend_outline(fb, x, y, w, h, t, color, a): i64 {
+    if (w <= 0) { return 0; }
+    if (h <= 0) { return 0; }
+    if (t <= 0) { return 0; }
+    if (w <= 2 * t) { return fill_rect_a(fb, x, y, w, h, color, a); }
+    if (h <= 2 * t) { return fill_rect_a(fb, x, y, w, h, color, a); }
+    fill_rect_a(fb, x, y, w, t, color, a);                       # top, corners included
+    fill_rect_a(fb, x, y + h - t, w, t, color, a);               # bottom, corners included
+    fill_rect_a(fb, x, y + t, t, h - 2 * t, color, a);           # left, between the corners
+    fill_rect_a(fb, x + w - t, y + t, t, h - 2 * t, color, a);   # right
+    return 0;
+}
+
+# draw_rect_outline(fb, x, y, w, h, color): Rust's `Framebuffer::draw_rect_outline` — a 1 px opaque outline.
+fn draw_rect_outline(fb, x, y, w, h, color): i64 { return rend_outline(fb, x, y, w, h, 1, color, 255); }
+
+# render_border(fb, win, color, a): the ring BORDER_W outside the window's rect, titlebar included.
+# ⛔⛔ CALLED AFTER THE BODY AND TITLEBAR FILLS, AND THE ORDER IS LOAD-BEARING ON THE GPU. gpu.cyr's op 0x02
+# coverage slot takes its capacity from the FIRST alpha rect it ever stages and refuses a larger one later
+# (`ae_gpu_cov_ensure`), and a refusal retires the chrome path for the run. A 1 px ring side staged first
+# would cap the slot below the body that follows it.
+fn render_border(fb, win, color, a): i64 {
+    return rend_outline(fb, win_x(win) - BORDER_W, win_y(win) - BORDER_W, win_w(win) + 2 * BORDER_W,
+      win_total_h(win) + 2 * BORDER_W, BORDER_W, color, a);
 }
 
 # rend_frame_damage(comp, fb): compute this frame's damage into ae_frame_dmg. Call ONCE at the
@@ -993,10 +1331,10 @@ fn rend_frame_damage(comp, fb, bg): i64 {
         if (win_rect_changed(w0) == 1) {
             if (ae_frame_dmg != 0) {
                 if (win_px(w0) >= 0) {
-                    rend_dmg_add(ae_frame_dmg, win_px(w0), win_py(w0),
+                    rend_dmg_add_win(ae_frame_dmg, win_px(w0), win_py(w0),
                       win_pw(w0), win_prev_total_h(w0));
                 }
-                rend_dmg_add(ae_frame_dmg, win_x(w0), win_y(w0),
+                rend_dmg_add_win(ae_frame_dmg, win_x(w0), win_y(w0),
                   win_w(w0), win_total_h(w0));
             }
         }
@@ -1009,8 +1347,8 @@ fn rend_frame_damage(comp, fb, bg): i64 {
     # introduce that looks like a client problem rather than a compositor one.
     #
     # ⛔⛔ A TRANSLUCENT WINDOW IS DAMAGED FOR THE SAME REASON, AND OMITTING IT MEANT OPACITY HAS
-    # NEVER WORKED FOR A STATIONARY WINDOW. `fill_rect_a` (:81) is read-modify-write —
-    # `bhumi_fb_set(fb, xx, yy, rend_blend(bhumi_fb_get(fb, xx, yy), color, a))`. `render_desktop`
+    # NEVER WORKED FOR A STATIONARY WINDOW. `fill_rect_a` is read-modify-write — every destination pixel
+    # goes through the op 0x02 blend — and so is a premultiplied surface's op 0x06. `render_desktop`
     # calls `render_window` every frame while the clear is band-limited, so an undamaged translucent
     # window is re-blended OVER ITS OWN PREVIOUS OUTPUT. That iteration's fixed point is (near) the
     # source colour: the window fades in and then **converges to opaque in about four frames**.
@@ -1032,7 +1370,7 @@ fn rend_frame_damage(comp, fb, bg): i64 {
         if (win_translucent(w1) == 1) { dmg1 = 1; }
         if (dmg1 == 1) {
             if (ae_frame_dmg != 0) {
-                rend_dmg_add(ae_frame_dmg, win_x(w1), win_y(w1),
+                rend_dmg_add_win(ae_frame_dmg, win_x(w1), win_y(w1),
                   win_w(w1), win_total_h(w1));
             }
         }
@@ -1058,7 +1396,7 @@ fn rend_frame_damage(comp, fb, bg): i64 {
     # frame than this function runs, so a rect written straight into `cur` at close time would be wiped
     # by this frame's own clear before anyone read it.
     # ⚠ TITLEBAR_H is added HERE. The compositor stores the raw window rect because this constant lives
-    # in this file, which is included after compositor.cyr.
+    # in this file, which is included after compositor.cyr. So is the border ring, for the same reason.
     # ⚠ Cleared UNCONDITIONALLY, including when there is no damage tracker at all: a retired rect that
     # survived its frame would keep re-damaging those rows for the rest of the run.
     # ⭐ THE CURSOR'S OWN DAMAGE — current AND previous position. The cursor is not in the window vector,
@@ -1067,7 +1405,7 @@ fn rend_frame_damage(comp, fb, bg): i64 {
     rend_cursor_damage(ae_frame_dmg);
     if (comp_retire_valid() == 1) {
         if (ae_frame_dmg != 0) {
-            rend_dmg_add(ae_frame_dmg, comp_retire_x(), comp_retire_y(),
+            rend_dmg_add_win(ae_frame_dmg, comp_retire_x(), comp_retire_y(),
               comp_retire_w(), comp_retire_h() + TITLEBAR_H);
         }
         comp_retire_clear();
@@ -1108,27 +1446,28 @@ enum FontK {
 # overwriting each other in whichever order the frame happens to run. So the decision is taken ONCE per
 # frame, before anything is drawn, and every fill in that frame follows it.
 enum AeRect {
-    AE_RECT_MAX = 256;   # ~6 rects per window x 16 windows + the shell panel + the clear band, with room
+    AE_RECT_MAX = 768;   # ~10 rects a window (4 of them the border) x AE_MARK_MAX (64) windows + the panel, the clear band, the launcher
 }
 var ae_rect_n = 0;
-var ae_rect_x[256];
-var ae_rect_y[256];
-var ae_rect_w[256];
-var ae_rect_h[256];
-var ae_rect_col[256];
+var ae_rect_x[768];
+var ae_rect_y[768];
+var ae_rect_w[768];
+var ae_rect_h[768];
+var ae_rect_col[768];
 # ⭐ PER-RECT ALPHA, 255 = opaque. An opaque rect goes to `#88 gpu_fill_rect`; a translucent one to
 # `#92` op 0x02 with a constant-coverage mask (gpu.cyr). ⛔ Before this lane existed `fill_rect_a` had
 # NO GPU route at all, and the two shapes that fell out of that cost two consecutive burns — see
 # `ae_gpu_cov_ok`'s banner. The queue is the right place for it: the routing decision belongs to the
 # emitter, which is the only code that knows whether this frame's chrome is on the GPU.
-var ae_rect_a[256];
+var ae_rect_a[768];
 # ⛔ 1 = the GPU chrome path is still trusted. Cleared by gpu.cyr on a refusal, exactly like the text
 # latch, because a queued rect that never gets emitted is a HOLE in the frame — and with `#39` gone there
 # is no userland copy to fall back on after the fact. One bad frame, then the CPU path for the rest.
 var ae_chrome_gpu_ok = 1;
-# ⚠ Overflow is a frame with missing chrome, so it is counted AND it retires the path. Sizing above makes
-# it unreachable for any window count the compositor supports; the counter is there because "unreachable"
-# is a claim about today's code.
+# ⚠ Overflow is a frame with missing chrome — the rect falls to a CPU store a GPU frame never presents —
+# so it is COUNTED (it does not retire the path). AE_RECT_MAX is sized past AE_MARK_MAX windows so it
+# cannot happen for any window count the marks support; the counter is there because "cannot" is a claim
+# about today's chrome. ⚠ 0.17.4's borders took a window from ~6 rects to ~10: re-size this with the chrome.
 var ae_rect_dropped = 0;
 
 # ============================================================================================

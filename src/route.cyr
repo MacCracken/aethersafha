@@ -1,0 +1,453 @@
+# aethersafha — input routing: where each pointer and key event goes, and the drag / resize state machine
+# Parity: rust-old/src/compositor.rs  route_input (:555-581), handle_left_click (:583-626),
+#         handle_mouse_move (:628-646), end_interactive (:649-652), apply_resize (:704-786), the
+#         drag_state / resize_state fields (:128-131) and InputAction (:97-117);
+#         rust-old/src/renderer.rs  DecorationHit / ResizeEdge (:484-513), through `deco_hit`.
+#
+# ⭐⭐ MOVED OUT OF main.cyr (0.17.4). This was the frame loop's `ae_pointer_event`, which only the frame
+# loop could reach: the titlebar drag that could be entered and never exited, the release no client got,
+# the titlebar coordinates sent to a client — each was found on a burn, because no suite could drive it.
+# The frame loop keeps the plumbing: it reads the bhumi batch, prints its log lines and delivers to
+# clients over setu. This module decides what each event MEANS.
+#
+# ⭐ THE CONTRACT — feed it events and the screen size, read back what it decided:
+#   route_pointer(comp, ev, sw, sh)   one bhumi MOTION / BUTTON / SCROLL event
+#   route_key(comp, ev)               one bhumi KEY event, and the held-modifier latch
+# Each call clears and refills an ordered list of OUTCOMES (`route_out_*`): Rust's InputAction, plus what
+# the port adds. Window management — focus, close, maximize, minimize, move, resize — is APPLIED here,
+# so a test reads it back off the compositor. Delivery is NOT: an outcome names the window by id and the
+# point relative to its content, and the caller sends it. So a suite drives this with `bhumi_*_event`
+# values and a compositor: no device, no framebuffer, no socket (tests/route.tcyr).
+#
+# ⚠ Bounds are PARAMETERS, as in input.cyr: the screen geometry is a main.cyr global declared after this
+# file is included, and Cyrius resolves forward references to functions but not to variables.
+
+# What the router decided, and the payload each kind carries in the outcome's fields (win, x, y, btn, val).
+# A button transition always names its wire button in `btn` and 1 down / 0 up in `val`.
+enum RouteAct {
+    # Nobody takes it: a click on the background, a key with nothing focused (Rust: None).
+    RA_NONE            = 0;
+    # A titlebar press: win; x, y = the grab offset from the origin (Rust: BeginDrag).
+    RA_BEGIN_DRAG      = 1;
+    # A window button, already applied: win (Rust: Close, Minimize, ToggleMaximize).
+    RA_CLOSE           = 2;
+    RA_MINIMIZE        = 3;
+    RA_TOGGLE_MAX      = 4;
+    # A grip press: win; x = the grip, a DECO_RESIZE_* (Rust: BeginResize(id, edge)).
+    RA_BEGIN_RESIZE    = 5;
+    # A button for win's client: x, y content-relative (Rust: ClientClick, which was a press only).
+    RA_CLIENT_CLICK    = 6;
+    # A key for the focused window: win; x = usage; y = held modifiers; val = pressed (Rust: KeyToFocused).
+    RA_KEY_TO_FOCUSED  = 7;
+    # The cursor moved: x, y on screen (Rust: PointerMove).
+    RA_POINTER_MOVE    = 8;
+    # ---- the port's own ----
+    # Motion over win's content: x, y content-relative (setu PTR_MOVE).
+    RA_CLIENT_MOVE     = 9;
+    # A wheel step over win's content: x, y content-relative; val = the signed delta.
+    RA_CLIENT_SCROLL   = 10;
+    # The left release that ended a drag / resize: win; x = the grip.
+    RA_END_INTERACTIVE = 11;
+    # A key while the chrome modifier is held — the compositor's, never a client's (0.16.25):
+    # x = usage; y = held modifiers; val = pressed.
+    RA_CHORD           = 12;
+}
+
+# One outcome record. ⚠ MODULE SCOPE: `var X[N]` is N x u64 here, so 48 slots = 8 records of RO_SZ bytes.
+# The most one event yields is six — a BUTTON event's left press and release, and two more buttons' press
+# and release — so eight leaves room, and a push past it is dropped rather than written off the end.
+enum RouteOutOff {
+    RO_KIND = 0;
+    RO_WIN  = 8;     # window id, 0 = none
+    RO_X    = 16;
+    RO_Y    = 24;
+    RO_BTN  = 32;    # wire button of a button transition, 0 otherwise
+    RO_VAL  = 40;
+    RO_SZ   = 48;
+}
+var ROUTE_OUT_MAX = 8;
+var ae_rt_out[48];
+var ae_rt_out_n = 0;
+
+fn route_out_clear(): i64 { ae_rt_out_n = 0; return 0; }
+
+fn route_out_push(kind, win, x, y, btn, val): i64 {
+    if (ae_rt_out_n >= ROUTE_OUT_MAX) { return 0; }
+    var r = &ae_rt_out + ae_rt_out_n * RO_SZ;
+    store64(r + RO_KIND, kind);
+    store64(r + RO_WIN, win);
+    store64(r + RO_X, x);
+    store64(r + RO_Y, y);
+    store64(r + RO_BTN, btn);
+    store64(r + RO_VAL, val);
+    ae_rt_out_n = ae_rt_out_n + 1;
+    return 1;
+}
+
+# @public — how many outcomes the last call produced, and their fields. An index out of range reads -1,
+# never a plausible RA_NONE.
+fn route_out_n(): i64 { return ae_rt_out_n; }
+fn route_out_field(i, off): i64 {
+    if (i < 0) { return 0 - 1; }
+    if (i >= ae_rt_out_n) { return 0 - 1; }
+    return load64(&ae_rt_out + i * RO_SZ + off);
+}
+fn route_out_kind(i): i64 { return route_out_field(i, RO_KIND); }
+fn route_out_win(i): i64  { return route_out_field(i, RO_WIN); }
+fn route_out_x(i): i64    { return route_out_field(i, RO_X); }
+fn route_out_y(i): i64    { return route_out_field(i, RO_Y); }
+fn route_out_btn(i): i64  { return route_out_field(i, RO_BTN); }
+fn route_out_val(i): i64  { return route_out_field(i, RO_VAL); }
+
+# ============================================================================================
+# KEYS — the held-modifier latch lives here, and only here
+# ============================================================================================
+# ⭐⭐ THE HELD-MODIFIER BITMAP (0.16.25) — the compositor's chrome keys are Ctrl chords, and this is the
+# Ctrl. Folded by `input_mod_track` from the modifier usages' own press/release events. See the ⛔⛔ on
+# `input_map`.
+var ae_mods = 0;
+
+# @public — is the chrome modifier held? Either Ctrl, today.
+# ⭐ THE ONE PLACE THE SUPER KEY GOES (roadmap SK1): `input_mod_track` already folds all eight modifier
+# usages, 0xE3 / 0xE7 included, so answering Super here is what makes every chrome decision answer it.
+fn route_chrome_mod(): i64 { return input_mod_ctrl(ae_mods); }
+fn route_mods(): i64 { return ae_mods; }
+
+# route_key(comp, ev): route one KEY event (Rust: route_input's KeyPress arm, compositor.rs:568-578).
+# -> its kind, and one outcome. The latch is folded FIRST, on every key event, before anything decides
+# what the key means: a Ctrl press is what makes the next key a chord.
+#   RA_CHORD           the chrome modifier is held and this is not a modifier key — the compositor's
+#                      (`input_map` / `input_chrome_key` say what it does), and never a client's
+#   RA_KEY_TO_FOCUSED  the focused window's
+#   RA_NONE            nothing holds focus
+# ⛔⛔ A CHORD IS SWALLOWED WHOLE: not the press of a claimed key, not its release, not an unclaimed Ctrl+X.
+# The wire carries no modifier state, so a forwarded `r` under Ctrl would be a bare `r` to the client:
+# RENAME, in crab. The modifier keys' OWN edges are not chords (`input_is_modifier`), which is how a client
+# learns Shift.
+# ⚠ Rust had no compositor keys: every press went to the focused window with its modifier mask. The chord
+# set is desktop work (roadmap § "The Super key replaces Ctrl"), not parity.
+fn route_key(comp, ev): i64 {
+    route_out_clear();
+    ae_mods = input_mod_track(ae_mods, ev);
+    if (bhumi_ev_is_key(ev) == 0) { return RouteAct.RA_NONE; }
+    var usage = bhumi_key_usage(ev);
+    var pressed = bhumi_key_pressed(ev);
+    if (route_chrome_mod() == 1) {
+        if (input_is_modifier(ev) == 0) {
+            route_out_push(RouteAct.RA_CHORD, 0, usage, ae_mods, 0, pressed);
+            return RouteAct.RA_CHORD;
+        }
+    }
+    var win = comp_focused_window(comp);
+    if (win == 0) {
+        route_out_push(RouteAct.RA_NONE, 0, usage, ae_mods, 0, pressed);
+        return RouteAct.RA_NONE;
+    }
+    route_out_push(RouteAct.RA_KEY_TO_FOCUSED, win_id(win), usage, ae_mods, 0, pressed);
+    return RouteAct.RA_KEY_TO_FOCUSED;
+}
+
+# ============================================================================================
+# THE POINTER (`AE-7`) — mostly wiring, which was the point
+# ============================================================================================
+# ⭐ `comp_window_at` (z-ordered, skips minimized), `deco_hit` and `input_move`'s GPU-safe clamp were all
+# written long before anything called them; they were waiting for a pointer. The setu protocol likewise
+# already carried PTR_MOVE (kind 9) and PTR_BTN (kind 10). Nothing here is a new mechanism.
+var ae_ptr_btn = 0;        # believed-down button BITMAP (kernel bit order), one bit per button — see input_btn_carry
+# ⛔⛔ THE WINDOW **ID**, NEVER A RAW Window POINTER. A drag outlives the thing it drags: F4, a close-button
+# click, or the client simply exiting all run `comp_close_window`, which unlinks the Window from the
+# compositor's vector — and a stored pointer then addresses an object that is no longer in the scene. Every
+# later motion would write geometry nobody composites and, once the allocator reuses that memory, write into
+# whatever lives there now. An id is re-resolved each motion, so a closed window ENDS the gesture.
+var ae_ptr_drag_id = 0;    # the window a pointer gesture (drag OR resize) owns, by id; 0 = none
+# ⭐ WHICH GRIP the gesture owns: DECO_TITLEBAR moves the window, DECO_RESIZE_* resizes it.
+# ⚠ One gesture with a grip beside it, rather than Rust's two Options (`drag_state`, `resize_state`): two
+# facts for one gesture can disagree, and every way out would have to clear both.
+var ae_ptr_grip = 0;
+# ⭐ THE ANCHOR — where the press was, and the window's rect at that moment (Rust: drag_state's grab
+# offset, resize_state's original rect). Every motion puts the window where the anchor says, from the
+# pointer's travel since the press — never by adding one more delta to where it is now. See
+# `win_apply_resize` for what a delta-at-a-time gesture does at the floor and the screen edge.
+var ae_ptr_press_x = 0;
+var ae_ptr_press_y = 0;
+var ae_ptr_orig_x = 0;
+var ae_ptr_orig_y = 0;
+var ae_ptr_orig_w = 0;
+var ae_ptr_orig_h = 0;
+# ⛔ 1 = THE LEFT BUTTON'S CURRENT PRESS WAS THE COMPOSITOR'S (a titlebar, a grip or a button), SO ITS
+# RELEASE IS TOO. A release goes to whoever got the press. Without this, the release of a close-button click
+# a frame after the press found the window UNDERNEATH and handed its client a release it never got a press
+# for; the event-scoped `consumed` guard below covers only a press and release folded into one drain.
+var ae_ptr_chrome = 0;
+
+# @public — Rust's two interactive states, as views of the one gesture.
+fn route_drag_id(): i64 {
+    if (win_grip_is_resize(ae_ptr_grip) == 1) { return 0; }
+    return ae_ptr_drag_id;
+}
+fn route_resize_id(): i64 {
+    if (win_grip_is_resize(ae_ptr_grip) == 0) { return 0; }
+    return ae_ptr_drag_id;
+}
+fn route_grip(): i64 { return ae_ptr_grip; }
+
+# @public — end any drag or resize (Rust: end_interactive, compositor.rs:649-652). The left release calls
+# it, and so does a motion that finds the gesture's window gone.
+fn route_end_interactive(): i64 {
+    ae_ptr_drag_id = 0;
+    ae_ptr_grip = 0;
+    return 0;
+}
+
+fn route_begin(win, grip, px, py): i64 {
+    ae_ptr_drag_id = win_id(win);
+    ae_ptr_grip = grip;
+    ae_ptr_chrome = 1;
+    ae_ptr_press_x = px;
+    ae_ptr_press_y = py;
+    ae_ptr_orig_x = win_x(win);
+    ae_ptr_orig_y = win_y(win);
+    ae_ptr_orig_w = win_w(win);
+    ae_ptr_orig_h = win_h(win);
+    return 0;
+}
+
+# The window whose CLIENT SURFACE is under (px, py), or 0. The point relative to it is
+# (px - win_x, py - win_body_y).
+# ⛔⛔ CHROME IS NOT THE CLIENT'S SURFACE. `comp_window_at` hit-tests from `win_y` so the TITLEBAR is inside
+# the window (it has to be — that is what makes a drag possible), but coordinates handed to a client are
+# CONTENT-relative. A pointer anywhere on the titlebar once produced `ry` in [-30, -1] and sent it down the
+# wire: a client indexing a row array by `ry / row_h` reads BEFORE its buffer. setu carries these as full
+# i64 so nothing corrupts them — the number arrives intact and wrong. ⇒ A point outside the content rect is
+# not a client's event.
+fn route_client_at(comp, px, py): i64 {
+    var win = comp_window_at(comp, px, py);
+    if (win == 0) { return 0; }
+    var rx = px - win_x(win);
+    var ry = py - win_body_y(win);
+    if (ry < 0) { return 0; }
+    if (rx < 0) { return 0; }
+    if (rx >= win_w(win)) { return 0; }
+    if (ry >= win_h(win)) { return 0; }
+    return win;
+}
+
+# A button transition for whichever client's content is under the pointer: RA_CLIENT_CLICK, or RA_NONE.
+fn route_client_btn(comp, btn, pressed): i64 {
+    var px = input_ptr_x();
+    var py = input_ptr_y();
+    var win = route_client_at(comp, px, py);
+    if (win == 0) {
+        route_out_push(RouteAct.RA_NONE, 0, 0, 0, btn, pressed);
+        return 0;
+    }
+    route_out_push(RouteAct.RA_CLIENT_CLICK, win_id(win), px - win_x(win), py - win_body_y(win), btn, pressed);
+    return 1;
+}
+
+# @public — route_pointer(comp, ev, sw, sh): route one non-key bhumi event on an sw x sh screen.
+# -> how many outcomes it produced. ⚠ Only for events whose kind is NOT key — the frame loop routes on
+# `bhumi_ev_is_key`, and so does `route_key`.
+fn route_pointer(comp, ev, sw, sh): i64 {
+    route_out_clear();
+    var k = bhumi_ev_kind(ev);
+    if (k == BhumiEvKind.BHUMI_EV_MOTION) { route_motion(comp, bhumi_motion_dx(ev), bhumi_motion_dy(ev), sw, sh); }
+    if (k == BhumiEvKind.BHUMI_EV_SCROLL) { route_scroll(comp, bhumi_scroll_delta(ev)); }
+    if (k == BhumiEvKind.BHUMI_EV_BUTTON) { route_buttons(comp, bhumi_button_state(ev), bhumi_button_seen(ev), sw, sh); }
+    return ae_rt_out_n;
+}
+
+fn route_motion(comp, dx, dy, sw, sh): i64 {
+    # ⭐⭐ THE FULL SCREEN, because the cursor CLIPS now. This used to be reduced by the glyph extent so the
+    # cursor's rect could never leave the buffer and be refused by `#92` op 0x03, which left the last
+    # columns of the screen unreachable. `cursor_visible_rect` sends only the on-surface part, so the
+    # hotspot may sit on the final pixel while the arrow runs off the edge. `input_ptr_move` clamps a POINT
+    # to `bound - 1`, so the raw geometry lands the hotspot on the last addressable pixel exactly.
+    input_ptr_move(dx, dy, sw, sh);
+    if (ae_ptr_drag_id != 0) { route_gesture_step(comp, sw, sh); }
+    var px = input_ptr_x();
+    var py = input_ptr_y();
+    route_out_push(RouteAct.RA_POINTER_MOVE, 0, px, py, 0, 0);
+    var win = route_client_at(comp, px, py);
+    if (win != 0) {
+        route_out_push(RouteAct.RA_CLIENT_MOVE, win_id(win), px - win_x(win), py - win_body_y(win), 0, 0);
+    }
+    return 0;
+}
+
+# One motion of the current gesture: put the window where the anchor and the pointer say.
+fn route_gesture_step(comp, sw, sh): i64 {
+    # Re-resolve by id: if it is gone, the gesture is over.
+    var idx = comp_find_by_id(comp, ae_ptr_drag_id);
+    if (idx < 0) { route_end_interactive(); return 0; }
+    var win = comp_get(comp, idx);
+    if (win == 0) { route_end_interactive(); return 0; }
+    var tdx = input_ptr_x() - ae_ptr_press_x;
+    var tdy = input_ptr_y() - ae_ptr_press_y;
+    # ⚠ The usable height: a window's chrome sits ABOVE its content rect, so the bottom clamp reserves it.
+    var bh = sh - TITLEBAR_H;
+    if (win_grip_is_resize(ae_ptr_grip) == 1) {
+        # ⛔ RETIRE THE OLD RECT BEFORE THE RESIZE CHANGES IT. A resize that SHRINKS a window vacates the
+        # region it gave up, and that region is in neither `cur` nor `prev` for the damage model — the old
+        # edges would stay on screen as a ghost. A move never needed this: `win_stamp_prev` covers a
+        # same-size rect that moved. A size change is the case it does not cover.
+        # ⚠ Same fix as F4-close, F6-minimize and un-maximize. Four sites now; that is the signal it belongs
+        # to "the window's extent changed", not to any one gesture.
+        comp_retire_add(win_x(win), win_y(win), win_w(win), win_total_h(win));
+        win_apply_resize(win, ae_ptr_grip, ae_ptr_orig_x, ae_ptr_orig_y, ae_ptr_orig_w, ae_ptr_orig_h,
+          tdx, tdy, sw, bh);
+        # ⛔ SAME ASK AS MAXIMIZE. A drag-resize changes `win_w`/`win_h` exactly as F5 does, so it had exactly
+        # the same divergence — the defect behind the 2026-08-18 report that dragging crab "destroyed its
+        # visible FB".
+        win_notify_resize(win);
+        return 1;
+    }
+    # ⭐ THE DRAG: the origin is the pointer minus the grab offset (Rust: handle_mouse_move, :631-636),
+    # through the mover F7-F10 proved on iron — including its clamp, which keeps a dragged window from
+    # crossing an edge and dropping the whole frame off the GPU (`#88`/`#87` REJECT an out-of-range rect).
+    # ⚠ Rust had no clamp, so its window could leave the screen. The port's stays on it, and because the
+    # target comes from the anchor, the grab point is back under the pointer as soon as the pointer is back
+    # inside the range the clamp allows.
+    return input_move(win, ae_ptr_orig_x + tdx - win_x(win), ae_ptr_orig_y + tdy - win_y(win), sw, bh);
+}
+
+# ⭐ THE WHEEL (0.16.21). The compositor has no scrollable chrome, so a scroll only ever goes to the client
+# whose content is under the cursor.
+# ⚠ ZERO IS NOT AN EVENT. bhumi already zero-suppresses, but a delta that reached here as 0 would cost a
+# client a wakeup and a repaint for no change.
+fn route_scroll(comp, delta): i64 {
+    if (delta == 0) { return 0; }
+    var px = input_ptr_x();
+    var py = input_ptr_y();
+    var win = route_client_at(comp, px, py);
+    if (win == 0) {
+        route_out_push(RouteAct.RA_NONE, 0, 0, 0, 0, delta);
+        return 0;
+    }
+    route_out_push(RouteAct.RA_CLIENT_SCROLL, win_id(win), px - win_x(win), py - win_body_y(win), 0, delta);
+    return 1;
+}
+
+fn route_buttons(comp, cur, seen, sw, sh): i64 {
+    # ⚠ `buttons_seen` OR-folds a click that began AND ended inside one frame. Without it a fast click is
+    # invisible: the level is back to 0 by the time the compositor looks.
+    # ⛔ NOT an edge on `cur | seen` — that makes the RELEASE unreachable, because the kernel re-seeds `seen`
+    # to the held level on every drain. See `input_btn_transitions`.
+    # ⛔⛔ LEFT FIRST, AND LEFT ALONE OWNS WINDOW MANAGEMENT (0.16.24). Click-to-focus, `deco_hit`'s
+    # close/maximize/minimize and both gestures live in the left arm. The other buttons are handled by the
+    # loop after it and only ever reach a client — routing them through the left arm would let a right-click
+    # close a window. Left runs first so its `consumed` verdict is known when they are routed.
+    var lmask = input_btn_mask(0);
+    var tr = input_btn_transitions(ae_ptr_btn & lmask, cur, seen, lmask);
+    # ⛔ `consumed` = a press in THIS event closed, maximized or minimized a window. Every later transition
+    # in the event is dropped: each would re-derive `comp_window_at` at the same point, find the window
+    # UNDERNEATH (or the moved one) and hand its client a button at a point the user never clicked in it.
+    var consumed = 0;
+    if (input_btn_pressed(tr) == 1) { consumed = route_left_press(comp, sw, sh); }
+    if (input_btn_released(tr) == 1) { route_left_release(comp, consumed); }
+    # ⭐⭐ THE OTHER BUTTONS (0.16.24). Until then every button but the left was discarded and no client on the
+    # desktop could see a right-click — filed by crab, whose context menu had no pointer route
+    # (docs/development/issues/archived/2026-09-09-forwards-only-the-left-button.md).
+    # ⛔ NO `deco_hit`, NO focus, NO gesture IN HERE.
+    # ⚠ Each button runs the same state machine the left does, against its own belief bit, so a folded
+    # right-click yields both transitions and a held one yields neither — see the input suite.
+    var bit = 1;
+    while (bit < INPUT_BTN_COUNT) {
+        var bmask = input_btn_mask(bit);
+        var trb = input_btn_transitions(ae_ptr_btn & bmask, cur, seen, bmask);
+        if (consumed == 0) {
+            if (input_btn_pressed(trb) == 1) { route_client_btn(comp, input_btn_wire(bit), 1); }
+            if (input_btn_released(trb) == 1) { route_client_btn(comp, input_btn_wire(bit), 0); }
+        }
+        bit = bit + 1;
+    }
+    # ⚠ THE LEVEL, NOT `seen`. A folded click (press and release inside one frame) yields both transitions
+    # above and must end BELIEVED-UP, or the next press is swallowed — and `seen` still says down for it.
+    # `input_btn_carry` is `cur` over the forwarded buttons, and the input suite proves exhaustively that the
+    # three-branch rule this line used to be equals exactly that.
+    # ⛔ Assigned AFTER every arm above, all of which derived their transitions from the OLD mask.
+    ae_ptr_btn = input_btn_carry(cur);
+    return 0;
+}
+
+# The left press (Rust: handle_left_click, compositor.rs:583-626). -> 1 when it consumed the event
+# (close, maximize, minimize), else 0.
+fn route_left_press(comp, sw, sh): i64 {
+    ae_ptr_chrome = 0;
+    var px = input_ptr_x();
+    var py = input_ptr_y();
+    var win = comp_window_at(comp, px, py);
+    if (win == 0) {
+        route_out_push(RouteAct.RA_NONE, 0, 0, 0, INPUT_BTN_LEFT, 1);
+        return 0;
+    }
+    var id = win_id(win);
+    # CLICK TO FOCUS, AND RAISE — before the hit decides anything, as Rust's focus_window did (:599-600).
+    var idx = comp_find_by_id(comp, id);
+    if (idx >= 0) { comp_focus(comp, idx); }
+    var hit = deco_hit(win, px, py);
+    var bh = sh - TITLEBAR_H;
+    # ⛔ A CLOSE CONSUMES THE CLICK. Nothing after it in this event may reach a client: the window is gone,
+    # and the point now lies over whatever was underneath it.
+    if (hit == Deco.DECO_CLOSE) {
+        comp_close_window(comp, id);
+        return route_window_action(RouteAct.RA_CLOSE, id);
+    }
+    # ⭐ THE MAXIMIZE AND MINIMIZE BUTTONS route through `input_apply_from`, so a click and Ctrl+F5 / Ctrl+F6
+    # take the identical path — and the record says which SOURCE did it, so a capture can tell them apart.
+    if (hit == Deco.DECO_MAX) {
+        input_apply_from(comp, InputAction.IA_MAXIMIZE_FOCUSED, sw, bh, IA_SRC_BUTTON);
+        return route_window_action(RouteAct.RA_TOGGLE_MAX, id);
+    }
+    if (hit == Deco.DECO_MIN) {
+        input_apply_from(comp, InputAction.IA_MINIMIZE_FOCUSED, sw, bh, IA_SRC_BUTTON);
+        return route_window_action(RouteAct.RA_MINIMIZE, id);
+    }
+    # ⭐⭐ THE GRIPS. A resize is the SAME state machine as the titlebar drag, with the grip recorded so a
+    # motion knows which edges move.
+    # ⛔ A GRIP PRESS IS THE COMPOSITOR'S, NOT THE CLIENT'S (Rust: Border → BeginResize and nothing else,
+    # :614-617). The side and bottom strips lie over the content rect's outer pixels, and the press used to
+    # reach the client as well — a click on its edge, delivered while the compositor began a resize.
+    if (win_grip_is_resize(hit) == 1) {
+        route_begin(win, hit, px, py);
+        route_out_push(RouteAct.RA_BEGIN_RESIZE, id, hit, 0, INPUT_BTN_LEFT, 1);
+        return 0;
+    }
+    if (hit == Deco.DECO_TITLEBAR) {
+        route_begin(win, hit, px, py);
+        route_out_push(RouteAct.RA_BEGIN_DRAG, id, px - win_x(win), py - win_y(win), INPUT_BTN_LEFT, 1);
+        return 0;
+    }
+    if (hit == Deco.DECO_BODY) {
+        route_out_push(RouteAct.RA_CLIENT_CLICK, id, px - win_x(win), py - win_body_y(win), INPUT_BTN_LEFT, 1);
+        return 0;
+    }
+    route_out_push(RouteAct.RA_NONE, 0, 0, 0, INPUT_BTN_LEFT, 1);
+    return 0;
+}
+
+fn route_window_action(kind, id): i64 {
+    ae_ptr_chrome = 1;
+    route_out_push(kind, id, 0, 0, INPUT_BTN_LEFT, 1);
+    return 1;
+}
+
+# The left release. `consumed` = a press earlier in this same event consumed it.
+fn route_left_release(comp, consumed): i64 {
+    var chrome = ae_ptr_chrome;
+    ae_ptr_chrome = 0;
+    # ⭐ THE TRANSITION THE BURN BLOCKER NEEDED. Before `input_btn_transitions` a release was unreachable and a
+    # titlebar drag never ended. A gesture ends here, and the release that ends it is the compositor's.
+    if (ae_ptr_drag_id != 0) {
+        route_out_push(RouteAct.RA_END_INTERACTIVE, ae_ptr_drag_id, ae_ptr_grip, 0, INPUT_BTN_LEFT, 0);
+        route_end_interactive();
+        return 0;
+    }
+    if (consumed == 1) { return 0; }
+    # ⚠ The press was chrome, and the gesture (if it was one) already ended with its window: nobody's.
+    if (chrome == 1) {
+        route_out_push(RouteAct.RA_NONE, 0, 0, 0, INPUT_BTN_LEFT, 0);
+        return 0;
+    }
+    return route_client_btn(comp, INPUT_BTN_LEFT, 0);
+}

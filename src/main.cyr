@@ -20,6 +20,7 @@ include "src/render.cyr"
 include "src/gpu.cyr"           # hardware compositing on agnos (#87 + #84) — after render.cyr for TITLEBAR_H
 include "src/wallpaper.cyr"     # the backdrop as a SOURCE (M6-C1a) — after render.cyr for rend_clear_band
 include "src/input.cyr"
+include "src/route.cyr"       # where each pointer and key event goes, and the drag / resize gestures (pure)
 # ⭐ The launcher's PURE half — registry, selection, key semantics, panel geometry. The impure half
 # (spawning a client, painting the panel) is in this file, because both need a kernel or a screen.
 include "src/launcher.cyr"
@@ -165,10 +166,8 @@ var ae_inp_denied = 0;
 var ae_present_bad = 0;
 var ae_inp_down = 0;
 var ae_inp_tab = 0;
-# ⭐⭐ THE HELD-MODIFIER BITMAP (0.16.25) — the compositor's chrome keys are Ctrl chords now, and this
-# is the Ctrl. Folded by `input_mod_track` from the modifier usages' own press/release events, read
-# by `input_mod_ctrl`. See the ⛔⛔ on `input_map`.
-var ae_mods = 0;
+# ⚠ The held-modifier bitmap (`ae_mods`) lives in src/route.cyr since 0.17.4, beside the key routing that
+# reads it: `route_key` folds it and `route_chrome_mod` answers from it.
 var ae_inp_chord = 0;      # one-shot: a Ctrl chord claimed nothing and was swallowed
 var ae_inp_fwd = 0;
 var ae_inp_nofwd = 0;   # BITMASK of focus indices already reported — NOT a boot-scoped latch (see the site)
@@ -344,28 +343,15 @@ fn ae_centre_pointer(): i64 {
 }
 
 # ================================================================
-# `AE-7` — POINTER HANDLING
+# `AE-7` — POINTER HANDLING: the plumbing
 # ================================================================
 #
-# ⭐ THIS IS MOSTLY WIRING, WHICH IS THE POINT. `comp_window_at` (z-ordered, skips minimized), the
-# 9-region `deco_hit`, and `input_move`'s GPU-safe clamp were all written long ago and never called —
-# they were waiting for a pointer. The setu protocol likewise already carries `SETU_INPUT_PTR_MOVE`
-# (kind 9) and `SETU_INPUT_PTR_BTN` (kind 10). Nothing here is a new mechanism.
-var ae_ptr_btn = 0;        # believed-down button BITMAP (kernel bit order), one bit per button — see input_btn_carry
+# ⭐ WHAT A POINTER EVENT MEANS IS DECIDED IN src/route.cyr (0.17.4): focus, the buttons, the drag and
+# resize gestures, and whose content is under the cursor. It moved there because this file's frame loop
+# is the one thing no suite can drive. What stays here needs the frame loop: the log lines, and delivering
+# an outcome to a client over setu.
 var ae_ptr_fwd_x = 0 - 1;  # last surface-relative position forwarded (dedupe; -1 = none yet)
 var ae_ptr_fwd_y = 0 - 1;
-var ae_ptr_drag = 0;       # 1 = dragging a window by its titlebar
-# ⛔⛔ THE WINDOW **ID**, NEVER A RAW Window POINTER. A drag outlives the thing it drags: F4, a
-# close-button click, or the client simply exiting all run `comp_close_window`, which unlinks the Window
-# from the compositor's vector — and a stored pointer then addresses an object that is no longer in the
-# scene. Every later motion would call `input_move` on it, writing geometry nobody composites and, once
-# the allocator reuses that memory, writing into whatever now lives there. An id is re-resolved against
-# the live vector each motion, so a closed window ENDS the drag instead of continuing it invisibly.
-var ae_ptr_drag_id = 0;    # window id being dragged (0 = none)
-# ⭐ WHICH GRIP the current pointer drag owns: DECO_TITLEBAR moves the window, DECO_RESIZE_* resizes it.
-# ⚠ One drag flag with a grip beside it, rather than a second `ae_ptr_resize` boolean — two flags for
-# one gesture can disagree, and the release path would have to clear both.
-var ae_ptr_grip = 0;
 var ae_resize_started = 0;   # first-occurrence latch, same shape as ae_drag_started
 var ae_ptr_first = 0;      # one-shot marker latch
 var ae_ptr_click = 0;      # one-shot marker latch
@@ -381,300 +367,181 @@ var ae_scroll_nowin = 0;
 var ae_btnx_first = 0;
 var ae_btnx_nowin = 0;
 
-# Forward a pointer event to the window under the cursor, using the setu messages that already exist.
-# ⚠ Coordinates are sent SURFACE-RELATIVE: a client knows nothing about where the compositor placed it,
-# so screen coordinates would make every client's hit-testing wrong by its own window origin.
-# ⭐ 0.16.21 — `kind_is_btn` became a THREE-VALUE kind rather than a boolean, so the wheel reuses the
-# window lookup and the content-rect guard below instead of copying them. That guard is where the
-# titlebar bug lived (`ry` in [-30,-1] sent to a client that indexes rows by it), and a second copy of
-# it is a second place for that to come back.
-#   0 = MOVE   (a, b unused — position comes from `input_ptr_*`)
-#   1 = BUTTON (a = button, b = pressed)
-#   2 = SCROLL (a = signed delta, + = up/away; b unused)
-fn ae_ptr_forward(comp, kind_is_btn, btn, pressed): i64 {
-    var win = comp_window_at(comp, input_ptr_x(), input_ptr_y());
+# Deliver routed outcome `i` — RA_CLIENT_MOVE, _CLICK or _SCROLL — to its window's client, using the setu
+# messages that already exist. -> 1 sent; 0 not (the window is gone or has no client, or a motion repeats).
+# ⚠ Coordinates are SURFACE-RELATIVE, as route.cyr computed them: a client knows nothing about where the
+# compositor placed it, so screen coordinates would make every client's hit-testing wrong by its own origin.
+# ⚠ The window is re-resolved BY ID, never trusted as a pointer from an earlier step.
+fn ae_ptr_forward(comp, i): i64 {
+    var wid = route_out_win(i);
+    var idx = comp_find_by_id(comp, wid);
+    if (idx < 0) { return 0; }
+    var win = comp_get(comp, idx);
     if (win == 0) { return 0; }
     var cfd = win_cfd(win);
     if (cfd == 0) { return 0; }                 # a compositor-seeded window has no client
-    var rx = input_ptr_x() - win_x(win);
-    var ry = input_ptr_y() - win_body_y(win);   # relative to the CONTENT rect, not the chrome
-    # ⛔⛔ CHROME IS NOT THE CLIENT'S SURFACE. `comp_window_at` hit-tests from `win_y` so the TITLEBAR is
-    # inside the window (it has to be — that is what makes a drag possible), but coordinates handed to a
-    # client are CONTENT-relative. A pointer anywhere on the titlebar therefore produced `ry` in [-30, -1]
-    # and sent it down the wire: a client indexing a row array by `ry / row_h` reads BEFORE its buffer.
-    # setu carries these as full i64 so nothing corrupts them — the number arrives intact and wrong.
-    # ⇒ A position outside the content rect is not this client's event. Drop it: chrome interaction is the
-    # compositor's (drag, close), and forwarding it as well was double-handling the same press.
-    if (ry < 0) { return 0; }
-    if (rx < 0) { return 0; }
-    if (rx >= win_w(win)) { return 0; }
-    if (ry >= win_h(win)) { return 0; }
+    var act = route_out_kind(i);
+    var rx = route_out_x(i);
+    var ry = route_out_y(i);
     # ⚠ MOTION IS DEDUPED. Every frame the pointer is over a client cost a `#97` ring slot even when the
     # surface-relative position had not changed, and that ring drops the OLDEST record when it fills — so a
     # stationary pointer could push a client's real events out. No shipped client decodes PTR_MOVE yet, so
     # this is pure cost today; a proper per-surface opt-in flag is the real fix and needs a protocol bit.
-    if (kind_is_btn == 0) {
+    if (act == RouteAct.RA_CLIENT_MOVE) {
         if (rx == ae_ptr_fwd_x) {
             if (ry == ae_ptr_fwd_y) { return 0; }
         }
         ae_ptr_fwd_x = rx;
         ae_ptr_fwd_y = ry;
-        setu_send(cfd, setu_input_ptr_move(win_id(win), rx, ry));
+        setu_send(cfd, setu_input_ptr_move(wid, rx, ry));
+        return 1;
     }
-    if (kind_is_btn == 1) { setu_send(cfd, setu_input_ptr_btn(win_id(win), btn, pressed)); }
-    # ⭐⭐ THE WHEEL (0.16.21). `btn` carries the signed delta here.
+    if (act == RouteAct.RA_CLIENT_CLICK) {
+        setu_send(cfd, setu_input_ptr_btn(wid, route_out_btn(i), route_out_val(i)));
+        return 1;
+    }
+    # ⭐⭐ THE WHEEL (0.16.21). The outcome carries the signed delta.
     # ⚠ NOT DEDUPED like motion, and not coalesced. A scroll is a discrete quantity the user asked
     # for — dropping a repeat because it equals the last one would swallow the second notch of every
     # steady scroll, which is the opposite of motion's problem.
-    # ⛔ THE CHAIN BELOW THIS LINE IS FIVE REPOS DEEP AND WAS BROKEN AT THE BOTTOM UNTIL TODAY: agnos
+    # ⛔ THE CHAIN BELOW THIS LINE IS FIVE REPOS DEEP AND WAS BROKEN AT THE BOTTOM UNTIL 0.16.21: agnos
     # 1.56.49 reads HID report byte [3] (it was documented and never read), bhumi 1.4.3 carries it as
     # `BHUMI_EV_SCROLL`, setu 0.8.8 defines `SETU_INPUT_PTR_SCROLL`. Sending this against an older
     # stack is inert, not wrong.
-    if (kind_is_btn == 2) { setu_send(cfd, setu_input_ptr_scroll(win_id(win), btn)); }
-    return 1;
+    if (act == RouteAct.RA_CLIENT_SCROLL) {
+        setu_send(cfd, setu_input_ptr_scroll(wid, route_out_val(i)));
+        return 1;
+    }
+    return 0;
 }
 
-# ae_pointer_event(comp, ev, frame): handle one MOTION or BUTTON event from the bhumi batch.
+# ae_pointer_event(comp, ev, frame): route one MOTION, BUTTON or SCROLL event from the bhumi batch, then
+# log and deliver what the router decided, in its order.
 # ⚠ `frame` is passed, not read from a global: the frame counter is a LOCAL of the frame loop, and Cyrius
 # would not resolve a forward reference to it from here even if it were module-scope and declared below.
 # ⚠ Only ever called for events whose kind is NOT key — the frame loop routes on `bhumi_ev_is_key`.
 fn ae_pointer_event(comp, ev, frame): i64 {
-    var k = bhumi_ev_kind(ev);
-
-    if (k == BhumiEvKind.BHUMI_EV_MOTION) {
-        var dx = bhumi_motion_dx(ev);
-        var dy = bhumi_motion_dy(ev);
-        # ⭐⭐ THE FULL SCREEN, because the cursor CLIPS now. This used to be reduced by the glyph extent
-        # (`ae_geom_w - FONT_ADV + 1`) so the cursor's rect could never leave the buffer and be refused by
-        # `#92` op 0x03 — correct at the time, but it meant the pointer stopped short of the right and
-        # bottom edges and the last columns of the screen were unreachable. A 20 px arrow would make that
-        # the whole bottom-right corner, including anything you might want to click there.
-        # ⇒ `cursor_visible_rect` computes the on-surface sub-rectangle and only that is sent, so the
-        # hotspot is free to sit on the final pixel while the arrow simply runs off the edge — which is
-        # what every real cursor does. `input_ptr_move` clamps a POINT to `bound - 1`, so passing the raw
-        # geometry lands the hotspot on the last addressable pixel exactly.
-        input_ptr_move(dx, dy, ae_geom_w, ae_geom_h);
+    var n = route_pointer(comp, ev, ae_geom_w, ae_geom_h);
+    if (bhumi_ev_kind(ev) == BhumiEvKind.BHUMI_EV_MOTION) {
         if (ae_ptr_first == 0) {
             ae_ptr_first = 1;
             println("aethersafha: pointer motion received -- the cursor is live");
         }
-        # ⭐ A DRAG IS A MOVE BY A DELTA, so it reuses the mover F7-F10 already proved on iron —
-        # including its clamp, which is what keeps a dragged window from crossing an edge and dropping
-        # the whole frame off the GPU (`#88`/`#87` REJECT an out-of-range rect rather than clipping).
-        if (ae_ptr_drag == 1) {
-            # Re-resolve by id: if it is gone, the drag is over.
-            var didx = comp_find_by_id(comp, ae_ptr_drag_id);
-            if (didx < 0) {
-                ae_ptr_drag = 0;
-                ae_ptr_drag_id = 0;
-            }
-            if (didx >= 0) {
-                var dwin = comp_get(comp, didx);
-                if (dwin != 0) {
-                    # ⛔ RETIRE THE OLD RECT BEFORE EITHER GESTURE CHANGES IT. A resize that SHRINKS a
-                    # window vacates the region it gave up, and that region is in neither `cur` nor
-                    # `prev` for the damage model — the old edges would stay on screen as a ghost. The
-                    # move path never needed this because `win_stamp_prev` covers a same-size rect that
-                    # moved; a size change is the case it does not cover.
-                    # ⚠ Same fix as F4-close, F6-minimize and un-maximize. Four sites now; that is the
-                    # signal it belongs to "the window's extent changed", not to any one gesture.
-                    if (win_grip_is_resize(ae_ptr_grip) == 1) {
-                        comp_retire_add(win_x(dwin), win_y(dwin), win_w(dwin), win_total_h(dwin));
-                        win_resize_by(dwin, ae_ptr_grip, dx, dy, ae_geom_w, ae_geom_h - TITLEBAR_H);
-                        # ⛔ SAME ASK AS MAXIMIZE. A drag-resize changes `win_w`/`win_h` exactly as F5
-                        # does, so it had exactly the same divergence — this is the defect behind the
-                        # 2026-08-18 report that dragging crab "destroyed its visible FB".
-                        win_notify_resize(dwin);
-                    }
-                    if (win_grip_is_resize(ae_ptr_grip) == 0) {
-                        input_move(dwin, dx, dy, ae_geom_w, ae_geom_h - TITLEBAR_H);
-                    }
-                }
+    }
+    var i = 0;
+    while (i < n) {
+        ae_pointer_outcome(comp, i, frame);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Log and deliver outcome `i` of the event just routed.
+fn ae_pointer_outcome(comp, i, frame): i64 {
+    var act = route_out_kind(i);
+    var btn = route_out_btn(i);
+    var val = route_out_val(i);
+    if (act == RouteAct.RA_CLIENT_MOVE) { ae_ptr_forward(comp, i); return 0; }
+    if (act == RouteAct.RA_POINTER_MOVE) { return 0; }
+    # ⭐ THE WHEEL — the only outcomes left without a button are a scroll's.
+    if (btn == 0) {
+        # ⛔⛔ LOG THE OUTCOME, NOT THE INTENT — AND THE FIRST CUT OF THIS LIED. The one-shot sat BEFORE the
+        # forward and said "forwarded a scroll to the client under the cursor", so it fired whenever a wheel
+        # event REACHED the compositor, whether or not any window was under the cursor to receive it. A QEMU
+        # run then reported the compositor forwarding while the client logged nothing, and the log gave no
+        # way to tell "crab dropped it" from "there was no window there" — two bugs in two repos, which is
+        # exactly what a one-shot exists to separate. `ae_ptr_forward` returns 1 only when it actually sent.
+        var fwd = 0;
+        if (act == RouteAct.RA_CLIENT_SCROLL) { fwd = ae_ptr_forward(comp, i); }
+        if (fwd == 1) {
+            if (ae_scroll_first == 0) {
+                ae_scroll_first = 1;
+                println("aethersafha: forwarded a scroll to the client under the cursor");
             }
         }
-        ae_ptr_forward(comp, 0, 0, 0);
+        else {
+            if (ae_scroll_nowin == 0) {
+                ae_scroll_nowin = 1;
+                println("aethersafha: got a scroll with NO client window under the cursor");
+            }
+        }
         return 0;
     }
-
-    # ⭐ THE WHEEL ARM. The compositor itself does nothing with a scroll — it has no scrollable chrome
-    # — so this is a pure forward to whichever client is under the cursor.
-    # ⚠ ZERO IS NOT AN EVENT. bhumi already zero-suppresses, but a delta that reached here as 0 would
-    # cost a client a wakeup and a repaint for no change.
-    if (k == BhumiEvKind.BHUMI_EV_SCROLL) {
-        var sd = bhumi_scroll_delta(ev);
-        if (sd != 0) {
-            # ⛔⛔ LOG THE OUTCOME, NOT THE INTENT — AND THE FIRST CUT OF THIS LIED. The one-shot sat
-            # BEFORE the forward and said "forwarded a scroll to the client under the cursor", so it
-            # fired whenever a wheel event REACHED the compositor, whether or not any window was under
-            # the cursor to receive it. A QEMU run then reported the compositor forwarding while the
-            # client logged nothing, and the log gave no way to tell "crab dropped it" from "there was
-            # no window there" — two bugs in two repos, which is exactly what a one-shot exists to
-            # separate. `ae_ptr_forward` returns 1 only when it actually sent.
-            var fwd = ae_ptr_forward(comp, 2, sd, 0);
-            if (fwd == 1) {
-                if (ae_scroll_first == 0) {
-                    ae_scroll_first = 1;
-                    println("aethersafha: forwarded a scroll to the client under the cursor");
-                }
-            }
-            else {
-                if (ae_scroll_nowin == 0) {
-                    ae_scroll_nowin = 1;
-                    println("aethersafha: got a scroll with NO client window under the cursor");
-                }
+    if (btn == INPUT_BTN_LEFT) {
+        if (val == 1) { return ae_pointer_left_press(comp, i, frame); }
+        # ⭐ THE LINE THE BURN BLOCKER NEEDED. Before `input_btn_transitions` the release was UNREACHABLE:
+        # the kernel re-seeds `seen` to the held level, so an edge on `cur | seen` never saw the button come
+        # up and a titlebar drag never ended. Printing here makes the fix self-evidencing on any boot, and
+        # makes its absence-after-`drag started` the failure signal.
+        if (act == RouteAct.RA_END_INTERACTIVE) {
+            if (ae_drag_released == 0) {
+                ae_drag_released = 1;
+                println("aethersafha: drag released -- the window stopped, frames held:");
+                println_int(frame - ae_drag_frame);
             }
         }
-    }
-
-    if (k == BhumiEvKind.BHUMI_EV_BUTTON) {
-        var cur = bhumi_button_state(ev);
-        # ⚠ `buttons_seen` OR-folds a click that began AND ended inside one frame. Without this a fast
-        # click is invisible: the level is back to 0 by the time the compositor looks.
-        var seen = bhumi_button_seen(ev);
-        # ⛔ NOT an edge on `cur | seen` — that makes the RELEASE unreachable, because the kernel re-seeds
-        # `seen` to the held level on every drain. See `input_btn_transitions`.
-        # ⛔⛔ LEFT FIRST, AND LEFT ALONE OWNS WINDOW MANAGEMENT (0.16.24). Click-to-focus, `deco_hit`'s
-        # close/maximize/minimize and both drag grips live in THIS arm. The other buttons are handled by
-        # the loop after it and only ever FORWARD — routing them through this arm would make a right-click
-        # close a window. Left runs first so its `closed` verdict is already known when they forward.
-        # ⚠ `ae_ptr_btn` is a BITMASK now (its comment always called it one); this arm reads only bit 0.
-        var tr = input_btn_transitions(ae_ptr_btn & input_btn_mask(0), cur, seen, input_btn_mask(0));
-        var closed = 0;
-        if (input_btn_pressed(tr) == 1) {
-            var win = comp_window_at(comp, input_ptr_x(), input_ptr_y());
-            if (win != 0) {
-                # CLICK TO FOCUS — the first consumer `comp_window_at` has ever had.
-                var idx = comp_find_by_id(comp, win_id(win));
-                if (idx >= 0) { comp_focus(comp, idx); }
-                var hit = deco_hit(win, input_ptr_x(), input_ptr_y());
-                # ⛔ A CLOSE CONSUMES THE CLICK. Without `closed`, the forward below re-derives
-                # `comp_window_at` at the SAME cursor position — the window it found is gone, so it now
-                # finds whatever was underneath and sends THAT client a button press at a coordinate the
-                # user never clicked in it. A click that destroys a window must not also be delivered.
-                if (hit == Deco.DECO_CLOSE) {
-                    comp_close_window(comp, win_id(win));
-                    closed = 1;
-                }
-                # ⭐ THE MAXIMIZE AND MINIMIZE BUTTONS DO SOMETHING NOW. `deco_hit` has returned nine
-                # regions since it was written and this handler consumed exactly two of them, so both
-                # buttons were PAINTED on every titlebar in their own theme colours — they looked live and
-                # were inert. Worse than absent: a control that ignores you reads as a broken desktop.
-                # ⚠ The actions already existed (F5/F6 drive them); this is wiring, not new behaviour, and
-                # it routes through `input_apply` so click and key take the identical path.
-                # ⚠ `input_apply_from` records the SOURCE so the line below can say "button". Without it
-                # a titlebar click and an F5/F6 keypress are the same three log lines, which is why the
-                # 2026-08-10 burn could not corroborate the button path at all (A2).
-                if (hit == Deco.DECO_MAX) { input_apply_from(comp, InputAction.IA_MAXIMIZE_FOCUSED, ae_geom_w, ae_geom_h - TITLEBAR_H, IA_SRC_BUTTON); closed = 1; }
-                if (hit == Deco.DECO_MIN) { input_apply_from(comp, InputAction.IA_MINIMIZE_FOCUSED, ae_geom_w, ae_geom_h - TITLEBAR_H, IA_SRC_BUTTON); closed = 1; }
-                if (closed == 1) {
-                    println("aethersafha: window action applied — action id, then source (1=key 2=button):");
-                    println_int(input_last_action());
-                    println_int(input_last_src());
-                }
-                # ⭐⭐ THE RESIZE GRIPS, WIRED (M7). `deco_hit` has returned DECO_RESIZE_R/_B/_BR since it
-                # was written and this handler consumed four of nine regions — the grips were hit-tested
-                # every frame and the answer discarded, exactly like MAX/MIN were before they were wired.
-                # ⚠ A resize drag is the SAME state machine as the titlebar drag, with the grip recorded
-                # so motion knows which edge is moving. Reusing `ae_ptr_drag` rather than adding a second
-                # flag keeps one "a pointer gesture owns this window" fact instead of two that can
-                # disagree — the release path already clears it.
-                if (win_grip_is_resize(hit) == 1) {
-                    ae_ptr_drag = 1;
-                    ae_ptr_drag_id = win_id(win);
-                    ae_ptr_grip = hit;
-                    ae_drag_frame = frame;
-                    if (ae_resize_started == 0) {
-                        ae_resize_started = 1;
-                        println("aethersafha: resize started -- a grip press was caught, region:");
-                        println_int(hit);
-                    }
-                }
-                if (hit == Deco.DECO_TITLEBAR) {
-                    ae_ptr_drag = 1;
-                    ae_ptr_drag_id = win_id(win);
-                    ae_ptr_grip = Deco.DECO_TITLEBAR;
-                    ae_drag_frame = frame;
-                    if (ae_drag_started == 0) {
-                        ae_drag_started = 1;
-                        println("aethersafha: drag started -- a titlebar press was caught");
-                    }
-                }
-            }
-            if (ae_ptr_click == 0) {
-                ae_ptr_click = 1;
-                println("aethersafha: pointer button click routed");
-            }
-            if (closed == 0) { ae_ptr_forward(comp, 1, INPUT_BTN_LEFT, 1); }
-        }
-        if (input_btn_released(tr) == 1) {
-            # ⭐ THE LINE THE BURN BLOCKER NEEDED. Before `input_btn_transitions` this branch was
-            # UNREACHABLE: the kernel re-seeds `seen` to the held level, so an edge on `cur | seen` never
-            # saw the button come up and a titlebar drag never ended. Printing here makes the fix
-            # self-evidencing on any boot, and makes its absence-after-`drag started` the failure signal.
-            if (ae_ptr_drag == 1) {
-                if (ae_drag_released == 0) {
-                    ae_drag_released = 1;
-                    println("aethersafha: drag released -- the window stopped, frames held:");
-                    println_int(frame - ae_drag_frame);
-                }
-            }
-            ae_ptr_drag = 0;
-            ae_ptr_drag_id = 0;
-            # ⛔ `closed` GUARDS THIS TOO — an earlier cut guarded only the press. `ae_ptr_forward`
-            # re-derives `comp_window_at` at the same cursor position, so after a close-button click the
-            # window it finds is the one UNDERNEATH, and that client receives a button RELEASE it never
-            # got a press for. Half a guard is not a guard.
-            if (closed == 0) { ae_ptr_forward(comp, 1, INPUT_BTN_LEFT, 0); }
-        }
-        # ⭐⭐ THE OTHER BUTTONS FORWARD, AND ONLY FORWARD (0.16.24). Until this cut every button but the
-        # left was discarded here — the kernel published the bitmap, bhumi and setu carried it, dhancha
-        # delivered it, and this loop's absence was the single point of loss: no client on the desktop
-        # could see a right-click. Filed by crab (docs/development/issues/archived/2026-09-09-forwards-only-the-
-        # left-button.md), whose context menu had no pointer route because of it.
-        # ⛔ NO `deco_hit`, NO focus, NO drag IN HERE. Window management is the left arm's, above, and
-        # stays there — a loop that reached `comp_close_window` would let a right-click close a window.
-        # ⛔ `closed` GUARDS THESE TOO, for the reason it guards the left release: a left press that closed
-        # a window and a right transition in the SAME event must not hand the right button to whatever
-        # `comp_window_at` finds underneath.
-        # ⚠ Each button runs the same state machine the left does, against its own belief bit, so a
-        # folded right-click emits both transitions and a held one emits neither — see the input suite.
-        var bit = 1;
-        while (bit < INPUT_BTN_COUNT) {
-            var bmask = input_btn_mask(bit);
-            var trb = input_btn_transitions(ae_ptr_btn & bmask, cur, seen, bmask);
-            if (input_btn_pressed(trb) == 1) {
-                if (closed == 0) {
-                    # ⚠ ONE-SHOT, for the same reason the wheel has one: on a boot, "right-click does
-                    # nothing" must be attributable to this compositor or to the client, not to both.
-                    var fwd = ae_ptr_forward(comp, 1, input_btn_wire(bit), 1);
-                    if (fwd == 1) {
-                        if (ae_btnx_first == 0) {
-                            ae_btnx_first = 1;
-                            println("aethersafha: forwarded a non-left button press, wire number:");
-                            println_int(input_btn_wire(bit));
-                        }
-                    }
-                    else {
-                        if (ae_btnx_nowin == 0) {
-                            ae_btnx_nowin = 1;
-                            println("aethersafha: a non-left button press had NO client content under the cursor");
-                        }
-                    }
-                }
-            }
-            if (input_btn_released(trb) == 1) {
-                if (closed == 0) { ae_ptr_forward(comp, 1, input_btn_wire(bit), 0); }
-            }
-            bit = bit + 1;
-        }
-        # ⚠ THE LEVEL, NOT `seen`. A folded click (press and release inside one frame) emits both
-        # transitions above and must end BELIEVED-UP, or the next press is swallowed — and `seen` still
-        # says down for it. `input_btn_carry` is `cur` over the forwarded buttons, and the input suite
-        # proves exhaustively that the three-branch rule this line used to be equals exactly that.
-        # ⛔ Assigned AFTER every arm above, all of which derived their transitions from the OLD mask.
-        ae_ptr_btn = input_btn_carry(cur);
+        if (act == RouteAct.RA_CLIENT_CLICK) { ae_ptr_forward(comp, i); }
         return 0;
     }
+    # ⭐⭐ THE OTHER BUTTONS FORWARD, AND ONLY FORWARD (0.16.24): route.cyr never gives them a window action.
+    var sent = 0;
+    if (act == RouteAct.RA_CLIENT_CLICK) { sent = ae_ptr_forward(comp, i); }
+    if (val == 1) {
+        # ⚠ ONE-SHOT, for the same reason the wheel has one: on a boot, "right-click does nothing" must be
+        # attributable to this compositor or to the client, not to both.
+        if (sent == 1) {
+            if (ae_btnx_first == 0) {
+                ae_btnx_first = 1;
+                println("aethersafha: forwarded a non-left button press, wire number:");
+                println_int(btn);
+            }
+        }
+        else {
+            if (ae_btnx_nowin == 0) {
+                ae_btnx_nowin = 1;
+                println("aethersafha: a non-left button press had NO client content under the cursor");
+            }
+        }
+    }
+    return 0;
+}
+
+# A left press's lines, in the order the handler always printed them: what it did to a window, that a
+# click was routed at all, and then the press itself when it was a client's.
+fn ae_pointer_left_press(comp, i, frame): i64 {
+    var act = route_out_kind(i);
+    var acted = 0;
+    if (act == RouteAct.RA_CLOSE) { acted = 1; }
+    if (act == RouteAct.RA_TOGGLE_MAX) { acted = 1; }
+    if (act == RouteAct.RA_MINIMIZE) { acted = 1; }
+    # ⚠ `input_apply_from` records the SOURCE so this line can say "button". Without it a titlebar click and
+    # a Ctrl+F5/F6 keypress are the same three log lines, which is why the 2026-08-10 burn could not
+    # corroborate the button path at all (A2).
+    if (acted == 1) {
+        println("aethersafha: window action applied — action id, then source (1=key 2=button):");
+        println_int(input_last_action());
+        println_int(input_last_src());
+    }
+    if (act == RouteAct.RA_BEGIN_RESIZE) {
+        ae_drag_frame = frame;
+        if (ae_resize_started == 0) {
+            ae_resize_started = 1;
+            println("aethersafha: resize started -- a grip press was caught, region:");
+            println_int(route_out_x(i));
+        }
+    }
+    if (act == RouteAct.RA_BEGIN_DRAG) {
+        ae_drag_frame = frame;
+        if (ae_drag_started == 0) {
+            ae_drag_started = 1;
+            println("aethersafha: drag started -- a titlebar press was caught");
+        }
+    }
+    if (ae_ptr_click == 0) {
+        ae_ptr_click = 1;
+        println("aethersafha: pointer button click routed");
+    }
+    if (act == RouteAct.RA_CLIENT_CLICK) { ae_ptr_forward(comp, i); }
     return 0;
 }
 
@@ -1216,8 +1083,10 @@ fn main(): i64 {
                 }
                 # ⭐ THE MODIFIER LATCH IS FOLDED FIRST, on every key event, before anything
                 # decides what the key means — a Ctrl press is what makes the next key a chord.
-                ae_mods = input_mod_track(ae_mods, ev);
-                var ctrl = input_mod_ctrl(ae_mods);
+                # `route_key` folds it and says where the key goes (src/route.cyr); `ctrl` is the
+                # chrome modifier every chrome decision below reads.
+                var kroute = route_key(comp, ev);
+                var ctrl = route_chrome_mod();
                 # ⭐ NAME THE KEY THAT QUIT, because on the 2026-08-02 burn the desktop
                 # rendered and then exited immediately and nothing said why. IA_QUIT has exactly
                 # one source (HID_ESC), so either an Esc really arrived or the Set-1 decode
@@ -1377,20 +1246,19 @@ fn main(): i64 {
                 # not an unclaimed Ctrl+X either. The wire carries no modifier state, so a
                 # forwarded `r` under Ctrl would be a bare `r` to the client: RENAME, in crab.
                 # The modifier keys' OWN edges still go through (`input_is_modifier`), which is
-                # how a client can learn Shift.
-                if (ctrl == 1) {
-                    if (input_is_modifier(ev) == 0) {
-                        if (kdone == 0) {
-                            if (bhumi_key_pressed(ev) == 1) {
-                                if (ae_inp_chord == 0) {
-                                    ae_inp_chord = 1;
-                                    println("aethersafha: a Ctrl chord claimed nothing and was swallowed, usage:");
-                                    println_int(bhumi_key_usage(ev));
-                                }
+                # how a client can learn Shift. `route_key` drew that line: RA_CHORD is exactly a
+                # non-modifier key under the chrome modifier.
+                if (kroute == RouteAct.RA_CHORD) {
+                    if (kdone == 0) {
+                        if (bhumi_key_pressed(ev) == 1) {
+                            if (ae_inp_chord == 0) {
+                                ae_inp_chord = 1;
+                                println("aethersafha: a Ctrl chord claimed nothing and was swallowed, usage:");
+                                println_int(bhumi_key_usage(ev));
                             }
                         }
-                        kdone = 1;
                     }
+                    kdone = 1;
                 }
                 if (kdone == 0) {
                     var fk = setu_srv_forward_key(comp, ev);   # key-DOWN -> focused client

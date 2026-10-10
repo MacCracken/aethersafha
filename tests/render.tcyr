@@ -283,6 +283,667 @@ fn ghost_frame(comp, fb, win, bg): i64 {
     return 0;
 }
 
+# ================================================================================================================
+# ⭐⭐ 0.17.4 — THE CPU BLEND AGAINST THE KERNEL'S, AND THE WINDOW BORDER
+# ================================================================================================================
+# THE ORACLES, none of them a call into the code under test:
+#   · op 0x01 — `t_ref_px_r`, the kernel's own integer reference, copied verbatim (below).
+#   · op 0x06 / op 0x02 — words and digests computed OUTSIDE this tree by an IEEE-f32 model of agnos's
+#     blend_alpha.s and blend_cov.s: every v_mul_f32 a numpy float32 multiply, every v_fma_f32 the exact a·b + c
+#     rounded once to f32 (that rounding checked against numpy's float32 multiply on all 65,792 products the
+#     shaders form), v_cvt_pk_u8_f32 saturate-then-round-half-even. Constants: INV = 0x3B808081 (f32 1/255),
+#     -INV = 0xBB808081. Recompute with those steps; the digest is Σ word·(i·K1 + K2) mod 2^64 over the words in
+#     the order listed, K1 = 0x9E3779B97F4A7C15, K2 = 0x632BE59BD9B4E019. The same model of blend_rect.s equals
+#     `t_ref_px_r` on all 2^24 of its inputs, and its blend_alpha.s at α = 255 equals blend_rect.s everywhere.
+
+# ⭐ THE KERNEL'S INTEGER REFERENCE FOR `#92` op 0x01, VERBATIM from agnos kernel/core/gpu.cyr `blend_ref_px` — what
+# the burned blend_rect.s is gated against (agnos tests/gpu/shaderexec.cyr gate 1). The kernel's code, not the port's.
+fn t_ref_px_r(src, dst): i64 {
+    var sa = (src >> 24) & 0xFF;
+    var ia = 255 - sa;
+    var out = 0;
+    var b = 0;
+    while (b < 4) {
+        var sc = (src >> (b * 8)) & 0xFF;
+        var dc = (dst >> (b * 8)) & 0xFF;
+        var r = sc + ((dc * ia) * 2 + 255) / 510;
+        if (r > 255) { r = 255; }
+        out = out | (r << (b * 8));
+        b = b + 1;
+    }
+    return out;
+}
+
+# One step of the fixture digest: h + word · (i·K1 + K2), wrapping mod 2^64 as the generator does.
+fn t_dig_step_r(h, word, i): i64 { return h + word * (i * 0x9E3779B97F4A7C15 + 0x632BE59BD9B4E019); }
+
+# The sweep surface: 256 x 256, row y has source alpha y, so every alpha meets every lane value. Pixel (0,0) is 0.
+fn t_sweep_src_r(x, y): i64 {
+    return (((y << 24) | (((x * 3 + y) & 0xFF) << 16)) | ((((x * 7) + (y * 2)) & 0xFF) << 8)) | (x & 0xFF);
+}
+# Three destination patterns over the same 256 x 256, every lane varying, the alpha byte included.
+fn t_sweep_dst_r(x, y, p): i64 {
+    var a = (x * 3 + y * 5 + p * 85) & 0xFF;
+    var r = (x * 11 + p * 50) & 0xFF;
+    var g = (y * 7 + x + p) & 0xFF;
+    var b = (x * y + p * 99) & 0xFF;
+    return (((a << 24) | (r << 16)) | (g << 8)) | b;
+}
+fn t_sweep_fill_r(fb, p): i64 {
+    var y = 0;
+    while (y < 256) {
+        var x = 0;
+        while (x < 256) { bhumi_fb_set(fb, x, y, t_sweep_dst_r(x, y, p)); x = x + 1; }
+        y = y + 1;
+    }
+    return 0;
+}
+
+# The op 0x06 digest grid the generator walks: sa = 0..255, k = 0..255, i = sa·256 + k.
+fn t_dig06_r(alpha): i64 {
+    var h = 0;
+    var i = 0;
+    var sa = 0;
+    while (sa < 256) {
+        var k = 0;
+        while (k < 256) {
+            var sc0 = (k * 4 + sa) & 0xFF;
+            var sc1 = (k * 7 + 3) & 0xFF;
+            var sc2 = (k * 13 + sa * 3) & 0xFF;
+            var d0 = (k * 5 + sa * 11) & 0xFF;
+            var d1 = (k * 9 + 17) & 0xFF;
+            var d2 = (255 - k * 3) & 0xFF;
+            var d3 = (k * 29 + sa) & 0xFF;
+            var src = (((sa << 24) | (sc2 << 16)) | (sc1 << 8)) | sc0;
+            var dst = (((d3 << 24) | (d2 << 16)) | (d1 << 8)) | d0;
+            h = t_dig_step_r(h, rend_blend_alpha_px(src, dst, alpha), i);
+            i = i + 1;
+            k = k + 1;
+        }
+        sa = sa + 1;
+    }
+    return h;
+}
+
+# The op 0x02 digest: a 64 x 64 framebuffer of varied words, filled whole by `fill_rect_a` on a CPU frame.
+fn t_dig02_dst_r(x, y): i64 {
+    var hi = (((x * 37 + y * 11) & 0xFF) << 24) | (((x * 4 + y) & 0xFF) << 16);
+    return hi | ((((y * 4 + x) & 0xFF) << 8) | ((x * y + 7) & 0xFF));
+}
+fn t_dig02_r(color, a): i64 {
+    var fb = bhumi_fb_new(64, 64);
+    var y = 0;
+    while (y < 64) {
+        var x = 0;
+        while (x < 64) { bhumi_fb_set(fb, x, y, t_dig02_dst_r(x, y)); x = x + 1; }
+        y = y + 1;
+    }
+    fill_rect_a(fb, 0, 0, 64, 64, color, a);
+    var h = 0;
+    var yy = 0;
+    while (yy < 64) {
+        var xx = 0;
+        while (xx < 64) { h = t_dig_step_r(h, bhumi_fb_get(fb, xx, yy), yy * 64 + xx); xx = xx + 1; }
+        yy = yy + 1;
+    }
+    return h;
+}
+
+# Pixels of `fb` in [x0,x1) x [y0,y1) that are NOT `c`.
+fn t_count_not_r(fb, x0, x1, y0, y1, c): i64 {
+    var n = 0;
+    var yy = y0;
+    while (yy < y1) {
+        var xx = x0;
+        while (xx < x1) {
+            if (bhumi_fb_get(fb, xx, yy) != c) { n = n + 1; }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    return n;
+}
+
+# ---- op 0x01 -----------------------------------------------------------------------------------------------------
+fn t_grp_op01_r(): i64 {
+    test_group("render — #92 op 0x01 on the CPU: renderer.rs blend tests, re-expressed premultiplied");
+    # Rust's test_blend_semi_transparent fed blend() a STRAIGHT red (a 128, r 255). The rule is premultiplied
+    # (c <= a), so the same half-transparent red is (128, 128, 0, 0), and the kernel's arithmetic makes it exact:
+    # r = 128 + round(0), b = 0 + round(255·127/255) = 127, a = 128 + round(255·127/255) = 255.
+    var sm = rend_px_premul(0x80800000, 0xFF0000FF);
+    assert_eq(sm, 0xFF80007F, "50% premultiplied red over opaque blue is 0xFF80007F");
+    assert_eq(sm >> 24, 255, "  a == 255 (Rust's assertion)");
+    assert_eq(t_gt_r(sm & 0xFF, 0), 1, "  b > 0 — the blue shows through (Rust's)");
+    assert_eq(t_gt_r(255, sm & 0xFF), 1, "  b < 255 (Rust's)");
+    assert_eq((sm >> 16) & 0xFF, 128, "  r is the source's own premultiplied 128 (Rust's `r > 128` held for straight red)");
+    # Rust's own straight input through the kernel's rule: the channel saturates, as Rust's `.min(255)` did.
+    assert_eq(rend_px_premul(0x80FF0000, 0xFF0000FF), 0xFFFF007F, "Rust's straight-red input: r saturates at 255, b 127, a 255");
+    assert_eq(rend_px_premul(0xFFFFFFFF, 0xFF000000), 0xFFFFFFFF, "test_blend_opaque_over: opaque white over black is white");
+    assert_eq(rend_px_premul(0, 0xFF000000), 0xFF000000, "test_blend_transparent_over: transparent over black is black");
+    # ⚠ WHERE THE KERNEL AND RUST PART (ADR 0003): Rust truncated d·(255 − sa)/255 and returned dst for any
+    # zero-alpha source; the kernel rounds to nearest and ADDS a zero-alpha source's colour.
+    assert_eq(rend_px_premul(0x01010101, 0x01010101), 0x02020202, "1 + round(1·254/255) = 2 — Rust truncated it to 1");
+    assert_eq(rend_px_premul(0x00102030, 0x00405060), 0x00507090, "a zero-alpha source with colour ADDS — Rust returned dst");
+
+    # ⭐ THE SWEEP, THROUGH THE REAL CPU PATH: a premultiplied surface at full opacity, every source alpha against
+    # every lane value, over three destinations — each pixel against the kernel's reference.
+    ae_gpu_frame_ok = 0;
+    var src = alloc(256 * 256 * 4);
+    var y = 0;
+    while (y < 256) {
+        var x = 0;
+        while (x < 256) { store32(src + (y * 256 + x) * 4, t_sweep_src_r(x, y)); x = x + 1; }
+        y = y + 1;
+    }
+    var fb = bhumi_fb_new(256, 256);
+    var bad = 0;
+    var blended = 0;
+    var p = 0;
+    while (p < 3) {
+        t_sweep_fill_r(fb, p);
+        rend_composite_surface(fb, 0, 0, src, 256, 256, 1, 255);
+        var yy = 0;
+        while (yy < 256) {
+            var xx = 0;
+            while (xx < 256) {
+                var want = t_ref_px_r(t_sweep_src_r(xx, yy), t_sweep_dst_r(xx, yy, p));
+                if (bhumi_fb_get(fb, xx, yy) != want) { bad = bad + 1; }
+                if (want != t_sweep_src_r(xx, yy)) { blended = blended + 1; }
+                xx = xx + 1;
+            }
+            yy = yy + 1;
+        }
+        p = p + 1;
+    }
+    assert_eq(bad, 0, "op 0x01 over 196,608 pixels: every word is the kernel's blend_ref_px");
+    assert_eq(t_gt_r(blended, 150000), 1, "  (and most of them really blended — not a copy compared with a copy)");
+    # The copy shortcut is EXACT: an alpha-255 pixel is the op's result, row 255 untouched by the destination.
+    t_sweep_fill_r(fb, 1);
+    rend_composite_surface(fb, 0, 0, src, 256, 256, 1, 255);
+    assert_eq(bhumi_fb_get(fb, 77, 255), t_sweep_src_r(77, 255), "an alpha-255 source pixel lands as its own word");
+    assert_eq(bhumi_fb_get(fb, 0, 0), t_sweep_dst_r(0, 0, 1), "  and a zero source pixel leaves the destination word");
+    return 0;
+}
+
+# ---- op 0x06 -----------------------------------------------------------------------------------------------------
+fn t_grp_op06_r(): i64 {
+    test_group("render — #92 op 0x06 on the CPU: window opacity scales the premultiplied source (blend_alpha.s)");
+    # Words from the IEEE-f32 model (see the banner above), one per shape that matters.
+    assert_eq(rend_blend_alpha_px(0xFF336699, 0x00101018, 128), 0x80223B59, "an opaque pixel at α 128 over a dark backdrop");
+    assert_eq(rend_blend_alpha_px(0x80402010, 0x00808080, 128), 0x40807068, "a half-transparent pixel at α 128: they MULTIPLY");
+    assert_eq(rend_blend_alpha_px(0xFFFFFFFF, 0x00000000, 1), 0x01010101, "α 1: white over black is 1 in every byte");
+    assert_eq(rend_blend_alpha_px(0xFF000000, 0xFFFFFFFF, 254), 0xFF010101, "α 254: black over white keeps 1/255 of it");
+    assert_eq(rend_blend_alpha_px(0x00405060, 0x00101010, 200), 0x00424F5B,
+      "a zero-alpha source with colour ADDS under op 0x06 too — the ghost of a client that writes alpha 0");
+    assert_eq(rend_blend_alpha_px(0x7F7F7F7F, 0x12345678, 37), 0x23436282, "α 37 over a mixed word");
+    assert_eq(rend_blend_alpha_px(0xFFE7E9EF, 0x0014161B, 64), 0x40494B50, "ink over a panel at α 64");
+    # ⛔⛔ THE ROUNDING TIE — the one input class the kernel's own interpreter pins (agnos tests/gpu/shaderexec.cyr
+    # gate 4): α 4, sa = sc = 64, d = 128 makes R(d·ia + sc') exactly 128.5. Round-half-even gives 128, half-away
+    # 129. The shader declares round-to-nearest-EVEN and no burn has discriminated it; this asserts that choice.
+    var tie = rend_blend_alpha_px(0x40000040, 0x00000080, 4);
+    assert_eq(tie & 0xFF, 128, "the tie at 128.5 rounds to EVEN (128), the kernel's declared mode — half-away is 129");
+    assert_eq(tie, 0x01000080, "  the whole word, alpha lane R(64·4/255) = 1 included");
+    # ⛔ THE f32 ROUNDINGS INSIDE THE SHADER TIE TO EVEN TOO — IEEE's default and the shaders' round mode 0, a rule
+    # apart from the conversion's. These are among the few lane inputs where it shows (one in all 2^24 at α 1): a
+    # v_mul_f32 or v_fma_f32 result exactly halfway between two f32s. Rounded away, each comes out one step off,
+    # and the model's half-away variant says so too.
+    assert_eq(rend_blend_alpha_px(0xFE0000FF, 0x00000080, 1), 0x01000080, "an FMA tie at α 1 rounds to even: 128, not 129");
+    assert_eq(rend_blend_alpha_px(0xFE0000FF, 0x00000001, 128), 0x7F000080, "  at α 128: 128, not 129");
+    assert_eq(rend_blend_alpha_px(0x10000050, 0x000000D9, 121), 0x080000F8, "  a multiply tie at α 121: 248, not 249");
+    assert_eq(rend_blend_alpha_px(0x7A0000C0, 0x00000089, 122), 0x3A0000C5, "  at α 122: 197, not 198");
+    assert_eq(rend_blend_alpha_px(0x340000A2, 0x00000083, 131), 0x1B0000C9, "  at α 131: 201, where half-away gives 200");
+    # The kernel's two settled identities: α 0 leaves dst; α 255 IS op 0x01 (blend_alpha.s's header, measured).
+    # ⚠ One alpha per pass: the per-alpha tables are rebuilt whenever the alpha changes.
+    var i0 = 0;
+    var i255 = 0;
+    var pass = 0;
+    while (pass < 2) {
+        var y = 0;
+        while (y < 256) {
+            var x = 0;
+            while (x < 256) {
+                var s = t_sweep_src_r(x, y);
+                var d = t_sweep_dst_r(x, y, 2);
+                if (pass == 0) { if (rend_blend_alpha_px(s, d, 0) != d) { i0 = i0 + 1; } }
+                if (pass == 1) { if (rend_blend_alpha_px(s, d, 255) != t_ref_px_r(s, d)) { i255 = i255 + 1; } }
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+        pass = pass + 1;
+    }
+    assert_eq(i0, 0, "α 0 leaves every destination word as it was (65,536 pixels)");
+    assert_eq(i255, 0, "α 255 equals op 0x01 — the kernel's blend_ref_px — on every one of them");
+    # ⭐ DIGESTS: 65,536 words per alpha, against the model. One wrong byte anywhere moves the sum.
+    assert_eq(t_dig06_r(1), 0 - 6314396923382171578, "α 1: the digest of 65,536 words is the model's");
+    assert_eq(t_dig06_r(2), 0 - 7394524270973916816, "α 2");
+    assert_eq(t_dig06_r(4), 2569789153945065882, "α 4 (the tie's alpha)");
+    assert_eq(t_dig06_r(37), 7965779066389050477, "α 37");
+    assert_eq(t_dig06_r(64), 0 - 6794005979040855471, "α 64");
+    assert_eq(t_dig06_r(127), 1129992058937937491, "α 127");
+    assert_eq(t_dig06_r(128), 0 - 8811415284055575061, "α 128 (--opacity 128)");
+    assert_eq(t_dig06_r(129), 0 - 6667560609821055543, "α 129");
+    assert_eq(t_dig06_r(200), 0 - 5054729323977126896, "α 200");
+    assert_eq(t_dig06_r(253), 0 - 5220541295822012559, "α 253");
+    assert_eq(t_dig06_r(254), 0 - 5968361366421700941, "α 254");
+    # The real CPU path at α 128: alpha-255 pixels go through the opaque-source table, the rest per pixel; both
+    # must be the per-pixel op.
+    ae_gpu_frame_ok = 0;
+    var src = alloc(256 * 256 * 4);
+    var sy = 0;
+    while (sy < 256) {
+        var sx = 0;
+        while (sx < 256) { store32(src + (sy * 256 + sx) * 4, t_sweep_src_r(sx, sy)); sx = sx + 1; }
+        sy = sy + 1;
+    }
+    var fb = bhumi_fb_new(256, 256);
+    t_sweep_fill_r(fb, 0);
+    rend_composite_surface(fb, 0, 0, src, 256, 256, 1, 128);
+    var bad = 0;
+    var cy = 0;
+    while (cy < 256) {
+        var cx = 0;
+        while (cx < 256) {
+            if (bhumi_fb_get(fb, cx, cy) != rend_blend_alpha_px(t_sweep_src_r(cx, cy), t_sweep_dst_r(cx, cy, 0), 128)) {
+                bad = bad + 1;
+            }
+            cx = cx + 1;
+        }
+        cy = cy + 1;
+    }
+    assert_eq(bad, 0, "a premultiplied surface at α 128 through the CPU path is op 0x06, every pixel (the table rows too)");
+    return 0;
+}
+
+# ---- op 0x02 -----------------------------------------------------------------------------------------------------
+fn t_grp_op02_r(): i64 {
+    test_group("render — #92 op 0x02 on the CPU: alpha chrome is the kernel's coverage blend (blend_cov.s)");
+    ae_gpu_frame_ok = 0;
+    # A translucent window's body and its border over a dark backdrop, words from the model.
+    assert_eq(rend_blend(0x00101018, 0x1B1E24, 128), 0x8016171E, "the widget colour at α 128 over a dark backdrop");
+    assert_eq(rend_blend(0x00101018, 0x262A32, 128), 0x801B1D25, "the border's line colour at α 128 over it");
+    # ⭐ DIGESTS of `fill_rect_a` itself on a CPU frame — 4,096 varied words per case, against the model.
+    assert_eq(t_dig02_r(0x1B1E24, 128), 7008102241270972494, "fill_rect_a: widget at α 128, the digest of 4,096 words is the model's");
+    assert_eq(t_dig02_r(0xFF4D4D, 37), 0 - 2527459864991937397, "  alert at α 37");
+    assert_eq(t_dig02_r(0x00E5FF, 200), 7851221452573619598, "  accent at α 200");
+    assert_eq(t_dig02_r(0x262A32, 1), 0 - 7528157692685003378, "  line at α 1");
+    assert_eq(t_dig02_r(0xFBF8F0, 254), 0 - 7251279300320264126, "  a light widget at α 254");
+    # The rect walk reads the colour's rows of a table; the per-pixel op computes. Every destination byte, every lane.
+    var fb = bhumi_fb_new(256, 4);
+    var bad = 0;
+    var ai = 0;
+    while (ai < 4) {
+        var a = 1;
+        if (ai == 1) { a = 77; }
+        if (ai == 2) { a = 128; }
+        if (ai == 3) { a = 254; }
+        var ci = 0;
+        while (ci < 3) {
+            var c = 0x1B1E24;
+            if (ci == 1) { c = 0xFFFFFF; }
+            if (ci == 2) { c = 0x000000; }
+            var y = 0;
+            while (y < 4) {
+                var x = 0;
+                while (x < 256) {
+                    bhumi_fb_set(fb, x, y, ((((x + 3 * y) & 0xFF) << 24) | (((x * 5 + y) & 0xFF) << 16)) | ((255 - x) << 8) | x);
+                    x = x + 1;
+                }
+                y = y + 1;
+            }
+            fill_rect_a(fb, 0, 0, 256, 4, c, a);
+            var yy = 0;
+            while (yy < 4) {
+                var xx = 0;
+                while (xx < 256) {
+                    var d = ((((xx + 3 * yy) & 0xFF) << 24) | (((xx * 5 + yy) & 0xFF) << 16)) | ((255 - xx) << 8) | xx;
+                    if (bhumi_fb_get(fb, xx, yy) != rend_blend(d, c, a)) { bad = bad + 1; }
+                    xx = xx + 1;
+                }
+                yy = yy + 1;
+            }
+            ci = ci + 1;
+        }
+        ai = ai + 1;
+    }
+    assert_eq(bad, 0, "fill_rect_a's table walk equals the per-pixel op for every byte of every lane (12,288 words)");
+    return 0;
+}
+
+# A w x h surface whose word at (x, y) is (y·9) & 0xFF in the alpha byte — so rows run from transparent to opaque —
+# over varied colour bytes. `opaque` forces the alpha byte to 255.
+fn t_op_surface_r(w, h, opaque): i64 {
+    var px = alloc(w * h * 4);
+    var y = 0;
+    while (y < h) {
+        var x = 0;
+        while (x < w) {
+            var a = (y * 9) & 0xFF;
+            if (opaque == 1) { a = 255; }
+            store32(px + (y * w + x) * 4, (((a << 24) | (((x * 3) & 0xFF) << 16)) | (((x + y) & 0xFF) << 8)) | ((x * y) & 0x7F));
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return px;
+}
+
+# Body pixels of `win` (its content rect) whose word on `fb` is not `want(src, under)` for the routing `mode`:
+#   0 = a copy of the client's word · 1 = op 0x01 over `under` · 2 = op 0x06 at `a` over `under` · 3 = `under` itself
+fn t_body_bad_r(fb, win, px, under, mode, a): i64 {
+    var bad = 0;
+    var y = 0;
+    while (y < win_h(win)) {
+        var x = 0;
+        while (x < win_w(win)) {
+            var s = load32(px + (y * win_w(win) + x) * 4);
+            var want = s;
+            if (mode == 1) { want = t_ref_px_r(s, under); }
+            if (mode == 2) { want = rend_blend_alpha_px(s, under, a); }
+            if (mode == 3) { want = under; }
+            if (bhumi_fb_get(fb, win_x(win) + x, win_body_y(win) + y) != want) { bad = bad + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return bad;
+}
+
+# ---- what a CPU frame composites ---------------------------------------------------------------------------------
+fn t_grp_opacity_r(): i64 {
+    test_group("render — a CPU frame routes surfaces as gpu.cyr does: premultiplied blend, others copy");
+    ae_gpu_frame_ok = 0;
+    var OBG = 0x00101018;
+    var widget = ae_bhumi(rupa_theme_widget(rupa_theme_active()));
+    var fb = bhumi_fb_new(200, 200);
+    var win = win_new(41, 20, 20, 64, 48, "op");
+    var px = t_op_surface_r(64, 48, 0);
+    win_set_pix(win, px);
+    # 1. premultiplied at full opacity: op 0x01 over the opaque body — the kernel's reference, every pixel.
+    win_set_premul(win, 1);
+    win_set_opacity(win, 255);
+    bhumi_fb_clear(fb, OBG);
+    render_window(fb, win, 0);
+    assert_eq(t_body_bad_r(fb, win, px, widget, 1, 255), 0, "premultiplied, opacity 255: op 0x01 over the body (3,072 px)");
+    # 2. premultiplied at α 128: the body is the widget at 128 over the backdrop, and op 0x06 at 128 goes over THAT.
+    win_set_opacity(win, 128);
+    bhumi_fb_clear(fb, OBG);
+    render_window(fb, win, 0);
+    assert_eq(t_body_bad_r(fb, win, px, rend_blend(OBG, widget, 128), 2, 128), 0,
+      "premultiplied, opacity 128: op 0x06 at 128 over the translucent body — window and client alpha multiply");
+    assert_eq(t_gt_r(t_body_bad_r(fb, win, px, widget, 1, 255), 1000), 1, "  (and that is NOT what opacity 255 drew)");
+    # ⛔ THE FRAME AFTER COSTS NO HEAP. The per-alpha tables are module scope and the 64 KB opaque-source table is
+    # allocated once; the allocator never frees, so anything per frame would grow for the life of the desktop.
+    var heap0 = alloc_used();
+    render_window(fb, win, 0);
+    render_window(fb, win, 1);
+    assert_eq(alloc_used() - heap0, 0, "  and translucent frames after the first allocate 0 B");
+    # 3. NOT premultiplied: copied as `#87` copies, whatever the opacity — the word, alpha byte and all.
+    win_set_premul(win, 0);
+    bhumi_fb_clear(fb, OBG);
+    render_window(fb, win, 0);
+    assert_eq(t_body_bad_r(fb, win, px, 0, 0, 128), 0, "not premultiplied, opacity 128: the client's words, copied");
+    # 4. opacity 0: a premultiplied window leaves the backdrop — its chrome at 0 draws nothing, op 0x06 at 0 neither.
+    win_set_premul(win, 1);
+    win_set_opacity(win, 0);
+    bhumi_fb_clear(fb, OBG);
+    render_window(fb, win, 0);
+    assert_eq(t_body_bad_r(fb, win, px, OBG, 3, 0), 0, "premultiplied, opacity 0: the body is the backdrop");
+    # ...while a non-premultiplied one still shows its words — `#87` has no alpha to apply.
+    win_set_premul(win, 0);
+    bhumi_fb_clear(fb, OBG);
+    render_window(fb, win, 0);
+    assert_eq(t_body_bad_r(fb, win, px, 0, 0, 0), 0, "not premultiplied, opacity 0: still the client's words, as on iron");
+    win_set_opacity(win, 255);
+    return 0;
+}
+
+# ---- the framebuffer ---------------------------------------------------------------------------------------------
+fn t_grp_fb_r(): i64 {
+    test_group("render — the framebuffer: renderer.rs test_framebuffer_new / _out_of_bounds, on bhumi's");
+    var BLK = 0x00000000;
+    var WHT = 0x00FFFFFF;
+    var fb = bhumi_fb_new(100, 50);
+    assert_eq(t_ne_r(fb, 0), 1, "new(100, 50) makes a framebuffer");
+    assert_eq(bhumi_fb_width(fb), 100, "  width 100");
+    assert_eq(bhumi_fb_height(fb), 50, "  height 50");
+    assert_eq(bhumi_fb_size(fb), 5000 * 4, "  5000 pixels of 4 bytes (Rust: pixels.len() == 5000)");
+    bhumi_fb_clear(fb, 0x00123456);
+    assert_eq(bhumi_fb_get(fb, 0, 0), 0x00123456, "  filled, (0,0) reads the fill (Rust: new's fill colour)");
+    # Rust returned None where width·height overflowed; bhumi refuses an impossible size outright.
+    assert_eq(bhumi_fb_new(0, 50), 0, "a zero width is refused");
+    assert_eq(bhumi_fb_new(100, 0 - 1), 0, "a negative height is refused");
+    var ob = bhumi_fb_new(10, 10);
+    bhumi_fb_clear(ob, BLK);
+    assert_eq(bhumi_fb_get(ob, 10, 10), 0 - 1, "get(10, 10) on 10x10 is out of bounds: -1 (Rust: None)");
+    assert_eq(bhumi_fb_get(ob, 0 - 1, 0), 0 - 1, "  and so is a negative x");
+    assert_eq(bhumi_fb_set(ob, 10, 10, WHT), 0 - 1, "set(10, 10) is refused, not wrapped (Rust: no panic, no write)");
+    assert_eq(t_count_not_r(ob, 0, 10, 0, 10, BLK), 0, "  ...and wrote nothing anywhere");
+    return 0;
+}
+
+# ---- draw_rect_outline -------------------------------------------------------------------------------------------
+fn t_grp_outline_r(): i64 {
+    test_group("render — draw_rect_outline (renderer.rs test_framebuffer_draw_rect_outline)");
+    ae_gpu_frame_ok = 0;
+    var BLK = 0x00000000;
+    var WHT = 0x00FFFFFF;
+    var fb = bhumi_fb_new(100, 100);
+    bhumi_fb_clear(fb, BLK);
+    draw_rect_outline(fb, 10, 10, 20, 20, WHT);
+    assert_eq(bhumi_fb_get(fb, 10, 10), WHT, "top-left corner (Rust's)");
+    assert_eq(bhumi_fb_get(fb, 15, 10), WHT, "top edge (Rust's)");
+    assert_eq(bhumi_fb_get(fb, 15, 15), BLK, "interior (Rust's)");
+    assert_eq(bhumi_fb_get(fb, 29, 29), WHT, "bottom-right corner, the last pixel of the rect");
+    assert_eq(bhumi_fb_get(fb, 10, 22), WHT, "left edge");
+    assert_eq(bhumi_fb_get(fb, 29, 12), WHT, "right edge");
+    assert_eq(bhumi_fb_get(fb, 21, 29), WHT, "bottom edge");
+    assert_eq(bhumi_fb_get(fb, 28, 28), BLK, "the interior's last pixel");
+    assert_eq(bhumi_fb_get(fb, 30, 30), BLK, "one past the rect");
+    assert_eq(bhumi_fb_get(fb, 9, 9), BLK, "one before it");
+    assert_eq(t_count_px_r(fb, 0, 100, 0, 100, WHT), 76, "exactly the 76 perimeter pixels of a 20x20 rect");
+    # ⚠ THE PORT'S EDGE RULE (ADR 0003): an off-screen side is DROPPED. Rust clamped it onto the edge — `x0 =
+    # rect.x.max(0)`, then the left side drawn at x0 — so this rect would have a line at x = 0.
+    bhumi_fb_clear(fb, BLK);
+    draw_rect_outline(fb, 0 - 5, 10, 20, 20, WHT);
+    assert_eq(bhumi_fb_get(fb, 0, 15), BLK, "a side left of x = 0 is dropped, not drawn at x = 0 (Rust drew it there)");
+    assert_eq(bhumi_fb_get(fb, 0, 10), WHT, "  the top row survives from x = 0");
+    assert_eq(bhumi_fb_get(fb, 14, 15), WHT, "  and the right side is where it was");
+    assert_eq(t_count_px_r(fb, 0, 100, 0, 100, WHT), 48, "  48 pixels: 15 top, 15 bottom, 18 right");
+    # A translucent ring is four DISJOINT rects: a corner is blended once, exactly like an edge pixel.
+    bhumi_fb_clear(fb, 0x00204060);
+    rend_outline(fb, 10, 10, 20, 20, 1, WHT, 128);
+    var once = rend_blend(0x00204060, WHT, 128);
+    assert_eq(bhumi_fb_get(fb, 15, 10), once, "a translucent edge pixel is blended once");
+    assert_eq(bhumi_fb_get(fb, 10, 10), once, "  and so is a corner — two overlapping sides would blend it twice");
+    assert_eq(bhumi_fb_get(fb, 29, 29), once, "  every corner");
+    assert_eq(t_count_px_r(fb, 0, 100, 0, 100, once), 76, "  all 76, and nothing else");
+    # Degenerate rects, as Rust's x0 == x1 / y0 == y1 cases: all ring.
+    bhumi_fb_clear(fb, BLK);
+    draw_rect_outline(fb, 50, 50, 2, 5, WHT);
+    assert_eq(t_count_px_r(fb, 0, 100, 0, 100, WHT), 10, "a 2-wide rect is all outline (10 px)");
+    bhumi_fb_clear(fb, BLK);
+    draw_rect_outline(fb, 50, 50, 1, 1, WHT);
+    assert_eq(t_count_px_r(fb, 0, 100, 0, 100, WHT), 1, "a 1x1 rect is one pixel");
+    draw_rect_outline(fb, 60, 60, 0, 5, WHT);
+    assert_eq(t_count_px_r(fb, 0, 100, 0, 100, WHT), 1, "a zero-width rect draws nothing");
+    return 0;
+}
+
+# ---- the window border -------------------------------------------------------------------------------------------
+fn t_grp_border_r(): i64 {
+    test_group("render — the window border: Rust's one colour, outside the rect, at the window's opacity");
+    ae_gpu_frame_ok = 0;
+    var th = rupa_theme_active();
+    var LINE = ae_bhumi(rupa_theme_line(th));
+    var BBG = 0x00090A0B;
+    var SENT = 0x00C0FFEE;
+    var fb = bhumi_fb_new(300, 300);
+    var win = win_new(42, 50, 60, 120, 80, "border");
+    var px = alloc(120 * 80 * 4);
+    var i = 0;
+    while (i < 120 * 80) { store32(px + i * 4, SENT); i = i + 1; }
+    win_set_pix(win, px);
+    bhumi_fb_clear(fb, BBG);
+    render_window(fb, win, 1);
+    # The ring is one pixel OUTSIDE the rect: x 49 and 170, y 59 and 60 + 30 + 80 = 170.
+    assert_eq(bhumi_fb_get(fb, 49, 59), LINE, "the ring's top-left corner is at (x - 1, y - 1)");
+    assert_eq(bhumi_fb_get(fb, 110, 59), LINE, "  its top runs above the titlebar");
+    assert_eq(bhumi_fb_get(fb, 49, 120), LINE, "  its left side beside the content");
+    assert_eq(bhumi_fb_get(fb, 170, 75), LINE, "  its right side at x + w, beside the titlebar");
+    assert_eq(bhumi_fb_get(fb, 110, 170), LINE, "  its bottom at the window's exclusive bottom edge");
+    assert_eq(bhumi_fb_get(fb, 170, 170), LINE, "  bottom-right corner");
+    assert_eq(t_count_px_r(fb, 0, 300, 0, 300, LINE), 2 * 122 + 2 * 112 - 4, "exactly the 464 ring pixels, nothing else");
+    assert_eq(bhumi_fb_get(fb, 48, 120), BBG, "  one further out is the backdrop");
+    # ⭐ NOTHING INSIDE MOVED: the titlebar still starts at the window origin, and the client's own edge pixels
+    # are the client's — `scripts/qemu-linux-input.sh` reads focus_client's 6 px border from exactly those.
+    assert_eq(bhumi_fb_get(fb, 50, 60), ae_bhumi(rupa_theme_widget(th)), "the titlebar's first pixel is still at (x, y)");
+    assert_eq(bhumi_fb_get(fb, 50, 90), SENT, "the client's top-left word is untouched");
+    assert_eq(bhumi_fb_get(fb, 169, 90), SENT, "  its top-right");
+    assert_eq(bhumi_fb_get(fb, 50, 169), SENT, "  its bottom-left");
+    assert_eq(bhumi_fb_get(fb, 169, 169), SENT, "  its bottom-right");
+    assert_eq(t_count_not_r(fb, 50, 170, 90, 170, SENT), 0, "  and every one of its 9,600 words");
+    # Rust: one colour, focused or not (COLOR_BORDER; only the titlebar follows focus).
+    bhumi_fb_clear(fb, BBG);
+    render_window(fb, win, 0);
+    assert_eq(t_count_px_r(fb, 0, 300, 0, 300, LINE), 464, "an unfocused window has the same ring, in the same colour");
+    # At the window's opacity, like the rest of its chrome.
+    win_set_opacity(win, 128);
+    bhumi_fb_clear(fb, BBG);
+    render_window(fb, win, 0);
+    assert_eq(bhumi_fb_get(fb, 49, 59), rend_blend(BBG, LINE, 128), "at opacity 128 the ring is the line colour blended once");
+    assert_eq(bhumi_fb_get(fb, 110, 170), rend_blend(BBG, LINE, 128), "  every side of it");
+    win_set_opacity(win, 255);
+    # Past the left edge the off-screen side is dropped, not drawn over the content at x = 0 (ADR 0003).
+    win_move(win, 0 - 10, 60);
+    bhumi_fb_clear(fb, BBG);
+    render_window(fb, win, 0);
+    assert_eq(bhumi_fb_get(fb, 0, 120), SENT, "a window past the left edge keeps its content at x = 0 — no ring there");
+    assert_eq(bhumi_fb_get(fb, 0, 59), LINE, "  while the top side runs on from x = 0");
+    # A maximized window's ring is wholly off screen: the work area is the window.
+    win_move(win, 0, 0);
+    win_resize(win, 300, 300 - TITLEBAR_H);
+    win_set_pix(win, 0);
+    bhumi_fb_clear(fb, BBG);
+    render_window(fb, win, 0);
+    assert_eq(t_count_px_r(fb, 0, 300, 0, 300, LINE), 0, "a window filling the screen shows no ring");
+    # On a GPU frame the ring is four queued rects in the line colour, at the window's alpha.
+    win_move(win, 50, 60);
+    win_resize(win, 120, 80);
+    win_set_opacity(win, 200);
+    ae_gpu_frame_ok = 1; ae_text_gpu_ok = 1; ae_cursor_gpu_ok = 1; ae_chrome_gpu_ok = 1; ae_gpu_alpha_chrome = 0;
+    ae_rect_reset();
+    ae_text_reset();
+    render_window(fb, win, 0);
+    var nr = 0;
+    var area = 0;
+    var q = 0;
+    while (q < ae_rect_count()) {
+        if (ae_rect_get_col(q) == LINE) {
+            nr = nr + 1;
+            area = area + ae_rect_get_w(q) * ae_rect_get_h(q);
+            if (ae_rect_get_a(q) != 200) { area = area - 100000; }
+        }
+        q = q + 1;
+    }
+    assert_eq(nr, 4, "a GPU frame queues the ring as 4 rects");
+    assert_eq(area, 464, "  covering the 464 ring pixels once each, at the window's alpha");
+    ae_gpu_frame_ok = 0;
+    ae_rect_reset();
+    ae_text_reset();
+    win_set_opacity(win, 255);
+    return 0;
+}
+
+# ---- overlap and z-order -----------------------------------------------------------------------------------------
+fn t_grp_overlap_r(): i64 {
+    test_group("render — overlapping_surfaces and z_order (renderer.rs SceneGraph tests, on the window vector)");
+    # ADR 0003: the scene's order is the window vector's, bottom to top, raised on focus — Rust's Layer sort is gone.
+    ae_gpu_frame_ok = 0;
+    var LINE = ae_bhumi(rupa_theme_line(rupa_theme_active()));
+    var SA = 0x00AA1111;
+    var SB = 0x0022BB22;
+    var c = comp_new();
+    var wa = comp_create_window(c, 0, 0, 100, 100, "Back");
+    var wb = comp_create_window(c, 50, 50, 100, 100, "Front");
+    var pa = alloc(100 * 100 * 4);
+    var pb = alloc(100 * 100 * 4);
+    var i = 0;
+    while (i < 10000) { store32(pa + i * 4, SA); store32(pb + i * 4, SB); i = i + 1; }
+    win_set_pix(wa, pa);
+    win_set_pix(wb, pb);
+    # Rust's test_scene_graph_overlapping_surfaces: the overlap hits the topmost, the rest the one below.
+    assert_eq(comp_window_at(c, 75, 100), wb, "the overlap hits the topmost window (Rust: surface_at(75, 75) == id2)");
+    assert_eq(comp_window_at(c, 10, 40), wa, "outside the overlap, the window below (Rust: surface_at(10, 10) == id1)");
+    var fb = bhumi_fb_new(200, 200);
+    var k = 0;
+    while (k < 2) {
+        bhumi_fb_clear(fb, 0x00050505);
+        var v = comp_windows(c);
+        var j = 0;
+        while (j < vec_len(v)) {
+            var f = 0;
+            if (j == comp_focused(c)) { f = 1; }
+            render_window(fb, vec_get(v, j), f);
+            j = j + 1;
+        }
+        if (k == 0) {
+            assert_eq(bhumi_fb_get(fb, 75, 100), SB, "painted bottom to top, the overlap shows the upper window's content");
+            assert_eq(bhumi_fb_get(fb, 10, 40), SA, "  and the lower window shows where it is alone");
+            assert_eq(bhumi_fb_get(fb, 49, 100), LINE, "  the upper window's BORDER is drawn over the lower one's content");
+            # Rust's test_scene_graph_z_order: a later layer is drawn later. Here focus raises: focus the lower one.
+            comp_focus(c, comp_find_by_id(c, win_id(wa)));
+        }
+        if (k == 1) {
+            assert_eq(bhumi_fb_get(fb, 75, 100), SA, "after focusing it, the lower window is on top in the overlap");
+            assert_eq(comp_window_at(c, 75, 100), wa, "  and hit-testing agrees with what is drawn");
+            assert_eq(bhumi_fb_get(fb, 100, 100), LINE, "  its border now crosses the other window's content");
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+# ---- a minimized window ------------------------------------------------------------------------------------------
+fn t_grp_minimized_r(): i64 {
+    test_group("render — a minimized window is not drawn (renderer.rs test_scene_graph_hidden_surface)");
+    var MBG = 0x00070809;
+    var fb = bhumi_fb_new(200, 200);
+    var c = comp_new();
+    var w = comp_create_window(c, 30, 30, 80, 60, "min");
+    var px = alloc(80 * 60 * 4);
+    var i = 0;
+    while (i < 80 * 60) { store32(px + i * 4, 0x00C0FFEE); i = i + 1; }
+    win_set_pix(w, px);
+    win_minimize(w);
+    ae_gpu_frame_ok = 0;
+    bhumi_fb_clear(fb, MBG);
+    render_window(fb, w, 1);
+    assert_eq(t_count_not_r(fb, 0, 200, 0, 200, MBG), 0, "a CPU frame draws nothing of it: no chrome, no ring, no content");
+    assert_eq(comp_window_at(c, 60, 70), 0, "  and nothing hits it (Rust: surface_at -> None)");
+    ae_gpu_frame_ok = 1; ae_text_gpu_ok = 1; ae_cursor_gpu_ok = 1; ae_chrome_gpu_ok = 1; ae_gpu_alpha_chrome = 0;
+    ae_rect_reset();
+    ae_text_reset();
+    render_window(fb, w, 1);
+    assert_eq(ae_rect_count(), 0, "a GPU frame queues no rect for it");
+    assert_eq(ae_text_count(), 0, "  and no caption");
+    # Non-vacuity: restored, the same calls draw it.
+    win_unminimize(w);
+    render_window(fb, w, 1);
+    assert_eq(t_gt_r(ae_rect_count(), 5), 1, "restored, it queues its chrome again");
+    # ⚠ SIZING: AE_MARK_MAX windows of this chrome, plus headroom for the clear, the panel and the launcher,
+    # must fit the queue — an overflow is chrome a GPU frame never presents. Borders took ~6 to ~10 (0.17.4).
+    var rq_per_win = ae_rect_count();
+    assert_eq(t_gt_r(AE_RECT_MAX + 1, rq_per_win * AE_MARK_MAX + 64), 1, "the rect queue holds AE_MARK_MAX windows of chrome and the prelude");
+    ae_gpu_frame_ok = 0;
+    ae_rect_reset();
+    ae_text_reset();
+    bhumi_fb_clear(fb, MBG);
+    render_window(fb, w, 1);
+    assert_eq(bhumi_fb_get(fb, 60, 70), 0x00C0FFEE, "  and a CPU frame draws its content");
+    return 0;
+}
+
 # ⚠ `src/gpu.cyr` cannot be included here (duplicate variable against this suite's own fixtures), and
 # `wp_fill_band`'s IMAGE arm references `ae_gpu_wp_on`. Under `wp_set_solid` that arm is never taken at
 # runtime — but it must LINK. A local stub keeps the suite honest: it exercises the SOLID path, which
@@ -298,11 +959,15 @@ fn main() {
     input_ptr_set(0, 0);
     rend_cursor_mark_drawn(0, 0);
 
-    test_group("render — alpha blend");
-    assert_eq(rend_blend(0x000000, 0xFFFFFF, 255), 0xFFFFFF, "full src alpha = src");
-    assert_eq(rend_blend(0x000000, 0xFFFFFF, 0), 0x000000, "zero alpha = dst");
-    assert_eq(rend_blend(0x000000, 0xFFFFFF, 128), 0x808080, "half alpha = mid grey");
-    assert_eq(rend_blend(0x203040, 0x203040, 200), 0x203040, "same src/dst is stable");
+    # ⭐ 0.17.4: `rend_blend` IS the kernel's `#92` op 0x02 for one pixel — the opaque colour at a constant
+    # coverage, ALL FOUR BYTES, so its alpha byte is the kernel's too. Expected words: the IEEE-f32 model of
+    # blend_cov.s (the 0.17.4 banner above `t_ref_px_r`). The old straight-colour blend left byte 3 at 0 and truncated.
+    test_group("render — alpha blend (#92 op 0x02, one pixel)");
+    assert_eq(rend_blend(0x000000, 0xFFFFFF, 255), 0xFFFFFFFF, "full coverage = the opaque colour, alpha byte 255");
+    assert_eq(rend_blend(0x000000, 0xFFFFFF, 0), 0x000000, "zero coverage = dst, every byte");
+    assert_eq(rend_blend(0x000000, 0xFFFFFF, 128), 0x80808080, "half coverage = mid grey, alpha byte 128");
+    assert_eq(rend_blend(0x203040, 0x203040, 200) & 0xFFFFFF, 0x203040, "same src/dst colour is stable");
+    assert_eq(rend_blend(0x203040, 0x203040, 200) >> 24, 200, "  ...and the alpha byte is the coverage over a 0");
 
     test_group("render — damage tracker");
     var d = rend_dmg_new();
@@ -493,6 +1158,8 @@ fn main() {
     ghost_frame(gcomp, gfb, gwin, GBG);       # frame 2 — band still full (prev = frame 1)
     ghost_frame(gcomp, gfb, gwin, GBG);       # frame 3 — settled: nothing changed in two frames
     assert_eq(rend_band_h(), 0, "settled: an idle desktop writes NOTHING — the band is empty");
+    var gring = ae_bhumi(rupa_theme_line(rupa_theme_active()));
+    assert_eq(bhumi_fb_get(gfb, 80, 40 - BORDER_W), gring, "frame 3: the border's top row is drawn ABOVE the window, at y = 39");
 
     # ---- frame 4: move it far down. Its old rows must come back to the background. ----
     win_move(gwin, 40, 200);
@@ -501,6 +1168,11 @@ fn main() {
     assert(rend_band_y() <= 40, "after the move: the band reaches the window's OLD top");
     assert(rend_band_y() + rend_band_h() >= 200 + 100 + 30,
       "after the move: ...and its NEW bottom + titlebar");
+    # ⭐ 0.17.4: AND THE RING, ONE ROW FURTHER EACH WAY. The border lies outside the window rect, so a band of the
+    # rect alone leaves the old top ring row on screen — a one-pixel ghost line where the window was.
+    assert_eq(t_gt_r(rend_band_y(), 40 - BORDER_W), 0, "after the move: the band reaches the OLD ring row, y = 39");
+    assert_eq(t_gt_r(200 + 30 + 100 + BORDER_W, rend_band_y() + rend_band_h()), 0,
+      "after the move: ...and the NEW ring row below the window, y = 330");
     if (rend_band_valid() == 1) {
         if (rend_band_h() > 0) { rend_clear_band(gfb, rend_band_y(), rend_band_h(), GBG); }
     }
@@ -511,6 +1183,8 @@ fn main() {
     # read the background. If the band ever narrows to the new rect alone, this pixel still holds chrome.
     assert_eq(bhumi_fb_get(gfb, 80, 100), GBG, "after the move: the VACATED region is background, not a ghost");
     assert(bhumi_fb_get(gfb, 80, 260) != GBG, "after the move: and the window is drawn at its new position");
+    assert_eq(bhumi_fb_get(gfb, 80, 40 - BORDER_W), GBG, "after the move: the OLD border row is background — no ghost line");
+    assert_eq(bhumi_fb_get(gfb, 80, 200 - BORDER_W), gring, "after the move: the border is drawn at its new top");
 
     # ================================================================================================
     # A STATIONARY TRANSLUCENT WINDOW MUST NOT CONVERGE TO OPAQUE
@@ -546,18 +1220,26 @@ fn main() {
     ghost_frame(trcomp, trfb, trwin, TRBG);
     ghost_frame(trcomp, trfb, trwin, TRBG);
     var px_settled = bhumi_fb_get(trfb, 80, 100);
+    var ring_settled = bhumi_fb_get(trfb, 80, 40 - BORDER_W);
 
     # ⛔ THE DAMAGE ASSERTION IS THE ROOT CAUSE, AND IT IS CHECKED DIRECTLY. Without it the band goes
     # empty for a stationary translucent window and every pixel assertion below becomes vacuous —
     # nothing would be redrawn, so nothing could drift, and a broken build would pass.
     rend_frame_damage(trcomp, trfb, TRBG);
     assert(rend_band_h() > 0, "a stationary translucent window is STILL damaged (no bufid, no move)");
+    # ⭐ 0.17.4: its BORDER is chrome at the window's opacity too, one row outside it each way.
+    assert_eq(t_gt_r(rend_band_y(), 40 - BORDER_W), 0, "  ...and its band reaches the border row above it");
+    assert_eq(t_gt_r(40 + TITLEBAR_H + 100 + BORDER_W, rend_band_y() + rend_band_h()), 0,
+      "  ...and the border row below it");
 
     var trf = 0;
     while (trf < 12) { ghost_frame(trcomp, trfb, trwin, TRBG); trf = trf + 1; }
     var px_late = bhumi_fb_get(trfb, 80, 100);
     assert_eq(px_late, px_settled, "12 further frames change NOTHING — no accumulation");
     assert(px_late != TRBG, "the window is still drawn");
+    assert_eq(bhumi_fb_get(trfb, 80, 40 - BORDER_W), ring_settled, "  nor does its translucent border accumulate");
+    assert_eq(ring_settled, rend_blend(TRBG, ae_bhumi(rupa_theme_line(rupa_theme_active())), 128),
+      "  ...which is the line colour at a=128 over the backdrop, blended ONCE");
 
     # And it must genuinely be a blend of the two, not either one alone. The opaque chrome colour is
     # whatever a=255 produces; assert the translucent result differs from it.
@@ -635,10 +1317,11 @@ fn main() {
     var zj = ae_rect_mark_at(0);
     var zbad2 = 0;
     while (zj < ae_rect_mark_at(1)) {
-        if (ae_rect_get_x(zj) < 200) { zbad2 = zbad2 + 1; }
+        # ⚠ 0.17.4: the border ring is window 1's chrome and lies BORDER_W outside its rect, so x >= 199.
+        if (ae_rect_get_x(zj) < 200 - BORDER_W) { zbad2 = zbad2 + 1; }
         zj = zj + 1;
     }
-    assert_eq(zbad2, 0, "window 1's slice contains only rects inside window 1 (x >= 200)");
+    assert_eq(zbad2, 0, "window 1's slice contains only rects of window 1 (x >= 199, its border included)");
     ae_chrome_gpu_ok = zsaved; ae_gpu_frame_ok = zsaved_ok; ae_text_gpu_ok = zsaved_t; ae_cursor_gpu_ok = zsaved_c;
 
     # ⛔⛔ `AE-0a`: A **CLOSED** WINDOW IS NOT A MOVED WINDOW, and the difference cost an iron burn.
@@ -681,8 +1364,11 @@ fn main() {
     assert(rend_band_y() + rend_band_h() >= 40 + 100 + 30,
       "close frame: ...and its bottom, titlebar included");
     assert_eq(comp_retire_valid(), 0, "the retired rect is CONSUMED by the frame that folded it in");
+    assert_eq(t_gt_r(rend_band_y(), 40 - BORDER_W), 0, "close frame: the band reaches its border row above it");
+    assert_eq(t_gt_r(40 + 100 + 30 + BORDER_W, rend_band_y() + rend_band_h()), 0, "  ...and below it");
     if (rend_band_h() > 0) { rend_clear_band(kfb, rend_band_y(), rend_band_h(), KBG); }
     assert_eq(bhumi_fb_get(kfb, 80, 100), KBG, "close frame: the vacated region is background");
+    assert_eq(bhumi_fb_get(kfb, 80, 40 - BORDER_W), KBG, "close frame: and so is its old border row");
 
     # ---- frame 5: THE ASSERT THAT CATCHES THE FLASH. The other buffer still holds the window. ----
     rend_frame_damage(kcomp, kfb, KBG);
@@ -1876,8 +2562,9 @@ fn main() {
     assert_eq(bhumi_fb_get(ofb, 1, 1), 0xFFFFFF, "a=255 is an opaque fill");
     bhumi_fb_clear(ofb, 0x000000);
     fill_rect_a(ofb, 0, 0, 4, 4, 0xFFFFFF, 128);
-    # 255*128/255 = 128 -> 0x80 on every channel, over black.
-    assert_eq(bhumi_fb_get(ofb, 1, 1), 0x808080, "a=128 blends white over black to mid grey");
+    # 255·R(128/255) = 128.0 -> 0x80 on every channel over black, and the alpha byte is the coverage (op 0x02's
+    # fourth lane: R(0·ia + sa') = 128) — the kernel writes it, so the CPU frame does too.
+    assert_eq(bhumi_fb_get(ofb, 1, 1), 0x80808080, "a=128 blends white over black to mid grey, alpha byte 128");
     bhumi_fb_clear(ofb, 0x000000);
     fill_rect_a(ofb, 0, 0, 4, 4, 0xFFFFFF, 0);
     assert_eq(bhumi_fb_get(ofb, 1, 1), 0x000000, "a=0 draws nothing at all");
@@ -1885,12 +2572,10 @@ fn main() {
     # point, and it is what makes a translucent window show the wallpaper rather than a flat tint.
     bhumi_fb_clear(ofb, 0x204060);
     fill_rect_a(ofb, 0, 0, 4, 4, 0x000000, 128);
-    # ⚠ 0x0F1F2F, NOT 0x102030 — and the literal that said otherwise was wrong, not the renderer.
-    # `rend_blend` weights the destination by `255 - a`, so a = 128 keeps 127/255 of it, not 128/255:
-    # 32*127/255 = 15, 64*127/255 = 31, 96*127/255 = 47. The group's own white-over-black assertion
-    # already pins the other half (255*128/255 = 128 = 0x80) and agrees. ⛔ "a=128 is exactly half" is
-    # false for an integer blend over 0..255 and was only ever plausible because this never executed.
-    assert_eq(bhumi_fb_get(ofb, 1, 1), 0x0F1F2F, "black at a=128 keeps 127/255 of the existing pixel");
+    # ⛔⛔ 0x102030, NOT 0x0F1F2F — CHANGED AT 0.17.4, AND THE OLD LITERAL WAS RIGHT FOR THE OLD BLEND. Both keep
+    # 127/255 of the destination; the straight-colour blend TRUNCATED it (32·127/255 = 15.94 -> 15) while the
+    # kernel's op 0x02 ROUNDS (-> 16), so the CPU frame drew this titlebar one step darker per channel than iron.
+    assert_eq(bhumi_fb_get(ofb, 1, 1), 0x80102030, "black at a=128 keeps 127/255 of the existing pixel, ROUNDED");
 
     # ----- ⛔⛔ THE 1.56.44 IRON REGRESSION -----------------------------------------------------
     # THE INVARIANT, and it is the one `ae_chrome_on_gpu()`'s banner already states: every chrome fill
@@ -2021,6 +2706,17 @@ fn main() {
     bhumi_fb_clear(wfb2, 0x00FFFFFF);
     wp_fill_band(wfb2, 0, 32, 32);
     assert_eq(bhumi_fb_get(wfb2, 32, 16), bhumi_fb_get(wfb, 32, 16), "full and banded clears agree");
+
+    # 0.17.4 — the kernel's blend on the CPU, window opacity, the border, and renderer.rs's tests.
+    t_grp_op01_r();
+    t_grp_op06_r();
+    t_grp_op02_r();
+    t_grp_opacity_r();
+    t_grp_fb_r();
+    t_grp_outline_r();
+    t_grp_border_r();
+    t_grp_overlap_r();
+    t_grp_minimized_r();
 
     return assert_summary();
 }
