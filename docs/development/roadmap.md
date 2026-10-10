@@ -1,12 +1,13 @@
 # aethersafha — Roadmap
 
 > What ships next, in what order, and against which gates. Live state is in [`state.md`](state.md), history in
-> [`../../CHANGELOG.md`](../../CHANGELOG.md), and the parity gate in [`parity-plan.md`](parity-plan.md).
+> [`../../CHANGELOG.md`](../../CHANGELOG.md), and where the Rust original's API went in
+> [`../architecture/002-rust-public-api-map.md`](../architecture/002-rust-public-api-map.md).
 > ⛔ **Not a ledger.** A finished item shrinks to one line under *Done*, and its story lives in the CHANGELOG.
 
 ## v1.0 criteria
 
-- [ ] Rust parity closed and `rust-old/` deleted (the 0.17.x arc)
+- [x] Rust parity closed and `rust-old/` deleted (the 0.17.x arc, 0.17.6; the Rust lives on in tag `0.17.5`)
 - [ ] Test coverage ≥ 80%. Reference coverage is **60%** (791 of 1,297 fns, 2026-10-09)
 - [ ] Benchmarks in `docs/benchmarks.md` (0.17.5)
 - [x] Runs on agnos via bhumi, iron-proven: `--selftest` exits 95, keyboard and pointer work, every frame layer
@@ -14,14 +15,24 @@
 - [ ] CHANGELOG complete from v0.1.0
 - [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`)
 
-## 0.17.x — close the port, then delete `rust-old/` (next: 0.17.6)
+## 0.17.x — close the port, then delete `rust-old/` (✅ done at 0.17.6)
 
 **Why the arc is smaller than 28,072 lines of Rust suggests.** The Rust *binary* never created a window or
 rendered a frame. It built the desktop, ran a 5 s status tick, honoured `--secure`, and exited on a signal.
 Everything else was library code reached only by tests. So parity means library behaviour plus that tick.
 A module that was library-only in Rust and is library-only here is at parity. Wiring one into the running
-desktop is new work, and it stays out of the deletion gate (see *Desktop track*). The module-by-module
-gate, with every open item, is [`parity-plan.md`](parity-plan.md).
+desktop is new work, and it stays out of the deletion gate (see *Desktop track*).
+
+**The parity matrix's closing record.** The module-by-module gate was `parity-plan.md`, deleted with
+`rust-old/` (it is at tag `0.17.5`). Every row closed, and with them all 1,096 Rust tests. Ported, with every
+Rust test re-expressed in a `.tcyr` suite under ADR 0003's mappings: `main.rs` and `accessibility.rs`
+(0.17.2); `plugin_host`, `security_ui`, `screen_capture` and `screen_recording` (0.17.3); `compositor.rs`
+and `renderer.rs` (0.17.4); `ai_features`, `shell`, `gestures` (kept dormant), `system_tests.rs`,
+`tests/*.rs` and the benches (0.17.5). Retired by ADR at 0.17.0: `apps`, `theme_bridge`,
+`shell_integration`, quick settings, `KeyboardNavConfig` and the HUD (ADR 0004), and `wayland/` and
+`xwayland.rs` (ADRs 0001 and 0002). The last row, `lib.rs`, the example and the Cargo files, closed at
+0.17.6 with [`002-rust-public-api-map.md`](../architecture/002-rust-public-api-map.md), which also keeps
+each module's size, test count and Cyrius home.
 
 **Decided (operator, 2026-10-09):**
 - **Retire** the app layer (`apps.rs`: the window list, FileManager, Command Palette, browsers, Shruti and
@@ -39,10 +50,10 @@ gate, with every open item, is [`parity-plan.md`](parity-plan.md).
 | **0.17.3** | Stubs become real | ✅ **Shipped.** `PluginMessage` JSON as serde writes and reads it (bayan declared), and the `plug_ipc_*` stubs deleted. security_ui writes its audit log, sends SIGHUP on revoke and SIGKILL on kill behind load-bearing pid guards, and deregisters the agent from daimon; the stale cgroup removal is retired. The agent HUD and the panel gauge are fed from daimon 2.4.3's `GET /v1/agents` by a client that never blocks the frame loop (Linux; agnos has no non-blocking connect). screen_capture writes alpha 0xFF, refuses empty sizes and frees its buffers, with a chitra round-trip past 64 KB; screen_recording frees what its ring evicts. plugin_host, security_ui, screen_capture and screen_recording are CLOSED in the parity plan. |
 | **0.17.4** | Compositor and renderer depth | ✅ **Shipped.** Pointer routing and the drag / resize state live in `src/route.cyr` with Rust's nine routing tests; a gesture is anchored at the press, and the left and bottom-left grips keep the opposite edge fixed. `qemu-linux-input.sh` gains a `drag` scenario with a USB mouse. Four default workspaces with the active / agent queries and the context setter, and the compositor's lifecycle, state and workspace tests. The CPU blend is the kernel's `#92` arithmetic, so CPU and GPU frames are word-identical; window opacity applies on both; windows get Rust's 1 px border. compositor.rs and renderer.rs are CLOSED in the parity plan. |
 | **0.17.5** | Tests and benchmarks | ✅ **Shipped.** Every Rust test of every PORT row is re-expressed (`tests/system.tcyr` holds the end-to-end ones); the parity plan's to-do list is empty and only the OBSOLETE row is left. Cyrius benches cover every series Rust benchmarked; `docs/benchmarks.md` keeps Rust's CSV as a record beside them; `scripts/bench-history.sh` runs `cyrius bench`. The coverage floor rises to 68%. |
-| **0.17.6** | Delete `rust-old/` | Once the gate below passes. The CHANGELOG names the last tag that carries the directory. |
+| **0.17.6** | Delete `rust-old/` | ✅ **Shipped.** The gate passed: every parity row CLOSED (the OBSOLETE row through [`../architecture/002-rust-public-api-map.md`](../architecture/002-rust-public-api-map.md)), nothing of value lost, every reference pointed at tag `0.17.5` — the last tag that carries the directory. `parity-plan.md` retired with it. Folded in: setu 0.8.12, whose bounded reads let the Linux accept path handshake without blocking (D12). |
 
 **The gate for deleting `rust-old/`:**
-1. Every [`parity-plan.md`](parity-plan.md) row is CLOSED.
+1. Every `parity-plan.md` row is CLOSED.
 2. ✅ ADRs 0002–0004 are accepted (0.17.0), and every divergence the matrix names cites one of them.
 3. Nothing of value is lost:
    - the bench CSV is in `docs/benchmarks.md`;
@@ -85,7 +96,7 @@ agnos it comes from the boot report's modifier byte and has not yet been seen on
 |---|---|---|---|
 | D1 | **Burn the phase instrument**, reading 0.16.27's `cumulative us (client blit, #84 flip, input, yield, period)` line. It decides D2: blit points to damage rects, flip to vblank pacing, yield to the clients, input to the drain. Iron measured 7–15 fps on 2026-08-22, and the clear is exonerated. | burn | needs iron |
 | D2 | **Present-protocol damage.** setu has no damage concept, and every live surface is re-read or re-blitted every frame whether or not it committed. A maximized 2560×1408 terminal moves about 28.8 MB per frame. This needs COMMIT as an opt-in change signal, plus dirty rects. | setu, then here | after D1 |
-| D3 | **A client that exits leaves its window behind.** A dead channel only sets `chan_dead` (`main.cyr` frame loop). Its window stays focusable, and its dead buffer is re-read every frame. A client's own `SETU_CLOSE` is rejected (`setu_hs_action`, state 3). Same family, seen in QEMU at 0.16.30: on the Linux accept path a surface refused at ATTACH, or any later handshake failure, leaves the empty window minted at CREATE_SURFACE (`setu_srv_commit_from_create`). ⚠ That window also TAKES FOCUS, which makes `qemu-linux-input.sh`'s hostile scenario order-dependent: when the honest client connects first, the refused window keeps focus and the check "the honest client told it has focus" fails (seen in three runs under load, 2026-10-09). Fix the refusal path and the harness stops flaking. | here | open |
+| D3 | **A client that exits leaves its window behind.** A client that presents and then exits keeps its window (detached from the dead connection since 0.17.6), and each keeps its buffer cache, so a local process that connects, presents and hangs up over and over piles up windows (40 cycles of 2048×2048: +657 MB, measured 0.17.6 review). A client's own `SETU_CLOSE` is still rejected (`setu_hs_action`, state 3). ✅ 0.17.6 closed the Linux accept-path half: a refusal at ATTACH, or any handshake failure, now removes the half-made window and hands focus on, which was the cause of the order-dependent `hostile` flake. | here | open (the rest) |
 | D4 | **Per-PTY window size.** There is no TIOCSWINSZ on the `#97` band, so `ls` lays out columns for the console grid instead of puka's window. | agnos, puka | open |
 | D5 | **Theme repaint on the GPU path**, reported 2026-08-18 and not reproduced. QEMU covers only the CPU path; re-test on the next burn. | burn | unconfirmed |
 | D6 | **crab has no maximize view.** | crab | open |
@@ -94,7 +105,7 @@ agnos it comes from the boot report's modifier byte and has not yet been seen on
 | D9 | **Protocol depth owed by ADR 0002:** title and app_id, fullscreen and other client state requests, size hints, dialogs, popups, clipboard and drag-and-drop, IME, output info and scale, pointer leave and horizontal scroll, and a version handshake. | setu, then here | after the arc |
 | D10 | **Wiring library code (new work, not parity):** a system screenshot through `screen_capture` (it doubles as the `--ppm` pixel oracle), agent capture requests (new setu kinds), a recording consumer, and gestures once touch exists. On iron a screenshot needs the CPU path for that frame or a kernel read-back. | here | after the arc |
 | D11 | **The foreign-app lane** (ADR 0002, "mehman owes"): multi-window guests; guest-driven title, state and size; input and focus; clipboard; real pixels (mehman ADR 0004). | mehman, then here | open |
-| D12 | **A silent client wedges the compositor.** setu's reads on an accepted socket block with no timeout, so a local process that connects and never sends stops the frame loop. Since 0.17.2 SIGINT is read once per frame, so Ctrl+C cannot end a wedged compositor (Ctrl+\\ and SIGTERM still do; ADR 0003). Bound the reads (a timeout or non-blocking serve). | here + setu | open |
+| D12 | **A silent client wedges the compositor.** ✅ Closed on aethersafha's side at 0.17.6: setu 0.8.12's bounded reads, and every Linux client served by the non-blocking per-client drain (`src/setu_clients.cyr`) with a 10 s handshake budget; client buffers read through `win_client_buf_read`, which cannot wait. QEMU `silent` scenario. setu still has two defects found here, reported to the operator: `setu_buf_read` opens the client-named `/dev/shm` buffer blocking and follows symlinks (a FIFO or a write lease holds its caller), and `setu_poll_input` allocates 256 B per call that it never frees. | setu | closed here |
 | D13 | **A window changed during a gesture snaps back.** A drag or resize rebuilds the rect from the press-time anchor (`src/route.cyr`), so a keyboard chord that maximizes or moves the window while the button is held is undone by the next motion, and a maximized window keeps WS_MAXIMIZED with the anchored rect. End the gesture when the window changes under it. Seen in review, 0.17.4. | here | open |
 
 **Owned by agnos, tracked here because the desktop feels them:**

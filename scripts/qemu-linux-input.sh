@@ -14,11 +14,12 @@
 #   ./scripts/qemu-linux-input.sh hostile    # a client attaching at stride 4
 #   ./scripts/qemu-linux-input.sh sigint     # SIGINT from PID 1 runs the Ctrl+Q teardown; clients stay stoppable
 #   ./scripts/qemu-linux-input.sh drag       # a USB mouse drags a window by its titlebar, then by its left edge
+#   ./scripts/qemu-linux-input.sh silent     # clients that connect and stop talking; the desktop runs on (D12)
 #   AE_INPUT_COMPOSITOR=/path/to/aethersafha ./scripts/qemu-linux-input.sh   # judge a prebuilt binary (A/B)
 #
-# The clients are `programs/focus_client.cyr` (and its `-D AE_HOSTILE` build). Screendumps, a montage and
-# the serial log land in build/qemu-input/<scenario>/. Boot setup (OVMF, `console=tty0`, no `quiet`) is the
-# desktop harness's, for the reasons recorded there.
+# The clients are `programs/focus_client.cyr` and its `-D AE_HOSTILE`, `-D AE_SILENT` and `-D AE_STALL`
+# builds. Screendumps, a montage and the serial log land in build/qemu-input/<scenario>/. Boot setup
+# (OVMF, `console=tty0`, no `quiet`) is the desktop harness's, for the reasons recorded there.
 # Exit: 0 every scenario PASS · 1 at least one FAIL · 2 could not run.
 set -uo pipefail
 
@@ -26,7 +27,7 @@ cd "$(dirname "$0")/.."
 OUT=${AE_INPUT_OUT:-build/qemu-input}
 KERNEL=${AE_QEMU_KERNEL:-/boot/vmlinuz-linux}
 OVMF=${AE_QEMU_OVMF:-/usr/share/edk2/x64/OVMF.4m.fd}
-SCENARIOS=${*:-focus hostile sigint drag}
+SCENARIOS=${*:-focus hostile sigint drag silent}
 
 [ -r "$KERNEL" ] || { echo "no kernel at $KERNEL (set AE_QEMU_KERNEL)"; exit 2; }
 [ -r "$OVMF" ] || { echo "no OVMF firmware at $OVMF (set AE_QEMU_OVMF)"; exit 2; }
@@ -45,7 +46,11 @@ cyrius build programs/focus_client.cyr "$OUT/focus_client" >/dev/null 2>&1 \
     || { echo "focus_client build failed"; exit 2; }
 cyrius build -D AE_HOSTILE programs/focus_client.cyr "$OUT/hostile_client" >/dev/null 2>&1 \
     || { echo "hostile_client build failed"; exit 2; }
-for b in aethersafha init focus_client hostile_client; do
+cyrius build -D AE_SILENT programs/focus_client.cyr "$OUT/silent_client" >/dev/null 2>&1 \
+    || { echo "silent_client build failed"; exit 2; }
+cyrius build -D AE_STALL programs/focus_client.cyr "$OUT/stall_client" >/dev/null 2>&1 \
+    || { echo "stall_client build failed"; exit 2; }
+for b in aethersafha init focus_client hostile_client silent_client stall_client; do
     file "$OUT/$b" | grep -q 'statically linked' || { echo "$OUT/$b is NOT static — the initramfs has no loader"; exit 2; }
 done
 echo "   compositor sha256 $(sha256sum "$OUT/aethersafha" | cut -c1-16)…"

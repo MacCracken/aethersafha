@@ -220,25 +220,45 @@ fn comp_agent_aware(c)         { return load64(c + C_AGENT); }
 
 # comp_create_window: assign next id, push (top of z-order), focus it, and add
 # it to the active workspace. -> *Window
+# ⭐ = `comp_mint_window` + `comp_map_window` + focus, in that order (0.17.6).
 fn comp_create_window(c, x, y, w, h, title): i64 {
+    var win = comp_mint_window(c, w, h, title);
+    if (win == 0) { return 0; }
+    win_move(win, x, y);
+    comp_map_window(c, win);
+    store64(c + C_FOCUSED, comp_count(c) - 1);
+    # ⚠ Rust's create_window focuses the new window but never syncs the tree (compositor.rs:244-247);
+    # the port does, so tree focus is never left on a window that lost it.
+    comp_a11y_sync_focus(c);
+    return win;
+}
+
+# comp_mint_window(c, w, h, title): give a window its id and nothing else. It is NOT in the stack, the
+# workspace or the a11y tree, so nothing draws it, hit-tests it, focuses it or closes it until
+# `comp_map_window` puts it there. -> *Window (0 on OOM)
+# ⭐ A setu client's window is minted at CREATE_SURFACE and mapped at its first COMMIT (0.17.6). It used to
+# be created whole at CREATE_SURFACE: an empty window at (0,0) that took focus, was drawn as chrome with no
+# content until COMMIT moved it, and could be closed by hand while its client was still in the handshake.
+fn comp_mint_window(c, w, h, title): i64 {
     var id = load64(c + C_NEXTID);
     store64(c + C_NEXTID, id + 1);
-    var win = win_new(id, x, y, w, h, title);
-    if (win == 0) { return 0; }
-    var v = load64(c + C_WINDOWS);
-    vec_push(v, win);
-    store64(c + C_FOCUSED, vec_len(v) - 1);
+    return win_new(id, 0, 0, w, h, title);
+}
+
+# comp_map_window(c, win): put a minted window on the desktop where it already is — on top of the stack,
+# in the active workspace (as its active window) and in the a11y tree. Focus is NOT moved: the caller
+# decides (`comp_create_window` focuses it; a setu client's first present does, in setu_clients.cyr).
+fn comp_map_window(c, win): i64 {
+    var id = win_id(win);
+    vec_push(load64(c + C_WINDOWS), win);
     var aw = comp_get_workspace(c, load64(c + C_ACTIVE_WS));
     if (aw != 0) {
         vec_push(wsp_windows(aw), id);
         store64(aw + WSP_ACTIVE, id);
     }
     var ax = load64(c + C_A11Y);
-    if (ax != 0) { a11y_tree_window_open(ax, id, title, x, y, w, h); }
-    # ⚠ Rust's create_window focuses the new window but never syncs the tree (compositor.rs:244-247);
-    # the port does, so tree focus is never left on a window that lost it.
-    comp_a11y_sync_focus(c);
-    return win;
+    if (ax != 0) { a11y_tree_window_open(ax, id, win_title(win), win_x(win), win_y(win), win_w(win), win_h(win)); }
+    return 0;
 }
 
 # comp_focus(c, i): focus window index i AND RAISE IT TO THE TOP OF THE STACK.
@@ -449,8 +469,6 @@ fn comp_retire_add(x, y, w, h): i64 {
     return 0;
 }
 
-# comp_close_window(c, id): remove the window from the registry + active
-# workspace. -> 0 ok / -1 absent
 # comp_close_all_clients(c) -> the number of clients told to close.
 #
 # ⛔⛔ THE COMPOSITOR HAD NO SESSION TEARDOWN ON agnos AT ALL, and that is a resource leak with a hard
@@ -491,15 +509,14 @@ fn comp_close_all_clients(c): i64 {
     return told;
 }
 
+# comp_close_window(c, id): tell the window's client (SETU_CLOSE), then remove the window from the
+# registry + active workspace (`comp_remove_window`). -> 0 ok / -1 absent
 fn comp_close_window(c, id): i64 {
     var idx = comp_find_by_id(c, id);
     if (idx < 0) { return 0 - 1; }
     var v = load64(c + C_WINDOWS);
-    # ⛔ RETIRE THE RECT BEFORE UNLINKING, because after `vec_remove` this window is unreachable and
-    # its geometry is the only record of which pixels need repainting. See the retired-rect note above.
     var dying = vec_get(v, idx);
     if (dying != 0) {
-        comp_retire_add(win_x(dying), win_y(dying), win_w(dying), win_h(dying));
         # ⛔⛔ TELL THE CLIENT. A setu client is a SEPARATE PROCESS, and removing its window from this
         # vector is invisible to it — so before this fix, F4 left the process **orphaned alive**, still
         # holding its `#97` channel end and its `#86` GPU-visible shm slot for the rest of the boot.
@@ -537,7 +554,25 @@ fn comp_close_window(c, id): i64 {
             }
         }
     }
+    return comp_remove_window(c, id);
+}
+
+# comp_remove_window(c, id): take a window out of the registry and the active workspace WITHOUT telling
+# its client — retire its rect, unlink it, close it in the a11y mirror, free the pixel cache it owns, and
+# hand focus on. -> 0 ok / -1 absent. ⚠ For a window whose client the CALLER deals with. `comp_close_window`
+# is this plus SETU_CLOSE and its log lines, which name a close somebody asked for (0.17.6).
+fn comp_remove_window(c, id): i64 {
+    var idx = comp_find_by_id(c, id);
+    if (idx < 0) { return 0 - 1; }
+    var v = load64(c + C_WINDOWS);
+    # ⛔ RETIRE THE RECT BEFORE UNLINKING, because after `vec_remove` this window is unreachable and
+    # its geometry is the only record of which pixels need repainting. See the retired-rect note above.
+    var dying = vec_get(v, idx);
+    if (dying != 0) { comp_retire_add(win_x(dying), win_y(dying), win_w(dying), win_h(dying)); }
     vec_remove(v, idx);
+    # ⭐ ITS CACHE GOES WITH IT (0.17.6). Out of the stack, nothing draws it, and nothing reads or allocates
+    # for it again: `setu__hs_apply` skips a window that is off the desktop (setu_dispatch.cyr).
+    if (dying != 0) { win_pix_release(dying); }
     # ⚠ Mirrored BEFORE the focus hand-off below, so the hand-off's `comp_focus` lands tree focus on the
     # successor last. (Rust never re-set it: remove_node cleared it when the closed window held tree focus,
     # and otherwise left it wherever it was, since Rust's create_window never synced it either.)

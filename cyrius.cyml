@@ -85,5 +85,5 @@ modules = ["dist/chitra.cyr"]
 [deps.setu]
 git = "https://github.com/MacCracken/setu.git"
 # path = "../setu"
-tag = "0.8.11"
+tag = "0.8.12"
 modules = ["dist/setu.cyr"]

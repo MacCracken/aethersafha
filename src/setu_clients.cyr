@@ -1,0 +1,472 @@
+# aethersafha — the setu clients the frame loop serves: one row per client, and one frame of service
+# per row that never waits on the client.
+#
+# ⭐ TWO KINDS OF ROW, ONE LOOP (0.17.6, roadmap D12).
+#   PLACED   — agnos. A `#97` channel the compositor minted, one end endowed to a child it spawned
+#              (`ae_client_spawn`, main.cyr). The channel exists before the client has run at all.
+#   ACCEPTED — Linux. An AF_UNIX / SOCK_SEQPACKET connection taken off the listener
+#              (`ae_client_accept`). It exists because the client connected.
+# Both are served by `setu_srv_handshake_drain`, which only POLLS (`setu_poll_input`), so a client
+# completes CREATE_SURFACE -> ATTACH -> COMMIT over as many frames as it needs, and is read after that
+# for its re-attaches (a resize presents a new buffer).
+#
+# ⛔⛔ THE LINUX ACCEPT PATH USED TO SERVE A CLIENT TO COMPLETION INSIDE ONE FRAME, AND A CLIENT THAT
+# STOPPED TALKING STOPPED THE DESKTOP. `setu_srv_serve_accepted_at` read CREATE_SURFACE, ATTACH and COMMIT
+# with `setu_read_msg`, and on Linux that read has no deadline. setu keeps it that way on purpose (a
+# client's own input loop waits on it; setu 0.8.12). A local process that connected and never sent, or
+# sent CREATE_SURFACE and stopped, held the frame loop forever. Since 0.17.2 SIGINT is read once per
+# frame, so Ctrl+C could not end it either. Moving the setu pin does not change that default; the fix
+# is that the frame loop does not read a client's RECORDS in any way that can wait.
+# ⛔ AND RECORDS WERE NOT THE ONLY WAIT. An ATTACH names a buffer by id, and on Linux setu's `setu_buf_read`
+# (lib/setu.cyr ~743, setu's code) opens "/dev/shm/setu-buf-<id>" without O_NONBLOCK or O_NOFOLLOW: a FIFO
+# planted at that name holds the frame loop in `open` at the ATTACH, or at any frame's live re-read of a
+# window showing that id; so does a regular file whose owner holds a write lease (F_SETLEASE) on it, for
+# the kernel's whole lease-break time (measured: 45 s). That is setu's defect, reported, not patched here; the compositor reads client
+# buffers through `win_client_buf_read` (window.cyr), which opens non-blocking, refuses a symlink and reads
+# only a regular file. Sends cannot wait either (below). What a client can still cost a frame is bounded
+# work, not a wait: at most DRAIN_MAX records and ONE buffer copy of at most 16 MB (setu_dispatch.cyr; one
+# such serve measured 6.6 ms on Linux 7.2.8).
+#
+# ⭐ AN IDLE CLIENT COSTS NOTHING (Linux, 0.17.6). Once per frame `ae_clients_poll` asks poll(2), with no
+# timeout, which rows' connections have something to read, and only those are drained; the drain asks
+# again before each further record (`setu_srv_fd_readable`). So `setu_poll_input` runs only for a record
+# that is there, an end of file or an error. ⛔ It ran for every live row every frame, and each call takes
+# 256 bytes that setu never frees (its receive buffer, lib/setu.cyr `setu_poll_input`), plus 80 for the
+# step's message: 336 B per client per frame (measured, 100,000 idle serves). The 256 B per RECORD remain:
+# that buffer is setu's. ⚠ agnos channels have no poll: there every live row is drained every frame, as
+# before, and pays setu's 256 B per call.
+#
+# ⭐ WHAT ENDS A ROW, PER KIND, AND WHY THE KINDS DIFFER.
+#   PLACED   — unchanged from the agnos loop this was lifted out of. A handshake error is retried until
+#              AE_PLACED_FAIL_MAX come in a row (a frame that consumes records without one resets the
+#              count), then the row is marked dead and never polled again. Its channel end is left as it
+#              is, and so is a window it presented. No time limit: a placed client may take seconds to load
+#              and start.
+#   ACCEPTED — the handshake has a budget, AE_HS_BUDGET_MS from accept to the first COMMIT, and any
+#              handshake error is final. Neither reason a placed row is retried applies: the connection
+#              exists only because the client is running, and SOCK_SEQPACKET neither drops nor reorders a
+#              record, so a kind that is wrong was sent wrong. EOF is final too.
+#
+# ⭐ A CLIENT'S WINDOW IS NOT ON THE DESKTOP UNTIL ITS FIRST PRESENT (0.17.6). It is minted at CREATE_SURFACE
+# and mapped — placed at its cascade position, on top, showing its buffer — when its first COMMIT is applied
+# (setu_dispatch.cyr, SetuHsSt), and focused then (`ae_client_focus_new`). Before that nothing draws it,
+# hit-tests it, focuses it or closes it. ⛔ It used to enter the desktop at CREATE_SURFACE: an empty window at
+# (0,0) that took focus, flashed its chrome at the origin for the frame its COMMIT moved it, could be closed
+# by hand mid-handshake, and was left behind by a client that never presented (roadmap D3).
+#
+# ⭐ RETIRING AN ACCEPTED ROW (`ae_client_retire`):
+#   - before the client first presented: if it was told SURFACE_CREATED(id), it is sent SETU_CLOSE(id).
+#     Its window was never on the desktop, so there is nothing to remove.
+#   - after it presented (it hung up, or sent a protocol error on a live window): its window stays on
+#     screen, as a dead placed client's does (D3), and is DETACHED (`win_cfd` 0) before the close — unless
+#     the operator closed it already (Ctrl+F4, the close button: `comp_close_window` sent SETU_CLOSE, and
+#     an honest client then hangs up), which the retirement line says.
+#     ⛔ DETACH BEFORE CLOSE. The kernel hands the closed fd number to the next accept, and a window still
+#     naming it would send its keys, focus notices and SETU_CLOSE to a different client.
+#   - then the connection is closed, and the row can be reused by the next accept.
+#
+# ⭐ WHAT A RETIRED CLIENT SEES (Linux), in this order:
+#   1. SURFACE_CREATED(id), if its CREATE_SURFACE was served and it has not read the reply yet;
+#   2. SETU_CLOSE(id), if it was given a surface id and had not presented;
+#   3. end of file: `setu_read_msg` / `setu_read_msg_ms` return -6 with `setu_read_timed_out()` 0,
+#      `setu_client_poll_input` returns -6, and a send fails (`setu_send` -7, EPIPE). Never SIGPIPE: a
+#      SOCK_SEQPACKET send to a closed peer is EPIPE without the signal (measured on Linux 7.2.8).
+#   ⚠ A client retired with records it sent still unread (a refused ATTACH followed by its COMMIT) first
+#     reads ECONNRESET, which the kernel reports once, before 1-3. setu's reads return -6 for it;
+#     `setu_poll_input` reports it as "nothing yet" and sees the end of file on the next poll.
+#
+# ⭐ SENDS DO NOT WAIT EITHER. An accepted fd is blocking as setu hands it over, so a send waits for room,
+# and a client that completes its handshake and then never reads fills its queue: 278 records of 40 bytes
+# (measured, Linux 7.2.8), after which the frame loop would wait in `write`. Each accepted fd is made
+# O_NONBLOCK here, so a send to a full queue fails (-7) and the record is dropped. Reads are unaffected:
+# setu reads with MSG_DONTWAIT whatever the fd's mode.
+
+# ============================================================================================
+# ⭐⭐ THE HOSTED-CLIENT TABLE — module scope, so a client can be spawned AFTER boot
+# ============================================================================================
+# ⛔ THESE WERE FUNCTION-LOCAL IN `main()` AND THAT IS WHY NOTHING COULD BE LAUNCHED LATER. The four
+# arrays were filled by a hardcoded `while (ci < 2)` loop that ran once, at startup, and then went out
+# of reach — so "start an app from the desktop" had nowhere to write.
+# ⚠⚠ THE UNIT RULE FLIPS AT MODULE SCOPE, and this exact table already paid for it once: as a
+# FUNCTION-local `var chan_fd[32]` it was 32 **BYTES** = 4 slots, and a second client's store ran off
+# the end into the adjacent locals — one client presented, the other silently corrupted the first.
+# At MODULE scope `var X[N]` is N x u64, so `[8]` here is 8 real slots (64 bytes).
+# [[feedback_cyrius_var_array_u64_units]]
+# ⚠ It moved here from main.cyr at 0.17.6 so a suite can drive it (tests/setu_clients.tcyr): the frame
+# loop is the one thing no suite can run.
+var AE_CLIENT_MAX = 8;
+var chan_fd[8];        # the compositor's end: a placed channel end, or an accepted socket; -1 once closed
+var chan_served[8];    # 1 once that client's surface has been ANNOUNCED (not a poll gate — see chan_dead)
+var chan_st[8];        # per-client handshake scratch (`setu_hs_st_new`, setu_dispatch.cyr)
+var chan_fail[8];      # consecutive handshake failures per client (PLACED rows)
+var chan_name[8];      # window title for the client on this channel
+# ⛔⛔ `chan_served` MEANT TWO THINGS AND THAT COST THE RESIZE. It latched on the first successful
+# present AND on retirement, and the poll loop skipped every client with it set — so the compositor
+# STOPPED READING a healthy client's channel the moment it presented once. Its window stayed alive
+# only through the LIVE re-read of the attached `#86` slot, which is why nothing noticed until a
+# resize: setu recreates the slot at a new id, the client sends ATTACH+COMMIT, and nobody was
+# listening. Iron 2026-08-19, puka fullscreen. `served` now means "announced", `dead` means
+# "stop polling"; only the latter gates the loop.
+var chan_dead[8];      # 1 = retired, never poll again (distinct from `served` = announced once)
+var chan_kind[8];      # AeRow: which rule ends this row (see the banner)
+var chan_t0[8];        # ACCEPTED: the monotonic ms it was accepted (-1 = no clock)
+var chan_due[8];       # ACCEPTED: the ms its handshake budget runs out; 0 = no budget (every PLACED row)
+# This frame's answer from `ae_clients_poll`, per row: 1 something to read, 0 nothing, -1 not asked — the
+# serve then asks for that row alone. Read once by the serve, which puts it back to -1.
+var chan_ready[8];
+var chan_n = 0;
+
+enum AeRow {
+    AE_ROW_PLACED   = 0;    # agnos: a minted, endowed channel
+    AE_ROW_ACCEPTED = 1;    # Linux: an accepted AF_UNIX connection
+}
+
+enum AeClientK {
+    # A PLACED row is retired after this many handshake errors in a row.
+    AE_PLACED_FAIL_MAX = 200;
+    # ⭐ An ACCEPTED client's whole handshake, accept to first COMMIT, in ms. It connected, so it is
+    # running: a client that has not presented in 10 s is stuck or hostile. setu's own wait for a reply
+    # on agnos is 8 s (SETU_READ_DEFAULT_MS). ⚠ A client that connects and only presents more than 10 s
+    # later is disconnected; setu's client presents when it is ready and connects just before.
+    AE_HS_BUDGET_MS = 10000;
+}
+
+# Why an ACCEPTED row was retired, beside the handshake's own negative codes (-6 .. -15).
+enum AeRetire {
+    AE_RET_BUDGET = 1;      # its handshake did not finish within its budget
+}
+
+# Initialise row `i` for a client on `fd`: every field, so a reused row carries nothing over. -> i
+fn ae_client_fill(i, fd, name, kind): i64 {
+    store64(&chan_fd + i * 8, fd);
+    store64(&chan_served + i * 8, 0);
+    store64(&chan_dead + i * 8, 0);      # slots are reused across spawns — clear both latches
+    store64(&chan_st + i * 8, setu_hs_st_new());
+    store64(&chan_fail + i * 8, 0);
+    store64(&chan_name + i * 8, name);
+    store64(&chan_kind + i * 8, kind);
+    store64(&chan_t0 + i * 8, 0);
+    store64(&chan_due + i * 8, 0);
+    store64(&chan_ready + i * 8, 0 - 1);
+    return i;
+}
+
+# Register a channel the compositor minted and endowed (agnos: `ae_client_spawn`). -> its row, or -1
+# when the table is full. ⚠ Appends and never reuses a row: the agnos table has always been append-only.
+fn ae_client_place(fd, name): i64 {
+    if (chan_n >= AE_CLIENT_MAX) { return 0 - 1; }
+    var i = chan_n;
+    ae_client_fill(i, fd, name, AeRow.AE_ROW_PLACED);
+    chan_n = chan_n + 1;
+    return i;
+}
+
+# A row for a new accepted connection: a retired ACCEPTED row (its connection already closed), else a
+# fresh one. -> the row, or -1 when every row holds a client.
+# ⚠ Reuse is what lets a long Linux session host more than AE_CLIENT_MAX clients in all; the limit is on
+# clients at once. The old accept path had no table and no limit.
+fn ae_client_free_row(): i64 {
+    var i = 0;
+    while (i < chan_n) {
+        if (load64(&chan_dead + i * 8) == 1) {
+            if (load64(&chan_kind + i * 8) == AeRow.AE_ROW_ACCEPTED) {
+                if (load64(&chan_fd + i * 8) < 0) { return i; }
+            }
+        }
+        i = i + 1;
+    }
+    if (chan_n >= AE_CLIENT_MAX) { return 0 - 1; }
+    i = chan_n;
+    chan_n = chan_n + 1;
+    return i;
+}
+
+# Register a connection the Linux listener just accepted, with `budget_ms` from `now_ms` to finish its
+# handshake. -> its row, or -1 when every row holds a client: the connection is then CLOSED, and the
+# client reads end of file at once. ⚠ `now_ms` -1 (no clock) leaves the row without a budget.
+# ⭐ Registering is ALL the accept does. Nothing is read here; the row's first service is the drain.
+fn ae_client_accept(fd, now_ms, budget_ms): i64 {
+    var i = ae_client_free_row();
+    if (i < 0) {
+        sys_close(fd);
+        return 0 - 1;
+    }
+    #ifndef CYRIUS_TARGET_AGNOS
+    fd_set_nonblocking(fd);         # a send to a client that does not read fails instead of waiting
+    #endif
+    # ⚠ Named for the protocol, as the accept path always named it: nothing here knows what the client is.
+    ae_client_fill(i, fd, "setu-surface", AeRow.AE_ROW_ACCEPTED);
+    store64(&chan_t0 + i * 8, now_ms);
+    if (now_ms >= 0) {
+        if (budget_ms > 0) { store64(&chan_due + i * 8, now_ms + budget_ms); }
+    }
+    return i;
+}
+
+# 1 when row `i` is an ACCEPTED client that has not presented and whose budget has run out at `now_ms`.
+fn ae_client_overdue(i, now_ms): i64 {
+    if (load64(&chan_kind + i * 8) != AeRow.AE_ROW_ACCEPTED) { return 0; }
+    if (load64(&chan_served + i * 8) != 0) { return 0; }
+    var due = load64(&chan_due + i * 8);
+    if (due <= 0) { return 0; }
+    if (now_ms < 0) { return 0; }
+    if (now_ms >= due) { return 1; }
+    return 0;
+}
+
+# ============================================================================================
+# ⭐ ONE poll(2) PER FRAME OVER EVERY LIVE ROW (Linux) — see the banner
+# ============================================================================================
+var ae_pfd[8];         # the frame's struct pollfd[AE_CLIENT_MAX] { i32 fd; i16 events; i16 revents; }
+var ae_pfd_row[8];     # the row each entry asks for
+
+# Ask, once and without waiting, which live rows have something to read, into `chan_ready`. Call it once
+# per frame before serving the rows. -> poll's answer (the number of rows with something), or its error,
+# which leaves every row at -1 so each serve asks for its own. agnos: a no-op answering 0.
+fn ae_clients_poll(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var n = 0;
+    var i = 0;
+    while (i < chan_n) {
+        store64(&chan_ready + i * 8, 0 - 1);
+        if (load64(&chan_dead + i * 8) == 0) {
+            var fd = load64(&chan_fd + i * 8);
+            if (fd >= 0) {
+                var e = &ae_pfd + n * 8;
+                store32(e, fd);
+                store16(e + 4, SETU_POLLIN);
+                store16(e + 6, 0);
+                store64(&ae_pfd_row + n * 8, i);
+                n = n + 1;
+            }
+        }
+        i = i + 1;
+    }
+    if (n == 0) { return 0; }
+    var r = syscall(7, &ae_pfd, n, 0);              # poll(2), timeout 0 — the literal 7: see SETU_POLLIN
+    if (r < 0) { return r; }
+    var k = 0;
+    while (k < n) {
+        var rd = 0;
+        if (load16(&ae_pfd + k * 8 + 6) != 0) { rd = 1; }   # POLLIN, POLLHUP, POLLERR: a read will say
+        store64(&chan_ready + load64(&ae_pfd_row + k * 8) * 8, rd);
+        k = k + 1;
+    }
+    return r;
+    #endif
+}
+
+# 1 when row `i` should be drained this frame. Takes this frame's poll answer and clears it; a row nobody
+# polled this frame is asked alone (`setu_srv_fd_readable`). agnos: always 1, as before.
+fn ae_client_readable(i): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var rd = load64(&chan_ready + i * 8);
+    store64(&chan_ready + i * 8, 0 - 1);
+    if (rd >= 0) { return rd; }
+    return setu_srv_fd_readable(load64(&chan_fd + i * 8));
+    #endif
+}
+
+# Serve row `i` for one frame: drain its records — which never waits — then apply its kind's rule.
+# `dstx, dsty` is where its window goes on its first COMMIT; `now_ms` is the frame's monotonic clock in
+# ms (-1 = no clock, which disarms the budget).
+# -> the window id (> 0) on the ONE frame the client first presents: the caller announces it, focuses it
+#    (`ae_client_focus_new`) and advances the cascade. Else 0: in progress, idle, a re-attach cycle,
+#    retired, or already dead.
+fn ae_client_serve(comp, i, dstx, dsty, now_ms): i64 {
+    if (load64(&chan_dead + i * 8) != 0) { return 0; }
+    var st = load64(&chan_st + i * 8);
+    var kind = load64(&chan_kind + i * 8);
+    # ⭐ NOTHING TO READ, NOTHING READ: no `setu_poll_input`, so none of its 256 bytes. The budget still runs.
+    if (ae_client_readable(i) == 0) {
+        if (ae_client_overdue(i, now_ms) == 1) { ae_client_retire(comp, i, AeRetire.AE_RET_BUDGET, now_ms); }
+        return 0;
+    }
+    # ⛔ DRAIN, NOT ONE STEP. `..._step` consumes ONE record; a client that presents every
+    # frame emits two per its (much faster) frame and wraps the 64-slot ring between two
+    # compositor frames, and the ring drops the OLDEST — so sipping loses the handshake's
+    # phase permanently. That is exactly why puka never got a client fd on iron and every
+    # key it should have received died at forward_key's `cfd == 0`.
+    var psid = setu_srv_handshake_drain(st, load64(&chan_fd + i * 8), comp, dstx, dsty, load64(&chan_name + i * 8));
+    # ⚠ ANNOUNCE ONCE. `psid > 0` now recurs every time a client completes a
+    # re-attach cycle (a resize), so the announce, the focus grab and the cascade
+    # counter must be latched — otherwise every resize would steal focus and shift
+    # the next client's spawn position.
+    # ⭐ No "was its window closed mid-handshake?" check any more (0.17.6): until this present the window
+    # was not on the desktop, so nobody could close it.
+    if (psid > 0) {
+        if (load64(&chan_served + i * 8) != 0) { return 0; }
+        store64(&chan_served + i * 8, 1);
+        return psid;
+    }
+    # ⛔⛔ RESET THE FAILURE COUNT ON PROGRESS, or "consecutive" is a claim the comment makes and the
+    # code does not keep. Nothing zeroed this counter after the initial store, so it was
+    # CUMULATIVE: 200 transient errors spread over a long run killed a perfectly live
+    # client, and the reader of the comment above would never suspect it. A frame that
+    # consumed records without erroring is the definition of "the client is alive and
+    # behaving" — that is the reset. [[feedback_audit_re_derive_dont_validate_comments]]
+    if (psid == 0) {
+        if (setu_hs_drained > 0) { store64(&chan_fail + i * 8, 0); }
+        if (ae_client_overdue(i, now_ms) == 1) { ae_client_retire(comp, i, AeRetire.AE_RET_BUDGET, now_ms); }
+        return 0;
+    }
+    if (kind == AeRow.AE_ROW_ACCEPTED) {
+        ae_client_retire(comp, i, psid, now_ms);
+        return 0;
+    }
+    # ⛔ A PLACED CLIENT'S HANDSHAKE ERROR IS NOT TERMINAL ON THE FIRST OCCURRENCE. This used to mark
+    # the client served (i.e. give up forever) the first time it saw a negative — but a
+    # client that stats a directory tree before it connects (crab does, ~37 entries)
+    # is merely SLOW, and a transient read error while it is still starting is not the
+    # same fact as a client that died. Count consecutive failures and only give up
+    # after several, so "not ready yet" and "gone" stop being the same verdict.
+    var fails = load64(&chan_fail + i * 8) + 1;
+    store64(&chan_fail + i * 8, fails);
+    if (fails < AeClientK.AE_PLACED_FAIL_MAX) { return 0; }
+    # A handshake error is terminal for THIS client — mark it DEAD so the loop
+    # does not retry a dead channel every frame for the rest of the run.
+    # ⚠ `dead`, not `served`: `served` only records that the window was announced,
+    # and gating the poll on it is what stopped live clients being read at all.
+    store64(&chan_dead + i * 8, 1);
+    ae_client_drop_unshown(comp, st);
+    ae_client_placed_say(psid);
+    return 0;
+}
+
+# A retired row's window, if it is not on the desktop, keeps no pixels: nothing will draw them. ⚠ Normally
+# a no-op — a window off the desktop holds no cache (setu_dispatch.cyr allocates one only for a window it
+# maps or one still mapped, and `comp_remove_window` frees it) — kept so a row cannot be retired holding one.
+fn ae_client_drop_unshown(comp, st): i64 {
+    var win = load64(st + HS_ST_WIN);
+    if (win == 0) { return 0; }
+    if (comp_find_by_id(comp, win_id(win)) >= 0) { return 0; }
+    return win_pix_release(win);
+}
+
+# Focus a client that has just presented for the first time: ITS OWN window, by id.
+# ⛔⛔ IT FOCUSED THE TOP OF THE STACK, which was the presenting window only if nothing had been created
+# or raised since its CREATE_SURFACE. With CREATE(A), CREATE(B), COMMIT(A) the top was B's half-made
+# window, so A's present focused B and A was never told it had focus (a serialized handshake had hidden
+# it). And a focus moved during A's handshake (Ctrl+Tab, a click) was not given back to A.
+# ⭐ The window was mapped by this present, so the focus detector (`setu_srv_focus_sync`) has never seen it
+# focused — it could not hold focus before it was on the desktop — and the frame's sync tells the client
+# (and whoever lost focus to it). The detector needs no reset. -> 0, or -1 when no window has that id.
+fn ae_client_focus_new(comp, psid): i64 {
+    var idx = comp_find_by_id(comp, psid);
+    if (idx < 0) { return 0 - 1; }
+    comp_focus(comp, idx);
+    return 0;
+}
+
+# Retire ACCEPTED row `i`: say why, withdraw a surface it never presented, close its connection. The
+# banner says what the client sees. `why` is a handshake code (< 0) or an AeRetire value.
+fn ae_client_retire(comp, i, why, now_ms): i64 {
+    var st = load64(&chan_st + i * 8);
+    var fd = load64(&chan_fd + i * 8);
+    var win = load64(st + HS_ST_WIN);
+    var served = load64(&chan_served + i * 8);
+    store64(&chan_dead + i * 8, 1);
+    # ⭐ SAY WHAT HAPPENED TO ITS WINDOW, read from the compositor, not assumed from `served`: a window the
+    # operator closed is gone although its client presented, and its client hangs up because it was told.
+    var shown = 0;
+    if (win != 0) {
+        if (comp_find_by_id(comp, win_id(win)) >= 0) { shown = 1; }
+    }
+    ae_client_accepted_say(why, load64(st), ft_elapsed(load64(&chan_t0 + i * 8), now_ms), served, shown);
+    if (win != 0) {
+        var id = win_id(win);
+        # ⭐ NOTHING TO REMOVE: a window is mapped only at its first present (see the banner). State 1 and
+        # on: the reply went out, so the client holds this id and is told it is withdrawn. A failed reply
+        # (-7) leaves state 0 and an id the client was never told.
+        # ⚠ SENT AFTER THE LOG LINES. The client acts on it at once, and on a console the processes
+        # share, its own line landed inside the one above (seen in QEMU, 0.17.6).
+        if (served == 0) {
+            if (load64(st) >= 1) {
+                println("aethersafha: accepted client: withdrew the surface it never presented, id:");
+                println_int(id);
+                setu_send(fd, setu_close(id));
+            }
+        }
+        ae_client_drop_unshown(comp, st);
+        # A live window, or a closed one this row still names.
+        if (win_cfd(win) == fd) { win_set_cfd(win, 0); }
+    }
+    sys_close(fd);
+    store64(&chan_fd + i * 8, 0 - 1);
+    return 0;
+}
+
+# ⛔⛔ EVERY RETIREMENT MUST SAY SOMETHING, AND TWO CODES USED TO SAY NOTHING.
+# `-9` (comp_create_window refused — window table full) and `-12` (attach geometry
+# or buffer id refused) are both returnable by the handshake and neither had a line
+# here, so a client could be retired in COMPLETE SILENCE. That silence is
+# indistinguishable from "the retry budget has not expired yet", which is exactly
+# the reading a burn card would give it — a wrong verdict with no way to catch it.
+# ⇒ `pnamed` makes silence IMPOSSIBLE: any code without its own line still prints.
+# [[feedback_instrument_discipline]] — a readout that suppresses a value makes
+# ABSENT and THAT VALUE indistinguishable.
+# ⛔ DISTINCT STRINGS, NOT println_int: three procs share this console
+# unserialised (spawn_path #43 does not apply an fd redirect unless one is
+# armed), so a bare number lands mid-line in somebody else's output and is
+# unreadable. That already cost one diagnosis this session.
+fn ae_client_placed_say(psid): i64 {
+    var pnamed = 0;
+    if (psid == 0 - 6) { println("aethersafha: placed client: channel read failed, peer gone or bad fd"); pnamed = 1; }
+    if (psid == 0 - 8) { println("aethersafha: placed client: first frame was not create_surface"); pnamed = 1; }
+    if (psid == 0 - 7) { println("aethersafha: placed client: could not write surface_created back"); pnamed = 1; }
+    if (psid == 0 - 9) { println("aethersafha: placed client: the compositor could not create a window -- table full"); pnamed = 1; }
+    if (psid == 0 - 12) { println("aethersafha: placed client: surface refused -- create/attach geometry or buffer id out of range"); pnamed = 1; }
+    # ⚠ NO LONGER "the second/third frame" — the machine resyncs past records the
+    # channel ring dropped, so these fire only on a kind that is wrong in a way LOSS
+    # cannot explain: neither attach nor commit at a point where one of them is due.
+    if (psid == 0 - 11) { println("aethersafha: placed client: expected attach, got neither attach nor commit"); pnamed = 1; }
+    if (psid == 0 - 13) { println("aethersafha: placed client: attached, then got neither commit nor a re-attach"); pnamed = 1; }
+    if (psid == 0 - 14) { println("aethersafha: placed client: buffer read or alloc failed"); pnamed = 1; }
+    if (psid == 0 - 15) { println("aethersafha: placed client: surface refused -- its buffer is not a regular file"); pnamed = 1; }
+    if (pnamed == 0) { println("aethersafha: placed client: retired on a handshake error with NO name -- add a line for this code"); }
+    return 0;
+}
+
+# The same ladder for an ACCEPTED row, which is retired at once and disconnected. `state` is its handshake
+# state (0 nothing yet, 1 awaiting ATTACH, 2 awaiting COMMIT, 3 live); `ms` is the time since accept (-1
+# no clock); `served` 1 = it had presented; `shown` 1 = its window is on the desktop now. ⚠ The -12 line is
+# the accept path's, byte for byte: the `hostile` harness scenario reads it.
+# ⚠ The budget lines name the state in words and print only the measured ms as a number, by the rule
+# above: the clients write to the same console, and QEMU showed one landing inside a compositor line.
+fn ae_client_accepted_say(why, state, ms, served, shown): i64 {
+    if (why == AeRetire.AE_RET_BUDGET) {
+        if (state == 0) { println("aethersafha: accepted client: sent nothing within the handshake budget -- disconnected, ms since accept:"); }
+        if (state == 1) { println("aethersafha: accepted client: sent create_surface, then nothing within the handshake budget -- disconnected, ms since accept:"); }
+        if (state == 2) { println("aethersafha: accepted client: attached, then no commit within the handshake budget -- disconnected, ms since accept:"); }
+        if (state > 2) { println("aethersafha: accepted client: no surface within the handshake budget -- disconnected, ms since accept:"); }
+        println_int(ms);
+        return 0;
+    }
+    if (why == 0 - 6) {
+        if (served == 0) { println("aethersafha: accepted client: hung up before presenting"); }
+        # ⛔ "ITS WINDOW STAYS" WAS PRINTED FOR A WINDOW THE OPERATOR HAD JUST CLOSED: Ctrl+F4 removes it and
+        # sends SETU_CLOSE, the client exits as told, and its hang-up is how the row finds out.
+        if (served != 0) {
+            if (shown == 1) { println("aethersafha: accepted client: hung up -- its window stays, without a connection"); }
+            if (shown == 0) { println("aethersafha: accepted client: hung up after its window was closed -- disconnected"); }
+        }
+        return 0;
+    }
+    var named = 0;
+    if (why == 0 - 8) { println("aethersafha: accepted client: first frame was not create_surface -- disconnected"); named = 1; }
+    if (why == 0 - 7) { println("aethersafha: accepted client: could not write surface_created back -- disconnected"); named = 1; }
+    if (why == 0 - 9) { println("aethersafha: accepted client: the compositor could not create a window -- table full"); named = 1; }
+    if (why == 0 - 12) { println("aethersafha: accepted client: surface refused -- create/attach geometry or buffer id out of range"); named = 1; }
+    if (why == 0 - 11) { println("aethersafha: accepted client: expected attach, got neither attach nor commit -- disconnected"); named = 1; }
+    if (why == 0 - 13) { println("aethersafha: accepted client: attached, then got neither commit nor a re-attach -- disconnected"); named = 1; }
+    if (why == 0 - 14) { println("aethersafha: accepted client: buffer read or alloc failed -- disconnected"); named = 1; }
+    if (why == 0 - 15) { println("aethersafha: accepted client: surface refused -- its buffer is not a regular file (a FIFO or a symlink) -- disconnected"); named = 1; }
+    if (named == 0) { println("aethersafha: accepted client: retired on a handshake error with NO name -- add a line for this code"); }
+    return 0;
+}

@@ -3,8 +3,10 @@
 > aethersafha is a pure-Cyrius sovereign compositor. It speaks a **native
 > display protocol** (not Wayland — see
 > [`../adr/0001-native-display-protocol.md`](../adr/0001-native-display-protocol.md))
-> and sits on the **bhumi** platform backend. The Rust original is frozen at
-> `rust-old/` as the parity oracle; this map is the Cyrius port (`src/`).
+> and sits on the **bhumi** platform backend. The Rust original was deleted at
+> 0.17.6; tag `0.17.5` is the last that carries it, at `rust-old/`, and
+> [`002-rust-public-api-map.md`](002-rust-public-api-map.md) maps its public API
+> onto this tree. This map is the Cyrius port (`src/`).
 
 ## Module map (`src/`)
 

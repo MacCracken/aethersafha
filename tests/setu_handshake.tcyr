@@ -81,12 +81,7 @@ fn hs_unpair(): i64 {
     syscall(SYS_CLOSE, hs_cli);
     return 0;
 }
-fn hs_st_new(): i64 {               # the caller-owned 6-word handshake scratch, zeroed
-    var st = alloc(48);
-    var i = 0;
-    while (i < 6) { store64(st + i * 8, 0); i = i + 1; }
-    return st;
-}
+fn hs_st_new(): i64 { return setu_hs_st_new(); }   # the caller-owned handshake scratch, zeroed (SetuHsSt)
 fn hs_step(st, comp): i64 { return setu_srv_handshake_step(st, hs_srv, comp, 0, 0, "probe"); }
 
 fn main() {
@@ -223,8 +218,28 @@ fn main() {
     setu_send(hs_cli, setu_attach_buf(hsid, 100, 0 - 50, 0 - 400, 1, 7));
     assert_eq(hs_step(hst, hcomp), 0 - 12, "negative h and stride are refused (-12, not -14)");
     assert_eq(load64(hst), 1, "a refused attach leaves the state alone");
-    assert_eq(load64(hst + 16), 0, "and allocates no cache");
+    assert_eq(win_pix(load64(hst + 8)), 0, "and allocates no cache");
+    assert_eq(win_pixcap(load64(hst + 8)), 0, "none at all");
     assert_eq(win_bufid(load64(hst + 8)), 0, "and attaches nothing to the window");
+    assert_eq(comp_count(hcomp), 0, "the window minted at create_surface is not on the desktop");
+
+    # ⭐ AN ATTACH IS KEPT, A COMMIT APPLIES IT (0.17.6). A sane attach naming a buffer that does not exist
+    # reads nothing until its commit — and an attach that no commit follows changes nothing.
+    setu_send(hs_cli, setu_attach_buf(hsid, 100, 50, 400, 1, 7));
+    assert_eq(hs_step(hst, hcomp), 0, "an attach of a missing buffer is taken: nothing is read yet");
+    assert_eq(load64(hst), 2, "-> state 2");
+    assert_eq(win_bufid(load64(hst + 8)), 0, "and nothing is attached to the window");
+    setu_send(hs_cli, setu_commit(hsid));
+    assert_eq(hs_step(hst, hcomp), 0 - 14, "its commit reads the buffer, and the read fails (-14)");
+    assert_eq(win_pix(load64(hst + 8)), 0, "the failed read keeps no cache");
+    assert_eq(comp_count(hcomp), 0, "and puts nothing on the desktop");
+    var hst3 = hs_st_new();
+    setu_send(hs_cli, setu_create_surface(100, 50, 0));
+    assert_eq(hs_step(hst3, hcomp), 0, "a fresh surface for the rest");
+    var hrep3 = setu_msg_new();
+    setu_read_msg(hs_cli, hrep3);
+    hsid = setu_msg_arg(hrep3, 0);
+    hst = hst3;
 
     # A sane attach still lands, so the refusal is the rule and not a broken path.
     var hnb = 100 * 50 * 4;

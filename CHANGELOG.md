@@ -5,6 +5,106 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.17.6] — 2026-10-10 — `rust-old/` deleted, and no client can hold the frame loop
+
+> The arc's last bite (roadmap § 0.17.x). Every gate item passed, so the Rust original leaves the tree:
+> **`0.17.5` is the last tag that carries `rust-old/`**, and every citation of it now means that tag. Folded
+> in: setu 0.8.12, and the Linux client path rebuilt so a local process can no longer stop the desktop
+> (roadmap D12). The commit, the tag and the push are the operator's.
+
+### Removed — `rust-old/`, after the gate
+
+- The parity plan's last row (OBSOLETE: `lib.rs`, the example, the Cargo-era files) closes through
+  **[`docs/architecture/002-rust-public-api-map.md`](docs/architecture/002-rust-public-api-map.md)**. It maps
+  every `pub mod` and `pub use` in Rust's `lib.rs` to its Cyrius home or the ADR that retired it, and says
+  what replaces each Cargo-era file.
+- Nothing of value is lost:
+  - Rust's bench CSV is `docs/benchmarks/rust-a460c3a.csv`, byte-identical.
+  - The HUD specs are in ADR 0004, and the deferred protocol concepts in ADR 0002.
+  - The line count is kept with its definition: 27,207 lines of `src/**/*.rs`, 28,072 across all `.rs`
+    files.
+- **One citation rule**, stated in CLAUDE.md, the README and ADR 0003: `rust-old/<path>[:<line>]`, or a
+  bare `<name>.rs:<line>` in a parity comment, means that path at tag `0.17.5`. Read it with
+  `git show 0.17.5:rust-old/<path>`.
+- **CLAUDE.md** changes in the four passages the gate names: the identity line, Scaffolding (with the
+  citation rule), the cross-check principle, and the rule that named `rust-old/` the parity oracle. All
+  four now say the record is ADRs 0001–0004, the `.tcyr` suites and tag `0.17.5`.
+- `docs/development/parity-plan.md` is retired with the directory. The roadmap keeps its closing record,
+  and its per-module rows live on in the API map.
+- `.gitignore` loses its Cargo lines.
+- The README, getting-started, overview, ADR 0001 and the desktop handoff describe the tag, not a
+  directory.
+
+### Changed — setu 0.8.12, and a Linux client can no longer stop the desktop
+
+- **The pin.** `[deps.setu]` moves 0.8.11 → 0.8.12: bounded reads (`setu_read_msg_ms`), and close-on-exec
+  on the listener and on accepted and connected sockets. `lib/setu.cyr` is byte-identical to the tag, and
+  the lock pins `e0a5076`.
+- **The wedge (roadmap D12).** The Linux frame loop used to serve a newly accepted client with blocking
+  reads. A local process that connected and never sent, or sent `CREATE_SURFACE` and stopped, stopped the
+  desktop, and since 0.17.2 Ctrl+C could not end it either. Now every client goes through the per-client,
+  non-blocking handshake drain the agnos path always used (`src/setu_clients.cyr`). On Linux:
+  - A client has 10 s from accept to its first COMMIT.
+  - Any handshake error is final: the client is told SETU_CLOSE if it had an id, its half-made window is
+    removed and focus is handed on.
+  - Its sends never block.
+  - One `poll(2)` per frame decides which clients to read, so an idle client costs nothing.
+- **Readable after the first present.** Linux clients are now read after their first present, as agnos
+  clients always were, so re-attaches and resizes are honoured. The review of that opening found and fixed:
+  - **Unbounded memory:** each geometry change leaked a buffer; a hostile client grew the heap by about
+    1 GB in one frame. A window now owns one buffer cache, reused while it fits and freed when replaced or
+    closed.
+  - **Re-attach amplification:** at most one buffer read per client per frame, the last committed ATTACH.
+    A hostile burst went from 121 ms a frame to 6.6 ms.
+  - **Per-frame allocation:** 336 B per live client per frame before; 0 B for an idle client after.
+  - **Focus:** the presenting client gets focus even when handshakes interleave or focus moved during one.
+  - **Mapping:** a window is drawn, hit-tested and focused only from its first COMMIT, and then at its
+    final place, so the empty frame at (0, 0) is gone on both targets.
+- **Client buffers are read by the compositor on Linux** (`win_client_buf_read`): non-blocking, no
+  symlinks, regular files only. setu's own reader opens the client-named `/dev/shm` buffer blocking, so a
+  FIFO or a write-leased file there could hold the caller. That is a setu defect, reported, and the
+  compositor no longer calls it on Linux.
+- **The other half of roadmap D3** is fixed with it: a refusal at ATTACH no longer leaves a half-made
+  window holding focus, which was what made the hostile QEMU scenario fail intermittently.
+- **`qemu-linux-input.sh` gains a `silent` scenario.** A client that connects and never sends, and one that
+  stops after `CREATE_SURFACE`, must be disconnected at the budget while the desktop runs on: the honest
+  client presents and is told it has focus, Ctrl+Tab is handled, and Ctrl+Q exits 0. 0.17.4 and 0.17.5 fail
+  it.
+
+### Fixed
+
+- **Two window fields shared a slot.** Since 0.16.30, `W_PREMIN` sat at offset 176, which was already
+  `W_BUF_W`. Minimizing a client's window wrote its state into its buffer width, and a re-attach while
+  minimized wrote a width into the state the restore then set. `W_PREMIN` now has its own slot, and a test
+  pins both directions.
+
+### Changed — CI's coverage floor rises to 69%
+
+- 879 of 1,259 functions, checked to fail at `--min 70`. The release's new client code first measured
+  67.99%, under the 68% floor. The fix was not padding: a new `tests/security_ui.tcyr` group asserts every
+  field of the alert, request, definition, agent-permission and override records the dashboard shows, and
+  a swapped-getter mutant fails it.
+
+### Dependency defects encountered (setu; for the operator to repair or file)
+
+- `setu_buf_read` opens `/dev/shm/setu-buf-<client-chosen id>` with plain `O_RDONLY`: no `O_NONBLOCK`, no
+  `O_NOFOLLOW`, no regular-file check. aethersafha no longer calls it on Linux; other consumers still can.
+- `setu_poll_input` allocates 256 B per call and never frees it: 256 B per record received here, and per
+  live client per frame on agnos.
+
+### Verified
+
+- **Host 4,288,568 B** (sha256 `1537c997…`) · **`--agnos` 4,238,248 B** (sha256 `2bf60950…`).
+- **33 / 33 suites, 4,674 assertions, 0 failed**, with `rust-old/` gone (0.17.5: 32 / 4,341). No compiler
+  warning points at `src/`.
+- `scripts/qemu-linux-input.sh` → PASS for focus, hostile, sigint, drag and silent, on this binary (same
+  hash). The released 0.17.5, rebuilt from its tag to its own hash, FAILS silent: with a silent client
+  connected it handles no Ctrl+Tab and does not quit on Ctrl+Q.
+- `check-dep-tags.sh` → 7 deps clean · `cyrius deps --verify` → 83 verified · CI's format check clean ·
+  `cyrius coverage --min 69` passes.
+- ⚠ Not run on iron. On agnos, the mapping at first COMMIT, the one read per frame and the freed caches
+  are compile- and unit-verified only.
+
 ## [0.17.5] — 2026-10-10 — every Rust test re-expressed, and benchmarks beside Rust's record
 
 > The arc's sixth bite (roadmap § 0.17.x). The parity plan's *Rust tests still to re-express* list is empty:

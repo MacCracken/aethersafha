@@ -8,7 +8,7 @@
 
 ## Project Identity
 
-**aethersafha** — Cyrius port of a Rust project (27207 lines preserved at `rust-old/`).
+**aethersafha** — Cyrius port of a Rust project (27207 lines of `src/**/*.rs`; the last tag that carries it, at `rust-old/`, is `0.17.5`).
 
 - **Type**: Port (Rust → Cyrius)
 - **License**: AGPL-3.0-only. Full user-facing projects, such as this desktop, are AGPL; component libraries
@@ -31,7 +31,9 @@ This file (`CLAUDE.md`) is durable rules.
 
 ## Scaffolding
 
-Project was scaffolded with `cyrius port`. Original Rust at `rust-old/` is the reference oracle — do not modify it; cross-check the port against it.
+Project was scaffolded with `cyrius port`. The original Rust was deleted at 0.17.6. The record is ADRs 0001–0004, the `.tcyr` suites, and tag `0.17.5` — cross-check the port against it.
+
+**Citations.** A citation `rust-old/<path>[:<line>]`, or a bare `<name>.rs:<line>` in a parity comment, refers to that path at tag `0.17.5` — read it with `git show 0.17.5:rust-old/<path>`.
 
 ## Quick Start
 
@@ -43,7 +45,7 @@ cyrius test                              # run tests/*.tcyr
 
 ## Key Principles
 
-- **Cross-check against `rust-old/`** — the port's correctness bar is "matches what Rust did". Diverge only with an ADR.
+- **Cross-check against the record** (ADRs 0001–0004, the `.tcyr` suites, tag `0.17.5`) — the port's correctness bar is "matches what Rust did". Diverge only with an ADR.
 - **Correctness over cleverness** — if the Cyrius behavior diverges silently from Rust, the bugs win
 - Test after every change, not after the feature is "done"
 - ONE change at a time — never bundle unrelated changes
@@ -55,7 +57,7 @@ cyrius test                              # run tests/*.tcyr
 
 - **Do not commit or push** — the user handles all git operations
 - **Never use `gh` CLI** — use `curl` to the GitHub API if needed
-- Do not modify `rust-old/` — it's the parity oracle
+- The parity record is ADRs 0001–0004, the `.tcyr` suites, and tag `0.17.5` (`git show 0.17.5:rust-old/...`) — the Rust original lives only in that tag
 - Do not skip tests before claiming changes work
 - Do not modify `lib/` files (vendored stdlib / dep symlinks)
 - Do not hardcode toolchain versions in CI YAML — `cyrius = "X.Y.Z"` in `cyrius.cyml` is the source of truth

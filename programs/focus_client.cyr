@@ -9,8 +9,72 @@
 #
 # Built with `-D AE_HOSTILE` it attaches with stride 4 — a 640-byte cache for a 153,600-byte read, the
 # heap overflow 0.16.30 closed. 0.16.29 accepted it and was killed by SIGSEGV.
+#
+# Built with `-D AE_SILENT` it connects and SENDS NOTHING; with `-D AE_STALL` it sends CREATE_SURFACE and
+# nothing after it (0.17.6, roadmap D12). Each then waits in setu's read, which on Linux has no deadline,
+# so only the compositor can end the wait, by closing the connection; each logs what it was sent and when
+# the connection closed. Through 0.17.5 the compositor waited on them in turn, and the desktop stopped.
+# ⚠ Both wait 1.5 s before connecting, so the honest client is up first: a compositor that wedges on them
+# then does so after a start the harness can judge, instead of before it.
 
 fn fcl_say(s): i64 { return syscall(SYS_WRITE, 1, s, strlen(s)); }
+
+# "<pre><n>\n" in ONE write, so the line cannot interleave with another client's.
+fn fcl_say_n(pre, n): i64 {
+    var buf = alloc(160);
+    var k = strlen(pre);
+    memcpy(buf, pre, k);
+    k = k + fmt_int_buf(n, buf + k);
+    store8(buf + k, 10);
+    return syscall(SYS_WRITE, 1, buf, k + 1);
+}
+
+# AE_SILENT: connect, send nothing, and report how the wait ended. -> 0, or 1 when it could not connect.
+fn fcl_silent(): i64 {
+    sleep_ms(1500);
+    var t0 = clock_now_ms();
+    var c = setu_client_connect(0);
+    if (c == 0) { fcl_say("focus_client: SILENT -- connect failed\n"); return 1; }
+    fcl_say("focus_client: SILENT -- connected, will send nothing\n");
+    var m = setu_msg_new();
+    while (setu_read_msg(setu_client_fd(c), m) > 0) {
+        fcl_say_n("focus_client: SILENT -- was sent a record, kind ", setu_msg_kind(m));
+    }
+    if (setu_read_timed_out() == 0) {
+        fcl_say_n("focus_client: SILENT -- the compositor closed the connection (end of file), ms after connect: ", clock_now_ms() - t0);
+    }
+    setu_client_close(c);
+    return 0;
+}
+
+# AE_STALL: connect, send CREATE_SURFACE and nothing more, and report what comes back. -> 0, or 1.
+fn fcl_stall(): i64 {
+    sleep_ms(1500);
+    var t0 = clock_now_ms();
+    var c = setu_client_connect(0);
+    if (c == 0) { fcl_say("focus_client: STALL -- connect failed\n"); return 1; }
+    var fd = setu_client_fd(c);
+    if (setu_send(fd, setu_create_surface(240, 160, 0)) < 0) { fcl_say("focus_client: STALL -- send failed\n"); return 1; }
+    fcl_say("focus_client: STALL -- sent create_surface, will send nothing more\n");
+    var m = setu_msg_new();
+    var sid = 0;
+    while (setu_read_msg(fd, m) > 0) {
+        var k = setu_msg_kind(m);
+        if (k == SETU_SURFACE_CREATED) {
+            sid = setu_msg_arg(m, 0);
+            fcl_report(sid, "STALLED -- got surface_created, sending nothing more");
+        }
+        if (k == SETU_CLOSE) { fcl_report(sid, "told SETU_CLOSE -- the compositor withdrew its surface"); }
+        if (k != SETU_SURFACE_CREATED) {
+            if (k != SETU_CLOSE) { fcl_say_n("focus_client: STALL -- was sent a record, kind ", k); }
+        }
+    }
+    if (setu_read_timed_out() == 0) {
+        fcl_say_n("focus_client: STALL -- the compositor closed the connection (end of file), ms after connect: ", clock_now_ms() - t0);
+    }
+    setu_client_close(c);
+    return 0;
+}
 
 # "focus_client: window <id> <what>\n" in ONE write, so two clients on one console cannot interleave.
 fn fcl_report(id, what): i64 {
@@ -51,6 +115,12 @@ fn fcl_frame(pix, w, h, focused): i64 {
 
 fn main(): i64 {
     alloc_init();
+    #ifdef AE_SILENT
+    return fcl_silent();
+    #endif
+    #ifdef AE_STALL
+    return fcl_stall();
+    #endif
     var w = 240;
     var h = 160;
     var nbytes = w * h * 4;

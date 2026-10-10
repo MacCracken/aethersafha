@@ -223,7 +223,8 @@ Harnesses in `agnos/scripts/harness/`: `ae-wallpaper-load-test.py`, `crab-listin
 - The operator runs **all** git operations. Never commit, never push.
 - **Never use `gh`** — `curl` to the GitHub API if needed.
 - **Never file an issue without being asked.**
-- Do not modify `rust-old/` (the parity oracle) or `lib/` by hand.
+- Do not modify `lib/` by hand. The Rust parity oracle is tag `0.17.5`
+  (`git show 0.17.5:rust-old/<path>`); the directory left the tree at 0.17.6.
 - **Before a burn or a cut: `scripts/check-dep-tags.sh`** (local only; needs the siblings).
 - Burn artifacts: `PUKA_TERMINAL=1 scripts/burn/stage-tools.sh --build`, then
   `scripts/burn/burn-prep.sh`, then **run nothing in agnos** before flashing —

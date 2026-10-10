@@ -9,7 +9,8 @@ aethersafha is the AGNOS desktop compositor. Every GUI app must reach it over
 some client↔compositor display protocol: attach, create a surface, submit a
 pixel buffer, receive input. The question is what that protocol is.
 
-The port from Rust (`rust-old/`, 27,207 lines) carried a ~3360-line
+The port from Rust (`rust-old/`, 27,207 lines; deleted at 0.17.6, last carried by
+tag `0.17.5`) carried a ~3360-line
 `wayland/{types,protocol,server,popups}` surface plus an `xwayland.rs` bridge —
 so the plan of record recorded in the early `roadmap.md` / `parity-plan.md`
 drafts was "the native client protocol *is* Wayland, reimplemented in Cyrius on

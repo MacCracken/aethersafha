@@ -2,7 +2,7 @@
 # Stdlib + [deps.*] auto-included via cyrius.cyml.
 #
 # ⭐ EACH BENCH IS NAMED AFTER RUST'S SERIES, so the two columns of docs/benchmarks.md line up row for row
-# (`renderer/render_frame/1` here is `renderer/render_frame/1` in rust-old/bench-history.csv). What each one
+# (`renderer/render_frame/1` here is `renderer/render_frame/1` in docs/benchmarks/rust-a460c3a.csv). What each one
 # runs in the port is said beside it; where the port has no such operation (ADR 0003: no scene graph, no
 # damage region list) the row measures the port's replacement and says which.
 #

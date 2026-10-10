@@ -1196,6 +1196,17 @@ fn render_window(fb, win, focused): i64 {
         if (bw > 0) { if (w > bw) { w = bw; } }
         if (bh > 0) { if (h > bh) { h = bh; } }
     }
+    # ⛔ AND NEVER PAST THE CACHE ITSELF (0.17.6). A setu client's cache is now a `fl_alloc` block the window
+    # owns (`win_pix_adopt`), sized `h * stride` at its last applied attach, and a block over 4 KB is its own
+    # mapping, so reading past it can fault where the bump heap read a neighbour. The clamp above trusts
+    # `win_buf_w` / `win_buf_h`; this bounds the copy and the composite by the bytes that exist, whatever they say.
+    var pcap = win_pixcap(win);
+    if (pcap > 0) {
+        if (w > 0) {
+            var prows = pcap / (w * 4);
+            if (h > prows) { h = prows; }
+        }
+    }
     #
     # ⚠ SKIPPED ENTIRELY when the GPU has committed to this frame. The client surface is then
     # composited by the KERNEL straight out of its GPU-visible shm slot via gpu_blit_shm #87 (see
@@ -1215,8 +1226,10 @@ fn render_window(fb, win, focused): i64 {
         # LIVE surface: pull the client's LATEST frame out of the shared buffer into the cache each
         # frame. A client that keeps writing its buffer (setu_buf_write, no re-present) animates the
         # window. bid == 0 (a one-shot static present) skips this and just blits the cached frame.
+        # ⚠ Through `win_client_buf_read`, not setu's reader: a FIFO at the buffer's name would hold the frame
+        # here (window.cyr).
         if (bid != 0) {
-            if (spix != 0) { setu_buf_read(bid, spix, w * h * 4); }
+            if (spix != 0) { win_client_buf_read(bid, spix, w * h * 4); }
         }
         # Row-walking copy (blit_rect) rather than the per-pixel bhumi_fb_set loop this used to be.
         # Same pixels, same clipping; measured 23.974 ms -> see blit_rect's header for the numbers.

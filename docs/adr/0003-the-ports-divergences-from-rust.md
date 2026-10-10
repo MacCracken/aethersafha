@@ -3,6 +3,11 @@
 **Status**: Accepted
 **Date**: 2026-10-09
 
+> **Citations.** `rust-old/` was deleted at 0.17.6. A citation `rust-old/<path>[:<line>]` here or in the
+> code, or a bare `<name>.rs:<line>` in a parity comment, refers to that path at tag `0.17.5`; read it with
+> `git show 0.17.5:rust-old/<path>`. Where each Rust public type went is
+> [`../architecture/002-rust-public-api-map.md`](../architecture/002-rust-public-api-map.md).
+
 ## Context
 
 `CLAUDE.md` sets the port's correctness bar as "matches what Rust did" and allows divergence "only with an
@@ -78,9 +83,10 @@ fix.
   a signalfd once per frame, then takes the Ctrl+Q teardown. Only SIGINT is handled, as in Rust.
   - A `--clients` probe that is interrupted exits 130, not 93/94, which would claim the whole budget was
     spent. A 91/92 verdict or a completed 95 still stands.
-  - ⚠ A compositor wedged inside a blocking client read never reaches its next frame, so it does not see
-    Ctrl+C; Ctrl+\ or `kill` (SIGTERM) still end it. Before 0.17.2 Ctrl+C killed it outright, without the
-    teardown.
+  - Since 0.17.6 no client can hold the frame loop: client records are read only when a zero-timeout
+    poll(2) says they are there, and client buffers through a reader that cannot wait (below), so Ctrl+C
+    always reaches its frame. (0.17.2–0.17.5: a client that connected and never sent held the loop in a
+    blocking read, and only Ctrl+\ or `kill` could end it.)
   - agnos compiles the module to no-ops: SIGINT has no default action there and the keyboard delivers
     Ctrl+C as byte 3.
 - **Screen capture reads a framebuffer the caller passes in**; it does not call the renderer. This is the
@@ -215,6 +221,27 @@ fix.
     whose every read was `None`, so no pixel can be read either way.
   - A window's agent flag is set on the window (`win_set_agent`), not passed to `comp_create_window` as
     Rust's `create_window` took it.
+
+- **Linux setu clients** (0.17.6, setu 0.8.12, `src/setu_clients.cyr`). Every client goes through the
+  per-client handshake the agnos path always used, so the frame loop never waits on one. On Linux that
+  brings rules agnos-placed clients do not have:
+  - **A budget.** 10 s from accept to the first COMMIT (`AE_HS_BUDGET_MS`); a client over it is
+    disconnected.
+  - **Errors are final.** Any handshake error disconnects the client at once, sending SETU_CLOSE first if
+    it was given a surface id; a half-made window is removed and focus handed on.
+  - **The table is 8 rows.** A ninth connection is accepted and closed at once until a row frees up.
+- **A window appears at its first COMMIT** (0.17.6, both targets). The window minted at CREATE_SURFACE has
+  an id but is not drawn, hit-tested or focused until its first committed ATTACH, and then appears at its
+  final place with its buffer. That removes the empty frame at (0, 0) and a focus theft, and focus goes
+  to the client that presents. Both handshakes span frames now.
+- **One buffer read per client per frame** (0.17.6, both targets). A drain takes up to 64 records but
+  applies only the last committed ATTACH: one read into a cache the window owns, reused while it fits and
+  freed when replaced or when the window goes. Before, every geometry change leaked a buffer, and every
+  queued ATTACH was read.
+- **Client buffers are read by the compositor's own reader on Linux** (`win_client_buf_read`), not setu's
+  `setu_buf_read`. It opens `/dev/shm/setu-buf-<id>` non-blocking, refuses a symlink, and reads only a
+  regular file. setu's reader opens it blocking, so a FIFO or a write-leased file planted at that
+  client-chosen name could hold the caller; that is reported to setu.
 
 ## Consequences
 

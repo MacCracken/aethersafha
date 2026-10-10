@@ -4,7 +4,7 @@ commit	93909d009fd64d04ee696a2cf2065ae2b615f1ba	kashi	https://github.com/MacCrac
 commit	59bed0c5bfcf271a309898bcc33ca02d9648a9f0	mehman	https://github.com/MacCracken/mehman.git	1.0.4
 commit	472d6ca7be8be40d53be242a311b69245e4a9d7d	kavach	https://github.com/MacCracken/kavach.git	3.13.1
 commit	833919c2bf0ec8943aaf8f04a0cdf5b4c80544e5	chitra	https://github.com/MacCracken/chitra.git	1.0.3
-commit	e194d01925d66069520fb9a473a5861207b76f38	setu	https://github.com/MacCracken/setu.git	0.8.11
+commit	e0a50769d4c63b02246f89006564f8c24262fc16	setu	https://github.com/MacCracken/setu.git	0.8.12
 commit	eb6b92240ab0d6ae8a0509baa75d74984dc03630	sigil	https://github.com/MacCracken/sigil.git	3.12.18
 b1593105548307531c309458f9b701acae223eea8878cf1b2197f07fc260f591  lib/alloc.cyr
 69e92cc4b67f1a936f94c92ce8a4c66673758b84dba385e96fbeaa46fa692b4c  lib/alloc_agnos.cyr
@@ -57,7 +57,7 @@ cd45097afe2dfda210ff2015750962c50d4891e3ff4ba155f17b73ca092c8749  lib/process_wi
 6027b62a4c17484637db4e5da5a7ae6dceed923db1ec28312ebf1c4c619dcec1  lib/sakshi.cyr
 3c94f7da21e4d1ad84aa5e848f3684bc8ccbe3175ce4e2414f48d32197eab47e  lib/sandhi.cyr
 c5146f1c973c6daa27174993859979430bd571cac1a224780ac21553aa71f523  lib/sankoch.cyr
-d5fa1c20b41d663cb1ae42dec387262906280ce852dfe63d8e1a55435255c74e  lib/setu.cyr
+837a737d31e6fa96300c4a1f3ad2de9f938f87a6f6033e8598338884d2bc1d96  lib/setu.cyr
 3104f8d448f1b7eebef6e8e7feaec7ac9808dcf8ac1bd20423c526a37b80afc9  lib/sha1.cyr
 b89919ff3cf24eb31c2d819bc0827bd30b079bde8d7e85d1583882b35fec91d8  lib/sigil.cyr
 25f840dbf3a90b983c72afb33416b233d511cbc3298e768cd912bfa325204755  lib/slice.cyr

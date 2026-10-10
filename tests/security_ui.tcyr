@@ -305,9 +305,48 @@ fn t_signals(): i64 {
 }
 
 # ---------------------------------------------------------------------------
-# Rust tests still to re-express (parity-plan.md): the four evictions.
+# Rust's four eviction tests, re-expressed (0.17.5).
 # Rust only asserted len <= MAX; these pin which entry goes.
 # ---------------------------------------------------------------------------
+# Every field of the security records survives its constructor (Rust's struct literals in the
+# test_security_alert_* / test_permission_request_* / test_permission_definition_* / test_agent_permissions_*
+# tests read them back). These are the fields the dashboard and the dialogs show.
+fn t_record_fields(): i64 {
+    test_group("security_ui — record fields round-trip through their constructors");
+    var ra = sec_alert_new(9, "Title", "Description", SecThreatLevel.SEC_TL_HIGH, "agent-runtime", 1234, 1, 0);
+    assert_streq(sec_alert_description(ra), "Description", "alert description");
+    assert_eq(sec_alert_timestamp(ra), 1234, "alert timestamp");
+    sec_alert_set_title(ra, "Renamed");
+    sec_alert_set_threat(ra, SecThreatLevel.SEC_TL_CRITICAL);
+    sec_alert_set_resolved(ra, 1);
+    assert_streq(sec_alert_title(ra), "Renamed", "alert title set");
+    assert_eq(sec_alert_threat(ra), SecThreatLevel.SEC_TL_CRITICAL, "alert threat set");
+    assert_eq(sec_alert_is_resolved(ra), 1, "alert resolved set");
+    var rq = sec_permreq_new(5, 42, "agent-a", "file:read", "/home/user/doc.txt", "needs the doc", 2222, 0);
+    assert_eq(sec_permreq_agent_id(rq), 42, "request agent id");
+    assert_streq(sec_permreq_agent_name(rq), "agent-a", "request agent name");
+    assert_streq(sec_permreq_permission(rq), "file:read", "request permission");
+    assert_streq(sec_permreq_resource(rq), "/home/user/doc.txt", "request resource");
+    assert_streq(sec_permreq_reason(rq), "needs the doc", "request reason");
+    assert_eq(sec_permreq_timestamp(rq), 2222, "request timestamp");
+    sec_permreq_set_granted(rq, 1);
+    assert_eq(sec_permreq_is_granted(rq), 1, "request granted set");
+    var rd = sec_permdef_new("network:connect", "Open network connections", "network", 1);
+    assert_streq(sec_permdef_name(rd), "network:connect", "definition name");
+    assert_streq(sec_permdef_description(rd), "Open network connections", "definition description");
+    assert_streq(sec_permdef_category(rd), "network", "definition category");
+    assert_eq(sec_permdef_requires_confirmation(rd), 1, "definition requires confirmation");
+    var rp = sec_agentperm_new(42, "agent-a", vec_new(), 3000, 9000);
+    assert_streq(sec_agentperm_agent_name(rp), "agent-a", "agent permissions name");
+    assert_eq(sec_agentperm_granted_at(rp), 3000, "agent permissions granted_at");
+    assert_eq(sec_agentperm_expires_at(rp), 9000, "agent permissions expires_at (Some)");
+    var ro = sec_override_new(7, "agent-b", "kill", "runaway", 4000, 0, 0);
+    assert_streq(sec_override_agent_name(ro), "agent-b", "override agent name");
+    assert_streq(sec_override_action(ro), "kill", "override action");
+    assert_streq(sec_override_reason(ro), "runaway", "override reason");
+    return 0;
+}
+
 fn t_evictions(): i64 {
     test_group("security_ui — alert eviction at max capacity");
     var eu = sec_ui_new();
@@ -946,6 +985,7 @@ fn main() {
     t_audit_file();
     t_signals();
     t_evictions();
+    t_record_fields();
     t_lockdown_and_defs();
 
     xunlink(t_audit_path);

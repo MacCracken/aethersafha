@@ -55,8 +55,14 @@ full module map. In brief, the Cyrius source (`src/`) is:
   `setu_dispatch` here, the message types and wire codec in the `setu`
   dependency.
 
-The Rust original is preserved at `rust-old/` (27,207 lines) as the parity
-oracle; do not edit it.
+The Rust original — 27,207 lines of `src/**/*.rs`, 28,072 counting its tests,
+benches and example — was deleted at 0.17.6. Tag `0.17.5` is the last that
+carries it, at `rust-old/`. A citation `rust-old/<path>[:<line>]`, or a bare
+`<name>.rs:<line>` in a parity comment, refers to that path at tag `0.17.5`;
+read it with `git show 0.17.5:rust-old/<path>`. The record of the port is ADRs
+0001–0004, the `.tcyr` suites, and that tag;
+[`docs/architecture/002-rust-public-api-map.md`](docs/architecture/002-rust-public-api-map.md)
+maps every public Rust type to its Cyrius home or the ADR that retired it.
 
 ## Dependencies
 

@@ -36,7 +36,8 @@ enum WinOff {
     # When set, render_window RE-READS the client's buffer into W_PIX each frame,
     # so a client that keeps writing its buffer produces a live-updating window.
     W_CFD   = 80;   # persistent setu client connection fd (a tagged sock fd, always > 0), or 0
-    # for a compositor-seeded window with no client. Kept open AFTER the present
+    # for a window with no client: compositor-seeded, or one whose connection the compositor
+    # closed (setu_clients.cyr detaches it first). Kept open AFTER the present
     # handshake so the compositor can forward input (SETU_INPUT_*) to the client.
     W_KEYMODE = 88; # 1 = client requested FULL key events (SETU_SURF_FULL_KEYS in CREATE_SURFACE
     # flags): forward press AND release with the make/break in mods. 0 = press-only
@@ -80,10 +81,17 @@ enum WinOff {
     W_RY    = 152;
     W_RW    = 160;
     W_RH    = 168;
+    # ⭐ 0.17.6 — THE BYTES W_PIX OWNS: > 0 when W_PIX is a `fl_alloc` block this window owns (a setu
+    # client's cache, `win_pix_adopt`), 0 when W_PIX is borrowed or absent. The window frees what it owns
+    # when the cache is replaced and when it leaves the compositor (`win_pix_release`).
+    W_PIXCAP = 192;
     # ⭐ 0.16.30 — the state a window was minimized FROM, so restoring it is exact: a maximized window
     # comes back maximized with its restore rect untouched, instead of NORMAL at maximized size.
-    W_PREMIN = 176;
-    W_SZ    = 192;
+    # ⛔ 0.17.6 — ITS OWN SLOT. 0.16.30 put this at 176, which was already W_BUF_W: minimizing a client's
+    # window wrote its state into the buffer width, and a re-attach while minimized wrote a width into
+    # the state the restore then set. Found by review; pinned in tests/aethersafha.tcyr.
+    W_PREMIN = 200;
+    W_SZ    = 208;
 }
 
 # win_new(id, x, y, w, h, title_cstr) -> *Window (0 on OOM)
@@ -100,6 +108,7 @@ fn win_new(id, x, y, w, h, title): i64 {
     store64(p + W_TITLE, title);
     store64(p + W_AGENT, 0);
     store64(p + W_PIX, 0);
+    store64(p + W_PIXCAP, 0);
     store64(p + W_BUFID, 0);
     store64(p + W_BUF_W, 0);
     store64(p + W_BUF_H, 0);
@@ -192,7 +201,46 @@ fn win_state(p) { return load64(p + W_STATE); }
 fn win_title(p) { return load64(p + W_TITLE); }
 fn win_is_agent(p) { return load64(p + W_AGENT); }
 fn win_pix(p) { return load64(p + W_PIX); }
-fn win_set_pix(p, ptr) { store64(p + W_PIX, ptr); return 0; }
+# The bytes W_PIX owns; 0 when it is borrowed or absent. See W_PIXCAP.
+fn win_pixcap(p) { return load64(p + W_PIXCAP); }
+
+# ⛔⛔ A SETU CLIENT'S CACHE USED TO BE ABANDONED ON EVERY RESIZE, AND A CLIENT COULD SPEND THE HEAP WITH IT.
+# The handshake took a fresh bump `alloc` per ATTACH whose geometry changed and never gave the old one back
+# ("one leak per resize"). Alternating 2048x2048 / 2048x2047 grew the compositor ~1 GB in one serve
+# (measured 0.17.6: 1,056,723,968 B, 63 attaches). The cache is now a `fl_alloc` block the WINDOW owns,
+# freed when a larger one replaces it and when the window leaves the compositor.
+# ⚠ OWNED MEANS NOBODY ELSE HOLDS IT. The only readers are the frame's CPU composite (`render_window`, a
+# window in the compositor) and the handshake (`setu_dispatch.cyr`), and both take `win_pix` afresh.
+
+# Borrowed pixels: the caller keeps them alive. A block the window owned is released first.
+fn win_set_pix(p, ptr): i64 {
+    win_pix_release(p);
+    store64(p + W_PIX, ptr);
+    return 0;
+}
+
+# The window takes `ptr`, a `fl_alloc` block of `cap` bytes, as its cache, and frees the block it owned
+# before. The new pointer is stored first, so W_PIX never names freed memory.
+fn win_pix_adopt(p, ptr, cap): i64 {
+    var old = load64(p + W_PIX);
+    var oldcap = load64(p + W_PIXCAP);
+    store64(p + W_PIX, ptr);
+    store64(p + W_PIXCAP, cap);
+    if (oldcap > 0) {
+        if (old != ptr) { fl_free(old); }
+    }
+    return 0;
+}
+
+# Free the cache the window owns, if it owns one, and clear it. Borrowed pixels are left alone.
+fn win_pix_release(p): i64 {
+    if (load64(p + W_PIXCAP) <= 0) { return 0; }
+    var old = load64(p + W_PIX);
+    store64(p + W_PIX, 0);
+    store64(p + W_PIXCAP, 0);
+    fl_free(old);
+    return 1;
+}
 fn win_bufid(p) { return load64(p + W_BUFID); }
 fn win_buf_w(p) { return load64(p + W_BUF_W); }
 fn win_buf_h(p) { return load64(p + W_BUF_H); }
@@ -213,6 +261,61 @@ fn win_notify_resize(p): i64 {
     if (fd == 0) { return 0; }                        # no client (the compositor's own window)
     return setu_send(fd, setu_configure(load64(p + W_ID), load64(p + W_W), load64(p + W_H),
         load64(p + W_STATE)));
+}
+
+# ============================================================================================
+# ⛔⛔ THE CLIENT NAMES THE FILE THE COMPOSITOR OPENS, AND setu's READER CAN BE HELD ON IT FOREVER.
+# ============================================================================================
+# An ATTACH carries a buffer id, and on Linux `setu_buf_read` (lib/setu.cyr ~743, setu 0.8.12 — setu's
+# code) opens "/dev/shm/setu-buf-<id>" with a plain O_RDONLY: no O_NONBLOCK, no O_NOFOLLOW. /dev/shm is
+# world-writable, so any local process can put a FIFO at a name a client then attaches, and opening a FIFO
+# to read WAITS for a writer — inside the frame loop, at the ATTACH or at any frame's live re-read of a
+# window already showing that id. Ctrl+C waits with it (sigint.cyr). A symlink there is followed to
+# whatever it names. That is setu's defect, reported to the operator and not patched here.
+# ⭐ SO THE COMPOSITOR OPENS THE BUFFER ITSELF, on the path setu names (`setu_buf_path`): O_NONBLOCK, so
+# opening a FIFO returns at once; O_NOFOLLOW, so a symlink is refused; and `fstat` on the fd it opened must
+# say "regular file", whose reads never wait. Then setu's own read loop, unchanged.
+# ⚠ NOT an `lstat` of the path before calling `setu_buf_read`: a rename can swap a FIFO in between the
+# check and setu's open, and the live re-read would hand a racing process that chance every frame. The
+# check has to be on the descriptor that is read.
+# ⚠ HERE, not beside the handshake: `render_window` re-reads through it every frame, and render.cyr is
+# included before the setu modules (and by suites that include none of them).
+# ⚠ agnos keeps `setu_buf_read`: its buffers are kernel shm slots (`shm_read` #73), not paths.
+# -> 0; -1 when the buffer cannot be opened or read in full; -2 when the id names something that is not a
+# regular file (a FIFO, a directory, a symlink).
+fn win_client_buf_read(buf_id, dst, size): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return setu_buf_read(buf_id, dst, size);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var path[48];
+    setu_buf_path(buf_id, &path);
+    var fd = sys_open(&path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC, 0);
+    if (fd < 0) {
+        if (fd == 0 - 40) { return 0 - 2; }        # ELOOP (40 on x86_64 and aarch64): a symlink
+        return 0 - 1;
+    }
+    var stb[144];                                  # struct stat (STAT_BUFSZ)
+    if (sys_fstat(fd, &stb) != 0) {
+        sys_close(fd);
+        return 0 - 1;
+    }
+    if ((load32(&stb + STAT_MODE) & 0xF000) != 0x8000) {   # S_IFMT != S_IFREG
+        sys_close(fd);
+        return 0 - 2;
+    }
+    var got = 0;
+    while (got < size) {
+        var r = sys_read(fd, dst + got, size - got);
+        if (r <= 0) {
+            sys_close(fd);
+            return 0 - 1;
+        }
+        got = got + r;
+    }
+    sys_close(fd);
+    return 0;
+    #endif
 }
 
 fn win_buf_covers(p): i64 {

@@ -24,7 +24,7 @@ counterpart, so the history script does not record them.
 
 | File | What it is |
 |---|---|
-| [`benchmarks/rust-a460c3a.csv`](benchmarks/rust-a460c3a.csv) | Rust's `bench-history.csv`, copied byte for byte from `rust-old/`: 64 rows, two runs at `a460c3a` |
+| [`benchmarks/rust-a460c3a.csv`](benchmarks/rust-a460c3a.csv) | Rust's `bench-history.csv`, copied byte for byte from `rust-old/bench-history.csv` at tag `0.17.5`: 64 rows, two runs at `a460c3a` |
 | [`benchmarks/history.csv`](benchmarks/history.csv) | the port's history: one row per bench per run (`timestamp,commit,branch,benchmark,estimate_ns`), the same columns as Rust's |
 | [`benchmarks/runs.csv`](benchmarks/runs.csv) | one row per port run: the machine (CPU model, clocksource) and the toolchain that produced it |
 
@@ -126,7 +126,7 @@ They do not compare the port with Rust.
 
 ## Rust's record
 
-This is `rust-old/benchmarks.md`, the table Rust's `bench-history.sh` generated from its two runs. It is
+This is `rust-old/benchmarks.md` (tag `0.17.5`), the table Rust's `bench-history.sh` generated from its two runs. It is
 kept here as written, apart from the heading levels, and the series names have been filled in where
 Rust's table dropped the parameter. The machine is unknown, so this is a record and not a target.
 

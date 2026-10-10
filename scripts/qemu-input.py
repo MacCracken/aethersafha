@@ -2,15 +2,22 @@
 """Drive the compositor's Linux build in QEMU with real key chords, and judge what clients were TOLD.
 
 usage: qemu-input.py <bindir> <outdir> <scenario>
-  <bindir> holds static `aethersafha`, `init` (programs/qemu_init.cyr), `focus_client` and
-  `hostile_client` (programs/focus_client.cyr built with -D AE_HOSTILE). scripts/qemu-linux-input.sh
-  builds them.
+  <bindir> holds static `aethersafha`, `init` (programs/qemu_init.cyr), `focus_client`, and
+  `hostile_client`, `silent_client` and `stall_client` (programs/focus_client.cyr built with -D AE_HOSTILE,
+  -D AE_SILENT and -D AE_STALL). scripts/qemu-linux-input.sh builds them.
   scenario `focus`   — two focus_clients; screendumps after: start, Ctrl+Tab, Ctrl+F6, Ctrl+Tab, Ctrl+Tab
   scenario `hostile` — a hostile_client (stride 4) and one focus_client; one screendump
   scenario `sigint`  — two focus_clients, then SIGINT from PID 1 instead of Ctrl+Q: the teardown must run
     (0.17.1 fails it: KILLED by signal 2; with the child's mask reset removed, the clients read SigBlk 2)
   scenario `drag`    — two focus_clients and a USB mouse; the focused window is dragged by its titlebar,
     then pressed on its left edge (0.17.4: pointer routing moved to src/route.cyr)
+  scenario `silent`  — a focus_client, a `silent_client` (-D AE_SILENT: connects, sends nothing) and a
+    `stall_client` (-D AE_STALL: sends CREATE_SURFACE, then nothing). The desktop must keep running: a
+    Ctrl+Tab while they are connected is handled, both are disconnected at the 10 s handshake budget (the
+    stalled one's surface withdrawn; its window never reached the screen), focus still moves, and Ctrl+Q
+    exits 0. Through 0.17.5 the compositor waited on such a client forever (roadmap D12): 0.17.5's binary,
+    with setu 0.8.11 or with only the pin moved to 0.8.12, stops at the second accept and fails five of the
+    seven checks the scenario had then.
 Exit: 0 PASS · 1 FAIL · 2 could not run.
 
 ⭐ THE ORACLES ARE OUTSIDE THE COMPOSITOR. QEMU's `screendump` reads the emulated VGA device, and each
@@ -24,7 +31,7 @@ broken build is not a check.
 ⚠ The Linux build also hosts a mehman demo guest ("echo (foreign)") at boot, so Ctrl+Tab cycles THREE
 windows here. The checks are written against invariants, not window positions, so they do not care.
 """
-import gzip, json, os, socket, subprocess, sys, tempfile, time
+import gzip, json, os, re, socket, subprocess, sys, tempfile, time
 
 KERNEL = os.environ.get("AE_QEMU_KERNEL", "/boot/vmlinuz-linux")
 OVMF = os.environ.get("AE_QEMU_OVMF", "/usr/share/edk2/x64/OVMF.4m.fd")
@@ -34,6 +41,11 @@ DRAG_DX, DRAG_DY = 120, 70   # the `drag` scenario's titlebar drag: small enough
 LEFT_DX = -60            # ...and its drag of the window's left edge, outwards
 HOME = -4000             # a relative move this far left and up parks the cursor on (0, 0): it clamps there
 TITLEBAR_H = 30          # src/window.cyr: the titlebar is the rows ABOVE a window's content rect
+BUDGET_MS = 10000        # src/setu_clients.cyr AE_HS_BUDGET_MS: an accepted client's handshake budget
+# The compositor's disconnect lines at that budget, by how far the handshake got (ae_client_accepted_say).
+BUDGET_SILENT = "accepted client: sent nothing within the handshake budget -- disconnected, ms since accept:"
+BUDGET_STALL = ("accepted client: sent create_surface, then nothing within the handshake budget -- "
+                "disconnected, ms since accept:")
 
 
 def cpio_newc(entries):
@@ -51,7 +63,7 @@ def cpio_newc(entries):
 
 def build_initramfs(bindir, path):
     ents = [("proc", 0o40755, None), ("sys", 0o40755, None), ("dev", 0o40755, None)]
-    for name in ("init", "aethersafha", "focus_client", "hostile_client"):
+    for name in ("init", "aethersafha", "focus_client", "hostile_client", "silent_client", "stall_client"):
         ents.append((name, 0o100755, open(os.path.join(bindir, name), "rb").read()))
     with gzip.open(path, "wb", compresslevel=1) as f:
         f.write(cpio_newc(ents))
@@ -215,6 +227,8 @@ def main():
         # kill(compositor, SIGINT) — from OUTSIDE the compositor, like `kill -INT <pid>`. (A tty Ctrl+C
         # would signal the whole foreground group, clients included; this models the compositor's half.)
         gargs = "--sigint-port --frames 0 --client /focus_client --client /focus_client"
+    elif scenario == "silent":
+        gargs = "--frames 0 --client /focus_client --client /silent_client --client /stall_client"
     else:
         print("unknown scenario", scenario)
         return 2
@@ -240,14 +254,27 @@ def main():
     try:
         qmp = QMP(qmp_path)
         t0 = time.time()
-        while time.time() - t0 < 40:                 # both clients announce their present
-            if log().count(" presented\n") >= 2 or q.poll() is not None:
-                break
-            time.sleep(0.1)
-        if log().count(" presented\n") < 2:
-            print("  ⚠  the clients never both presented — cannot judge (see %s)" % serial)
-            return 2
-        time.sleep(2.0)                              # let the compositor composite a few frames
+        if scenario == "silent":
+            # ⭐ The honest client presents, and the other two connect 1.5 s later (focus_client.cyr).
+            # ⚠ The STALL line is printed BEFORE its reply is read, so a compositor that never serves
+            # it still gets this far — and is then judged, not reported as "could not run".
+            need = (" presented\n", "SILENT -- connected", "STALL -- sent create_surface")
+            while time.time() - t0 < 40:
+                if all(k in log() for k in need) or q.poll() is not None:
+                    break
+                time.sleep(0.1)
+            if not ("SILENT -- connected" in log() and "STALL -- sent create_surface" in log()):
+                print("  ⚠  the silent and stalled clients never connected — cannot judge (see %s)" % serial)
+                return 2
+        else:
+            while time.time() - t0 < 40:                 # both clients announce their present
+                if log().count(" presented\n") >= 2 or q.poll() is not None:
+                    break
+                time.sleep(0.1)
+            if log().count(" presented\n") < 2:
+                print("  ⚠  the clients never both presented — cannot judge (see %s)" % serial)
+                return 2
+        time.sleep(2.0 if scenario != "silent" else 1.0)   # let the compositor composite a few frames
 
         def shot(name):
             p = os.path.join(outdir, name + ".ppm")
@@ -280,6 +307,9 @@ def main():
         if scenario == "focus":
             steps += [("2-ctrl-tab", ("ctrl", "tab")), ("3-ctrl-f6", ("ctrl", "f6")),
                       ("4-ctrl-tab", ("ctrl", "tab")), ("5-ctrl-tab", ("ctrl", "tab"))]
+        if scenario == "silent":
+            # ⭐ The Ctrl+Tab lands while the silent client is connected and well inside its 10 s budget.
+            steps += [("2-ctrl-tab", ("ctrl", "tab"))]
         for name, keys in steps:
             if keys:
                 try:
@@ -288,6 +318,24 @@ def main():
                     pass
                 time.sleep(1.5)
             shot(name)
+        if scenario == "silent":
+            # Wait out the budget: both clients are disconnected and each logs the end of its wait.
+            t1 = time.time()
+            while time.time() - t1 < 25:
+                full_now = log()
+                if (BUDGET_SILENT in full_now and BUDGET_STALL in full_now
+                        and "SILENT -- the compositor closed" in full_now
+                        and "STALL -- the compositor closed" in full_now):
+                    break
+                time.sleep(0.2)
+            time.sleep(1.0)
+            shot("3-retired")
+            try:
+                qmp.chord("ctrl", "tab")
+            except OSError:
+                pass
+            time.sleep(1.5)
+            shot("4-ctrl-tab")
         if scenario == "drag":
             # ⭐ AIM FROM THE PICTURE. The focused client's bright border is its content rect, so its
             # titlebar is the 30 rows above it and its left strip the first columns of it.
@@ -419,6 +467,80 @@ def main():
         else:
             check(False, "every screendump was taken (the guest died mid-run, or the window was not found)")
         montage([p for p in shots if p], os.path.join(outdir, "montage.png"))
+    elif scenario == "silent":
+        flat = full.replace("\r", "")
+
+        def ints_after(k, n):
+            # The first `n` lines after offset k that are bare integers. ⚠ The processes share one console
+            # and a compositor line is two writes (text, then newline), so a client's line can land between
+            # a label and the numbers printed after it; skip anything that is not a number.
+            vals = [int(s) for s in (ln.strip() for ln in flat[k:].split("\n")[1:40])
+                    if s.lstrip("-").isdigit()]
+            return vals[:n] if len(vals) >= n else None
+
+        def budget_hits(line):
+            # [(offset, ms)] for each disconnect of this kind at the handshake budget, in log order.
+            hits, k = [], flat.find(line)
+            while k >= 0:
+                v = ints_after(k, 1)
+                hits.append((k, v[0] if v else None))
+                k = flat.find(line, k + 1)
+            return hits
+
+        sil = budget_hits(BUDGET_SILENT)
+        stl = budget_hits(BUDGET_STALL)
+        m = re.search(r"focus_client: window (\d+) presented", flat)
+        hid = m.group(1) if m else None
+        check(hid is not None and ("focus_client: window %s focus GAINED" % hid) in flat,
+              "the honest client presented, and was told it has focus (window %s)" % hid)
+        conn = flat.find("SILENT -- connected")
+        tab = flat.find("focus cycled by TAB", conn) if conn >= 0 else -1
+        check(conn >= 0 and tab > conn and (not sil or tab < sil[0][0]),
+              "a Ctrl+Tab sent while the silent client was connected was handled (focus cycled by TAB, "
+              "before its disconnect)")
+        cm = re.search(r"SILENT -- the compositor closed the connection \(end of file\), ms after connect: (\d+)",
+                       flat)
+        check(len(sil) == 1 and sil[0][1] is not None and BUDGET_MS <= sil[0][1] <= BUDGET_MS + 1500
+              and cm is not None and BUDGET_MS - 500 <= int(cm.group(1)) <= BUDGET_MS + 3000,
+              "the silent client was disconnected at the %d ms budget (compositor: %s ms after accept; "
+              "client: end of file %s ms after its connect)"
+              % (BUDGET_MS, sil[0][1] if sil else None, cm.group(1) if cm else None))
+        sm = re.search(r"focus_client: window (\d+) STALLED", flat)
+        sid = sm.group(1) if sm else None
+        # ⚠ 0.17.6: a window is put on the desktop at its client's first present, so the stalled client's never
+        # was; the compositor withdraws the surface id it was given (and says which), rather than removing a window.
+        rk = flat.find("withdrew the surface it never presented, id:")
+        withdrawn = ints_after(rk, 1) if rk >= 0 else None
+        check(len(stl) == 1 and sid is not None and withdrawn == [int(sid)]
+              and ("focus_client: window %s told SETU_CLOSE" % sid) in flat
+              and "STALL -- the compositor closed the connection (end of file)" in flat,
+              "the stalled client was disconnected at its budget: its surface %s withdrawn, and it read "
+              "SETU_CLOSE, then end of file" % sid)
+        # ⭐ 0.17.6: THE HALF-MADE WINDOW NEVER REACHES THE SCREEN. It was created whole at CREATE_SURFACE, at (0,0),
+        # 240x160 under a 30-row titlebar, and drawn there until its client was disconnected. Nothing else covers
+        # its left strip (x < 28, below the panel, to row 190): the honest client sits at (30, 50) and the foreign
+        # demo at (320, 200). So the strip must be the same with the stalled client mid-handshake (shot 1) as
+        # after it was disconnected (shot 3). 0.17.6 before this fix drew the window there: the strip changed.
+        if shots[0] and len(shots) >= 3 and shots[2]:
+            s1, s3 = read_ppm(shots[0]), read_ppm(shots[2])
+            strip = {y * s1[0] + x for y in range(PANEL_ROWS, 190) for x in range(0, 28)}
+            held = same_fraction(s1, s3, strip)
+            check(held >= 0.99, "the stalled client's half-made window never reached the screen: the strip it would "
+                  "cover at the origin is the same mid-handshake and after it (%.0f%% of %d px)"
+                  % (100 * held, len(strip)))
+        else:
+            check(False, "every screendump was taken (the guest died mid-run)")
+        if len(shots) >= 4 and shots[2] and shots[3]:
+            b3 = len(pixels_of(read_ppm(shots[2]), BRIGHT)) > 0
+            b4 = len(pixels_of(read_ppm(shots[3]), BRIGHT)) > 0
+            check(b3 != b4, "after both were disconnected the desktop runs on: a Ctrl+Tab moves focus, and "
+                  "the honest client is told it has focus in exactly one of the last two shots (%s, %s)"
+                  % ("bright" if b3 else "dim", "bright" if b4 else "dim"))
+        else:
+            check(False, "every screendump was taken (the guest died mid-run)")
+        check("quit on a key (Ctrl+Q)" in flat and "qemu_init: aethersafha exit 0" in flat and not killed,
+              "Ctrl+Q ended it: the compositor quit and exited 0")
+        montage([p for p in shots if p], os.path.join(outdir, "montage.png"))
     else:
         check("HOSTILE attach" in full, "the hostile client ran (stride 4 on a 240-wide surface)")
         check("surface refused" in full, "the compositor refused its surface")
@@ -428,7 +550,8 @@ def main():
     for line in full.splitlines():
         if any(k in line for k in ("focus_client", "presented surface", "surface refused",
                                    "qemu_init: aethersafha", "KILLED", "SIGINT", "SigBlk", "SIGNALFD",
-                                   "drag started", "drag released", "resize started", "pointer ")):
+                                   "drag started", "drag released", "resize started", "pointer ",
+                                   "accepted client", "client connected", "focus cycled", "quit on")):
             print("    " + line.rstrip())
     print("  %s %s (screendumps and montage in %s)" % (
         "PASS" if not failures else "FAIL", scenario, outdir))

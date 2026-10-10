@@ -1,9 +1,3 @@
-# Build
-/target/
-**/*.rs.bk
-
-# Cargo
-
 # IDE
 .idea/
 .vscode/
@@ -15,18 +9,8 @@
 .DS_Store
 Thumbs.db
 
-# Coverage / profiling
-/coverage/
-*.profraw
-*.profdata
-lcov.info
-tarpaulin-report.*
-
 # Claude Code
 .claude/
-
-# Benchmarks (CSV history is tracked, raw criterion output is not)
-/target/criterion/
 
 # Environment / secrets
 .env

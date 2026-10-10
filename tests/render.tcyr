@@ -944,6 +944,74 @@ fn t_grp_minimized_r(): i64 {
     return 0;
 }
 
+# ---- a setu client's cache (0.17.6): the CPU composite never reads past it, and its live re-read cannot wait ----
+# ⭐ A client's cache is a `fl_alloc` block its window owns (`win_pix_adopt`); over 4 KB it is its own mapping, so
+# reading past it can fault where the bump heap read a neighbour. And the live re-read goes through
+# `win_client_buf_read` (window.cyr), which refuses what is not a regular file, because setu's reader opens the
+# buffer's /dev/shm name in a way a FIFO holds forever.
+fn t_grp_cache_r(): i64 {
+    test_group("render — a client's cache bounds the CPU composite, and its live re-read cannot wait (0.17.6)");
+    ae_gpu_frame_ok = 0;
+    var CBG = 0x00050607;
+    var fb = bhumi_fb_new(200, 200);
+    var widget = ae_bhumi(rupa_theme_widget(rupa_theme_active()));
+    # A shared buffer of 10 x 150 words, every one 0x00ABCDEF.
+    var nb = 10 * 150 * 4;
+    var src = alloc(nb);
+    var i = 0;
+    while (i < 10 * 150) { store32(src + i * 4, 0x00ABCDEF); i = i + 1; }
+    var bid = setu_buf_create(nb);
+    setu_buf_write(bid, src, nb);
+    # A 10 x 150 window whose cache holds 125 rows (5000 B). ⚠ The client buffer's recorded size says nothing
+    # (0 x 0) — the state a minimize leaves it in, since W_PREMIN shares W_BUF_W's offset — so the clamp on it
+    # is a no-op and only the cache's own size can bound the copy.
+    var win = win_new(77, 20, 10, 10, 150, "cache");
+    win_pix_adopt(win, fl_alloc(5000), 5000);
+    win_set_client_buf(win, bid, 0, 0);
+    bhumi_fb_clear(fb, CBG);
+    render_window(fb, win, 0);
+    var by = win_body_y(win);
+    assert_eq(bhumi_fb_get(fb, 25, by), 0x00ABCDEF, "row 0 of the body: the client's pixels, re-read live");
+    assert_eq(bhumi_fb_get(fb, 25, by + 124), 0x00ABCDEF, "row 124, the last the cache holds: the client's");
+    assert_eq(bhumi_fb_get(fb, 25, by + 125), widget, "row 125, past the cache: not read, not composited — the body shows");
+    assert_eq(bhumi_fb_get(fb, 25, by + 149), widget, "row 149 likewise");
+    # The live re-read of a FIFO at the buffer's name. ⛔ Through setu's reader this render never returns (its
+    # `open` waits for a writer), so it runs in a child the suite can give up on after 2 s.
+    var fid = sys_getpid() * 100000 + 99101;
+    var fpath = alloc(48);
+    setu_buf_path(fid, fpath);
+    sys_unlink(fpath);
+    assert_eq(sys_mknodat(0 - 100, fpath, 4096 | 384, 0), 0, "a FIFO at a buffer's name");
+    win_set_client_buf(win, fid, 10, 125);
+    var pid = sys_fork();
+    if (pid == 0) {
+        render_window(fb, win, 0);
+        sys_exit(0);
+    }
+    var wst = alloc(8);
+    store64(wst, 0);
+    var done = 0;
+    var waited = 0;
+    while (waited < 2000) {
+        if (sys_waitpid(pid, wst, 1) == pid) {      # WNOHANG
+            done = 1;
+            break;
+        }
+        sleep_ms(10);
+        waited = waited + 10;
+    }
+    if (done == 0) {
+        sys_kill(pid, 9);
+        sys_waitpid(pid, wst, 0);
+    }
+    assert_eq(done, 1, "a frame that re-reads it returns: nothing waited on the FIFO");
+    assert_eq(load32(wst) & 0xFFFF, 0, "  and the frame ended normally (exit 0, no signal)");
+    sys_unlink(fpath);
+    setu_buf_close(bid);
+    win_pix_release(win);
+    return 0;
+}
+
 # ---- rust-old/tests/renderer_integration.rs ----------------------------------------------------------------------
 # All twelve, re-expressed under ADR 0003: the framebuffer is bhumi's XRGB8888 (a fill is a clear, absent is -1),
 # the blend is the kernel's `#92` op 0x01, the font is kashi's 8x16 with a 9 px advance, and the damage region
@@ -2824,6 +2892,7 @@ fn main() {
     t_grp_border_r();
     t_grp_overlap_r();
     t_grp_minimized_r();
+    t_grp_cache_r();
     t_grp_integ_r();
 
     return assert_summary();

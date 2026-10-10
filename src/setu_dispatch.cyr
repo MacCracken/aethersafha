@@ -63,6 +63,8 @@ fn setu_srv_dispatch_close(cfd, sfd, path): i64 {
 # alloc · -11 not ATTACH · -12 surface geometry refused (setu_attach_ok) · -13 not COMMIT). Byte-exact
 # framing throughout (setu_srv_read_msg for frames, setu_srv_read_exact for the
 # raw payload).
+# ⛔ IT WAITS, AND ON LINUX WITHOUT A DEADLINE: each read is setu's default (setu_read_msg). For the
+# single-client probes only — never the frame loop (0.17.6, roadmap D12; see setu_clients.cyr).
 fn setu_srv_recv_committed(cfd, comp, out4): i64 {
     var m = setu_msg_new();
     if (setu_srv_read_msg(cfd, m) < 0) { return 0 - 6; }
@@ -83,6 +85,11 @@ fn setu_srv_recv_committed(cfd, comp, out4): i64 {
 # reads are satisfied promptly. That is why only the FIRST read moved — the other two are correct as
 # they are, and making all three non-blocking would mean carrying a per-client handshake state machine
 # for no gain.
+# ⛔⛔ "SATISFIED PROMPTLY" HOLDS ONLY FOR A CLIENT THAT KEEPS GOING. One that sends CREATE_SURFACE and
+# stops holds the ATTACH read forever on Linux, where setu's read has no deadline. That wedged the Linux
+# frame loop through 0.17.5 (roadmap D12). The frame loop now serves every client through the per-client
+# state machine this note called unnecessary (`setu_srv_handshake_drain`, setu_clients.cyr); this
+# function is left to the single-client callers.
 fn setu_srv_commit_from_create(m, cfd, comp, out4): i64 {
     if (setu_msg_kind(m) != SETU_CREATE_SURFACE) { return 0 - 8; }
     if (setu_surface_dims_ok(setu_msg_arg(m, 0), setu_msg_arg(m, 1)) == 0) { return 0 - 12; }
@@ -301,8 +308,9 @@ fn setu_srv_serve_session(path, comp, fb): i64 {
     #endif
 }
 
-# Bite 12: serve a present on an ALREADY-ACCEPTED connection `cfd` — the seam
-# main's frame loop calls per accepted client. Receive CREATE→ATTACH+payload→
+# Bite 12: serve a present on an ALREADY-ACCEPTED connection `cfd`. ⛔ It waits for each record
+# (setu_srv_recv_committed), so the frame loop does not call it; see setu_clients.cyr.
+# Receive CREATE→ATTACH+payload→
 # COMMIT, mint the Window on `comp`, and blit the buffer into `fb` (composited on
 # top of whatever the desktop drew this frame; proper z-order via the Window
 # model is later polish). The CALLER owns cfd (accepts + closes it) and the
@@ -342,14 +350,61 @@ fn setu_srv_serve_accepted(cfd, comp, fb): i64 {
 # preempt disabled; the client cannot run to send ATTACH while the compositor sleeps for it.
 # ipc.md §9.4 names this exactly: "the preempt_disable; sti; hlt spin is the poison that made TCP
 # toxic — it starves the peer it is waiting on."
+# ⛔ AND ON LINUX IT MUST NOT EITHER, for a different reason: setu's read there has no deadline, so a
+# client that stopped mid-handshake held the frame loop forever (roadmap D12, through 0.17.5). Linux
+# clients have come through this step since 0.17.6 (setu_clients.cyr).
 #
 # ⚠ Under the retired TCP transport this was invisible: `accept()` only returned once a client had
 # connected, and the kernel's socket buffers absorbed the interleaving. A minted channel exists before
 # the client does, so the compositor now meets its peer's scheduling directly.
 #
-# State: 0 = await CREATE_SURFACE · 1 = await ATTACH · 2 = attached, await COMMIT · 3 = done.
-# Returns the window id (> 0) on COMPLETION, 0 while still in progress, negative on a protocol error.
-# `st` is a 6-word scratch owned by the caller, one per client: [0]=state [1]=win [2]=pix [3]=w [4]=h.
+# State: 0 = await CREATE_SURFACE · 1 = await ATTACH · 2 = attached, await COMMIT · 3 = committed.
+# Returns the window id (> 0) when a COMMIT is applied, 0 while still in progress, negative on a protocol
+# error. `st` is the caller's per-client scratch from `setu_hs_st_new()`; its words are SetuHsSt.
+#
+# ⭐⭐ AN ATTACH IS KEPT, A COMMIT APPLIES IT — ONCE PER DRAIN (0.17.6). `setu__hs_take` validates an ATTACH
+# and records it as PENDING, and a COMMIT moves the pending attach to COMMITTED. `setu__hs_apply` then does
+# the work — the one buffer read, the window's cache, the client buffer it shows — at the end of a drain, so
+# a frame costs one buffer read per client however many records it drained: the last ATTACH/COMMIT pair wins,
+# and an ATTACH no COMMIT followed changes nothing.
+# ⛔ IT WAS ONE READ PER ATTACH, AND A FRESH CACHE PER GEOMETRY CHANGE. Every ATTACH read the client's buffer
+# at once, and a drain takes up to DRAIN_MAX records: a client alternating two 16 MB buffer ids made one serve
+# read 63 of them (121 ms, measured on Linux 7.2.8), and alternating 2048x2048 / 2048x2047 also took a new
+# bump `alloc` each time and never gave one back — 1,056,723,968 B in that one serve.
+# ⭐⭐ THE WINDOW IS MINTED AT CREATE_SURFACE AND MAPPED AT ITS FIRST APPLIED COMMIT (`comp_mint_window`,
+# `comp_map_window`), already at (dstx, dsty) and showing its buffer. Until then it is not on the desktop:
+# nothing draws it, hit-tests it, focuses it or closes it.
+# ⛔ IT WAS CREATED WHOLE AT CREATE_SURFACE: at (0,0), focused, with no content. `render_desktop` draws before
+# the serve loop, so the frame of its COMMIT showed its chrome at the origin while the GPU composited the
+# surface at the cascade position; it took focus while it had no connection to be told so; and it could be
+# closed by hand mid-handshake.
+enum SetuHsSt {
+    HS_ST_STATE   = 0;     # 0 .. 3, above
+    HS_ST_WIN     = 8;     # the window minted at CREATE_SURFACE
+    HS_ST_DUE     = 16;    # 1 = a COMMIT committed the HS_ST_C* attach, not applied yet
+    HS_ST_PW      = 24;    # the PENDING attach (state 2): width, height, stride, buffer id
+    HS_ST_PH      = 32;
+    HS_ST_PLACED  = 40;    # 1 once the window is placed and mapped: its first present
+    HS_ST_PSTRIDE = 48;
+    HS_ST_PBUF    = 56;
+    HS_ST_CW      = 64;    # the COMMITTED attach: width, height, stride, buffer id
+    HS_ST_CH      = 72;
+    HS_ST_CSTRIDE = 80;
+    HS_ST_CBUF    = 88;
+    HS_ST_SZ      = 96;
+}
+
+# A zeroed handshake scratch for one client. -> it, or 0 on OOM.
+fn setu_hs_st_new(): i64 {
+    var st = alloc(HS_ST_SZ);
+    if (st == 0) { return 0; }
+    var i = 0;
+    while (i < HS_ST_SZ) {
+        store64(st + i, 0);
+        i = i + 8;
+    }
+    return st;
+}
 
 enum SetuHsAct {
     HS_SKIP   = 0;    # a stale orphan record — consume it and stay in this state
@@ -429,11 +484,21 @@ fn setu_hs_action(state, kind): i64 {
     return SetuHsAct.HS_BAD;
 }
 
-var setu_hs_consumed = 0;      # 1 = the last step took a record off the channel (drives the drain)
+var setu_hs_consumed = 0;      # 1 = the last take consumed a record off the channel (drives the drain)
 var setu_hs_stale = 0;         # one-shot: a resync happened, i.e. the ring really did drop a pair
 
-fn setu_srv_handshake_step(st, cfd, comp, dstx, dsty, title): i64 {
-    var m = setu_msg_new();
+# ⭐ ONE MESSAGE FOR EVERY TAKE (0.17.6). Each step took a fresh 80-byte `setu_msg_new()`, and the frame loop
+# polls every live client every frame: with `setu_poll_input`'s own 256-byte buffer that was 336 B per client
+# per frame that nothing frees (measured: 33,600,000 B over 100,000 idle serves). A take decodes into this
+# and is done with it before the next take.
+var setu_hs_msg = 0;
+
+# Take ONE record off `cfd` and advance `st`. Reads no buffer and maps nothing: an ATTACH becomes the
+# pending attach, a COMMIT commits it (HS_ST_DUE), and `setu__hs_apply` does the rest.
+# -> 0, or a negative handshake code. `setu_hs_consumed` says whether a record was taken.
+fn setu__hs_take(st, cfd, comp, title): i64 {
+    if (setu_hs_msg == 0) { setu_hs_msg = setu_msg_new(); }
+    var m = setu_hs_msg;
     setu_hs_consumed = 0;
     var p = setu_poll_input(cfd, m);
     if (p == 0) { return 0; }                      # nothing this frame — NOT an error
@@ -442,13 +507,20 @@ fn setu_srv_handshake_step(st, cfd, comp, dstx, dsty, title): i64 {
     # disappears into the diagnostic. A read is not a peek on a record transport.
     if (p < 0) { return 0 - 6; }
     setu_hs_consumed = 1;
-    var state = load64(st);
+    var state = load64(st + HS_ST_STATE);
     var act = setu_hs_action(state, setu_msg_kind(m));
 
     if (act == SetuHsAct.HS_SKIP) {
         if (setu_hs_stale == 0) {
             setu_hs_stale = 1;
+            #ifdef CYRIUS_TARGET_AGNOS
             println("aethersafha: placed client: resynced past a stale record -- the channel ring dropped its pair");
+            #endif
+            # ⚠ Not a drop on Linux: SOCK_SEQPACKET never loses a record, so the client sent its COMMIT
+            # without an ATTACH in front of it. Linux clients reach this step since 0.17.6.
+            #ifndef CYRIUS_TARGET_AGNOS
+            println("aethersafha: accepted client: skipped a commit with no attach in front of it");
+            #endif
         }
         return 0;
     }
@@ -463,18 +535,23 @@ fn setu_srv_handshake_step(st, cfd, comp, dstx, dsty, title): i64 {
         # with the protocol's name for a surface, which tells the user nothing and made two windows
         # indistinguishable in a photograph. setu carries no title in CREATE_SURFACE, but the compositor
         # SPAWNED these clients and therefore already knows what each one is — the name rides down from the
-        # spawn site instead of needing a protocol change. ⚠ A client that arrives some other way (the
-        # accept paths below) still gets "setu-surface"; that is honest, because nothing there knows better.
+        # spawn site instead of needing a protocol change. ⚠ A client that arrives some other way (a Linux
+        # connection off the listener, `ae_client_accept`) still gets "setu-surface"; that is honest,
+        # because nothing there knows better.
         if (setu_surface_dims_ok(setu_msg_arg(m, 0), setu_msg_arg(m, 1)) == 0) { return 0 - 12; }
-        var win = comp_create_window(comp, 0, 0, setu_msg_arg(m, 0), setu_msg_arg(m, 1), title);
+        # ⭐ MINTED, NOT MAPPED: an id to reply with, and nothing on the desktop yet (see SetuHsSt).
+        var win = comp_mint_window(comp, setu_msg_arg(m, 0), setu_msg_arg(m, 1), title);
         if (win == 0) { return 0 - 9; }
         win_set_keymode(win, setu_msg_arg(m, 2) & SETU_SURF_FULL_KEYS);
         var pmul = 0;
         if ((setu_msg_arg(m, 2) & SETU_SURF_PREMULTIPLIED) != 0) { pmul = 1; }
         win_set_premul(win, pmul);
+        # ⚠ RECORDED BEFORE THE REPLY (0.17.6). A reply that cannot be written (-7: the client hung up after
+        # sending CREATE_SURFACE) still leaves this window minted, and a caller that disconnects the client
+        # must be able to find it to release it. The state stays 0 until the reply is out.
+        store64(st + HS_ST_WIN, win);
         if (setu_srv_write_frame(cfd, setu_surface_created(win_id(win))) < 0) { return 0 - 7; }
-        store64(st + 8, win);
-        store64(st, 1);
+        store64(st + HS_ST_STATE, 1);
         return 0;
     }
 
@@ -483,71 +560,124 @@ fn setu_srv_handshake_step(st, cfd, comp, dstx, dsty, title): i64 {
         var ah = setu_msg_arg(m, 2);
         var stride = setu_msg_arg(m, 3);
         var buf_id = setu_msg_arg(m, 5);
-        # ⛔ Refused BEFORE anything is allocated or recorded, so a live window keeps the last buffer it
-        # validly attached: a hostile ATTACH in state 3 changes nothing on screen.
+        # ⛔ Refused BEFORE anything is recorded, so a live window keeps the last buffer it validly
+        # attached: a hostile ATTACH in state 3 changes nothing on screen.
         if (setu_attach_ok(w2, ah, stride) == 0) { return 0 - 12; }
-        var nbytes = ah * stride;
         # ⛔ SHM ONLY on this path. The inline-pixel branch streamed the surface down the control
         # connection, which a record channel cannot carry — and `setu_read_exact` correctly refuses on
         # agnos rather than emulating a stream. A client that presents inline here is a protocol error,
         # not something to work around.
         if (buf_id <= 0) { return 0 - 12; }
-        # ⭐ IDEMPOTENT RE-ATTACH. This arm is reachable from state 2 (a repeat ATTACH whose predecessor's
-        # COMMIT the ring ate), so it must not allocate a second surface every time — a continuously
-        # presenting client would leak one FULL SURFACE per dropped commit. Reuse the buffer whenever the
-        # geometry is unchanged, which for a client re-presenting the same window is always.
-        # ⚠ A real resize (w/h differ) does abandon the old block; there is no free() on this allocator,
-        # and one leak per resize is the same cost the single-shot version already paid per attach.
-        var pix = load64(st + 16);
-        if (pix != 0) { if (load64(st + 24) != w2) { pix = 0; } }
-        if (pix != 0) { if (load64(st + 32) != ah) { pix = 0; } }
-        if (pix == 0) {
-            pix = alloc(nbytes);
-            if (pix == 0) { return 0 - 14; }
-        }
-        # ⭐ AN UNCHANGED RE-ATTACH CARRIES NO NEW INFORMATION — SKIP THE COPY. A presenting client
-        # sends ATTACH+COMMIT EVERY FRAME (puka does), and those were all rejected while state 3
-        # answered HS_BAD; accepting them without this guard buys correctness at the price of a full
-        # surface copy per frame ON TOP of the LIVE re-read that render_window already does — 14 MB
-        # a frame for one fullscreen terminal. The pixels are not what a re-attach is for: the slot
-        # id and the extent are, and when neither moved the live read is already showing them.
-        var samebuf = 0;
-        var w_ = load64(st + 8);
-        if (buf_id == win_bufid(w_)) {
-            if (w2 == win_buf_w(w_)) { if (ah == win_buf_h(w_)) { samebuf = 1; } }
-        }
-        if (samebuf == 0) {
-            # ⭐ SAY IT WHEN THE EXTENT ACTUALLY MOVES. A resize that the compositor never learned is
-            # invisible from outside — the client reports its new grid and the screen does not follow
-            # — so the burn (and the QEMU harness) need the SERVER's own confirmation, not just the
-            # client's intent. Gated on a genuine extent change so a normal frame stays silent.
-            if (win_bufid(w_) != 0) {
-                if (w2 != win_buf_w(w_)) { setu__resized_say(w2, ah); }
-                if (w2 == win_buf_w(w_)) { if (ah != win_buf_h(w_)) { setu__resized_say(w2, ah); } }
-            }
-            if (setu_buf_read(buf_id, pix, nbytes) < 0) { return 0 - 14; }
-        }
-        win_set_client_buf(load64(st + 8), buf_id, w2, ah);
-        store64(st + 16, pix);
-        store64(st + 24, w2);
-        store64(st + 32, ah);
-        store64(st, 2);
+        # ⭐ IDEMPOTENT RE-ATTACH, FOR FREE. This arm is reachable from state 2 (a repeat ATTACH whose
+        # predecessor's COMMIT the ring ate) and state 3 (a resize); either way it only replaces the pending
+        # attach. Nothing is allocated or read until a COMMIT is applied.
+        store64(st + HS_ST_PW, w2);
+        store64(st + HS_ST_PH, ah);
+        store64(st + HS_ST_PSTRIDE, stride);
+        store64(st + HS_ST_PBUF, buf_id);
+        store64(st + HS_ST_STATE, 2);
         return 0;
     }
 
-    var win3 = load64(st + 8);                     # HS_COMMIT — the only action left
-    # ⛔ PLACE ONCE, ON THE FIRST COMMIT ONLY (st[5]). `dstx/dsty` is the SPAWN placement, so moving
+    # HS_COMMIT — the only action left: the pending attach is committed, to be applied once.
+    store64(st + HS_ST_CW, load64(st + HS_ST_PW));
+    store64(st + HS_ST_CH, load64(st + HS_ST_PH));
+    store64(st + HS_ST_CSTRIDE, load64(st + HS_ST_PSTRIDE));
+    store64(st + HS_ST_CBUF, load64(st + HS_ST_PBUF));
+    store64(st + HS_ST_DUE, 1);
+    store64(st + HS_ST_STATE, 3);
+    return 0;
+}
+
+# Apply the committed attach, if a COMMIT left one due: at most ONE buffer read, into the window's own cache,
+# then the client buffer the window shows. The first one also places the window at (dstx, dsty) and maps it.
+# -> the window id (> 0) when one was applied, 0 when none was due, -14 when the cache could not be
+# allocated or the buffer not read, -15 when the buffer id names something that is not a regular file.
+# On a negative the window keeps the client buffer it showed.
+fn setu__hs_apply(st, cfd, comp, dstx, dsty): i64 {
+    if (load64(st + HS_ST_DUE) == 0) { return 0; }
+    store64(st + HS_ST_DUE, 0);
+    var win = load64(st + HS_ST_WIN);
+    # ⚠ A WINDOW CLOSED BY HAND after its first present is off the desktop: its client was sent SETU_CLOSE,
+    # `comp_remove_window` freed its cache, and nothing draws what it presents now — so nothing is read or
+    # kept for it, and a window off the desktop never holds a cache.
+    if (load64(st + HS_ST_PLACED) == 1) {
+        if (comp_find_by_id(comp, win_id(win)) < 0) { return 0; }
+    }
+    var w2 = load64(st + HS_ST_CW);
+    var ah = load64(st + HS_ST_CH);
+    var buf_id = load64(st + HS_ST_CBUF);
+    var nbytes = ah * load64(st + HS_ST_CSTRIDE);
+    # ⭐ THE WINDOW'S CACHE IS REUSED WHENEVER IT HOLDS THIS MANY BYTES, and replaced (the old one freed, in
+    # `win_pix_adopt`) only when it is too small — so a resize costs at most one block, and a client flipping
+    # between two sizes reuses the larger. ⛔ The reuse was keyed on w and h alone while the read is `h *
+    # stride` bytes: a re-attach at the same extent with a wider stride read past the cache.
+    var pix = win_pix(win);
+    var fresh = 0;
+    if (win_pixcap(win) < nbytes) {
+        pix = fl_alloc(nbytes);
+        if (pix == 0) { return 0 - 14; }
+        fresh = 1;
+    }
+    # ⭐ AN UNCHANGED RE-ATTACH CARRIES NO NEW INFORMATION — SKIP THE COPY. A presenting client
+    # sends ATTACH+COMMIT EVERY FRAME (puka does), and those were all rejected while state 3
+    # answered HS_BAD; accepting them without this guard buys correctness at the price of a full
+    # surface copy per frame ON TOP of the LIVE re-read that render_window already does — 14 MB
+    # a frame for one fullscreen terminal. The pixels are not what a re-attach is for: the slot
+    # id and the extent are, and when neither moved the live read is already showing them.
+    # ⚠ A fresh cache is empty, so it is always read.
+    var samebuf = 0;
+    if (fresh == 0) {
+        if (buf_id == win_bufid(win)) {
+            if (w2 == win_buf_w(win)) { if (ah == win_buf_h(win)) { samebuf = 1; } }
+        }
+    }
+    if (samebuf == 0) {
+        # ⭐ SAY IT WHEN THE EXTENT ACTUALLY MOVES. A resize that the compositor never learned is
+        # invisible from outside — the client reports its new grid and the screen does not follow
+        # — so the burn (and the QEMU harness) need the SERVER's own confirmation, not just the
+        # client's intent. Gated on a genuine extent change so a normal frame stays silent.
+        if (win_bufid(win) != 0) {
+            if (w2 != win_buf_w(win)) { setu__resized_say(w2, ah); }
+            if (w2 == win_buf_w(win)) { if (ah != win_buf_h(win)) { setu__resized_say(w2, ah); } }
+        }
+        # ⚠ Not `setu_buf_read`: on Linux it opens the client-named path in a way a FIFO holds forever
+        # (window.cyr, `win_client_buf_read`).
+        var rd = win_client_buf_read(buf_id, pix, nbytes);
+        if (rd < 0) {
+            if (fresh == 1) { fl_free(pix); }
+            if (rd == 0 - 2) { return 0 - 15; }
+            return 0 - 14;
+        }
+    }
+    if (fresh == 1) { win_pix_adopt(win, pix, nbytes); }
+    # ⛔ RECORD WHAT THE CLIENT ACTUALLY ATTACHED. Every later frame blits `win_w x win_h` out of this slot,
+    # and the compositor can change those independently (maximize / resize). See win_buf_covers.
+    win_set_client_buf(win, buf_id, w2, ah);
+    # ⛔ PLACE ONCE, ON THE FIRST COMMIT ONLY (HS_ST_PLACED). `dstx/dsty` is the SPAWN placement, so moving
     # on every commit was harmless only while a second commit was unreachable (state 3 answered
     # HS_BAD). Now that a resize re-attaches, an unconditional move would yank a maximized window —
     # or one the operator has dragged — back to where it was launched, on its next present.
-    if (load64(st + 40) == 0) {
-        win_move(win3, dstx, dsty);
-        store64(st + 40, 1);
+    # ⭐ AND MAP IT THEN: it enters the desktop at its place, showing its buffer (0.17.6).
+    if (load64(st + HS_ST_PLACED) == 0) {
+        win_move(win, dstx, dsty);
+        store64(st + HS_ST_PLACED, 1);
+        comp_map_window(comp, win);
     }
-    win_set_pix(win3, load64(st + 16));
-    win_set_cfd(win3, cfd);                        # ⭐ THE KEY PATH: forward_key refuses on cfd == 0
-    store64(st, 3);
-    return win_id(win3);
+    win_set_cfd(win, cfd);                         # ⭐ THE KEY PATH: forward_key refuses on cfd == 0
+    return win_id(win);
+}
+
+# ONE record, applied at once: take it, then apply the attach it committed, if it was a COMMIT. For a caller
+# that steps record by record; the frame loop drains (below), which applies once per drain.
+# -> what `setu__hs_apply` returns after a COMMIT (the window id, or -14 / -15), else 0 or the take's error.
+fn setu_srv_handshake_step(st, cfd, comp, dstx, dsty, title): i64 {
+    var r = setu__hs_take(st, cfd, comp, title);
+    if (r < 0) {
+        store64(st + HS_ST_DUE, 0);
+        return r;
+    }
+    return setu__hs_apply(st, cfd, comp, dstx, dsty);
 }
 
 # ⭐⭐ DRAIN, DO NOT SIP. One record per frame is not a rate the compositor gets to choose: a client
@@ -557,7 +687,17 @@ fn setu_srv_handshake_step(st, cfd, comp, dstx, dsty, title): i64 {
 # ⛔ BOUNDED BY THE RING, so a client that writes faster than this loop reads cannot hold the frame
 # loop hostage: at most one ring's worth of records is processed per frame per client, then the
 # compositor renders regardless.
-# Returns exactly what the step returns: window id (> 0), 0 = still in progress, negative = error.
+# ⭐ AND APPLIED ONCE (0.17.6): the records are taken, the last committed attach is applied after them —
+# one buffer read per client per frame however many ATTACH/COMMIT pairs it queued.
+# ⚠ THE FIRST PRESENT ENDS THE DRAIN. The COMMIT that maps the window is applied as soon as it is taken, so
+# the caller announces and focuses the window this frame; anything queued behind it waits for the next.
+# ⛔ AN ERROR DISCARDS THE COMMIT IT FOLLOWED in the same drain: nothing is applied, and the window keeps the
+# client buffer it showed. An ACCEPTED client is disconnected for it; a PLACED one presents again.
+# ⚠ Linux: after the first record, each next take waits on nothing to find out whether there is another —
+# a poll(2) with a ZERO timeout (it never waits) on this one fd — so `setu_poll_input`, whose 256-byte
+# buffer setu never frees, runs only for a record that is there (or an end of file / error). agnos has no such poll: the drain asks
+# the channel until it answers WOULDBLOCK, as it always has.
+# Returns what the apply returns — the window id (> 0) when a commit was applied — or 0, or the take's error.
 enum SetuHsK { DRAIN_MAX = 64; }   # = CHAN_SLOTS, the agnos channel ring depth
 
 # ⚠ How many records the LAST drain call consumed. The caller needs this to tell "the client said
@@ -570,15 +710,45 @@ fn setu_srv_handshake_drain(st, cfd, comp, dstx, dsty, title): i64 {
     var n = 0;
     setu_hs_drained = 0;
     while (n < SetuHsK.DRAIN_MAX) {
-        var r = setu_srv_handshake_step(st, cfd, comp, dstx, dsty, title);
-        if (r != 0) { return r; }                   # completed or failed — the caller decides
-        if (setu_hs_consumed == 0) { return 0; }    # channel empty: nothing more to do this frame
+        if (n > 0) {
+            if (setu_srv_fd_readable(cfd) == 0) { break; }
+        }
+        var r = setu__hs_take(st, cfd, comp, title);
+        if (r < 0) {
+            store64(st + HS_ST_DUE, 0);
+            return r;                               # failed — the caller decides
+        }
+        if (setu_hs_consumed == 0) { break; }       # channel empty: nothing more to take this frame
         n = n + 1;
         setu_hs_drained = n;
+        if (load64(st + HS_ST_DUE) == 1) {
+            if (load64(st + HS_ST_PLACED) == 0) { break; }   # the first present: map it now
+        }
     }
-    return 0;
+    return setu__hs_apply(st, cfd, comp, dstx, dsty);
 }
 
+# 1 when `fd` has a record, an end of file or an error to read; 0 when a read would find nothing. Never
+# waits: a poll(2) with a zero timeout. agnos channels have no poll, so there it always answers 1 and the
+# read decides. (The literal 7 is setu's and the stdlib's spelling of poll: see SETU_POLLIN.)
+fn setu_srv_fd_readable(fd): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var pfd[8];                                     # struct pollfd { i32 fd; i16 events; i16 revents; }
+    store32(&pfd, fd);
+    store16(&pfd + 4, SETU_POLLIN);
+    store16(&pfd + 6, 0);
+    var r = syscall(7, &pfd, 1, 0);
+    if (r < 0) { return 1; }                        # poll failed: let the read say what is wrong
+    if (r == 0) { return 0; }
+    return 1;
+    #endif
+}
+
+# ⚠ Polls only for CREATE_SURFACE: ATTACH and COMMIT are then read with setu's waiting read
+# (`setu_srv_commit_from_create`). Nothing calls it; the frame loop uses the drain above.
 fn setu_srv_serve_polled_at(cfd, comp, fb, dstx, dsty): i64 {
     var m = setu_msg_new();
     var p = setu_poll_input(cfd, m);
@@ -595,6 +765,11 @@ fn setu_srv_serve_polled_at(cfd, comp, fb, dstx, dsty): i64 {
     return win_id(win);
 }
 
+# ⛔⛔ NOT THE FRAME LOOP'S ANY MORE (0.17.6, roadmap D12). Through 0.17.5 the Linux frame loop served
+# every accepted client here, waiting for CREATE_SURFACE, ATTACH and COMMIT with setu's read, which on
+# Linux has no deadline. A client that connected and never sent stopped the desktop, and Ctrl+C with it.
+# Accepted clients now go through `setu_srv_handshake_drain` with the placed ones (setu_clients.cyr).
+# Kept for a caller that serves exactly one client and can afford to wait for it.
 fn setu_srv_serve_accepted_at(cfd, comp, fb, dstx, dsty): i64 {
     var out4 = alloc(32);
     var nbytes = setu_srv_recv_committed(cfd, comp, out4);

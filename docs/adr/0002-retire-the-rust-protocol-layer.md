@@ -73,6 +73,6 @@ the inventory:**
 - **Port the pieces a desktop will want (popups, clipboard, IME) during the arc.** Rejected. Those are
   protocol design work in setu, not parity: the Rust versions never ran and stored state without behaviour.
   Porting them would put unexercised data models on the compositor side of a wire that cannot carry them.
-- **Keep `rust-old/wayland/` after the rest is deleted, as reference.** Rejected. A partial oracle invites
+- **Keep `rust-old/src/wayland/` after the rest is deleted, as reference.** Rejected. A partial oracle invites
   the reading that it is still authoritative. The lists above are the reference, and git history keeps the
-  files at the last tag that carries `rust-old/`.
+  files at the last tag that carries `rust-old/` (`0.17.5`).

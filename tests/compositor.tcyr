@@ -434,6 +434,24 @@ fn t_headless(): i64 {
     return 0;
 }
 
+# ⛔ 0.17.6 regression: W_PREMIN and W_BUF_W once shared offset 176 (window.cyr). Minimizing a client's
+# window wrote its state into the buffer width, and a re-attach while minimized wrote a width into the
+# state the restore then set. Each field must survive the other.
+fn t_premin_slot(): i64 {
+    test_group("window — the pre-minimize state and the client buffer size are separate fields");
+    var pw = win_new(1, 10, 20, 640, 384, "P");
+    win_set_client_buf(pw, 7, 640, 384);
+    win_set_state(pw, WinState.WS_MAXIMIZED);
+    win_minimize(pw);
+    assert_eq(win_buf_w(pw), 640, "minimizing keeps the client's buffer width");
+    assert_eq(win_buf_h(pw), 384, "  ...and its height");
+    win_set_client_buf(pw, 7, 800, 600);                # the client re-attaches while minimized
+    win_unminimize(pw);
+    assert_eq(win_state(pw), WinState.WS_MAXIMIZED, "a re-attach while minimized does not corrupt the restore");
+    assert_eq(win_buf_w(pw), 800, "  ...and the re-attached width stands");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     t_lifecycle();
@@ -443,6 +461,7 @@ fn main() {
     t_context();
     t_focus();
     t_headless();
+    t_premin_slot();
     return assert_summary();
 }
 
