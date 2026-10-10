@@ -46,7 +46,8 @@ full module map. In brief, the Cyrius source (`src/`) is:
   framebuffer, UTF-8 text, input routing, the command line (`aethersafha
   --help`), and the frame loop.
 - **Shell + leaf** — `desktop`, `shell`, `shell_render`, `launcher`,
-  `gestures`, `accessibility`, `ai_features`, `security_ui`, `plugin_host`.
+  `gestures`, `accessibility`, `ai_features`, `daimon_client` (the agent list
+  from daimon), `security_ui`, `plugin_host`.
 - **Capture** — `screen_capture`, `screen_recording` (library code, not yet
   wired into the desktop).
 - **Foreign** — `foreign`: the mehman swallow path.

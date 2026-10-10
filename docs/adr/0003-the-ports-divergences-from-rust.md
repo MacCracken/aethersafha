@@ -122,6 +122,48 @@ fix.
     their CP437 glyphs.
   - U+007F draws blank (kashi ADR 0011's rule, and Rust's); a raw 0x7F used to draw `⌂`.
 
+- **PluginMessage JSON** (0.17.3) is serde's text and serde's acceptance rules, checked against a crate
+  built from Rust's own serde 1.0.228 / serde_json 1.0.149 on about 96k cases. Differences:
+  - `ThemeUpdate`'s palette is written in ascending key order; Rust's `HashMap` order was unspecified.
+  - A `surface_id` of 2⁶³ and up keeps its u64 bits in an i64.
+  - Ill-formed UTF-8 in a string is refused (a Rust `&str` could not hold it).
+  - `to_json` refuses a message no Rust value could be, such as an out-of-range enum or a 0 string.
+  - Floats appear only in ignored fields, and there the port's correctly-rounded parse can accept a
+    near-`f64::MAX` literal that serde_json's parse rejects.
+- **The security UI's effects** (0.17.3):
+  - **pid guards.** The "no pid" sentinel is INT_MIN (`SEC_PID_NONE`), not the usual −1, because −1 is
+    `kill`'s broadcast value. An enforced revoke with pid 0 sends nothing; Rust's `i32::try_from(0)`
+    succeeded and its `kill(0, SIGHUP)` signalled the compositor's own process group.
+  - **The audit line** is serde's: keys sorted (serde_json without `preserve_order` used a BTreeMap),
+    the agent id as a decimal string, and a whole-second `YYYY-MM-DDTHH:MM:SS+00:00` timestamp (Rust's
+    `to_rfc3339` carried a fraction). A failed write after a successful open warns, where Rust was
+    silent. On agnos, which ignores `O_APPEND`, the writer seeks to the end itself.
+  - **The emergency kill's daimon DELETE** starts at once and is finished by the frame loop, at most
+    four in flight. Rust spawned one per kill on its tokio runtime.
+- **The agent-list poll** (0.17.3, `src/daimon_client.cyr`) speaks to daimon 2.4.3, which Rust's poll
+  predates:
+  - daimon sends integer ids and an integer status. Status maps through Rust's table by daimon's own
+    names: 2 running → Acting, 6 failed → Error, and every other value → Idle. Rust read strings, so
+    against this daimon it would have minted a random id each poll and read every agent as Idle.
+  - The 5 s status tick starts the poll, and every frame steps it, with at most one GET in flight; the
+    socket never blocks. Rust's `start_hud_polling` existed, but its binary never called it.
+  - The answer is bounded at 256 KiB, and HTTP is narrowed to what daimon sends: no chunked encoding,
+    no redirects.
+  - The body is parsed with bayan, which unlike serde_json accepts leading zeros, and ill-formed UTF-8
+    or raw control bytes inside a string.
+  - A failed poll is not logged.
+  - **On agnos the poll and the DELETE are no-ops.** Its `connect` blocks for up to 8 s, and a SYN to a
+    closed port gets no RST, so the frame loop cannot dial out safely. The agnos agent gauge shows only
+    what was registered locally.
+- **Screen capture and recording** (0.17.3, still library code):
+  - Every encoder writes alpha 0xFF. The port's framebuffer is XRGB; Rust wrote the pixel's top byte,
+    which was translucent only under its panels.
+  - A zero or negative size is refused before anything is allocated. That is Rust's `RegionOutOfBounds`
+    and `EncodingError`; Rust's encoders accepted 0×0.
+  - Buffers are freed: through `scap_result_free`, on ring eviction, and through the new
+    `srec_mgr_remove_recording`.
+  - Getters hand out the live record (the representation table above) rather than Rust's clones.
+
 ## Consequences
 
 - **Positive**:

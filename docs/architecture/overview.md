@@ -35,11 +35,13 @@ aethersafha
 ├── shell.cyr            — desktop shell: notifications, system status, app registry, search
 ├── shell_render.cyr     — the status panel and notification cards
 ├── ai_features.cyr      — context engine, AI suggestions, agent HUD state, resource metrics
+├── daimon_client.cyr    — daimon 2.4.3's agent list (feeds the HUD) and the kill's DELETE;
+│                           a non-blocking socket stepped per frame (Linux; a no-op on agnos)
 ├── accessibility.cyr    — accessibility tree (mirrors every window), focus, announcements,
 │                           high-contrast theme
 ├── gestures.cyr         — gesture recognition (dormant: no touch path yet)
 ├── security_ui.cyr      — permissions, threat alerts, security dashboard, window badges
-├── plugin_host.cyr      — plugin lifecycle, sandbox profiles, capabilities, messages
+├── plugin_host.cyr      — plugin lifecycle, sandbox profiles, capabilities, messages (serde JSON)
 ├── screen_capture.cyr   — capture manager: permissions, rate limiting, encoders (not wired)
 ├── screen_recording.cyr — recording manager: sessions, frame ring (not wired)
 └── foreign.cyr          — mehman swallow path: host a foreign-ABI app as a

@@ -5,6 +5,86 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.17.3] — 2026-10-10 — the stubs become real
+
+> The arc's fourth bite (roadmap § 0.17.x). Every remaining stub that stood in for a Rust effect now does
+> the work: plugin JSON, the security UI's audit log and signals, the agent-list poll, and capture memory.
+> plugin_host, security_ui, screen_capture and screen_recording close in the parity plan. Each change
+> has tests that fail when it is reverted. The commit, the tag and the push are the operator's.
+
+### Added — `PluginMessage` JSON, as serde writes and reads it
+
+`plug_msg_to_json` and `plug_msg_from_json` returned 0. They now produce and accept exactly what Rust's
+`#[serde(tag = "type")]` enum did: compact text with the tag first, serde's escaping, and serde's
+acceptance rules. Those rules cover the tag anywhere in the object, unknown fields ignored, and range
+errors. A crate built from the serde and serde_json versions in Rust's `Cargo.lock` was the oracle, and
+about 96k cases agree. The `plug_ipc_*` stubs are deleted; Rust had no transport. Ported: the seven
+`message_*_roundtrip` tests and `message_from_invalid_json`. `"bayan"` is declared in `[deps] stdlib`; it
+was already vendored, so `lib/` and the lock are unchanged.
+
+### Added — the security UI does what it says
+
+- **The audit log** gets one JSON line per event appended to `/var/log/agnos/audit.log`, with serde's
+  sorted keys and an RFC 3339 time. A failure warns and never fails the caller. The path can be set,
+  so tests write only to a temp file of their own.
+- **SIGHUP on an enforced revoke and SIGKILL on an emergency kill**, through `sys_kill`.
+  - ⛔ The pid guard is load-bearing, because `kill(0)` signals the whole process group and `kill(-1)`
+    every process the user owns. The "no pid" sentinel is therefore INT_MIN rather than −1. An adversarial
+    review caught the first version using −1.
+  - A revoke with pid 0 sends nothing, where Rust's would have signalled its own process group.
+  - Signal tests target only children the suite forks.
+- **The emergency kill deregisters the agent from daimon** (Rust's fire-and-forget DELETE). Its
+  stale cgroup removal is retired (ADR 0004): daimon owns its agents' cgroups now.
+- Ported: the four eviction tests; `grant_permission_lockdown` and `permission_definitions_initialized`
+  completed.
+
+### Added — the agent HUD and the panel's agent gauge are fed from daimon
+
+`src/daimon_client.cyr` sends `GET /v1/agents` to daimon 2.4.3 at `127.0.0.1:8090`.
+- **When:** the 5 s status tick starts each poll. Every frame steps it on a non-blocking socket, with
+  Rust's 5 s timeout, at most one GET in flight, and an answer bounded at 256 KiB.
+- **Never blocks:** a daimon that is absent, slow, or accepts and never answers cannot stall the frame
+  loop. The tests measure every step against such a peer.
+- **What it feeds:** a successful poll replaces the HUD, as Rust's did, and a failed one leaves it
+  untouched. daimon's integer ids and statuses map onto Rust's table (ADR 0003). The panel gauge reads
+  the HUD.
+- **agnos:** the poll is a no-op there, because its `connect` blocks for up to 8 s.
+- Tests run against fake daimons the suite forks on ephemeral ports. Nothing contacts a real daimon.
+
+### Fixed — screen capture and recording (still library code)
+
+- Alpha is 0xFF in RAW, BMP and PNG output. The XRGB framebuffer's padding byte used to be copied in.
+- A zero or negative width or height is refused before anything is allocated. Before, `alloc` returned 0
+  and the encoders wrote through it.
+- Buffers are freed. A 2560×1440 PNG capture used to leak about 74 MB, and the recording ring dropped
+  evicted frames without freeing them. Large buffers now come from the free-list allocator and have one
+  owner each; the tests assert memory stays bounded across repeated captures and a full ring.
+- A capture over 64 KB, spanning several stored-deflate blocks, decodes back to its pixels through chitra.
+- Ported: `full_screen_capture_png` at 800×600, `grant_and_revoke_permission`, `one_recording_per_agent`.
+
+### Changed
+
+- Reference coverage holds at 66% (787 of 1,186 functions, up from 725 of 1,097), so CI's floor stays at 66.
+
+### Docs
+
+- ADR 0003 gains entries for the plugin JSON, the security effects, the agent-list poll, and capture and
+  recording. ADR 0004 retires the cgroup removal.
+- `parity-plan.md`: plugin_host, security_ui, screen_capture and screen_recording are CLOSED.
+- `roadmap.md`: 0.17.3 is shipped; next is 0.17.4.
+
+### Verified
+
+- **Host 4,223,568 B** (sha256 `5a17bf18…`) · **`--agnos` 4,182,144 B** (sha256 `9ed9da61…`).
+- **29 / 29 suites, 3,486 assertions, 0 failed** (0.17.2: 28 / 2,821). No compiler warning points at `src/`.
+- `scripts/qemu-linux-input.sh` → PASS for focus, hostile and sigint, on this binary (same hash). Nothing
+  listens on 8090 in the guest, so every 5 s poll is a refused connection the frame loop steps past.
+  `qemu-linux-desktop.sh` → PASS (non-black 0.303).
+- `check-dep-tags.sh` → 7 deps clean · `cyrius deps --verify` → 83 verified · CI's format check clean ·
+  `cyrius coverage --min 66` passes.
+- ⚠ Not run on iron. None of 0.17.3's changes is reachable on agnos except the audit writer and the
+  kill (both library-only today).
+
 ## [0.17.2] — 2026-10-09 — what the Rust binary did, and UTF-8 text
 
 > The arc's third bite (roadmap § 0.17.x). The Rust binary built the desktop, ran a 5 s status tick,

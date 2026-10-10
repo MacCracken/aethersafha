@@ -24,11 +24,11 @@ wiring it into the running desktop is new work and is not part of the deletion g
 | `renderer.rs` | 1656 / 49 | `render`, `window`, `desktop`, `shell_render`, `wallpaper`, `theme`, `cursor` | driven | PORT | CPU premultiplied blend + opacity (CPU frames differ from iron today); border outline; tests for overlap and minimized-not-drawn. (0.17.1: title truncation; the dead asserts run. 0.17.2: UTF-8 text, text width in scalars, the `…` glyph) | .4 .5 |
 | `shell.rs` | 1396 / 60 | `shell`, `shell_render` | panel + cards painted | PORT | 6 missing + 4 partial tests; `toggle_panel` honoured. (0.17.1: the registry's `terminal` entry; launch and search tests. 0.17.2: the net dot reads UNKNOWN, the agent count is fed, cards cut to their width) | .5 |
 | `accessibility.rs` | 729 / 30 | `accessibility` | mirrored live | ✅ **CLOSED 0.17.2** — a node and an announcement on create / close, focus sync, an idempotent reconcile, the 3 tests; divergences in ADR 0003 | — | .2 |
-| `ai_features.rs` | 1707 / 86 | `ai_features` | constructed only | PORT | `poll_agents` against daimon 2.4.3; 13 tests. (0.17.1: the `"terminal"` context match; stable suggestion sort; null-checked hour) | .3 |
-| `security_ui.rs` | 1858 / 77 | `security_ui` | constructed only | PORT | audit-log writer; SIGHUP / SIGKILL; Linux-only kill effects; 6 tests incl. 4 eviction. (0.17.1: the dashboard maximum over active alerts; minted ids from 2⁶²+1, ADR 0003) | .3 |
-| `plugin_host.rs` | 848 / 31 | `plugin_host` | constructed only | PORT | `PluginMessage` JSON (both directions `return 0`) and its 8 tests; delete the `plug_ipc_*` stubs (Rust had no transport) | .3 |
-| `screen_capture.rs` | 1299 / 31 | `screen_capture` (not linked) | library | PORT as library | alpha 0xFF; refuse w / h ≤ 0 (a null write today); decode round-trip over 64 KB; per-capture memory | .3 |
-| `screen_recording.rs` | 938 / 22 | `screen_recording` (not linked) | library | PORT as library | the ring frees what it evicts | .3 |
+| `ai_features.rs` | 1707 / 86 | `ai_features` | constructed only | PORT | 13 tests. (0.17.1: the `"terminal"` context match; stable suggestion sort; null-checked hour. 0.17.3: `poll_agents` against daimon 2.4.3, feeding the HUD and the panel gauge on Linux) | .5 |
+| `security_ui.rs` | 1858 / 77 | `security_ui` | constructed only | ✅ **CLOSED 0.17.3** — the audit-log writer, SIGHUP on revoke, SIGKILL and the daimon DELETE on kill, the eviction tests; the cgroup removal is retired (ADR 0004). (0.17.1: the dashboard maximum, minted ids) | — | .3 |
+| `plugin_host.rs` | 848 / 31 | `plugin_host` | constructed only | ✅ **CLOSED 0.17.3** — `PluginMessage` JSON as serde writes and reads it, its 8 tests; the `plug_ipc_*` stubs deleted | — | .3 |
+| `screen_capture.rs` | 1299 / 31 | `screen_capture` (not linked) | library | ✅ **CLOSED 0.17.3** — alpha 0xFF, w / h ≤ 0 refused, a chitra round-trip past 64 KB, memory freed | — | .3 |
+| `screen_recording.rs` | 938 / 22 | `screen_recording` (not linked) | library | ✅ **CLOSED 0.17.3** — the ring frees what it evicts; `one_recording_per_agent` complete | — | .3 |
 | `gestures.rs` | 569 / 17 | `gestures` | constructed only | KEEP dormant (ADR 0004) | 1 test (`touch_point_fields`); the rotate wrap and the floor-sqrt boundary are recorded in ADR 0003 | .5 |
 | `apps.rs` | 2986 / 173 | — | dead in Rust too | ✅ **CLOSED 0.17.0** — retired by ADR 0004, `src/apps.cyr` deleted | — | .0 |
 | `theme_bridge.rs` | 372 / 18 | — | dead | ✅ **CLOSED 0.17.0** — retired by ADR 0004, deleted with `DSK_THEME` | — | .0 |
@@ -85,20 +85,12 @@ or error text close under ADR 0004 and are not listed.
   `ai_suggestion_custom`, `resource_metrics`, the three `analyze_context*`,
   `update_context_file_opened`, `_file_opened_cap_at_10`, `multiple_file_open_events_ordering`,
   `update_agent_hud_updates_last_activity`.
-- **security_ui.rs** — `alert_eviction_at_max_capacity`, `alert_eviction_resolved_first`,
-  `permission_request_eviction`, `override_request_eviction`; partly `grant_permission_lockdown`,
-  `permission_definitions_initialized`.
-- **plugin_host.rs** — the seven `message_*_roundtrip` and `message_from_invalid_json` (vacuous until
-  the JSON stub is real: a parse failure and the stub both return 0).
 - **shell.rs** — `notification_default`, `launcher_item`, `launcher_action`,
   `dismiss_multiple_notifications`, `notification_with_all_priorities`,
   `notification_eviction_prefers_non_action`; partly `notification_custom`, `multiple_notifications`,
   `lock_unlock_round_trip`, `update_system_status_all_fields`. `initial_system_status` is the UNKNOWN
   seed (ADR 0003).
 - **gestures.rs** — `touch_point_fields`.
-- **screen_capture.rs** — partly `full_screen_capture_png` (asserted on 4×4, not 800×600) and
-  `grant_and_revoke_permission` (list length after revoke). **screen_recording.rs** — partly
-  `one_recording_per_agent` (the existing recording's id is not returned).
 - **system_tests.rs** (all `test_e2e_*` except the first) — `workspace_context_management`,
   `screen_lock_blocks_interactions`; partly `workspace_switch`, `multi_window_workspace_management`,
   `full_desktop_startup_sequence`, `full_teardown_sequence`, `security_and_ai_combined`,

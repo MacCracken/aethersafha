@@ -20,6 +20,18 @@
 #  - `fb` is threaded into capture_frame (the ported compositor has no front buffer;
 #    same caller-owns-fb seam as D1 — see screen_capture.cyr's structural note).
 #
+# OWNERSHIP: the ring OWNS its frames and their data (lib/freelist.cyr). capture_frame
+# moves the capture's bytes into the frame (scap_result_take_data, Rust's
+# `data: result.data`) and frees the *ScapResult shell, so a frame's data has one
+# owner. A frame is freed when the ring evicts it and when its recording is
+# removed (srec_mgr_remove_recording). Stopping keeps them: Rust's stop_recording
+# leaves "the session data accessible via get_session and get_frames until the
+# manager is dropped" (screen_recording.rs:390-392).
+# ⚠ Rust hands out CLONES (capture_frame, get_frames, get_latest_frame); the port
+# hands out the ring's own *SrecFrame, valid until evicted or removed. Copy the
+# bytes to keep them longer. Session headers stay on alloc() and are never freed,
+# so a *SrecSess from stop/get_session never dangles (its frames vec is emptied).
+#
 # LIBRARY MODULE: definitions only, no main / no top-level statements.
 
 # ---------------------------------------------------------------------------
@@ -67,7 +79,7 @@ enum SrecFrameOff {     # RecordedFrame
     SREC_F_CAPTURED_AT = 8;    # i64 epoch secs (from CaptureResult)
     SREC_F_WIDTH       = 16;
     SREC_F_HEIGHT      = 24;
-    SREC_F_DATA        = 32;   # byte ptr (scap_result_data); may be 0
+    SREC_F_DATA        = 32;   # byte ptr (fl_alloc'd, OWNED — taken from the capture); may be 0
     SREC_F_DATA_SIZE   = 40;   # byte count
     SREC_F_SZ          = 48;
 }
@@ -86,7 +98,8 @@ enum SrecMgrOff {       # ScreenRecordingManager
     SREC_M_SESSIONS = 0;    # *vec of *SrecSess (linear-scanned by id)
     SREC_M_ACTIVE   = 8;    # map (cstr-keyed): agent_id -> i64 RecordingId
     SREC_M_NEXT_ID  = 16;   # i64 monotonic RecordingId, starts 1
-    SREC_M_SZ       = 24;
+    SREC_M_ERR_ID   = 24;   # RecordingId payload of start's last error: AlreadyRecording(existing), else 0
+    SREC_M_SZ       = 32;
 }
 
 # ---------------------------------------------------------------------------
@@ -133,8 +146,9 @@ fn srec_cfg_agent_id(c)   { return load64(c + SREC_C_AGENT_ID); }
 # ---------------------------------------------------------------------------
 # RecordedFrame.
 # ---------------------------------------------------------------------------
+# srec_frame_new(...): the frame takes ownership of `data` (an fl_alloc'd buffer, or 0).
 fn srec_frame_new(seq, captured_at, width, height, data, data_size): i64 {
-    var f = alloc(SREC_F_SZ);
+    var f = fl_alloc(SREC_F_SZ);
     if (f == 0) { return 0; }
     store64(f + SREC_F_SEQUENCE, seq);
     store64(f + SREC_F_CAPTURED_AT, captured_at);
@@ -150,6 +164,13 @@ fn srec_frame_width(f)       { return load64(f + SREC_F_WIDTH); }
 fn srec_frame_height(f)      { return load64(f + SREC_F_HEIGHT); }
 fn srec_frame_data(f)        { return load64(f + SREC_F_DATA); }
 fn srec_frame_data_size(f)   { return load64(f + SREC_F_DATA_SIZE); }
+# srec_frame_free(f): the frame and its data. Safe on 0.
+fn srec_frame_free(f): i64 {
+    if (f == 0) { return 0; }
+    fl_free(load64(f + SREC_F_DATA));
+    fl_free(f);
+    return 0;
+}
 
 # ---------------------------------------------------------------------------
 # RecordingSession (frames inline).
@@ -185,10 +206,14 @@ fn srec_mgr_new(): i64 {
     store64(m + SREC_M_SESSIONS, vec_new());
     store64(m + SREC_M_ACTIVE, map_new());
     store64(m + SREC_M_NEXT_ID, 1);
+    store64(m + SREC_M_ERR_ID, 0);
     return m;
 }
 fn srec_mgr_sessions(m) { return load64(m + SREC_M_SESSIONS); }
 fn srec_mgr_active(m)   { return load64(m + SREC_M_ACTIVE); }
+# srec_mgr_err_id(m): the RecordingId carried by start_recording's last error —
+# AlreadyRecording(existing_id) — or 0. Query it after a 0 return.
+fn srec_mgr_err_id(m)   { return load64(m + SREC_M_ERR_ID); }
 fn srec_mgr_next_id(m): i64 {
     var id = load64(m + SREC_M_NEXT_ID);
     store64(m + SREC_M_NEXT_ID, id + 1);
@@ -208,8 +233,10 @@ fn srec_mgr_find(m, id): i64 {
 
 # srec_mgr_start_recording(m, comp, scap, cfg, now, err_out): begin a recording.
 # Guards in order: secure-mode, then (agent only) permission, then one-per-agent.
-# -> the new RecordingId (>0), or 0 with *err_out set to a SrecErr.
+# -> the new RecordingId (>0), or 0 with *err_out set to a SrecErr; on
+# ALREADY_RECORDING, srec_mgr_err_id(m) is the agent's existing id (Rust's payload).
 fn srec_mgr_start_recording(m, comp, scap, cfg, now, err_out): i64 {
+    store64(m + SREC_M_ERR_ID, 0);
     if (comp_secure_mode(comp) != 0) {
         store64(err_out, SrecErr.SREC_ERR_SECURE_MODE);
         return 0;
@@ -220,7 +247,9 @@ fn srec_mgr_start_recording(m, comp, scap, cfg, now, err_out): i64 {
             store64(err_out, SrecErr.SREC_ERR_PERM_DENIED);
             return 0;
         }
-        if (map_get(srec_mgr_active(m), agent) != 0) {
+        var existing = map_get(srec_mgr_active(m), agent);
+        if (existing != 0) {
+            store64(m + SREC_M_ERR_ID, existing);
             store64(err_out, SrecErr.SREC_ERR_ALREADY_RECORDING);
             return 0;
         }
@@ -236,8 +265,9 @@ fn srec_mgr_start_recording(m, comp, scap, cfg, now, err_out): i64 {
 # srec_mgr_capture_frame(m, comp, scap, fb, id, now, err_out): capture one frame
 # into the session (state machine hot spot). Guards: session exists + Recording,
 # then max_frames (hard error), then max_duration (hard error), then the D1
-# capture. Appends a RecordedFrame (ring-evicting the oldest at cap 100) and bumps
-# frame_count/total_bytes (which count ALL frames ever). -> *SrecFrame or 0/err.
+# capture. Appends a RecordedFrame (ring-evicting AND freeing the oldest at cap 100)
+# and bumps frame_count/total_bytes (which count ALL frames ever). -> the ring's
+# *SrecFrame (borrowed: valid until evicted or removed) or 0/err.
 fn srec_mgr_capture_frame(m, comp, scap, fb, id, now, err_out): i64 {
     var sess = srec_mgr_find(m, id);
     if (sess == 0) {
@@ -278,12 +308,22 @@ fn srec_mgr_capture_frame(m, comp, scap, fb, id, now, err_out): i64 {
         return 0;
     }
     var seq = srec_sess_frame_count(sess);
+    var data = scap_result_take_data(result);
     var frame = srec_frame_new(seq, scap_result_captured_at(result), scap_result_width(result),
-      scap_result_height(result), scap_result_data(result), scap_result_data_size(result));
+      scap_result_height(result), data, scap_result_data_size(result));
+    scap_result_free(result);        # the shell: its bytes now belong to the frame
+    if (frame == 0) {
+        fl_free(data);
+        store64(err_out, SrecErr.SREC_ERR_CAPTURE);
+        return 0;
+    }
     store64(sess + SREC_S_FRAME_COUNT, seq + 1);
     store64(sess + SREC_S_TOTAL_BYTES, srec_sess_total_bytes(sess) + srec_frame_data_size(frame));
     var frames = srec_sess_frames(sess);
-    if (vec_len(frames) >= SrecCap.SREC_MAX_RING_BUFFER_FRAMES) { vec_remove(frames, 0); }
+    if (vec_len(frames) >= SrecCap.SREC_MAX_RING_BUFFER_FRAMES) {
+        srec_frame_free(vec_get(frames, 0));   # Rust's pop_front drops it (screen_recording.rs:336-338)
+        vec_remove(frames, 0);
+    }
     vec_push(frames, frame);
     store64(err_out, SrecErr.SREC_OK);
     return frame;
@@ -325,6 +365,36 @@ fn srec_mgr_stop_recording(m, id, err_out): i64 {
     if (agent != 0) { map_delete(srec_mgr_active(m), agent); }
     store64(err_out, SrecErr.SREC_OK);
     return sess;
+}
+
+# srec_mgr_remove_recording(m, id): drop a recording in any state and free every
+# frame its ring holds — per session, what dropping Rust's manager does to all of
+# them (Rust has no per-session remove). A still-active agent recording also leaves
+# `active`. The *SrecSess stays readable (alloc()'d) with an empty ring.
+# -> SrecErr code (SESSION_NOT_FOUND if absent).
+fn srec_mgr_remove_recording(m, id): i64 {
+    var ss = srec_mgr_sessions(m);
+    var i = 0;
+    while (i < vec_len(ss)) {
+        var s = vec_get(ss, i);
+        if (srec_sess_id(s) == id) {
+            var frames = srec_sess_frames(s);
+            var k = 0;
+            while (k < vec_len(frames)) {
+                srec_frame_free(vec_get(frames, k));
+                k = k + 1;
+            }
+            vec_truncate(frames, 0);
+            vec_remove(ss, i);
+            var agent = srec_sess_agent_id(s);
+            if ((agent != 0) && (map_get(srec_mgr_active(m), agent) == id)) {
+                map_delete(srec_mgr_active(m), agent);
+            }
+            return SrecErr.SREC_OK;
+        }
+        i = i + 1;
+    }
+    return SrecErr.SREC_ERR_SESSION_NOT_FOUND;
 }
 
 # srec_mgr_get_session(m, id): -> *SrecSess or 0 (None).

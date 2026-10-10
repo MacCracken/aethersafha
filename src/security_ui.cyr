@@ -20,11 +20,23 @@
 #   - f32               -> not used by this module.
 #   - String            -> cstr pointer (char*). Ownership: caller keeps literals
 #                          alive; heap objects store the pointer, not a copy.
-#   - tracing macros     -> println(cstr) audit lines (best-effort, no-op-able).
-#   - serde / reqwest / tokio / libc::kill / fs — external effects; stubbed as
-#     commented parity notes in sec_emergency_kill_agent / sec_write_audit_log.
+#   - tracing macros     -> println(cstr) log lines (best-effort, no-op-able).
+#   - Option<u32> pid   -> i64, SEC_PID_NONE (-2^31, not -1) == None. Signalled
+#                          only when sec_pid_ok (0 < pid <= i32::MAX), on both
+#                          targets.
+#   - write_audit_log    -> sec_write_audit_log: serde_json's line (bayan) appended
+#                          to sec_ui_audit_log_path(); a failure warns, never fails.
+#   - libc::kill         -> sys_kill (SIGHUP on an enforced revoke, SIGKILL on an
+#                          emergency kill).
+#   - reqwest DELETE /v1/agents/<id> -> daimon_agent_delete (src/daimon_client.cyr):
+#     started by the kill, finished by the frame loop's daimon_step, never blocking.
+#   - the /sys/fs/cgroup/agnos/<uuid> removal -> dropped (see the kill path).
 #
 # LIBRARY MODULE: definitions only, no main / no top-level statements.
+
+# The emergency kill's deregistration is the daimon client's DELETE; include-once makes main.cyr's
+# own include of it (through desktop.cyr) a no-op.
+include "src/daimon_client.cyr"
 
 # ---------------------------------------------------------------------------
 # Ring-buffer capacity caps (Rust consts).
@@ -44,6 +56,21 @@ enum SecCap {
 # ---------------------------------------------------------------------------
 enum SecIdSpace {
     SEC_ID_MINTED_BASE = 0x4000000000000000;
+}
+
+# ---------------------------------------------------------------------------
+# Agent pids (Rust: Option<u32>). ⛔ Only 0 < pid <= SEC_PID_MAX ever reaches
+# kill: on Linux kill(0, sig) signals the caller's whole process group and
+# kill(-1, sig) every process the user owns; on agnos pid 0 is a real slot.
+# ⛔ None is INT_MIN, NOT the port's usual -1: -1 is kill's broadcast value, so
+# one broken guard would turn "no pid" into "every process". Linux's kill
+# answers INT_MIN (after its 32-bit truncation too) with -ESRCH, and agnos
+# kill#16 refuses any pid < 0, so a None that slips past a guard signals
+# nobody. A caller's -1 is not None: the guard refuses it like any bad pid.
+# ---------------------------------------------------------------------------
+enum SecPid {
+    SEC_PID_NONE = -0x80000000;    # None (INT_MIN)
+    SEC_PID_MAX  = 0x7FFFFFFF;     # i32::MAX (Rust's i32::try_from)
 }
 
 # ---------------------------------------------------------------------------
@@ -830,62 +857,215 @@ fn sec_ui_grant_permission_enforced(u, agent_id, agent_name, permission, now): i
     }
     sec_agentperm_add(entry, permission);
 
-    # parity: write_audit_log("permission_granted", agent_id, ...)
-    sec_write_audit_log("permission_granted", agent_id, permission);
+    var gsb = str_builder_new();
+    str_builder_add_cstr(gsb, "Permission '");
+    str_builder_add_cstr(gsb, permission);
+    str_builder_add_cstr(gsb, "' granted to '");
+    str_builder_add_cstr(gsb, agent_name);
+    str_builder_add_cstr(gsb, "'");
+    sec_write_audit_log("permission_granted", agent_id, str_data(str_builder_build(gsb)), now);
     println("security-ui: permission granted to agent (enforced)");
     return SecErr.SEC_ERR_OK;
 }
 
-# sec_ui_revoke_permission_enforced(u, agent_id, permission, pid): remove the
-# permission from the agent's entry; SIGHUP-to-pid is stubbed. -> SEC_ERR_OK if
-# the agent entry exists, SEC_ERR_PERMISSION_NOT_FOUND otherwise. pid==0 == None.
-fn sec_ui_revoke_permission_enforced(u, agent_id, permission, pid): i64 {
+# sec_pid_ok(pid): 1 if `pid` may be signalled (0 < pid <= SEC_PID_MAX), else 0.
+# Every sys_kill in this module is behind it.
+fn sec_pid_ok(pid): i64 {
+    if (pid <= 0) { return 0; }
+    if (pid > SecPid.SEC_PID_MAX) { return 0; }
+    return 1;
+}
+
+# sec_ui_revoke_permission_enforced(u, agent_id, permission, pid, now): remove the
+# permission from the agent's entry, SIGHUP the agent so it reloads its config,
+# audit. -> SEC_ERR_OK if the agent entry exists, SEC_ERR_PERMISSION_NOT_FOUND
+# otherwise. pid SEC_PID_NONE == None.
+fn sec_ui_revoke_permission_enforced(u, agent_id, permission, pid, now): i64 {
     var m = load64(u + SEC_U_AGENT_PERMS);
     var entry = map_u64_get(m, agent_id);
     if (entry == 0) { return SecErr.SEC_ERR_PERMISSION_NOT_FOUND; }
 
     sec_agentperm_remove(entry, permission);
 
-    # TODO parity: if pid != 0 -> libc::kill(pid, SIGHUP) to reload agent config.
-    # No process-signal binding wired into this port; pid is accepted + ignored.
+    # ⛔ Rust signalled whenever i32::try_from(pid) held, Some(0) included: kill(0,
+    # SIGHUP) ends every process in the compositor's group, the compositor too. The
+    # port signals only a sec_pid_ok pid; any other is skipped and the revoke still
+    # succeeds, as a failed try_from did. The result is ignored, as in Rust.
+    # agnos: SIGHUP has no default action (the kernel's proc_sig_locked only sets a
+    # pending bit), so an agent sees it only through signalfd#18; kill#16 refuses
+    # any pid but a direct child unless the compositor is init.
+    if (sec_pid_ok(pid) == 1) { sys_kill(pid, SIGHUP); }
 
-    sec_write_audit_log("permission_revoked", agent_id, permission);
+    var rsb = str_builder_new();
+    str_builder_add_cstr(rsb, "Permission '");
+    str_builder_add_cstr(rsb, permission);
+    str_builder_add_cstr(rsb, "' revoked");
+    sec_write_audit_log("permission_revoked", agent_id, str_data(str_builder_build(rsb)), now);
     println("security-ui: permission revoked from agent (enforced)");
     return SecErr.SEC_ERR_OK;
 }
 
-# sec_ui_emergency_kill_agent(u, agent_id, pid, now): the enforced kill path.
-# SIGKILL / cgroup removal / HTTP deregister are stubbed (see TODO parity);
-# the observable in-model effect is a resolved CRITICAL alert + audit line.
-# pid==0 == None (skip SIGKILL). -> SEC_ERR_OK.
+# sec_ui_emergency_kill_agent(u, agent_id, pid, now): the enforced kill path —
+# SIGKILL, audit, and a resolved CRITICAL alert. pid SEC_PID_NONE == None (no
+# signal). -> SEC_ERR_OK, or SEC_ERR_ACTION_BLOCKED for any other pid that is not
+# sec_pid_ok, before any effect (Rust: "Invalid PID").
 fn sec_ui_emergency_kill_agent(u, agent_id, pid, now): i64 {
     println("security-ui: EMERGENCY KILL agent");
 
-    # TODO parity: if pid != 0 && pid > 0 -> unsafe libc::kill(pid, SIGKILL);
-    #   invalid pid -> return SEC_ERR_ACTION_BLOCKED. No signal binding here.
-    # TODO parity: remove cgroup /sys/fs/cgroup/agnos/<agent_id> (fs.remove_dir_all).
-    # TODO parity: fire-and-forget reqwest DELETE http://localhost:8090/v1/agents/<id>
-    #   guarded by a tokio runtime check. No HTTP/async in this port.
+    if (pid != SecPid.SEC_PID_NONE) {
+        if (sec_pid_ok(pid) == 0) {
+            println("security-ui: invalid PID for agent, skipping SIGKILL");
+            return SecErr.SEC_ERR_ACTION_BLOCKED;
+        }
+        # A failed kill (no such process, not ours) only warns, as in Rust.
+        # agnos: SIGKILL ends the process there too (proc_sig_locked).
+        var kr = sys_kill(pid, SIGKILL);
+        if (kr == 0) {
+            println("security-ui: SIGKILL sent to agent process");
+        } else {
+            println("security-ui: warning: failed to SIGKILL agent process");
+        }
+    }
 
-    sec_write_audit_log("emergency_kill", agent_id, "Agent killed via emergency kill switch");
+    # ⚠ No cgroup removal. Rust removed /sys/fs/cgroup/agnos/<uuid>, which nothing
+    # in the stack creates: daimon (2.4.3, src/agent.cyr:659-791) starts each agent
+    # run in its own /sys/fs/cgroup<daimon's cgroup>/daimon-<pid>/agent-<id>-<run>
+    # and removes it once its processes are gone. agnos has no cgroups.
+
+    # ⭐ DAIMON DEREGISTRATION — Rust's fire-and-forget DELETE /v1/agents/<id>
+    # (security_ui.rs:546-559), before the audit line as in Rust. It only STARTS
+    # here; the frame loop's daimon_step finishes it. Not sent (every slot busy,
+    # or agnos) warns and never fails the kill — Rust likewise only warned when it
+    # had no runtime to send it from.
+    if (daimon_agent_delete(agent_id) == 0) {
+        println("security-ui: warning: daimon deregistration not sent");
+    }
+
+    sec_write_audit_log("emergency_kill", agent_id, "Agent killed via emergency kill switch", now);
 
     # Record a resolved CRITICAL alert (Rust builds one with is_resolved: true).
+    var tsb = str_builder_new();
+    str_builder_add_cstr(tsb, "Emergency Kill: Agent ");
+    str_builder_add_int(tsb, agent_id);
     var id = sec_ui_next_id(u);
-    var alert = sec_alert_new(id, "Emergency Kill: Agent",
+    var alert = sec_alert_new(id, str_data(str_builder_build(tsb)),
       "Agent was terminated via emergency kill switch",
       SecThreatLevel.SEC_TL_CRITICAL, "security-ui", now, 0, 1);
     sec_ui_show_security_alert(u, alert);
     return SecErr.SEC_ERR_OK;
 }
 
-# sec_write_audit_log(event_type, agent_id, details): Rust writes a JSON line to
-# /var/log/agnos/audit.log via serde_json + OpenOptions. Stubbed to a stdout
-# line — no serde, and file IO/path are left as a parity TODO.
-fn sec_write_audit_log(event_type, agent_id, details): i64 {
-    # TODO parity: serde_json::json!({timestamp, event_type, source, agent_id,
-    #   details}) appended to /var/log/agnos/audit.log; warn-on-failure, never fail.
-    println("security-ui: audit:");
-    println(event_type);
+# ---------------------------------------------------------------------------
+# The audit log (Rust write_audit_log).
+# ---------------------------------------------------------------------------
+
+# The log's path; 0 == Rust's /var/log/agnos/audit.log. Process-wide, as Rust's
+# associated fn was. ⛔ Tests point it at a file of their own before any
+# enforced call.
+var _sec_audit_path = 0;
+
+fn sec_ui_set_audit_log_path(path): i64 { _sec_audit_path = path; return 0; }
+
+fn sec_ui_audit_log_path(): i64 {
+    if (_sec_audit_path == 0) { return "/var/log/agnos/audit.log"; }
+    return _sec_audit_path;
+}
+
+# sec_audit_rfc3339(now): epoch seconds as chrono's to_rfc3339 renders a
+# whole-second UTC instant, "YYYY-MM-DDTHH:MM:SS+00:00". -> cstr, 0 on OOM
+# (sec_audit_line passes the 0 on).
+# ⚠ Rust stamped Utc::now(), so its line also carried a 3/6/9-digit fraction
+# (SecondsFormat::AutoSi) the port has no source for (ADR 0003: epoch seconds).
+# The offset is "+00:00", never lib/chrono iso8601's "Z". A negative `now`
+# clamps to the epoch: epoch_to_date has no pre-1970 arm.
+fn sec_audit_rfc3339(now): i64 {
+    var t = now;
+    if (t < 0) { t = 0; }
+    var z = iso8601(t);
+    if (z == 0) { return 0; }
+    var out = alloc(26);
+    if (out == 0) { return 0; }
+    memcpy(out, z, 19);
+    memcpy(out + 19, "+00:00", 7);    # with its NUL
+    return out;
+}
+
+# sec_audit_line(event_type, agent_id, details, now): the JSON Rust's
+# write_audit_log wrote, without its newline. -> cstr; 0 only when the timestamp
+# cannot allocate — an allocation failure inside the JSON build ends the process
+# (bayan's and str_builder's abort), as an OOM aborted Rust.
+# ⚠ THE KEYS ARE SORTED, not in json! order: rust-old/Cargo.toml takes serde_json
+# without preserve_order and nothing in rust-old/Cargo.lock turns it on (serde_json
+# has no indexmap dep there), so the object was a BTreeMap. bayan escapes as
+# serde_json does (\" \\ \b \f \n \r \t, other controls \u00xx, the rest as is).
+# agent_id was a Uuid string; it is the i64 in decimal, still a JSON string.
+fn sec_audit_line(event_type, agent_id, details, now): i64 {
+    var ts = sec_audit_rfc3339(now);
+    if (ts == 0) { return 0; }
+    var obj = bayan_json_v_obj_new();
+    bayan_json_v_obj_set(obj, str_from("agent_id"), bayan_json_v_str_new(str_from_int(agent_id)));
+    bayan_json_v_obj_set(obj, str_from("details"), bayan_json_v_str_new(str_from(details)));
+    bayan_json_v_obj_set(obj, str_from("event_type"), bayan_json_v_str_new(str_from(event_type)));
+    bayan_json_v_obj_set(obj, str_from("source"), bayan_json_v_str_new(str_from("security-ui")));
+    bayan_json_v_obj_set(obj, str_from("timestamp"), bayan_json_v_str_new(str_from(ts)));
+    return str_data(bayan_json_v_build(obj));
+}
+
+fn sec_audit_warn(path): i64 {
+    var wsb = str_builder_new();
+    str_builder_add_cstr(wsb, "security-ui: warning: could not write audit log to ");
+    str_builder_add_cstr(wsb, path);
+    str_println(str_builder_build(wsb));
+    return 0 - 1;
+}
+
+# sec_write_audit_log(event_type, agent_id, details, now): append one line to
+# the audit log, creating it if absent (Rust: create + append, writeln!).
+# -> 0 written, -1 not (after a warning). As in Rust, a failure never fails the
+# caller: every caller ignores the result. Rust stayed silent on a failed write
+# after a good open; the port warns there too.
+# agnos: the kernel creates a file only in an existing directory (sys_open's
+# ext2 arm) and nothing in the stack makes /var/log/agnos, so on a stock image
+# this warns. ⚠ The kernel ignores AO_APPEND (ext2_open starts at 0, so a write
+# would overwrite the log's head): the port seeks to the end itself, as lib/io.cyr
+# file_append_locked does. ⛔ It probes first: a FAT/exFAT write fd cannot seek
+# and is written back WHOLE at close, so opening an existing log there for
+# writing would replace it with this one line.
+fn sec_write_audit_log(event_type, agent_id, details, now): i64 {
+    var path = sec_ui_audit_log_path();
+    var line = sec_audit_line(event_type, agent_id, details, now);
+    if (line == 0) { return sec_audit_warn(path); }
+    var n = strlen(line);
+    var buf = alloc(n + 1);
+    if (buf == 0) { return sec_audit_warn(path); }
+    memcpy(buf, line, n);
+    store8(buf + n, 10);
+
+    #ifdef CYRIUS_TARGET_AGNOS
+    var probe = file_open(path, O_RDONLY, 0);
+    if (probe >= 0) {
+        var seekable = xlseek(probe, 0, 2);
+        file_close(probe);
+        if (seekable < 0) { return sec_audit_warn(path); }
+    }
+    #endif
+    var fd = file_open(path, O_WRONLY | O_CREAT | O_APPEND, 0x1B6);    # 0666, Rust's default
+    if (fd < 0) { return sec_audit_warn(path); }
+    #ifdef CYRIUS_TARGET_AGNOS
+    xlseek(fd, 0, 2);
+    #endif
+    var off = 0;
+    var torn = 0;
+    while (off <= n) {
+        var w = file_write(fd, buf + off, n + 1 - off);
+        if (w <= 0) {
+            torn = 1;
+            break;
+        }
+        off = off + w;
+    }
+    file_close(fd);
+    if (torn == 1) { return sec_audit_warn(path); }
     return 0;
 }
 

@@ -42,6 +42,370 @@ fn t_register_test_plugin(h, now): i64 {
     return id;
 }
 
+# --- PluginMessage JSON helpers ---------------------------------------------
+# Expected texts are serde_json 1.0.149's own output for the same Rust values
+# (rust-old/Cargo.lock's serde 1.0.228 / serde_json 1.0.149, run as an oracle).
+
+# 1 when plug_msg_to_json(msg) is exactly `expected` (a cstr).
+fn t_enc_is(msg, expected): i64 {
+    var j = plug_msg_to_json(msg);
+    if (j == 0) { return 0; }
+    return str_eq_cstr(j, expected);
+}
+
+# A decode result that is safe to read: a refused decode becomes a dummy of
+# kind -1 with empty fields, so a broken codec fails assertions, not the suite.
+fn t_safe(m): i64 {
+    if (m > 0) { return m; }
+    var d = plug_msg_input_event(str_from(""), str_from(""));
+    store64(d + M_KIND, 0 - 1);
+    store64(d + M_PTR, map_new_str());
+    return d;
+}
+
+# plug_msg_from_json over a cstr, made safe to read.
+fn t_dec(text): i64 { return t_safe(plug_msg_from_json(str_from(text))); }
+
+# from_json(to_json(msg)), made safe to read.
+fn t_back(msg): i64 { return t_safe(plug_msg_from_json(plug_msg_to_json(msg))); }
+
+# str_eq_cstr that answers 0 for a 0 Str.
+fn t_seq(s, expected): i64 {
+    if (s == 0) { return 0; }
+    return str_eq_cstr(s, expected);
+}
+
+# 1 when from_json refuses `text` with the Serialization code.
+fn t_refused(text): i64 {
+    var r = plug_msg_from_json(str_from(text));
+    if (r == 0 - PLG_Err.PLG_ERR_SERIALIZATION) { return 1; }
+    return 0;
+}
+
+# rust: from_json(to_json(msg)) == msg.
+fn t_rt(msg): i64 {
+    var j = plug_msg_to_json(msg);
+    if (j == 0) { return 0; }
+    var back = plug_msg_from_json(j);
+    if (back <= 0) { return 0; }
+    return plug_msg_eq(back, msg);
+}
+
+# {"type":"Heartbeat","x":[[...]]} with n nested arrays (n + 1 containers).
+fn t_nested(n): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"type\":\"Heartbeat\",\"x\":");
+    var i = 0;
+    while (i < n) { str_builder_add_cstr(sb, "["); i = i + 1; }
+    var k = 0;
+    while (k < n) { str_builder_add_cstr(sb, "]"); k = k + 1; }
+    str_builder_add_cstr(sb, "}");
+    return str_builder_build(sb);
+}
+
+fn t_palette2(k1, v1, k2, v2): i64 {
+    var m = map_new_str();
+    map_set(m, str_from(k1), str_from(v1));
+    map_set(m, str_from(k2), str_from(v2));
+    return m;
+}
+
+# rust tests: the seven test_message_*_roundtrip + test_message_from_invalid_json
+# (plugin_host.rs:758-848). Vacuous while the codec returned 0; real now.
+fn t_json_roundtrip(): i64 {
+    test_group("plugin_host — message JSON roundtrip (rust tests)");
+    var hb = plug_msg_heartbeat();
+    var hb_back = t_back(hb);
+    assert_eq(plug_msg_kind(hb_back), PLG_MsgKind.PLG_MSG_HEARTBEAT, "heartbeat roundtrip parses Heartbeat");
+    assert_eq(t_rt(hb), 1, "heartbeat roundtrip");
+
+    var caps = vec_new();
+    vec_push(caps, PLG_Capability.PLG_CAP_WAYLAND_SURFACE);
+    vec_push(caps, PLG_Capability.PLG_CAP_INPUT_EVENTS);
+    assert_eq(t_rt(plug_msg_init(PLG_Type.PLG_TYPE_PANEL_WIDGET, str_from("2.0.0"), caps)), 1, "init roundtrip");
+
+    assert_eq(t_rt(plug_msg_surface_grant(42, 100, 200, 800, 600)), 1, "surface_grant roundtrip");
+
+    var pal = t_palette2("bg", "#1e1e2e", "fg", "#cdd6f4");
+    var tu = plug_msg_theme_update(pal);
+    assert_eq(t_rt(tu), 1, "theme_update roundtrip");
+    var tu_back = t_back(tu);
+    assert_eq(map_size(plug_msg_theme_palette(tu_back)), 2, "theme_update palette keeps 2 entries");
+    assert_eq(t_seq(map_get(plug_msg_theme_palette(tu_back), str_from("fg")), "#cdd6f4"), 1, "theme_update fg value");
+
+    var sd_back = t_back(plug_msg_shutdown());
+    assert_eq(plug_msg_kind(sd_back), PLG_MsgKind.PLG_MSG_SHUTDOWN, "shutdown roundtrip parses Shutdown");
+    assert_eq(t_rt(plug_msg_shutdown()), 1, "shutdown roundtrip");
+
+    assert_eq(t_refused("not json at all"), 1, "from invalid json is Err(Serialization)");
+
+    assert_eq(t_rt(plug_msg_render_request(7)), 1, "render_request roundtrip");
+    assert_eq(t_rt(plug_msg_render_response(7, str_from("argb8888"), 1920, 1080)), 1, "render_response roundtrip");
+
+    var ie = plug_msg_input_event(str_from("key_press"), str_from("{\"key\":\"Enter\"}"));
+    assert_eq(t_rt(ie), 1, "input_event roundtrip");
+    var ie_back = t_back(ie);
+    assert_eq(t_seq(plug_msg_input_data(ie_back), "{\"key\":\"Enter\"}"), 1, "input_event data survives its quotes");
+
+    # Values only the full u64 / i32 / u32 ranges hold.
+    assert_eq(t_rt(plug_msg_surface_grant(0 - 1, 0 - 2147483648, 2147483647, 4294967295, 0)), 1, "extreme surface_grant roundtrip");
+    var nul = alloc(3);
+    store8(nul, 97);
+    store8(nul + 1, 0);
+    store8(nul + 2, 98);
+    assert_eq(t_rt(plug_msg_input_event(str_new(nul, 3), str_from(""))), 1, "a string holding U+0000 roundtrips");
+    assert_eq(t_rt(plug_msg_theme_update(map_new_str())), 1, "empty palette roundtrip");
+    return 0;
+}
+
+# to_json's exact text, per variant, against serde_json's.
+fn t_json_encode(): i64 {
+    test_group("plugin_host — to_json is serde_json's text");
+    assert_eq(t_enc_is(plug_msg_heartbeat(), "{\"type\":\"Heartbeat\"}"), 1, "Heartbeat");
+    assert_eq(t_enc_is(plug_msg_shutdown(), "{\"type\":\"Shutdown\"}"), 1, "Shutdown");
+    var caps = vec_new();
+    vec_push(caps, PLG_Capability.PLG_CAP_WAYLAND_SURFACE);
+    vec_push(caps, PLG_Capability.PLG_CAP_INPUT_EVENTS);
+    var init = plug_msg_init(PLG_Type.PLG_TYPE_PANEL_WIDGET, str_from("2.0.0"), caps);
+    assert_eq(t_enc_is(init, "{\"type\":\"Init\",\"plugin_type\":\"PanelWidget\",\"version\":\"2.0.0\",\"capabilities\":[\"WaylandSurface\",\"InputEvents\"]}"), 1, "Init");
+    var caps_all = vec_new();
+    vec_push(caps_all, PLG_Capability.PLG_CAP_FILESYSTEM_READ);
+    vec_push(caps_all, PLG_Capability.PLG_CAP_NETWORK_ACCESS);
+    vec_push(caps_all, PLG_Capability.PLG_CAP_OVERLAY);
+    var init2 = plug_msg_init(PLG_Type.PLG_TYPE_DESKTOP_APP, str_from(""), caps_all);
+    assert_eq(t_enc_is(init2, "{\"type\":\"Init\",\"plugin_type\":\"DesktopApp\",\"version\":\"\",\"capabilities\":[\"FilesystemRead\",\"NetworkAccess\",\"Overlay\"]}"), 1, "Init: other names, empty version");
+    var init3 = plug_msg_init(PLG_Type.PLG_TYPE_WINDOW_DECORATOR, str_from("1"), 0);
+    assert_eq(t_enc_is(init3, "{\"type\":\"Init\",\"plugin_type\":\"WindowDecorator\",\"version\":\"1\",\"capabilities\":[]}"), 1, "Init: a 0 capabilities vec is []");
+    assert_eq(t_enc_is(plug_msg_surface_grant(42, 100, 200, 800, 600), "{\"type\":\"SurfaceGrant\",\"surface_id\":42,\"x\":100,\"y\":200,\"width\":800,\"height\":600}"), 1, "SurfaceGrant");
+    assert_eq(t_enc_is(plug_msg_surface_grant(0 - 1, 0 - 2147483648, 2147483647, 4294967295, 0), "{\"type\":\"SurfaceGrant\",\"surface_id\":18446744073709551615,\"x\":-2147483648,\"y\":2147483647,\"width\":4294967295,\"height\":0}"), 1, "SurfaceGrant at every range edge (u64 max)");
+    var i64min = 0 - 9223372036854775807 - 1;
+    assert_eq(t_enc_is(plug_msg_render_request(i64min), "{\"type\":\"RenderRequest\",\"surface_id\":9223372036854775808}"), 1, "surface_id 2^63 prints unsigned");
+    assert_eq(t_enc_is(plug_msg_render_request(9223372036854775807), "{\"type\":\"RenderRequest\",\"surface_id\":9223372036854775807}"), 1, "surface_id 2^63-1");
+    assert_eq(t_enc_is(plug_msg_render_request(7), "{\"type\":\"RenderRequest\",\"surface_id\":7}"), 1, "RenderRequest");
+    assert_eq(t_enc_is(plug_msg_render_response(7, str_from("argb8888"), 1920, 1080), "{\"type\":\"RenderResponse\",\"surface_id\":7,\"format\":\"argb8888\",\"width\":1920,\"height\":1080}"), 1, "RenderResponse");
+    var ie = plug_msg_input_event(str_from("key_press"), str_from("{\"key\":\"Enter\"}"));
+    assert_eq(t_enc_is(ie, "{\"type\":\"InputEvent\",\"event_type\":\"key_press\",\"data\":\"{\\\"key\\\":\\\"Enter\\\"}\"}"), 1, "InputEvent escapes quotes");
+    # serde's escaper: short escapes for " \ BS FF LF CR TAB; \u00xx lowercase for
+    # the other controls; '/', DEL and non-ASCII raw.
+    var esc = plug_msg_input_event(str_from("\"\\/\b\f\n\r\t"), str_from("\x01\x1f\x7f\xc3\xa9\xe2\x80\xa8"));
+    assert_eq(t_enc_is(esc, "{\"type\":\"InputEvent\",\"event_type\":\"\\\"\\\\/\\b\\f\\n\\r\\t\",\"data\":\"\\u0001\\u001f\x7f\xc3\xa9\xe2\x80\xa8\"}"), 1, "InputEvent: serde's escape set exactly");
+    var nul = alloc(3);
+    store8(nul, 97);
+    store8(nul + 1, 0);
+    store8(nul + 2, 98);
+    assert_eq(t_enc_is(plug_msg_input_event(str_new(nul, 3), str_from("")), "{\"type\":\"InputEvent\",\"event_type\":\"a\\u0000b\",\"data\":\"\"}"), 1, "U+0000 is \\u0000");
+    var pal = t_palette2("fg", "#cdd6f4", "bg", "#1e1e2e");
+    map_set(pal, str_from("accent"), str_from("#89b4fa"));
+    map_set(pal, str_from("b"), str_from("x"));
+    assert_eq(t_enc_is(plug_msg_theme_update(pal), "{\"type\":\"ThemeUpdate\",\"palette\":{\"accent\":\"#89b4fa\",\"b\":\"x\",\"bg\":\"#1e1e2e\",\"fg\":\"#cdd6f4\"}}"), 1, "ThemeUpdate: keys in ascending byte order");
+    assert_eq(t_enc_is(plug_msg_theme_update(0), "{\"type\":\"ThemeUpdate\",\"palette\":{}}"), 1, "ThemeUpdate: a 0 palette is {}");
+
+    # A message no Rust PluginMessage could be is refused (0), not written.
+    assert_eq(plug_msg_to_json(0), 0, "to_json(0) is 0");
+    assert_eq(plug_msg_to_json(plug_msg_surface_grant(1, 2147483648, 0, 0, 0)), 0, "x past i32 is refused");
+    assert_eq(plug_msg_to_json(plug_msg_surface_grant(1, 0, 0 - 2147483649, 0, 0)), 0, "y below i32 is refused");
+    assert_eq(plug_msg_to_json(plug_msg_surface_grant(1, 0, 0, 0 - 1, 0)), 0, "negative width is refused");
+    assert_eq(plug_msg_to_json(plug_msg_render_response(1, str_from("f"), 1, 4294967296)), 0, "height past u32 is refused");
+    assert_eq(plug_msg_to_json(plug_msg_init(7, str_from("1"), 0)), 0, "bad plugin_type is refused");
+    var bad_caps = vec_new();
+    vec_push(bad_caps, 5);
+    assert_eq(plug_msg_to_json(plug_msg_init(0, str_from("1"), bad_caps)), 0, "bad capability is refused");
+    assert_eq(plug_msg_to_json(plug_msg_init(0, 0, 0)), 0, "a 0 version is refused");
+    assert_eq(plug_msg_to_json(plug_msg_input_event(str_from("k"), 0)), 0, "a 0 data is refused");
+    var cmap = map_new();
+    map_set(cmap, "bg", str_from("#000"));
+    assert_eq(plug_msg_to_json(plug_msg_theme_update(cmap)), 0, "a cstr-keyed palette is refused");
+    assert_eq(plug_msg_to_json(plug_msg_alloc(99)), 0, "an unknown kind is refused");
+    return 0;
+}
+
+# rust #[derive(PartialEq)].
+fn t_json_eq(): i64 {
+    test_group("plugin_host — message equality");
+    assert_eq(plug_msg_eq(plug_msg_heartbeat(), plug_msg_heartbeat()), 1, "Heartbeat == Heartbeat");
+    assert_eq(plug_msg_eq(plug_msg_heartbeat(), plug_msg_shutdown()), 0, "Heartbeat != Shutdown");
+    assert_eq(plug_msg_eq(plug_msg_render_request(7), plug_msg_render_request(8)), 0, "surface 7 != 8");
+    assert_eq(plug_msg_eq(plug_msg_surface_grant(1, 2, 3, 4, 5), plug_msg_surface_grant(1, 2, 3, 4, 6)), 0, "height differs");
+    assert_eq(plug_msg_eq(plug_msg_render_response(7, str_from("a"), 1, 1), plug_msg_render_response(7, str_from("b"), 1, 1)), 0, "format differs");
+    assert_eq(plug_msg_eq(plug_msg_input_event(str_from("k"), str_from("a")), plug_msg_input_event(str_from("k"), str_from("b"))), 0, "data differs");
+    var c1 = vec_new();
+    vec_push(c1, PLG_Capability.PLG_CAP_OVERLAY);
+    var c2 = vec_new();
+    vec_push(c2, PLG_Capability.PLG_CAP_INPUT_EVENTS);
+    assert_eq(plug_msg_eq(plug_msg_init(0, str_from("1"), c1), plug_msg_init(0, str_from("1"), c2)), 0, "capabilities differ");
+    assert_eq(plug_msg_eq(plug_msg_init(0, str_from("1"), c1), plug_msg_init(1, str_from("1"), c1)), 0, "plugin_type differs");
+    var p1 = t_palette2("bg", "#1", "fg", "#2");
+    var p2 = t_palette2("fg", "#2", "bg", "#1");
+    var p3 = t_palette2("bg", "#1", "fg", "#3");
+    assert_eq(plug_msg_eq(plug_msg_theme_update(p1), plug_msg_theme_update(p2)), 1, "palette equality ignores insertion order");
+    assert_eq(plug_msg_eq(plug_msg_theme_update(p1), plug_msg_theme_update(p3)), 0, "palette value differs");
+    assert_eq(plug_msg_eq(plug_msg_theme_update(p1), plug_msg_theme_update(map_new_str())), 0, "palette size differs");
+    return 0;
+}
+
+# from_json accepts what serde_json accepts, with serde's values.
+fn t_json_decode_accepts(): i64 {
+    test_group("plugin_host — from_json accepts what serde does");
+    var a = t_dec("{\"surface_id\":7,\"type\":\"RenderRequest\"}");
+    assert_eq(plug_msg_kind(a), PLG_MsgKind.PLG_MSG_RENDER_REQUEST, "the tag may come last");
+    assert_eq(plug_msg_req_surface(a), 7, "  and the field still reads 7");
+    var b = t_dec("{\"type\":\"RenderRequest\",\"surface_id\":7,\"extra\":\"x\",\"more\":[1,{\"a\":null}]}");
+    assert_eq(plug_msg_req_surface(b), 7, "unknown fields are ignored");
+    assert_eq(plug_msg_kind(t_dec("{\"type\":\"Shutdown\",\"x\":1,\"x\":2}")), PLG_MsgKind.PLG_MSG_SHUTDOWN, "a unit variant ignores its body");
+    assert_eq(plug_msg_kind(t_dec(" \t\r\n{ \"type\" : \"Heartbeat\" } \n")), PLG_MsgKind.PLG_MSG_HEARTBEAT, "JSON whitespace around tokens");
+    assert_eq(plug_msg_kind(t_dec("{\"\\u0074ype\":\"Shutdown\"}")), PLG_MsgKind.PLG_MSG_SHUTDOWN, "an escaped key is the decoded key");
+    assert_eq(plug_msg_req_surface(t_dec("{\"type\":\"RenderRequest\",\"surface\\u005fid\":5}")), 5, "an escaped field name matches");
+
+    # serde reads an internally tagged enum from a sequence too: tag, then fields.
+    assert_eq(plug_msg_req_surface(t_dec("[\"RenderRequest\",7]")), 7, "sequence form: RenderRequest");
+    var sg = t_dec("[\"SurfaceGrant\",1,2,3,4,5]");
+    assert_eq(plug_msg_grant_y(sg), 3, "sequence form: fields by position");
+    assert_eq(plug_msg_grant_h(sg), 5, "sequence form: last field");
+    assert_eq(plug_msg_kind(t_dec("[\"Heartbeat\"]")), PLG_MsgKind.PLG_MSG_HEARTBEAT, "sequence form: a unit variant");
+
+    # Integers: the whole u64 / i32 / u32 range.
+    assert_eq(plug_msg_req_surface(t_dec("{\"type\":\"RenderRequest\",\"surface_id\":18446744073709551615}")), 0 - 1, "surface_id u64 max is the all-ones bit pattern");
+    var i64min = 0 - 9223372036854775807 - 1;
+    assert_eq(plug_msg_req_surface(t_dec("{\"type\":\"RenderRequest\",\"surface_id\":9223372036854775808}")), i64min, "surface_id 2^63");
+    assert_eq(plug_msg_req_surface(t_dec("{\"type\":\"RenderRequest\",\"surface_id\":0}")), 0, "surface_id 0");
+    var edge = t_dec("{\"type\":\"SurfaceGrant\",\"surface_id\":42,\"x\":-2147483648,\"y\":2147483647,\"width\":4294967295,\"height\":0}");
+    assert_eq(plug_msg_grant_x(edge), 0 - 2147483648, "x = i32 min");
+    assert_eq(plug_msg_grant_y(edge), 2147483647, "y = i32 max");
+    assert_eq(plug_msg_grant_w(edge), 4294967295, "width = u32 max");
+    assert_eq(plug_msg_grant_x(t_dec("{\"type\":\"SurfaceGrant\",\"surface_id\":1,\"x\":-1,\"y\":0,\"width\":0,\"height\":0}")), 0 - 1, "x = -1");
+
+    # Enums: the variant name, or a one-entry map whose value is null or {}.
+    var ini = t_dec("{\"type\":\"Init\",\"plugin_type\":{\"PanelWidget\":null},\"version\":\"2\",\"capabilities\":[{\"Overlay\":{}},\"Overlay\"]}");
+    assert_eq(plug_msg_init_type(ini), PLG_Type.PLG_TYPE_PANEL_WIDGET, "plugin_type as {\"PanelWidget\":null}");
+    assert_eq(vec_len(plug_msg_init_caps(ini)), 2, "two capabilities");
+    assert_eq(vec_get(plug_msg_init_caps(ini), 0), PLG_Capability.PLG_CAP_OVERLAY, "capability as {\"Overlay\":{}}");
+
+    # Palette: a repeated key keeps the last value (HashMap::insert).
+    var th = t_dec("{\"type\":\"ThemeUpdate\",\"palette\":{\"bg\":\"#1\",\"bg\":\"#2\"}}");
+    assert_eq(map_size(plug_msg_theme_palette(th)), 1, "repeated palette key: one entry");
+    assert_eq(t_seq(map_get(plug_msg_theme_palette(th), str_from("bg")), "#2"), 1, "  holding the last value");
+
+    # String decoding: escapes, surrogate pairs, raw UTF-8, raw DEL.
+    var ie = t_dec("{\"type\":\"InputEvent\",\"event_type\":\"a\\/b\\u00e9\\ud83d\\ude00\",\"data\":\"\\u0000\"}");
+    assert_eq(t_seq(plug_msg_input_type(ie), "a/b\xc3\xa9\xf0\x9f\x98\x80"), 1, "\\/ \\u00e9 and a surrogate pair decode to UTF-8");
+    assert_eq(str_len(plug_msg_input_data(ie)), 1, "\\u0000 is one byte");
+    assert_eq(load8(str_data(plug_msg_input_data(ie))), 0, "  and it is NUL");
+    var raw = t_dec("{\"type\":\"InputEvent\",\"event_type\":\"\xc3\xa9\x7f\",\"data\":\"\\uDBFF\\uDFFF\"}");
+    assert_eq(t_seq(plug_msg_input_type(raw), "\xc3\xa9\x7f"), 1, "raw UTF-8 and DEL pass through");
+    assert_eq(t_seq(plug_msg_input_data(raw), "\xf4\x8f\xbf\xbf"), 1, "uppercase hex, U+10FFFF");
+
+    # Ignored values serde_json still has to read.
+    assert_eq(plug_msg_kind(t_dec("{\"type\":\"Heartbeat\",\"a\":1e308,\"b\":-0.0,\"c\":1E-2,\"d\":1e-400,\"e\":18446744073709551616,\"f\":true,\"g\":false}")), PLG_MsgKind.PLG_MSG_HEARTBEAT, "floats, -0.0, a past-u64 integer, booleans");
+    assert_eq(plug_msg_kind(t_safe(plug_msg_from_json(t_nested(126)))), PLG_MsgKind.PLG_MSG_HEARTBEAT, "127 nested containers (serde_json's limit)");
+    return 0;
+}
+
+# from_json refuses what serde_json refuses: Err(Serialization).
+fn t_json_decode_refuses(): i64 {
+    test_group("plugin_host — from_json refuses what serde does");
+    assert_eq(plug_msg_from_json(0), 0 - PLG_Err.PLG_ERR_SERIALIZATION, "a 0 Str");
+    assert_eq(t_refused(""), 1, "empty input");
+    assert_eq(t_refused("   "), 1, "whitespace only");
+    assert_eq(t_refused("\"Heartbeat\""), 1, "a bare string is not the enum");
+    assert_eq(t_refused("null"), 1, "null");
+    assert_eq(t_refused("42"), 1, "a number");
+    assert_eq(t_refused("{}"), 1, "missing type");
+    assert_eq(t_refused("[]"), 1, "missing type (sequence)");
+    assert_eq(t_refused("{\"TYPE\":\"Heartbeat\"}"), 1, "the tag name is case-sensitive");
+
+    # The tag.
+    assert_eq(t_refused("{\"type\":\"heartbeat\"}"), 1, "variant names are case-sensitive");
+    assert_eq(t_refused("{\"type\":\"Nope\"}"), 1, "unknown variant");
+    assert_eq(t_refused("{\"type\":0}"), 1, "an integer tag");
+    assert_eq(t_refused("{\"type\":null}"), 1, "a null tag");
+    assert_eq(t_refused("[1]"), 1, "an integer tag (sequence)");
+    assert_eq(t_refused("{\"type\":\"Heartbeat\",\"type\":\"Heartbeat\"}"), 1, "a repeated tag");
+    assert_eq(t_refused("{\"type\":\"Shutdown\",\"\\u0074ype\":\"Heartbeat\"}"), 1, "a repeated tag, escaped");
+
+    # Sequence form arity.
+    assert_eq(t_refused("[\"Heartbeat\",1]"), 1, "a unit variant takes no fields");
+    assert_eq(t_refused("[\"RenderRequest\"]"), 1, "too few fields");
+    assert_eq(t_refused("[\"RenderRequest\",7,8]"), 1, "too many fields");
+
+    # Fields: missing, repeated, wrong JSON type.
+    assert_eq(t_refused("{\"type\":\"RenderRequest\"}"), 1, "missing surface_id");
+    assert_eq(t_refused("{\"type\":\"SurfaceGrant\",\"surface_id\":42,\"x\":0,\"y\":0,\"width\":1}"), 1, "missing height");
+    assert_eq(t_refused("{\"type\":\"RenderRequest\",\"surface_id\":7,\"surface_id\":8}"), 1, "a repeated field");
+    assert_eq(t_refused("{\"type\":\"RenderRequest\",\"surface_id\":\"7\"}"), 1, "a string for u64");
+    assert_eq(t_refused("{\"type\":\"RenderRequest\",\"surface_id\":null}"), 1, "null for u64");
+    assert_eq(t_refused("{\"type\":\"RenderRequest\",\"surface_id\":true}"), 1, "a bool for u64");
+    assert_eq(t_refused("{\"type\":\"RenderRequest\",\"surface_id\":7.0}"), 1, "7.0 is a float");
+    assert_eq(t_refused("{\"type\":\"RenderRequest\",\"surface_id\":7e0}"), 1, "7e0 is a float");
+    assert_eq(t_refused("{\"type\":\"RenderRequest\",\"surface_id\":-0}"), 1, "-0 is a float to serde_json");
+    assert_eq(t_refused("{\"type\":\"SurfaceGrant\",\"surface_id\":1,\"x\":-0,\"y\":0,\"width\":0,\"height\":0}"), 1, "-0 is a float even for i32");
+    assert_eq(t_refused("{\"type\":\"InputEvent\",\"event_type\":1,\"data\":\"y\"}"), 1, "a number for String");
+    assert_eq(t_refused("{\"type\":\"ThemeUpdate\",\"palette\":[]}"), 1, "a sequence for the palette");
+    assert_eq(t_refused("{\"type\":\"ThemeUpdate\",\"palette\":null}"), 1, "null for the palette");
+    assert_eq(t_refused("{\"type\":\"ThemeUpdate\",\"palette\":{\"bg\":1}}"), 1, "a number palette value");
+
+    # Integer ranges.
+    assert_eq(t_refused("{\"type\":\"RenderRequest\",\"surface_id\":-1}"), 1, "negative u64");
+    assert_eq(t_refused("{\"type\":\"RenderRequest\",\"surface_id\":-9223372036854775808}"), 1, "i64 min for u64");
+    assert_eq(t_refused("{\"type\":\"RenderRequest\",\"surface_id\":18446744073709551616}"), 1, "u64 max + 1");
+    assert_eq(t_refused("{\"type\":\"SurfaceGrant\",\"surface_id\":42,\"x\":-2147483649,\"y\":0,\"width\":0,\"height\":0}"), 1, "x below i32");
+    assert_eq(t_refused("{\"type\":\"SurfaceGrant\",\"surface_id\":42,\"x\":0,\"y\":2147483648,\"width\":0,\"height\":0}"), 1, "y past i32");
+    assert_eq(t_refused("{\"type\":\"SurfaceGrant\",\"surface_id\":42,\"x\":0,\"y\":0,\"width\":4294967296,\"height\":0}"), 1, "width past u32");
+    assert_eq(t_refused("{\"type\":\"SurfaceGrant\",\"surface_id\":42,\"x\":0,\"y\":0,\"width\":-1,\"height\":0}"), 1, "negative width");
+    assert_eq(t_refused("{\"type\":\"RenderResponse\",\"surface_id\":7,\"format\":\"f\",\"width\":1,\"height\":-1}"), 1, "negative height");
+
+    # Enums.
+    assert_eq(t_refused("{\"type\":\"Init\",\"plugin_type\":\"panelwidget\",\"version\":\"2\",\"capabilities\":[]}"), 1, "unknown plugin_type");
+    assert_eq(t_refused("{\"type\":\"Init\",\"plugin_type\":1,\"version\":\"2\",\"capabilities\":[]}"), 1, "plugin_type by index");
+    assert_eq(t_refused("{\"type\":\"Init\",\"plugin_type\":[\"Theme\"],\"version\":\"2\",\"capabilities\":[]}"), 1, "plugin_type in a sequence");
+    assert_eq(t_refused("{\"type\":\"Init\",\"plugin_type\":{},\"version\":\"2\",\"capabilities\":[]}"), 1, "plugin_type: an empty map");
+    assert_eq(t_refused("{\"type\":\"Init\",\"plugin_type\":{\"Theme\":null,\"Overlay\":null},\"version\":\"2\",\"capabilities\":[]}"), 1, "plugin_type: a two-entry map");
+    assert_eq(t_refused("{\"type\":\"Init\",\"plugin_type\":{\"Theme\":[]},\"version\":\"2\",\"capabilities\":[]}"), 1, "plugin_type: a non-unit value");
+    assert_eq(t_refused("{\"type\":\"Init\",\"plugin_type\":{\"Theme\":{\"a\":1}},\"version\":\"2\",\"capabilities\":[]}"), 1, "plugin_type: a non-empty map value");
+    assert_eq(t_refused("{\"type\":\"Init\",\"plugin_type\":\"Theme\",\"version\":\"2\",\"capabilities\":[\"Bogus\"]}"), 1, "unknown capability");
+    assert_eq(t_refused("{\"type\":\"Init\",\"plugin_type\":\"Theme\",\"version\":\"2\",\"capabilities\":\"x\"}"), 1, "capabilities not a sequence");
+    assert_eq(t_refused("{\"type\":\"Init\",\"plugin_type\":\"Theme\",\"version\":2,\"capabilities\":[]}"), 1, "version not a string");
+
+    # Strings.
+    assert_eq(t_refused("{\"type\":\"InputEvent\",\"event_type\":\"a\tb\",\"data\":\"\"}"), 1, "a raw control character");
+    assert_eq(t_refused("{\"type\":\"InputEvent\",\"event_type\":\"\\ud800\",\"data\":\"\"}"), 1, "a lone high surrogate");
+    assert_eq(t_refused("{\"type\":\"InputEvent\",\"event_type\":\"\\ud800\\u0041\",\"data\":\"\"}"), 1, "a high surrogate without its low half");
+    assert_eq(t_refused("{\"type\":\"InputEvent\",\"event_type\":\"\\udc00\",\"data\":\"\"}"), 1, "a lone low surrogate");
+    assert_eq(t_refused("{\"type\":\"InputEvent\",\"event_type\":\"\\u12\",\"data\":\"\"}"), 1, "a short \\u");
+    assert_eq(t_refused("{\"type\":\"InputEvent\",\"event_type\":\"\\u12G4\",\"data\":\"\"}"), 1, "a bad hex digit");
+    assert_eq(t_refused("{\"type\":\"InputEvent\",\"event_type\":\"\\x\",\"data\":\"\"}"), 1, "an unknown escape");
+    assert_eq(t_refused("{\"type\":\"InputEvent\",\"event_type\":\"\xff\",\"data\":\"\"}"), 1, "ill-formed UTF-8 (a &str cannot hold it)");
+    assert_eq(t_refused("{\"type\":\"InputEvent\",\"event_type\":\"\xc0\x80\",\"data\":\"\"}"), 1, "an overlong UTF-8 form");
+    assert_eq(t_refused("{\"type\":\"InputEvent\",\"event_type\":\"\xed\xa0\x80\",\"data\":\"\"}"), 1, "a UTF-8-encoded surrogate");
+    assert_eq(t_refused("{\"type\":\"InputEvent\",\"event_type\":\"x"), 1, "an unterminated string");
+
+    # Syntax.
+    assert_eq(t_refused("{\"type\":\"Heartbeat\""), 1, "EOF in an object");
+    assert_eq(t_refused("{\"type\" \"Heartbeat\"}"), 1, "missing colon");
+    assert_eq(t_refused("{\"type\":\"Heartbeat\",}"), 1, "trailing comma in an object");
+    assert_eq(t_refused("{\"type\":\"Heartbeat\",\"x\":[1,]}"), 1, "trailing comma in an array");
+    assert_eq(t_refused("{'type':\"Heartbeat\"}"), 1, "a single-quoted key");
+    assert_eq(t_refused("{\"type\":\"Heartbeat\"}x"), 1, "trailing characters");
+    assert_eq(t_refused("{\"type\":\"Heartbeat\"}{}"), 1, "a second value");
+    assert_eq(t_refused("\xef\xbb\xbf{\"type\":\"Heartbeat\"}"), 1, "a leading BOM");
+    assert_eq(t_refused("\x0c{\"type\":\"Heartbeat\"}"), 1, "form feed is not JSON whitespace");
+    assert_eq(t_refused("{\"type\":\"Heartbeat\",\"x\":nul}"), 1, "nul");
+    assert_eq(t_refused("{\"type\":\"Heartbeat\",\"x\":tru}"), 1, "tru");
+    assert_eq(t_refused("{\"type\":\"Heartbeat\",\"x\":True}"), 1, "True");
+    assert_eq(t_refused("{\"type\":\"Heartbeat\",\"x\":07}"), 1, "a leading zero");
+    assert_eq(t_refused("{\"type\":\"Heartbeat\",\"x\":-00}"), 1, "a leading zero after '-'");
+    assert_eq(t_refused("{\"type\":\"Heartbeat\",\"x\":01.5}"), 1, "a leading zero before a fraction");
+    assert_eq(t_refused("{\"type\":\"Heartbeat\",\"x\":+1}"), 1, "a '+' sign");
+    assert_eq(t_refused("{\"type\":\"Heartbeat\",\"x\":.5}"), 1, "no integer part");
+    assert_eq(t_refused("{\"type\":\"Heartbeat\",\"x\":1.}"), 1, "no fraction digits");
+    assert_eq(t_refused("{\"type\":\"Heartbeat\",\"x\":1e}"), 1, "no exponent digits");
+    assert_eq(t_refused("{\"type\":\"Heartbeat\",\"x\":1e+}"), 1, "no exponent digits after the sign");
+    assert_eq(t_refused("{\"type\":\"Heartbeat\",\"x\":-}"), 1, "a lone '-'");
+    assert_eq(t_refused("{\"type\":\"Heartbeat\",\"x\":1e400}"), 1, "a float past f64 (number out of range)");
+    assert_eq(t_refused("{\"type\":\"Heartbeat\",\"x\":-1e400}"), 1, "a negative float past f64");
+    assert_eq(plug_msg_from_json(t_nested(127)), 0 - PLG_Err.PLG_ERR_SERIALIZATION, "128 nested containers (recursion limit)");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     var now = 1000000;   # fixed epoch stand-in for Utc::now.
@@ -233,10 +597,10 @@ fn main() {
     var caps_m = vec_new();
     vec_push(caps_m, PLG_Capability.PLG_CAP_WAYLAND_SURFACE);
     vec_push(caps_m, PLG_Capability.PLG_CAP_INPUT_EVENTS);
-    var m_init = plug_msg_init(PLG_Type.PLG_TYPE_PANEL_WIDGET, "2.0.0", caps_m);
+    var m_init = plug_msg_init(PLG_Type.PLG_TYPE_PANEL_WIDGET, str_from("2.0.0"), caps_m);
     assert_eq(plug_msg_kind(m_init), PLG_MsgKind.PLG_MSG_INIT, "init kind");
     assert_eq(plug_msg_init_type(m_init), PLG_Type.PLG_TYPE_PANEL_WIDGET, "init plugin_type");
-    assert_eq(t_cstr_eq(plug_msg_init_version(m_init), "2.0.0"), 1, "init version 2.0.0");
+    assert_eq(str_eq_cstr(plug_msg_init_version(m_init), "2.0.0"), 1, "init version 2.0.0");
     assert_eq(vec_len(plug_msg_init_caps(m_init)), 2, "init 2 capabilities");
 
     var m_sg = plug_msg_surface_grant(42, 100, 200, 800, 600);
@@ -250,20 +614,26 @@ fn main() {
     var m_req = plug_msg_render_request(7);
     assert_eq(plug_msg_kind(m_req), PLG_MsgKind.PLG_MSG_RENDER_REQUEST, "render_request kind");
     assert_eq(plug_msg_req_surface(m_req), 7, "render_request surface 7");
-    var m_resp = plug_msg_render_response(7, "argb8888", 1920, 1080);
+    var m_resp = plug_msg_render_response(7, str_from("argb8888"), 1920, 1080);
     assert_eq(plug_msg_kind(m_resp), PLG_MsgKind.PLG_MSG_RENDER_RESPONSE, "render_response kind");
     assert_eq(plug_msg_resp_surface(m_resp), 7, "render_response surface 7");
-    assert_eq(t_cstr_eq(plug_msg_resp_format(m_resp), "argb8888"), 1, "render_response format");
+    assert_eq(str_eq_cstr(plug_msg_resp_format(m_resp), "argb8888"), 1, "render_response format");
     assert_eq(plug_msg_resp_w(m_resp), 1920, "render_response w 1920");
     assert_eq(plug_msg_resp_h(m_resp), 1080, "render_response h 1080");
 
-    var m_ie = plug_msg_input_event("key_press", "enter");
+    var m_ie = plug_msg_input_event(str_from("key_press"), str_from("enter"));
     assert_eq(plug_msg_kind(m_ie), PLG_MsgKind.PLG_MSG_INPUT_EVENT, "input_event kind");
-    assert_eq(t_cstr_eq(plug_msg_input_type(m_ie), "key_press"), 1, "input_event type");
-    assert_eq(t_cstr_eq(plug_msg_input_data(m_ie), "enter"), 1, "input_event data");
+    assert_eq(str_eq_cstr(plug_msg_input_type(m_ie), "key_press"), 1, "input_event type");
+    assert_eq(str_eq_cstr(plug_msg_input_data(m_ie), "enter"), 1, "input_event data");
 
     assert_eq(plug_msg_kind(plug_msg_heartbeat()), PLG_MsgKind.PLG_MSG_HEARTBEAT, "heartbeat kind");
     assert_eq(plug_msg_kind(plug_msg_shutdown()), PLG_MsgKind.PLG_MSG_SHUTDOWN, "shutdown kind");
+
+    t_json_roundtrip();
+    t_json_encode();
+    t_json_eq();
+    t_json_decode_accepts();
+    t_json_decode_refuses();
 
     return assert_summary();
 }

@@ -12,8 +12,481 @@ fn t_ok(x): i64 {
     return 0;
 }
 
+# ---------------------------------------------------------------------------
+# Audit-log + signal helpers.
+# ⛔ The suite writes only to a temp file it creates (t_audit_path) and signals
+# only children it forks itself. With a WRONG pid guard, what each bad pid
+# would reach:
+#   - main's preflight runs first and stops the suite, before any enforced
+#     call, if sec_pid_ok passes -1, 0, -2 or None, or None is not INT_MIN.
+#   - None (SEC_PID_NONE, INT_MIN) and 2^31: Linux truncates both to INT_MIN
+#     and kill answers -ESRCH. -2^31 - 1 and 0x7FFFFFFF truncate to i32::MAX,
+#     above PID_MAX_LIMIT (2^22): -ESRCH as well.
+#   - pid 0 is passed only in a forked child that first leaves the suite's
+#     process group (setpgid), so kill(0) reaches nobody but that child.
+#   - -1, -2 and 2^32 + 1 (which truncates to 1) go only to sec_pid_ok itself,
+#     never to an enforced call: no process group contains kill(-1).
+# ---------------------------------------------------------------------------
+var t_audit_path = 0;
+
+# The whole file as a cstr ("" when absent or empty).
+fn t_read(path): i64 {
+    var buf = alloc(65537);
+    var n = file_read_all(path, buf, 65536);
+    if (n < 0) { n = 0; }
+    store8(buf + n, 0);
+    return buf;
+}
+
+# A forked child that waits for a signal. -> its pid (> 0), or <= 0 on failure.
+fn t_fork_paused(): i64 {
+    var pid = sys_fork();
+    if (pid == 0) {
+        # ⚠ A child inherits dispositions and the mask: under `nohup` (SIGHUP ignored) or a runner
+        # that blocks signals, SIGHUP would never end it and a correct port would fail. Reset both.
+        signal_default(SIGHUP);
+        var none: i64[1];
+        store64(&none, 0);
+        sys_sigprocmask(SIG_SETMASK, &none, 0);
+        while (1 == 1) { sys_pause(); }
+        syscall(60, 0);
+    }
+    return pid;
+}
+
+# Reap child `pid` (> 0): -> the signal that ended it, 1000 + its exit code if it
+# exited, -1 if it was still running after ~2 s (it is then SIGKILLed and
+# reaped, so no test leaves a child behind), or -2 if waitpid failed (the pid is
+# no child of ours, so it is never signalled).
+fn t_reap(pid): i64 {
+    var st[8];
+    store64(&st, 0);
+    var tries = 0;
+    while (tries < 200) {
+        var r = sys_waitpid(pid, &st, 1);    # WNOHANG
+        if (r == pid) {
+            var status = load64(&st) & 0xFFFFFFFF;
+            if (WIFSIGNALED(status) == 1) { return WTERMSIG(status); }
+            return 1000 + WEXITSTATUS(status);
+        }
+        if (r < 0) { return 0 - 2; }
+        sleep_ms(10);
+        tries = tries + 1;
+    }
+    sys_kill(pid, 9);
+    sys_waitpid(pid, &st, 0);
+    return 0 - 1;
+}
+
+# ---------------------------------------------------------------------------
+# The kill's daimon DELETE. ⛔ A real daimon may run on this machine at 127.0.0.1:8090, and a
+# DELETE there deregisters a real agent: main points the client at a port of its own before any
+# kill, so no request from this suite can reach it.
+# ---------------------------------------------------------------------------
+var t_dport = 0;
+
+# A non-blocking TCP socket bound to 127.0.0.1 on an ephemeral port (left in t_dport), listening
+# when `listen` is 1. Bound and NOT listening, the port refuses every connect and nobody else can
+# take it while it stays open.
+fn t_bind_lo(listen): i64 {
+    var fd = sys_socket(AF_INET, SOCK_STREAM | 2048, 0);   # SOCK_NONBLOCK
+    if (fd < 0) { return 0 - 1; }
+    var sa[16];
+    memset(&sa, 0, 16);
+    store16(&sa, AF_INET);
+    store32(&sa + 4, 0x0100007F);
+    if (sys_bind(fd, &sa, 16) < 0) { return 0 - 1; }
+    if (listen == 1) { if (sys_listen(fd, 8) < 0) { return 0 - 1; } }
+    var sl[8];
+    store64(&sl, 16);
+    sys_getsockname(fd, &sa, &sl);
+    t_dport = (load8(&sa + 2) << 8) | load8(&sa + 3);
+    return fd;
+}
+
+fn t_now_us(): i64 { return clock_now_ns() / 1000; }
+
+fn t_sleep_1ms(): i64 {
+    var ts[16];
+    store64(&ts, 0);
+    store64(&ts + 8, 1000000);
+    sys_nanosleep(&ts, 0);
+    return 0;
+}
+
+# Run sec_ui_emergency_kill_agent (which == 0) or sec_ui_revoke_permission_enforced
+# (which == 1) with `pid` in a forked child of its own process group, which exits
+# with the result code (+ 100 per alert recorded). -> t_reap's answer: the child
+# dying of a signal means the port signalled its own group.
+fn t_effect_in_child(which, pid): i64 {
+    var child = sys_fork();
+    if (child == 0) {
+        if (syscall(109, 0, 0) != 0) { syscall(60, 99); }    # setpgid(0, 0)
+        var cu = sec_ui_new();
+        var code = 0;
+        if (which == 0) {
+            code = sec_ui_emergency_kill_agent(cu, 77, pid, 1760000000);
+        } else {
+            sec_ui_grant_permission_enforced(cu, 77, "agent", "file:read", 1760000000);
+            code = sec_ui_revoke_permission_enforced(cu, 77, "file:read", pid, 1760000000);
+        }
+        syscall(60, code + 100 * vec_len(sec_ui_alerts(cu)));
+    }
+    if (child <= 0) { return 0 - 3; }
+    return t_reap(child);
+}
+
+# ---------------------------------------------------------------------------
+# write_audit_log: the line, its timestamp and escaping, from fixed epochs.
+# ---------------------------------------------------------------------------
+fn t_audit_format(): i64 {
+    test_group("security_ui — audit line format");
+    assert_streq(sec_audit_rfc3339(0), "1970-01-01T00:00:00+00:00", "rfc3339 epoch");
+    assert_streq(sec_audit_rfc3339(1760000000), "2025-10-09T08:53:20+00:00", "rfc3339 1760000000");
+    assert_streq(sec_audit_rfc3339(951782400), "2000-02-29T00:00:00+00:00", "rfc3339 leap day 2000");
+    assert_streq(sec_audit_rfc3339(1709210096), "2024-02-29T12:34:56+00:00", "rfc3339 2024-02-29T12:34:56");
+    assert_streq(sec_audit_rfc3339(0 - 5), "1970-01-01T00:00:00+00:00", "rfc3339 negative clamps to epoch");
+
+    # serde_json (no preserve_order) sorts the keys and prints compact.
+    assert_streq(sec_audit_line("permission_granted", 700,
+        "Permission 'file:read' granted to 'test-agent'", 1760000000),
+      "{\"agent_id\":\"700\",\"details\":\"Permission 'file:read' granted to 'test-agent'\",\"event_type\":\"permission_granted\",\"source\":\"security-ui\",\"timestamp\":\"2025-10-09T08:53:20+00:00\"}",
+      "audit line: exact serde_json text");
+
+    # Escaping: " \ newline tab and a raw 0x01, as serde_json writes them.
+    var det = alloc(16);
+    memcpy(det, "a\"b\\c\nd", 7);
+    store8(det + 7, 1);
+    store8(det + 8, 9);
+    store8(det + 9, 101);    # 'e'
+    store8(det + 10, 0);
+    assert_streq(sec_audit_line("x", 0 - 3, det, 0),
+      "{\"agent_id\":\"-3\",\"details\":\"a\\\"b\\\\c\\nd\\u0001\\te\",\"event_type\":\"x\",\"source\":\"security-ui\",\"timestamp\":\"1970-01-01T00:00:00+00:00\"}",
+      "audit line: JSON escaping");
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# The writer: appends to the injected path; a failing path warns and the
+# caller still succeeds.
+# ---------------------------------------------------------------------------
+fn t_audit_file(): i64 {
+    test_group("security_ui — audit log file");
+    var au = sec_ui_new();
+    var before = strlen(t_read(t_audit_path));
+
+    assert_eq(sec_ui_grant_permission_enforced(au, 31, "test-agent", "file:read", 1760000000),
+      SecErr.SEC_ERR_OK, "audited grant OK");
+    var got1 = t_read(t_audit_path) + before;
+    var want1 = "{\"agent_id\":\"31\",\"details\":\"Permission 'file:read' granted to 'test-agent'\",\"event_type\":\"permission_granted\",\"source\":\"security-ui\",\"timestamp\":\"2025-10-09T08:53:20+00:00\"}\n";
+    assert_streq(got1, want1, "grant appends its exact line");
+
+    assert_eq(sec_ui_revoke_permission_enforced(au, 31, "file:read", SecPid.SEC_PID_NONE, 1760000001),
+      SecErr.SEC_ERR_OK, "audited revoke OK");
+    var got2 = t_read(t_audit_path) + before + strlen(want1);
+    assert_streq(got2,
+      "{\"agent_id\":\"31\",\"details\":\"Permission 'file:read' revoked\",\"event_type\":\"permission_revoked\",\"source\":\"security-ui\",\"timestamp\":\"2025-10-09T08:53:21+00:00\"}\n",
+      "revoke appends after the grant line");
+
+    var mid = strlen(t_read(t_audit_path));
+    assert_eq(sec_ui_emergency_kill_agent(au, 31, SecPid.SEC_PID_NONE, 1760000002),
+      SecErr.SEC_ERR_OK, "audited kill OK");
+    assert_streq(t_read(t_audit_path) + mid,
+      "{\"agent_id\":\"31\",\"details\":\"Agent killed via emergency kill switch\",\"event_type\":\"emergency_kill\",\"source\":\"security-ui\",\"timestamp\":\"2025-10-09T08:53:22+00:00\"}\n",
+      "kill appends its exact line");
+    var kal = vec_get(sec_ui_alerts(au), 0);
+    assert_streq(sec_alert_title(kal), "Emergency Kill: Agent 31", "kill alert title names the agent");
+    assert_streq(sec_alert_source(kal), "security-ui", "kill alert source");
+
+    # The default is Rust's path (read only — never written by this suite).
+    sec_ui_set_audit_log_path(0);
+    assert_streq(sec_ui_audit_log_path(), "/var/log/agnos/audit.log", "default audit path");
+    sec_ui_set_audit_log_path(t_audit_path);
+    assert_streq(sec_ui_audit_log_path(), t_audit_path, "injected audit path");
+
+    # A path that cannot be opened (its "directory" is our temp file): warns,
+    # returns -1, and every caller still succeeds with its in-model effect.
+    var bad_sb = str_builder_new();
+    str_builder_add_cstr(bad_sb, t_audit_path);
+    str_builder_add_cstr(bad_sb, "/nested.log");
+    var bad = str_data(str_builder_build(bad_sb));
+    var size_before_bad = strlen(t_read(t_audit_path));
+    sec_ui_set_audit_log_path(bad);
+    assert_eq(sec_write_audit_log("x", 1, "d", 0), 0 - 1, "unopenable path -> -1");
+    var bu = sec_ui_new();
+    assert_eq(sec_ui_grant_permission_enforced(bu, 32, "a", "file:read", 1760000000),
+      SecErr.SEC_ERR_OK, "unopenable log: grant still OK");
+    assert_eq(sec_agentperm_has(sec_ui_get_agent_permission(bu, 32), "file:read"), 1,
+      "unopenable log: grant still applied");
+    assert_eq(sec_ui_revoke_permission_enforced(bu, 32, "file:read", SecPid.SEC_PID_NONE, 1760000000),
+      SecErr.SEC_ERR_OK, "unopenable log: revoke still OK");
+    assert_eq(sec_ui_emergency_kill_agent(bu, 32, SecPid.SEC_PID_NONE, 1760000000),
+      SecErr.SEC_ERR_OK, "unopenable log: kill still OK");
+    assert_eq(vec_len(sec_ui_alerts(bu)), 1, "unopenable log: kill alert still recorded");
+    sec_ui_set_audit_log_path(t_audit_path);
+    assert_eq(strlen(t_read(t_audit_path)), size_before_bad, "unopenable log: temp log untouched");
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Signals: the pid guard, SIGHUP on revoke, SIGKILL on kill — forked children only.
+# ---------------------------------------------------------------------------
+fn t_signals(): i64 {
+    test_group("security_ui — pid guard");
+    assert_eq(sec_pid_ok(1), 1, "pid 1 signalable");
+    assert_eq(sec_pid_ok(0x7FFFFFFF), 1, "pid i32::MAX signalable");
+    assert_eq(sec_pid_ok(0), 0, "pid 0 refused (own process group)");
+    assert_eq(sec_pid_ok(0 - 1), 0, "pid -1 refused (every process)");
+    assert_eq(sec_pid_ok(0 - 2), 0, "pid -2 refused (a process group)");
+    assert_eq(sec_pid_ok(0x80000000), 0, "pid i32::MAX + 1 refused");
+    assert_eq(sec_pid_ok(0x100000001), 0, "pid 2^32 + 1 refused (would truncate to 1)");
+    assert_eq(sec_pid_ok(0 - 0x80000000), 0, "pid -2^31 refused");
+
+    test_group("security_ui — emergency kill: invalid pid blocked, no effect");
+    var size0 = strlen(t_read(t_audit_path));
+    # 3 == SEC_ERR_ACTION_BLOCKED and no alert -> exit code 1003.
+    assert_eq(t_effect_in_child(0, 0), 1003, "kill pid 0 -> ACTION_BLOCKED, no alert, no signal");
+    var iu = sec_ui_new();
+    assert_eq(sec_ui_emergency_kill_agent(iu, 78, 0x80000000, 1760000000),
+      SecErr.SEC_ERR_ACTION_BLOCKED, "kill pid i32::MAX + 1 -> ACTION_BLOCKED");
+    assert_eq(sec_ui_emergency_kill_agent(iu, 78, 0 - 0x80000001, 1760000000),
+      SecErr.SEC_ERR_ACTION_BLOCKED, "kill pid -2^31 - 1 -> ACTION_BLOCKED");
+    assert_eq(vec_len(sec_ui_alerts(iu)), 0, "blocked kills record no alert");
+    assert_eq(strlen(t_read(t_audit_path)), size0, "blocked kills write no audit line");
+
+    # Revoke: Rust's Some(0) would SIGHUP the whole group; the port skips it.
+    # 0 == SEC_ERR_OK, no alert -> exit code 1000.
+    assert_eq(t_effect_in_child(1, 0), 1000, "revoke pid 0 -> OK, no signal sent");
+    assert_eq(t_effect_in_child(1, 0x80000000), 1000, "revoke pid i32::MAX + 1 -> OK");
+
+    # None: the revoke sends nothing; the kill sends nothing and still records
+    # its alert (0 + 100 -> exit code 1100).
+    assert_eq(t_effect_in_child(1, SecPid.SEC_PID_NONE), 1000, "revoke pid None -> OK, no signal sent");
+    assert_eq(t_effect_in_child(0, SecPid.SEC_PID_NONE), 1100, "kill pid None -> OK + alert, no signal sent");
+
+    test_group("security_ui — SIGHUP on enforced revoke");
+    var hu = sec_ui_new();
+    sec_ui_grant_permission_enforced(hu, 40, "agent", "file:read", 1760000000);
+    var hup_child = t_fork_paused();
+    assert_eq(hup_child > 0, 1, "forked a child for SIGHUP");
+    if (hup_child > 0) {
+        assert_eq(sec_ui_revoke_permission_enforced(hu, 40, "file:read", hup_child, 1760000000),
+          SecErr.SEC_ERR_OK, "revoke with pid OK");
+        assert_eq(t_reap(hup_child), 1, "child ended by SIGHUP (1)");
+    }
+    # No agent entry -> NOT_FOUND before any signal.
+    var nf_child = t_fork_paused();
+    if (nf_child > 0) {
+        assert_eq(sec_ui_revoke_permission_enforced(hu, 4040, "file:read", nf_child, 1760000000),
+          SecErr.SEC_ERR_PERMISSION_NOT_FOUND, "revoke unknown agent -> NOT_FOUND");
+        assert_eq(t_reap(nf_child), 0 - 1, "NOT_FOUND revoke sends no signal");
+    }
+
+    test_group("security_ui — SIGKILL on emergency kill");
+    var ku = sec_ui_new();
+    var kill_child = t_fork_paused();
+    assert_eq(kill_child > 0, 1, "forked a child for SIGKILL");
+    if (kill_child > 0) {
+        var ksize = strlen(t_read(t_audit_path));
+        assert_eq(sec_ui_emergency_kill_agent(ku, 41, kill_child, 1760000000),
+          SecErr.SEC_ERR_OK, "kill with pid OK");
+        assert_eq(t_reap(kill_child), 9, "child ended by SIGKILL (9)");
+        assert_eq(vec_len(sec_ui_alerts(ku)), 1, "kill with pid records its alert");
+        assert_eq(strlen(t_read(t_audit_path)) > ksize, 1, "kill with pid writes its audit line");
+    }
+    # A pid nobody has: i32::MAX passes the guard but is above Linux's
+    # PID_MAX_LIMIT (2^22), so kill fails (-ESRCH); the kill still completes
+    # with its alert, as Rust's did after a failed libc::kill.
+    var gone_alerts = vec_len(sec_ui_alerts(ku));
+    assert_eq(sec_ui_emergency_kill_agent(ku, 42, SecPid.SEC_PID_MAX, 1760000000),
+      SecErr.SEC_ERR_OK, "kill of a pid nobody has still OK");
+    assert_eq(vec_len(sec_ui_alerts(ku)), gone_alerts + 1, "kill of a pid nobody has records its alert");
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Rust tests still to re-express (parity-plan.md): the four evictions.
+# Rust only asserted len <= MAX; these pin which entry goes.
+# ---------------------------------------------------------------------------
+fn t_evictions(): i64 {
+    test_group("security_ui — alert eviction at max capacity");
+    var eu = sec_ui_new();
+    var ei = 0;
+    while (ei < SecCap.SEC_MAX_ALERTS) {
+        sec_ui_show_security_alert(eu, sec_alert_new(ei + 1, "Alert", "", SecThreatLevel.SEC_TL_LOW, "", 1000, 0, 0));
+        ei = ei + 1;
+    }
+    assert_eq(vec_len(sec_ui_get_active_alerts(eu)), SecCap.SEC_MAX_ALERTS, "500 active alerts");
+    sec_ui_show_security_alert(eu, sec_alert_new(9001, "Overflow alert", "", SecThreatLevel.SEC_TL_HIGH, "", 1000, 0, 0));
+    var ea = sec_ui_alerts(eu);
+    assert_eq(vec_len(ea), SecCap.SEC_MAX_ALERTS, "overflow: still 500");
+    assert_eq(sec_alert_id(vec_get(ea, 0)), 2, "overflow: oldest (1) evicted");
+    assert_eq(sec_alert_id(vec_get(ea, SecCap.SEC_MAX_ALERTS - 1)), 9001, "overflow: newest last");
+
+    test_group("security_ui — alert eviction drops resolved first");
+    var ru = sec_ui_new();
+    var ri = 0;
+    while (ri < SecCap.SEC_MAX_ALERTS) {
+        var rres = 0;
+        if (ri % 2 == 0) { rres = 1; }
+        sec_ui_show_security_alert(ru, sec_alert_new(ri + 1, "Alert", "", SecThreatLevel.SEC_TL_LOW, "", 1000, 0, rres));
+        ri = ri + 1;
+    }
+    sec_ui_show_security_alert(ru, sec_alert_new(9002, "New alert", "", SecThreatLevel.SEC_TL_MEDIUM, "", 1000, 0, 0));
+    var ra = sec_ui_alerts(ru);
+    assert_eq(vec_len(ra), 251, "resolved-first: 250 unresolved + the new one");
+    assert_eq(sec_alert_id(vec_get(ra, 0)), 2, "resolved-first: oldest unresolved kept");
+    var rresolved = 0;
+    var rj = 0;
+    while (rj < vec_len(ra)) {
+        rresolved = rresolved + sec_alert_is_resolved(vec_get(ra, rj));
+        rj = rj + 1;
+    }
+    assert_eq(rresolved, 0, "resolved-first: every resolved alert gone");
+
+    test_group("security_ui — permission request eviction");
+    var pu = sec_ui_new();
+    var pi = 0;
+    while (pi < SecCap.SEC_MAX_PERMISSION_REQUESTS) {
+        sec_ui_request_permission(pu, sec_permreq_new(pi + 1, pi + 1, "agent", "file:read", "/home", "test", 1000, 0));
+        pi = pi + 1;
+    }
+    sec_ui_request_permission(pu, sec_permreq_new(9003, 9003, "overflow-agent", "file:read", "/home", "test", 1000, 0));
+    var pa = sec_ui_perm_requests(pu);
+    assert_eq(vec_len(pa), SecCap.SEC_MAX_PERMISSION_REQUESTS, "requests: still 200");
+    assert_eq(sec_permreq_id(vec_get(pa, 0)), 2, "requests: oldest (1) evicted");
+    assert_eq(sec_permreq_id(vec_get(pa, SecCap.SEC_MAX_PERMISSION_REQUESTS - 1)), 9003, "requests: newest last");
+
+    test_group("security_ui — override request eviction");
+    var ou = sec_ui_new();
+    var first_oid = sec_ui_request_human_override(ou, "agent-0", "action", "reason", 1000);
+    var oi = 1;
+    while (oi < SecCap.SEC_MAX_OVERRIDE_REQUESTS) {
+        sec_ui_request_human_override(ou, "agent", "action", "reason", 1000);
+        oi = oi + 1;
+    }
+    var last_oid = sec_ui_request_human_override(ou, "overflow-agent", "action", "reason", 1000);
+    var oa = sec_ui_overrides(ou);
+    assert_eq(vec_len(oa), SecCap.SEC_MAX_OVERRIDE_REQUESTS, "overrides: still 100");
+    assert_eq(sec_override_id(vec_get(oa, 0)), first_oid + 1, "overrides: oldest evicted");
+    assert_eq(sec_override_id(vec_get(oa, SecCap.SEC_MAX_OVERRIDE_REQUESTS - 1)), last_oid, "overrides: newest last");
+    return 0;
+}
+
+# Rust test_grant_permission_lockdown: a FRESH UI in Lockdown blocks file:write
+# ("Lockdown" in the error text -> the ACTION_BLOCKED code, ADR 0003) and grants
+# nothing; and test_security_ui_permission_definitions_initialized: the six names.
+fn t_lockdown_and_defs(): i64 {
+    test_group("security_ui — grant_permission_lockdown (fresh UI)");
+    var lu = sec_ui_new();
+    sec_ui_set_security_level(lu, SecLevel.SEC_LVL_LOCKDOWN);
+    var lsize = strlen(t_read(t_audit_path));
+    assert_eq(sec_ui_grant_permission_enforced(lu, 50, "test-agent", "file:write", 1760000000),
+      SecErr.SEC_ERR_ACTION_BLOCKED, "fresh lockdown blocks file:write");
+    assert_eq(sec_ui_get_agent_permission(lu, 50), 0, "blocked grant creates no agent entry");
+    assert_eq(strlen(t_read(t_audit_path)), lsize, "blocked grant writes no audit line");
+
+    test_group("security_ui — permission definitions initialized");
+    var du = sec_ui_new();
+    assert_eq(vec_len(sec_ui_perm_defs(du)), 6, "6 definitions");
+    assert(t_ok(sec_ui_find_perm_def(du, "file:read")), "defs contain file:read");
+    assert(t_ok(sec_ui_find_perm_def(du, "file:write")), "defs contain file:write");
+    assert(t_ok(sec_ui_find_perm_def(du, "file:delete")), "defs contain file:delete");
+    assert(t_ok(sec_ui_find_perm_def(du, "network:outbound")), "defs contain network:outbound");
+    assert(t_ok(sec_ui_find_perm_def(du, "process:spawn")), "defs contain process:spawn");
+    assert(t_ok(sec_ui_find_perm_def(du, "agent:delegate")), "defs contain agent:delegate");
+    return 0;
+}
+
+# ⛔ The preflight (see the helpers' header): -> 1 when the pid guard refuses
+# every pid that would reach beyond the suite's own children, else 0.
+fn t_pid_preflight(): i64 {
+    test_group("security_ui — pid guard preflight");
+    var pf = 1;
+    assert_eq(SecPid.SEC_PID_NONE & 0xFFFFFFFF, 0x80000000, "None truncates to INT_MIN");
+    assert_eq(SecPid.SEC_PID_NONE < 0, 1, "None is negative");
+    if ((SecPid.SEC_PID_NONE & 0xFFFFFFFF) != 0x80000000) { pf = 0; }
+    if (SecPid.SEC_PID_NONE >= 0) { pf = 0; }
+    assert_eq(sec_pid_ok(0 - 1), 0, "preflight: -1 refused");
+    assert_eq(sec_pid_ok(0), 0, "preflight: 0 refused");
+    assert_eq(sec_pid_ok(0 - 2), 0, "preflight: -2 refused");
+    assert_eq(sec_pid_ok(SecPid.SEC_PID_NONE), 0, "preflight: None refused");
+    if (sec_pid_ok(0 - 1) != 0) { pf = 0; }
+    if (sec_pid_ok(0) != 0) { pf = 0; }
+    if (sec_pid_ok(0 - 2) != 0) { pf = 0; }
+    if (sec_pid_ok(SecPid.SEC_PID_NONE) != 0) { pf = 0; }
+    return pf;
+}
+
 fn main() {
     alloc_init();
+
+    # ⛔ Before any enforced call: a broken pid guard stops the suite here.
+    if (t_pid_preflight() != 1) { return assert_summary(); }
+
+    # ⛔ Before any enforced call: the audit log goes to a temp file of our own.
+    var tp_sb = str_builder_new();
+    str_builder_add_cstr(tp_sb, "/tmp/aethersafha-sec-audit-");
+    str_builder_add_int(tp_sb, sys_getpid());
+    str_builder_add_cstr(tp_sb, ".log");
+    t_audit_path = str_data(str_builder_build(tp_sb));
+    # ⚠ A run that crashed left its log; a later run with the same pid (a container's pid is often
+    # the same every time) would then fail O_EXCL. unlink removes a planted symlink, not its target.
+    sys_unlink(t_audit_path);
+    var tfd = file_open(t_audit_path, O_WRONLY | O_CREAT | O_EXCL, 0x180);
+    assert_eq(tfd >= 0, 1, "created the temp audit log");
+    if (tfd < 0) { return assert_summary(); }
+    file_close(tfd);
+    sec_ui_set_audit_log_path(t_audit_path);
+
+    # -----------------------------------------------------------------------
+    # The emergency kill deregisters the agent with daimon (security_ui.rs:546-559): a DELETE the
+    # kill starts and the frame loop's daimon_step finishes. Against a listener of our own.
+    # -----------------------------------------------------------------------
+    test_group("security_ui — the emergency kill DELETEs the agent from daimon, never blocking");
+    var dl = t_bind_lo(1);
+    assert_eq(dl >= 0, 1, "a listener of our own on 127.0.0.1");
+    if (dl < 0) { return assert_summary(); }
+    daimon_set_endpoint(0x0100007F, t_dport);
+    var dku = sec_ui_new();
+    var dai = ai_new();
+    assert_eq(sec_ui_emergency_kill_agent(dku, 77, SecPid.SEC_PID_NONE, 1760000000), SecErr.SEC_ERR_OK, "kill with no pid -> OK");
+    assert_eq(daimon_delete_busy(), 1, "  ...and one DELETE is under way");
+    var want = "DELETE /v1/agents/77 HTTP/1.1\r\n";
+    var wlen = strlen(want);
+    var rbuf = alloc(1024);
+    var conn = 0 - 1;
+    var dgot = 0;
+    var dsteps = 0;
+    while ((dsteps < 3000) && (dgot < wlen)) {
+        daimon_step(dai, t_now_us());
+        if (conn < 0) {
+            var ac = sys_accept4(dl, 0, 0, 2048);              # SOCK_NONBLOCK
+            if (ac >= 0) { conn = ac; }
+        }
+        if (conn >= 0) {
+            var rn = sys_read(conn, rbuf + dgot, 1023 - dgot);
+            if (rn > 0) { dgot = dgot + rn; }
+        }
+        if (dgot < wlen) { t_sleep_1ms(); }
+        dsteps = dsteps + 1;
+    }
+    store8(rbuf + dgot, 0);
+    assert_eq(dgot >= wlen, 1, "the request arrived");
+    assert_eq(memeq(rbuf, want, wlen), 1, "  ...as DELETE /v1/agents/77");
+    if (conn >= 0) { sys_close(conn); }
+    var dwait = 0;
+    while ((dwait < 3000) && (daimon_delete_busy() != 0)) {
+        daimon_step(dai, t_now_us());
+        t_sleep_1ms();
+        dwait = dwait + 1;
+    }
+    assert_eq(daimon_delete_busy(), 0, "a hang-up ends it: the slot is free again");
+    sys_close(dl);
+    # ⛔ Every later kill (and every forked child's) goes to a port of ours that refuses at once.
+    var drefuse = t_bind_lo(0);
+    assert_eq(drefuse >= 0, 1, "a refusing port of our own for the rest of the suite");
+    daimon_set_endpoint(0x0100007F, t_dport);
 
     # -----------------------------------------------------------------------
     # SecurityAlert::default() — Low threat, no action required, unresolved.
@@ -271,11 +744,11 @@ fn main() {
     sec_ui_set_security_level(ui, SecLevel.SEC_LVL_STANDARD);
 
     # Revoke enforced removes only the named perm; missing agent -> NOT_FOUND.
-    var rv1 = sec_ui_revoke_permission_enforced(ui, 700, "file:read", 0);
+    var rv1 = sec_ui_revoke_permission_enforced(ui, 700, "file:read", SecPid.SEC_PID_NONE, 1000);
     assert_eq(rv1, SecErr.SEC_ERR_OK, "revoke enforced OK");
     assert_eq(sec_agentperm_has(ent700, "file:read"), 0, "revoke removed file:read");
     assert_eq(sec_agentperm_has(ent700, "network:outbound"), 1, "revoke kept network:outbound");
-    var rv2 = sec_ui_revoke_permission_enforced(ui, 9999, "file:read", 0);
+    var rv2 = sec_ui_revoke_permission_enforced(ui, 9999, "file:read", SecPid.SEC_PID_NONE, 1000);
     assert_eq(rv2, SecErr.SEC_ERR_PERMISSION_NOT_FOUND, "revoke missing agent -> NOT_FOUND");
 
     # -----------------------------------------------------------------------
@@ -363,7 +836,7 @@ fn main() {
     # -----------------------------------------------------------------------
     test_group("security_ui — emergency kill agent");
     var ui3 = sec_ui_new();
-    var kerr = sec_ui_emergency_kill_agent(ui3, 123, 0, 3000);
+    var kerr = sec_ui_emergency_kill_agent(ui3, 123, SecPid.SEC_PID_NONE, 3000);
     assert_eq(kerr, SecErr.SEC_ERR_OK, "kill agent -> OK");
     # The alert was recorded (raw alerts vec has 1) but resolved (0 active).
     assert_eq(vec_len(sec_ui_alerts(ui3)), 1, "kill agent: 1 alert recorded");
@@ -382,10 +855,10 @@ fn main() {
     # -----------------------------------------------------------------------
     test_group("security_ui — minted ids never meet caller ids");
     var uid = sec_ui_new();
-    sec_ui_emergency_kill_agent(uid, 7, 0, 5000);
+    sec_ui_emergency_kill_agent(uid, 7, SecPid.SEC_PID_NONE, 5000);
     var oid_m = sec_ui_request_human_override(uid, "agent", "rm", "why", 5000);
-    sec_ui_emergency_kill_agent(uid, 8, 0, 5000);
-    sec_ui_emergency_kill_agent(uid, 9, 0, 5000);
+    sec_ui_emergency_kill_agent(uid, 8, SecPid.SEC_PID_NONE, 5000);
+    sec_ui_emergency_kill_agent(uid, 9, SecPid.SEC_PID_NONE, 5000);
     var minted = sec_alert_id(vec_get(sec_ui_alerts(uid), 0));
     var minted3 = sec_alert_id(vec_get(sec_ui_alerts(uid), 2));
     assert_eq(minted > SecIdSpace.SEC_ID_MINTED_BASE, 1, "kill alert id > SEC_ID_MINTED_BASE");
@@ -469,6 +942,13 @@ fn main() {
     assert_eq(sec_badge_color_for_trust(SecTrustLevel.SEC_TRUST_UNTRUSTED), 0xFFCC4444, "color Untrusted");
     assert_eq(sec_badge_color_for_trust(SecTrustLevel.SEC_TRUST_SANDBOXED), 0xFFCC8844, "color Sandboxed");
 
+    t_audit_format();
+    t_audit_file();
+    t_signals();
+    t_evictions();
+    t_lockdown_and_defs();
+
+    xunlink(t_audit_path);
     return assert_summary();
 }
 

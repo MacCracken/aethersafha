@@ -17,7 +17,25 @@
 # bhumi framebuffer as BOTH the front buffer and the output surface —
 # bhumi_fb_width/height == output dims, bhumi_fb_get == one XRGB pixel. This is
 # the same caller-owns-fb seam already used by src/render.cyr / src/desktop.cyr.
-# Observable behavior (dims, clamping, OOB-black, encoder byte output) matches.
+# Observable behavior (dims, clamping, OOB-black, encoder layout) matches; the alpha byte is the
+# one difference (ALPHA below).
+#
+# ALPHA: Rust's Pixel was ARGB and every encoder wrote the pixel's top byte
+# (screen_capture.rs:536,575,621). Most of Rust's front buffer was opaque (the COLOR_BG_DARK clear and
+# src-over, renderer.rs:46-68,75,863), but fill_rect OVERWRITES without blending, so its panels and
+# notification fills (COLOR_PANEL_BG, alpha 230; renderer.rs:82,152-170) captured translucent.
+# bhumi is XRGB8888: the top byte is padding, not alpha, and nothing the port draws is translucent in
+# the framebuffer. Every encoder writes 0xFF — a screenshot of what is on screen is opaque.
+#
+# OWNERSHIP (lib/freelist.cyr, not the bump allocator — a 2560x1440 PNG capture
+# is ~59 MB of transient buffers; on alloc() it never came back):
+#  - scap_mgr_capture's *ScapResult is the CALLER's: free it with scap_result_free.
+#    Its data moves out with scap_result_take_data (screen_recording does this).
+#  - encoders return a *ScapBuf the caller owns: scap_buf_free.
+#  - the pixel read (*ScapPix) and the PNG raw image are freed inside the capture.
+#  - history entries own a COPY of the target and are freed when the ring evicts them.
+#  ⛔ fl_free only what fl_alloc returned: scap_result_free / scap_buf_free are for
+#  objects THIS module built, never a hand-made scap_result_new over alloc()'d data.
 #
 # LIBRARY MODULE: definitions only, no main / no top-level statements.
 
@@ -42,8 +60,9 @@ enum ScapErr {          # CaptureError -> i64 (payload strings/ids dropped)
     SCAP_ERR_RATE_LIMIT         = 4;   # RateLimitExceeded(agent, max)
     SCAP_ERR_PERM_EXPIRED       = 5;   # PermissionExpired(agent)
     SCAP_ERR_WINDOW_NOT_FOUND   = 6;   # WindowNotFound(surface_id)
-    SCAP_ERR_REGION_OOB         = 7;   # RegionOutOfBounds
-    SCAP_ERR_ENCODING           = 8;   # EncodingError (encode is infallible here)
+    SCAP_ERR_REGION_OOB         = 7;   # RegionOutOfBounds — also any width or height <= 0
+    SCAP_ERR_ENCODING           = 8;   # EncodingError — an encoder refused (dims <= 0) or had no memory
+    SCAP_ERR_NO_MEMORY          = 9;   # port-only: an allocation for the capture failed (Rust aborts)
 }
 enum ScapCap {
     SCAP_MAX_HISTORY = 100;   # history ring-buffer cap (Rust const MAX_HISTORY)
@@ -105,7 +124,7 @@ enum ScapBufOff {       # encoder output: byte pointer + length
     SCAP_BUF_SZ  = 16;
 }
 enum ScapPixOff {       # framebuffer read result: flat i64 pixel array + dims
-    SCAP_PX_PTR = 0;    # alloc(w*h*8); pixels[y*w+x] = 0x00RRGGBB
+    SCAP_PX_PTR = 0;    # fl_alloc(w*h*8); pixels[y*w+x] = 0x00RRGGBB
     SCAP_PX_W   = 8;
     SCAP_PX_H   = 16;
     SCAP_PX_SZ  = 24;
@@ -122,7 +141,7 @@ fn scap_sat_sub(a, b): i64 { if (b >= a) { return 0; } return a - b; }
 # CaptureTarget value object.
 # ---------------------------------------------------------------------------
 fn scap_target_new(kind, a, b, c, d): i64 {
-    var t = alloc(SCAP_T_SZ);
+    var t = fl_alloc(SCAP_T_SZ);   # freed with its result / history entry
     if (t == 0) { return 0; }
     store64(t + SCAP_T_KIND, kind);
     store64(t + SCAP_T_A, a);
@@ -197,7 +216,7 @@ fn scap_allowed_all(): i64 {
 # CaptureResult + CaptureHistoryEntry + encoder buffer + pixel source.
 # ---------------------------------------------------------------------------
 fn scap_result_new(id, target, fmt, width, height, data, data_size, captured_at, agent): i64 {
-    var r = alloc(SCAP_R_SZ);
+    var r = fl_alloc(SCAP_R_SZ);   # the caller frees it: scap_result_free
     if (r == 0) { return 0; }
     store64(r + SCAP_R_ID, id);
     store64(r + SCAP_R_TARGET, target);
@@ -220,8 +239,25 @@ fn scap_result_data(r)        { return load64(r + SCAP_R_DATA); }
 fn scap_result_data_size(r)   { return load64(r + SCAP_R_DATA_SIZE); }
 fn scap_result_req_agent(r)   { return load64(r + SCAP_R_REQ_AGENT); }
 
+# scap_result_take_data(r): move the encoded bytes out (Rust `data: result.data`).
+# The result keeps data_size but no longer owns the bytes; the taker fl_frees them.
+fn scap_result_take_data(r): i64 {
+    var d = load64(r + SCAP_R_DATA);
+    store64(r + SCAP_R_DATA, 0);
+    return d;
+}
+# scap_result_free(r): the result, its target and whatever data it still owns.
+# The requesting agent is the caller's cstr, not copied, so it is not freed. Safe on 0.
+fn scap_result_free(r): i64 {
+    if (r == 0) { return 0; }
+    fl_free(load64(r + SCAP_R_DATA));
+    fl_free(load64(r + SCAP_R_TARGET));
+    fl_free(r);
+    return 0;
+}
+
 fn scap_hist_new(id, target, fmt, width, height, data_size, captured_at, agent): i64 {
-    var h = alloc(SCAP_H_SZ);
+    var h = fl_alloc(SCAP_H_SZ);   # freed when the history ring evicts it
     if (h == 0) { return 0; }
     store64(h + SCAP_H_ID, id);
     store64(h + SCAP_H_TARGET, target);
@@ -241,9 +277,15 @@ fn scap_hist_height(h)      { return load64(h + SCAP_H_HEIGHT); }
 fn scap_hist_data_size(h)   { return load64(h + SCAP_H_DATA_SIZE); }
 fn scap_hist_captured_at(h) { return load64(h + SCAP_H_CAPTURED_AT); }
 fn scap_hist_req_agent(h)   { return load64(h + SCAP_H_REQ_AGENT); }
+fn scap_hist_free(h): i64 {
+    if (h == 0) { return 0; }
+    fl_free(load64(h + SCAP_H_TARGET));
+    fl_free(h);
+    return 0;
+}
 
 fn scap_buf_new(ptr, len): i64 {
-    var b = alloc(SCAP_BUF_SZ);
+    var b = fl_alloc(SCAP_BUF_SZ);
     if (b == 0) { return 0; }
     store64(b + SCAP_BUF_PTR, ptr);
     store64(b + SCAP_BUF_LEN, len);
@@ -252,10 +294,26 @@ fn scap_buf_new(ptr, len): i64 {
 fn scap_buf_ptr(b)   { return load64(b + SCAP_BUF_PTR); }
 fn scap_buf_len(b)   { return load64(b + SCAP_BUF_LEN); }
 fn scap_buf_at(b, i) { return load8(load64(b + SCAP_BUF_PTR) + i); }
+# scap_buf_free(b): the bytes and the header. Safe on 0.
+fn scap_buf_free(b): i64 {
+    if (b == 0) { return 0; }
+    fl_free(load64(b + SCAP_BUF_PTR));
+    fl_free(b);
+    return 0;
+}
+# scap_buf_wrap(out, len): hand `out` to a new *ScapBuf; if even the header cannot
+# be had, `out` is freed rather than lost. -> *ScapBuf or 0.
+fn scap_buf_wrap(out, len): i64 {
+    var b = scap_buf_new(out, len);
+    if (b == 0) { fl_free(out); }
+    return b;
+}
 
 # ---------------------------------------------------------------------------
-# Encoders — pure byte arithmetic on alloc'd buffers. Pixel logical value is
-# 0x00RRGGBB (bhumi XRGB; alpha byte always 0), matching Rust's u32 ARGB with a=0.
+# Encoders — pure byte arithmetic on fl_alloc'd buffers. Pixel logical value is
+# 0x00RRGGBB (bhumi XRGB); the X byte is padding, so alpha is ALWAYS 0xFF.
+# ⛔ Each returns 0 for width, height or pixel count <= 0, BEFORE allocating:
+# alloc/fl_alloc return 0 for a size <= 0 and the loops would write through it.
 # ---------------------------------------------------------------------------
 
 # Adler-32 (RFC 1950). scap_adler32("") == 1, scap_adler32("Wikipedia") == 0x11E60398.
@@ -303,10 +361,12 @@ fn scap_put_be32(dst, v): i64 {
     return 4;
 }
 
-# scap_encode_raw(pix, npix): RawArgb — 4 bytes/pixel, [B,G,R,X] (px LE bytes).
+# scap_encode_raw(pix, npix): RawArgb — 4 bytes/pixel, [B,G,R,A=0xFF] (Rust's
+# px.to_ne_bytes() on little-endian). -> *ScapBuf, or 0 if npix <= 0 / no memory.
 fn scap_encode_raw(pix, npix): i64 {
-    var out = alloc(npix * 4);
-    if (out == 0) { return scap_buf_new(0, 0); }
+    if (npix <= 0) { return 0; }
+    var out = fl_alloc(npix * 4);
+    if (out == 0) { return 0; }
     var i = 0;
     while (i < npix) {
         var v = load64(pix + i * 8);
@@ -314,20 +374,22 @@ fn scap_encode_raw(pix, npix): i64 {
         store8(o + 0, v & 0xFF);
         store8(o + 1, (v >> 8) & 0xFF);
         store8(o + 2, (v >> 16) & 0xFF);
-        store8(o + 3, (v >> 24) & 0xFF);
+        store8(o + 3, 0xFF);              # A: XRGB has none; opaque (see ALPHA above)
         i = i + 1;
     }
-    return scap_buf_new(out, npix * 4);
+    return scap_buf_wrap(out, npix * 4);
 }
 
 # scap_encode_bmp(pix, width, height): 32-bit BITMAPINFOHEADER BMP, top-down
 # (negative height), BGRA, uncompressed. file_size = 54 + width*4*height.
+# -> *ScapBuf, or 0 if width/height <= 0 / no memory.
 fn scap_encode_bmp(pix, width, height): i64 {
+    if ((width <= 0) || (height <= 0)) { return 0; }
     var row_size = width * 4;
     var pixel_data_size = row_size * height;
     var file_size = 54 + pixel_data_size;
-    var out = alloc(file_size);
-    if (out == 0) { return scap_buf_new(0, 0); }
+    var out = fl_alloc(file_size);
+    if (out == 0) { return 0; }
     # --- file header (14 bytes) ---
     store8(out + 0, 0x42);            # 'B'
     store8(out + 1, 0x4D);            # 'M'
@@ -355,10 +417,19 @@ fn scap_encode_bmp(pix, width, height): i64 {
         store8(o + 0, v & 0xFF);          # B
         store8(o + 1, (v >> 8) & 0xFF);   # G
         store8(o + 2, (v >> 16) & 0xFF);  # R
-        store8(o + 3, (v >> 24) & 0xFF);  # A (0)
+        store8(o + 3, 0xFF);              # A (opaque — see ALPHA above)
         i = i + 1;
     }
-    return scap_buf_new(out, file_size);
+    return scap_buf_wrap(out, file_size);
+}
+
+# scap_zlib_size(raw_len): bytes scap_zlib_store writes for raw_len input — header,
+# 5 per stored block (at least one: the empty stream still has its final block),
+# the data, Adler-32.
+fn scap_zlib_size(raw_len): i64 {
+    var nblocks = (raw_len + 65534) / 65535;
+    if (nblocks == 0) { nblocks = 1; }
+    return 2 + nblocks * 5 + raw_len + 4;
 }
 
 # scap_zlib_store(raw, raw_len, out): zlib stream, deflate STORED blocks (no
@@ -408,21 +479,26 @@ fn scap_png_chunk(dst, type_ptr, data_ptr, data_len): i64 {
 }
 
 # scap_encode_png(pix, width, height): PNG (8-bit RGBA, filter None, zlib STORED).
-# Signature + IHDR + IDAT + IEND, hand-rolled CRC-32/Adler-32.
+# Signature + IHDR + IDAT + IEND, hand-rolled CRC-32/Adler-32. -> *ScapBuf, or 0
+# if width/height <= 0 / no memory.
+# ⚠ The zlib stream is written straight into the IDAT chunk, not into its own
+# buffer and copied: at 2560x1440 that buffer was 14.7 MB, and its copy, per capture.
 fn scap_encode_png(pix, width, height): i64 {
-    # IHDR data (13 bytes)
-    var ihdr = alloc(13);
-    scap_put_be32(ihdr + 0, width);
-    scap_put_be32(ihdr + 4, height);
-    store8(ihdr + 8, 8);    # bit depth
-    store8(ihdr + 9, 6);    # color type RGBA
-    store8(ihdr + 10, 0);   # compression
-    store8(ihdr + 11, 0);   # filter
-    store8(ihdr + 12, 0);   # interlace
+    if ((width <= 0) || (height <= 0)) { return 0; }
+    # IHDR data (13 bytes) — on the stack, nothing reads it after this returns
+    var ihdr[16];
+    scap_put_be32(&ihdr + 0, width);
+    scap_put_be32(&ihdr + 4, height);
+    store8(&ihdr + 8, 8);    # bit depth
+    store8(&ihdr + 9, 6);    # color type RGBA
+    store8(&ihdr + 10, 0);   # compression
+    store8(&ihdr + 11, 0);   # filter
+    store8(&ihdr + 12, 0);   # interlace
     # raw image bytes (filter byte per row + RGBA pixels)
     var row_bytes = 1 + width * 4;
     var raw_len = row_bytes * height;
-    var raw = alloc(raw_len);
+    var raw = fl_alloc(raw_len);
+    if (raw == 0) { return 0; }
     var y = 0;
     while (y < height) {
         var rowstart = y * row_bytes;
@@ -434,30 +510,34 @@ fn scap_encode_png(pix, width, height): i64 {
             store8(o + 0, (v >> 16) & 0xFF);  # R
             store8(o + 1, (v >> 8) & 0xFF);   # G
             store8(o + 2, v & 0xFF);          # B
-            store8(o + 3, (v >> 24) & 0xFF);  # A (0)
+            store8(o + 3, 0xFF);              # A (opaque — see ALPHA above)
             x = x + 1;
         }
         y = y + 1;
     }
-    # zlib stored stream
-    var num_blocks = raw_len / 65535 + 1;
-    var zmax = 2 + num_blocks * 5 + raw_len + 4;
-    var zbuf = alloc(zmax);
-    var zlen = scap_zlib_store(raw, raw_len, zbuf);
-    # assemble PNG
-    var total_max = 8 + 25 + (12 + zlen) + 12;
-    var out = alloc(total_max);
+    # assemble PNG: signature, IHDR, IDAT (zlib written in place), IEND
+    var zmax = scap_zlib_size(raw_len);
+    var out = fl_alloc(8 + 25 + (12 + zmax) + 12);
+    if (out == 0) { fl_free(raw); return 0; }
     store8(out + 0, 137); store8(out + 1, 80); store8(out + 2, 78); store8(out + 3, 71);
     store8(out + 4, 13); store8(out + 5, 10); store8(out + 6, 26); store8(out + 7, 10);
     var cur = 8;
-    cur = cur + scap_png_chunk(out + cur, "IHDR", ihdr, 13);
-    cur = cur + scap_png_chunk(out + cur, "IDAT", zbuf, zlen);
+    cur = cur + scap_png_chunk(out + cur, "IHDR", &ihdr, 13);
+    var idat = out + cur + 8;
+    var zlen = scap_zlib_store(raw, raw_len, idat);
+    fl_free(raw);                    # consumed: the IDAT holds a copy
+    scap_put_be32(out + cur, zlen);
+    store8(out + cur + 4, 73); store8(out + cur + 5, 68); store8(out + cur + 6, 65); store8(out + cur + 7, 84);
+    scap_put_be32(idat + zlen, scap_png_crc32("IDAT", 4, idat, zlen));
+    cur = cur + 12 + zlen;
     cur = cur + scap_png_chunk(out + cur, "IEND", 0, 0);
-    return scap_buf_new(out, cur);
+    return scap_buf_wrap(out, cur);
 }
 
-# scap_encode_pixels(pix, npix, width, height, fmt): dispatch. -> *ScapBuf.
+# scap_encode_pixels(pix, npix, width, height, fmt): dispatch. -> *ScapBuf, or 0
+# (EncodingError) for width/height/npix <= 0 or no memory.
 fn scap_encode_pixels(pix, npix, width, height, fmt): i64 {
+    if ((width <= 0) || (height <= 0)) { return 0; }
     if (fmt == ScapFmt.SCAP_FMT_RAW_ARGB) { return scap_encode_raw(pix, npix); }
     if (fmt == ScapFmt.SCAP_FMT_BMP) { return scap_encode_bmp(pix, width, height); }
     return scap_encode_png(pix, width, height);
@@ -467,9 +547,12 @@ fn scap_default_format(): i64 { return ScapFmt.SCAP_FMT_PNG; }
 
 # ---------------------------------------------------------------------------
 # Framebuffer read — the pixel-capture path (caller-supplied bhumi fb).
+# The *ScapPix and its pixels are fl_alloc'd; scap_mgr_capture frees them once
+# encoded (scap_pix_free).
 # ---------------------------------------------------------------------------
 fn scap_pix_new(ptr, w, h): i64 {
-    var r = alloc(SCAP_PX_SZ);
+    var r = fl_alloc(SCAP_PX_SZ);
+    if (r == 0) { return 0; }
     store64(r + SCAP_PX_PTR, ptr);
     store64(r + SCAP_PX_W, w);
     store64(r + SCAP_PX_H, h);
@@ -478,12 +561,32 @@ fn scap_pix_new(ptr, w, h): i64 {
 fn scap_pix_ptr(r) { return load64(r + SCAP_PX_PTR); }
 fn scap_pix_w(r)   { return load64(r + SCAP_PX_W); }
 fn scap_pix_h(r)   { return load64(r + SCAP_PX_H); }
+fn scap_pix_free(r): i64 {
+    if (r == 0) { return 0; }
+    fl_free(load64(r + SCAP_PX_PTR));
+    fl_free(r);
+    return 0;
+}
+# scap_pix_alloc(w, h, err_out): an empty w x h *ScapPix, or 0 with *err_out =
+# SCAP_ERR_NO_MEMORY. Callers have already refused w/h <= 0.
+fn scap_pix_alloc(w, h, err_out): i64 {
+    var pix = fl_alloc(w * h * 8);
+    if (pix == 0) { store64(err_out, ScapErr.SCAP_ERR_NO_MEMORY); return 0; }
+    var r = scap_pix_new(pix, w, h);
+    if (r == 0) { fl_free(pix); store64(err_out, ScapErr.SCAP_ERR_NO_MEMORY); return 0; }
+    return r;
+}
 
-# scap_capture_full_screen(fb): whole framebuffer -> *ScapPix (never fails).
-fn scap_capture_full_screen(fb): i64 {
+# scap_capture_full_screen(fb, err_out): whole framebuffer -> *ScapPix, or 0 with
+# *err_out = SCAP_ERR_REGION_OOB (an output with no pixels — Rust would have
+# encoded an empty image from a 0x0 Output; the port refuses it) / NO_MEMORY.
+fn scap_capture_full_screen(fb, err_out): i64 {
     var w = bhumi_fb_width(fb);
     var h = bhumi_fb_height(fb);
-    var pix = alloc(w * h * 8);
+    if ((w <= 0) || (h <= 0)) { store64(err_out, ScapErr.SCAP_ERR_REGION_OOB); return 0; }
+    var src = scap_pix_alloc(w, h, err_out);
+    if (src == 0) { return 0; }
+    var pix = scap_pix_ptr(src);
     var y = 0;
     while (y < h) {
         var x = 0;
@@ -493,21 +596,25 @@ fn scap_capture_full_screen(fb): i64 {
         }
         y = y + 1;
     }
-    return scap_pix_new(pix, w, h);
+    return src;
 }
 
 # scap_capture_region(fb, x, y, width, height, err_out): clamped sub-rectangle.
-# -> *ScapPix, or 0 with *err_out = SCAP_ERR_REGION_OOB.
+# -> *ScapPix, or 0 with *err_out = SCAP_ERR_REGION_OOB / NO_MEMORY.
+# Rust's width/height are u32, so its `== 0` test covers the whole invalid range;
+# here they are i64, and a negative one gets the same RegionOutOfBounds.
 fn scap_capture_region(fb, x, y, width, height, err_out): i64 {
-    if ((width == 0) || (height == 0)) { store64(err_out, ScapErr.SCAP_ERR_REGION_OOB); return 0; }
+    if ((width <= 0) || (height <= 0)) { store64(err_out, ScapErr.SCAP_ERR_REGION_OOB); return 0; }
     var out_w = bhumi_fb_width(fb);
     var out_h = bhumi_fb_height(fb);
     var src_x = scap_max(x, 0);
     var src_y = scap_max(y, 0);
     var cw = scap_min(width, scap_sat_sub(out_w, src_x));
     var ch = scap_min(height, scap_sat_sub(out_h, src_y));
-    if ((cw == 0) || (ch == 0)) { store64(err_out, ScapErr.SCAP_ERR_REGION_OOB); return 0; }
-    var pix = alloc(cw * ch * 8);
+    if ((cw <= 0) || (ch <= 0)) { store64(err_out, ScapErr.SCAP_ERR_REGION_OOB); return 0; }
+    var src = scap_pix_alloc(cw, ch, err_out);
+    if (src == 0) { return 0; }
+    var pix = scap_pix_ptr(src);
     var row = 0;
     while (row < ch) {
         var col = 0;
@@ -521,11 +628,12 @@ fn scap_capture_region(fb, x, y, width, height, err_out): i64 {
         }
         row = row + 1;
     }
-    return scap_pix_new(pix, cw, ch);
+    return src;
 }
 
 # scap_capture_window(comp, fb, surface_id, err_out): window geometry -> region.
-# -> *ScapPix, or 0 with *err_out = SCAP_ERR_WINDOW_NOT_FOUND / REGION_OOB.
+# -> *ScapPix, or 0 with *err_out = SCAP_ERR_WINDOW_NOT_FOUND / REGION_OOB (a
+# window of width or height <= 0) / NO_MEMORY.
 fn scap_capture_window(comp, fb, surface_id, err_out): i64 {
     var idx = comp_find_by_id(comp, surface_id);
     if (idx < 0) { store64(err_out, ScapErr.SCAP_ERR_WINDOW_NOT_FOUND); return 0; }
@@ -574,12 +682,21 @@ fn scap_mgr_get_permission(m, agent): i64 { return map_get(scap_mgr_perms(m), ag
 fn scap_mgr_capture_history(m): i64 { return scap_mgr_history(m); }
 
 # record_history(result): append metadata entry, evict oldest at cap (ring).
+# The entry owns a COPY of the target (the result's goes with scap_result_free),
+# and the evicted entry is freed.
 fn scap_mgr_record_history(m, result): i64 {
     var h = scap_mgr_history(m);
-    var e = scap_hist_new(scap_result_id(result), scap_result_target(result),
+    var rt = scap_result_target(result);
+    var tc = scap_target_new(scap_target_kind(rt), load64(rt + SCAP_T_A), load64(rt + SCAP_T_B),
+      load64(rt + SCAP_T_C), load64(rt + SCAP_T_D));
+    var e = scap_hist_new(scap_result_id(result), tc,
       scap_result_format(result), scap_result_width(result), scap_result_height(result),
       scap_result_data_size(result), scap_result_captured_at(result), scap_result_req_agent(result));
-    if (vec_len(h) >= ScapCap.SCAP_MAX_HISTORY) { vec_remove(h, 0); }
+    if (e == 0) { fl_free(tc); return 0; }
+    if (vec_len(h) >= ScapCap.SCAP_MAX_HISTORY) {
+        scap_hist_free(vec_get(h, 0));
+        vec_remove(h, 0);
+    }
     vec_push(h, e);
     return 0;
 }
@@ -615,6 +732,7 @@ fn scap_mgr_check_authorization(m, agent, target_kind, comp, now): i64 {
 # scap_mgr_capture(m, comp, fb, kind, a, b, c, d, fmt, agent, now):
 # the top-level capture. agent == 0 == system (None) path: only secure-mode
 # gates it. Returns *ScapResult (0 on any failure; query scap_mgr_last_err(m)).
+# The result is the caller's: scap_result_free it.
 # Target payload: Window a=surface_id; Region a=x,b=y,c=width,d=height.
 fn scap_mgr_capture(m, comp, fb, kind, a, b, c, d, fmt, agent, now): i64 {
     # --- authorization ---
@@ -628,7 +746,7 @@ fn scap_mgr_capture(m, comp, fb, kind, a, b, c, d, fmt, agent, now): i64 {
     var perr = ScapErr.SCAP_OK;
     var src = 0;
     if (kind == ScapKind.SCAP_KIND_FULLSCREEN) {
-        src = scap_capture_full_screen(fb);
+        src = scap_capture_full_screen(fb, &perr);
     } else {
         if (kind == ScapKind.SCAP_KIND_WINDOW) {
             src = scap_capture_window(comp, fb, a, &perr);
@@ -639,13 +757,24 @@ fn scap_mgr_capture(m, comp, fb, kind, a, b, c, d, fmt, agent, now): i64 {
     if (src == 0) { store64(m + SCAP_M_LAST_ERR, perr); return 0; }
     var w = scap_pix_w(src);
     var h = scap_pix_h(src);
-    var pix = scap_pix_ptr(src);
-    # --- encode ---
-    var buf = scap_encode_pixels(pix, w * h, w, h, fmt);
+    # --- encode; the pixel read is consumed either way ---
+    var buf = scap_encode_pixels(scap_pix_ptr(src), w * h, w, h, fmt);
+    scap_pix_free(src);
+    if (buf == 0) { store64(m + SCAP_M_LAST_ERR, ScapErr.SCAP_ERR_ENCODING); return 0; }
     # --- build result + record history ---
+    var data = scap_buf_ptr(buf);
+    var dlen = scap_buf_len(buf);
+    fl_free(buf);                    # the header only: the bytes move into the result
     var tgt = scap_target_new(kind, a, b, c, d);
-    var id = scap_mgr_next_id(m);
-    var result = scap_result_new(id, tgt, fmt, w, h, scap_buf_ptr(buf), scap_buf_len(buf), now, agent);
+    var result = 0;
+    if (tgt != 0) { result = scap_result_new(0, tgt, fmt, w, h, data, dlen, now, agent); }
+    if (result == 0) {
+        fl_free(tgt);
+        fl_free(data);
+        store64(m + SCAP_M_LAST_ERR, ScapErr.SCAP_ERR_NO_MEMORY);
+        return 0;
+    }
+    store64(result + SCAP_R_ID, scap_mgr_next_id(m));
     scap_mgr_record_history(m, result);
     store64(m + SCAP_M_LAST_ERR, ScapErr.SCAP_OK);
     return result;

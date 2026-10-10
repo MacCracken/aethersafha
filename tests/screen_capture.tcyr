@@ -7,11 +7,136 @@ include "src/geom.cyr"
 include "src/window.cyr"
 include "src/compositor.cyr"
 include "src/screen_capture.cyr"
+include "lib/chitra.cyr"   # the OUTSIDE PNG decoder (the wallpaper's): round-trips below
 
 # assert(cond) passes only when cond == 1; normalize a non-zero pointer to 1.
 fn t_ok(x): i64 {
     if (x != 0) { return 1; }
     return 0;
+}
+
+# rss_pages(): resident pages of this process, from /proc/self/statm (field 2).
+# An oracle outside both allocators: fl_free's munmap and a leak both show here.
+fn rss_pages(): i64 {
+    var sb[128];
+    var n = file_read_all("/proc/self/statm", &sb, 120);
+    if (n <= 0) { return 0 - 1; }
+    var i = 0;
+    while ((i < n) && (load8(&sb + i) != 32)) { i = i + 1; }
+    i = i + 1;
+    var v = 0;
+    while ((i < n) && (load8(&sb + i) >= 48) && (load8(&sb + i) <= 57)) {
+        v = v * 10 + (load8(&sb + i) - 48);
+        i = i + 1;
+    }
+    return v;
+}
+
+# pat_rgb(x, y): a position-dependent 0xRRGGBB, so a swapped channel, a shifted row
+# or a dropped block cannot pass.
+fn pat_rgb(x, y): i64 {
+    return bhumi_xrgb(x * 3 + y, x + y * 5, (x ^ y) + 17);
+}
+# pat_fb(w, h): a w x h fb of pat_rgb with a NON-ZERO X byte (0x5A) — the padding an
+# encoder must not pass off as alpha.
+fn pat_fb(w, h): i64 {
+    var f = bhumi_fb_new(w, h);
+    var y = 0;
+    while (y < h) {
+        var x = 0;
+        while (x < w) {
+            bhumi_fb_set(f, x, y, 0x5A000000 | pat_rgb(x, y));
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return f;
+}
+
+# png_mismatches(data, len, ox, oy, w, h): decode with chitra and count pixels that
+# differ from pat_rgb at (ox+x, oy+y) or are not alpha 0xFF; -1 if chitra refuses it
+# or the dims are wrong.
+fn png_mismatches(data, len, ox, oy, w, h): i64 {
+    var cerr = 0;
+    var img = chitra_png_decode(data, len, &cerr);
+    if (img == 0) { return 0 - 1; }
+    if ((chitra_image_width(img) != w) || (chitra_image_height(img) != h)) { return 0 - 1; }
+    var px = chitra_image_pixels(img);
+    var bad = 0;
+    var y = 0;
+    while (y < h) {
+        var x = 0;
+        while (x < w) {
+            var p = px + (y * w + x) * 4;
+            var want = pat_rgb(ox + x, oy + y);
+            var got = ((load8(p) << 16) | (load8(p + 1) << 8)) | load8(p + 2);
+            if ((got != want) || (load8(p + 3) != 0xFF)) { bad = bad + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return bad;
+}
+
+# img_alpha(img, i): pixel i's alpha in a chitra image, -1 when the decode failed.
+fn img_alpha(img, i): i64 {
+    if (img == 0) { return 0 - 1; }
+    return load8(chitra_image_pixels(img) + i * 4 + 3);
+}
+# img_dims(img): width * 65536 + height, -1 when the decode failed.
+fn img_dims(img): i64 {
+    if (img == 0) { return 0 - 1; }
+    return chitra_image_width(img) * 65536 + chitra_image_height(img);
+}
+
+# bmp_mismatches(data, len, w, h): an independent BMP reader — header fields, then
+# BGRA top-down rows against pat_rgb with alpha 0xFF. -1 on a bad header.
+fn bmp_mismatches(data, len, w, h): i64 {
+    if ((load8(data) != 0x42) || (load8(data + 1) != 0x4D)) { return 0 - 1; }
+    if (load32(data + 2) != len) { return 0 - 1; }
+    var off = load32(data + 10);
+    if ((load32(data + 18) != w) || (load32(data + 22) != ((0 - h) & 0xFFFFFFFF))) { return 0 - 1; }
+    if (load16(data + 28) != 32) { return 0 - 1; }
+    if (off + w * h * 4 != len) { return 0 - 1; }
+    var bad = 0;
+    var i = 0;
+    while (i < w * h) {
+        var p = data + off + i * 4;
+        var want = pat_rgb(i % w, i / w);
+        var got = ((load8(p + 2) << 16) | (load8(p + 1) << 8)) | load8(p);
+        if ((got != want) || (load8(p + 3) != 0xFF)) { bad = bad + 1; }
+        i = i + 1;
+    }
+    return bad;
+}
+
+# raw_mismatches(data, w, h): RawArgb is the little-endian u32 0xAARRGGBB per pixel.
+fn raw_mismatches(data, w, h): i64 {
+    var bad = 0;
+    var i = 0;
+    while (i < w * h) {
+        var v = load32(data + i * 4);
+        if (v != (0xFF000000 | pat_rgb(i % w, i / w))) { bad = bad + 1; }
+        i = i + 1;
+    }
+    return bad;
+}
+
+# png_idat_blocks(data): count the stored-deflate blocks in the (single) IDAT, so a
+# "spans several blocks" test proves it does.
+fn png_idat_blocks(data): i64 {
+    var idat = data + 8 + 25;              # signature + IHDR chunk
+    var zlen = ((load8(idat) << 24) | (load8(idat + 1) << 16)) | ((load8(idat + 2) << 8) | load8(idat + 3));
+    var z = idat + 8 + 2;                  # past the chunk header and CMF/FLG
+    var zend = idat + 8 + zlen - 4;        # before Adler-32
+    var nb = 0;
+    while (z < zend) {
+        var blen = load16(z + 1);
+        nb = nb + 1;
+        if ((load8(z) & 1) == 1) { return nb; }
+        z = z + 5 + blen;
+    }
+    return nb;
 }
 
 # a fresh 2-pixel array holding value v twice (encoder unit tests).
@@ -33,6 +158,8 @@ fn four_px(v): i64 {
 
 fn main() {
     alloc_init();
+    # freed fl blocks read 0xA5 and redzone overruns are counted: the free checks need both
+    fl_poison_enable();
     var NOW = 1000000000;
     # short aliases for fully-qualified enum values (keep capture call lines <= 120).
     var FS = ScapKind.SCAP_KIND_FULLSCREEN;
@@ -55,26 +182,61 @@ fn main() {
     assert_eq(scap_png_crc32("IEND", 4, 0, 0), 0xAE426082, "crc32(IEND) == 0xAE426082");
     # test_default_capture_format_is_png
     assert_eq(scap_default_format(), PNG, "default format == PNG");
-    # test_raw_encoding: 2px 0xAABBCCDD -> 8 bytes, [B,G,R,X] per pixel
+    # test_raw_encoding: 2px 0xAABBCCDD -> 8 bytes, [B,G,R,A] per pixel. The 0xAA is
+    # XRGB padding, not alpha: the encoder writes 0xFF (Rust's front buffer was opaque).
     var rbuf = scap_encode_pixels(two_px(0xAABBCCDD), 2, 2, 1, RAW);
     assert_eq(scap_buf_len(rbuf), 8, "raw 2px -> 8 bytes");
     assert_eq(scap_buf_at(rbuf, 0), 0xDD, "raw byte0 == B (0xDD)");
     assert_eq(scap_buf_at(rbuf, 1), 0xCC, "raw byte1 == G (0xCC)");
     assert_eq(scap_buf_at(rbuf, 2), 0xBB, "raw byte2 == R (0xBB)");
-    assert_eq(scap_buf_at(rbuf, 3), 0xAA, "raw byte3 == X (0xAA)");
+    assert_eq(scap_buf_at(rbuf, 3), 0xFF, "raw byte3 == A 0xFF, not the X byte 0xAA");
+    assert_eq(scap_buf_at(rbuf, 7), 0xFF, "raw pixel 1 A == 0xFF");
+    scap_buf_free(rbuf);
     # test_bmp_encoding_structure: 2x2 -> file_size 70, "BM" magic, size field == len
-    var bbuf = scap_encode_bmp(four_px(0xFFFF0000), 2, 2);
+    var bbuf = scap_encode_bmp(four_px(0x00FF0000), 2, 2);
     assert_eq(scap_buf_len(bbuf), 70, "bmp 2x2 len == 14+40+16");
     assert_eq(scap_buf_at(bbuf, 0), 0x42, "bmp byte0 == 'B'");
     assert_eq(scap_buf_at(bbuf, 1), 0x4D, "bmp byte1 == 'M'");
     assert_eq(scap_buf_at(bbuf, 2), 70, "bmp file_size field (LE byte0) == 70");
+    assert_eq(scap_buf_at(bbuf, 54 + 2), 0xFF, "bmp pixel 0 R == 0xFF");
+    assert_eq(scap_buf_at(bbuf, 54 + 3), 0xFF, "bmp pixel 0 A == 0xFF (fb X byte was 0)");
+    assert_eq(scap_buf_at(bbuf, 54 + 15), 0xFF, "bmp pixel 3 A == 0xFF");
+    scap_buf_free(bbuf);
     # test_png_encoding_signature: first 8 bytes are the PNG signature
-    var pbuf = scap_encode_png(four_px(0xFF00FF00), 2, 2);
+    var pbuf = scap_encode_png(four_px(0x0000FF00), 2, 2);
     assert_eq(scap_buf_at(pbuf, 0), 137, "png sig byte0 == 137");
     assert_eq(scap_buf_at(pbuf, 1), 80, "png sig byte1 == 'P'");
     assert_eq(scap_buf_at(pbuf, 2), 78, "png sig byte2 == 'N'");
     assert_eq(scap_buf_at(pbuf, 3), 71, "png sig byte3 == 'G'");
     assert_eq(scap_buf_at(pbuf, 7), 10, "png sig byte7 == 10");
+    # the first pixel's RGBA sits after IHDR(25) + IDAT hdr(8) + zlib(2) + block hdr(5) + filter(1)
+    assert_eq(scap_buf_at(pbuf, 8 + 25 + 8 + 2 + 5 + 1 + 1), 0xFF, "png pixel 0 G == 0xFF");
+    assert_eq(scap_buf_at(pbuf, 8 + 25 + 8 + 2 + 5 + 1 + 3), 0xFF, "png pixel 0 A == 0xFF (fb X byte was 0)");
+    var pcerr = 0;
+    var pimg = chitra_png_decode(scap_buf_ptr(pbuf), scap_buf_len(pbuf), &pcerr);
+    assert(t_ok(pimg), "chitra decodes the 2x2 png");
+    assert_eq(img_alpha(pimg, 3), 0xFF, "chitra: pixel 3 alpha == 0xFF");
+    scap_buf_free(pbuf);
+
+    # -----------------------------------------------------------------------
+    test_group("screen_capture — encoders refuse width / height <= 0 (no null write)");
+    var ep = four_px(0x00123456);
+    assert_eq(scap_encode_png(ep, 0 - 2, 3), 0, "png w=-2 h=3 refused (was a write through 0)");
+    assert_eq(scap_encode_png(ep, 0 - 2, 0 - 2), 0, "png w=-2 h=-2 refused (positive raw_len)");
+    assert_eq(scap_encode_png(ep, 0, 4), 0, "png w=0 refused");
+    assert_eq(scap_encode_png(ep, 4, 0), 0, "png h=0 refused");
+    assert_eq(scap_encode_bmp(ep, 0 - 1, 4), 0, "bmp w=-1 refused");
+    assert_eq(scap_encode_bmp(ep, 2, 0), 0, "bmp h=0 refused");
+    assert_eq(scap_encode_raw(ep, 0), 0, "raw npix=0 refused");
+    assert_eq(scap_encode_raw(ep, 0 - 4), 0, "raw npix=-4 refused");
+    assert_eq(scap_encode_pixels(ep, 4, 0 - 2, 0 - 2, RAW), 0, "dispatch w=-2 h=-2 RAW refused");
+    assert_eq(scap_encode_pixels(ep, 4, 2, 0, BMP), 0, "dispatch h=0 BMP refused");
+    assert_eq(scap_encode_pixels(ep, 4, 0 - 1, 4, PNG), 0, "dispatch w=-1 PNG refused");
+    # the zlib size is exact at the 65,535-byte block boundaries
+    assert_eq(scap_zlib_size(0), 11, "zlib size of empty == 2 + 5 + 4");
+    assert_eq(scap_zlib_size(65535), 2 + 5 + 65535 + 4, "zlib size: exactly one full block");
+    assert_eq(scap_zlib_size(65536), 2 + 10 + 65536 + 4, "zlib size: one byte over -> two blocks");
+    assert_eq(scap_zlib_size(131070), 2 + 10 + 131070 + 4, "zlib size: exactly two blocks");
 
     # -----------------------------------------------------------------------
     test_group("screen_capture — target kind matching");
@@ -98,10 +260,32 @@ fn main() {
     # test_full_screen_capture_bmp
     var fbmp = scap_mgr_capture(mm, comp, fb, FS, 0, 0, 0, 0, BMP, 0, NOW);
     assert_eq(scap_result_data_size(fbmp), 54 + 800 * 600 * 4, "bmp data_size == 54 + w*h*4");
-    # test_full_screen_capture_png
-    var fpng = scap_mgr_capture(mm, comp, fbs, FS, 0, 0, 0, 0, PNG, 0, NOW);
+    assert_eq(scap_result_width(fbmp), 800, "bmp width == 800");
+    assert_eq(scap_result_height(fbmp), 600, "bmp height == 600");
+    assert_eq(load8(scap_result_data(fbmp)), 0x42, "bmp data[0] == 'B'");
+    assert_eq(load8(scap_result_data(fbmp) + 1), 0x4D, "bmp data[1] == 'M'");
+    # test_full_screen_capture_png — at Rust's 800x600 (1,920,600 raw bytes: 30 stored blocks)
+    var fpng = scap_mgr_capture(mm, comp, fb, FS, 0, 0, 0, 0, PNG, 0, NOW);
     assert(t_ok(fpng), "full-screen png capture succeeds");
-    assert_eq(load8(scap_result_data(fpng)), 137, "png data starts with signature byte 137");
+    assert_eq(scap_result_width(fpng), 800, "png width == 800");
+    assert_eq(scap_result_height(fpng), 600, "png height == 600");
+    var fpd = scap_result_data(fpng);
+    assert_eq(load8(fpd + 0), 137, "png sig[0] == 137");
+    assert_eq(load8(fpd + 1), 80, "png sig[1] == 80");
+    assert_eq(load8(fpd + 2), 78, "png sig[2] == 78");
+    assert_eq(load8(fpd + 3), 71, "png sig[3] == 71");
+    assert_eq(load8(fpd + 4), 13, "png sig[4] == 13");
+    assert_eq(load8(fpd + 5), 10, "png sig[5] == 10");
+    assert_eq(load8(fpd + 6), 26, "png sig[6] == 26");
+    assert_eq(load8(fpd + 7), 10, "png sig[7] == 10");
+    var fpcerr = 0;
+    var fpimg = chitra_png_decode(fpd, scap_result_data_size(fpng), &fpcerr);
+    assert(t_ok(fpimg), "chitra decodes the 800x600 capture");
+    assert_eq(img_dims(fpimg), 800 * 65536 + 600, "decoded dims 800x600");
+    assert_eq(img_alpha(fpimg, 600 * 800 - 1), 0xFF, "last decoded pixel opaque");
+    scap_result_free(fr);
+    scap_result_free(fbmp);
+    scap_result_free(fpng);
 
     # -----------------------------------------------------------------------
     test_group("screen_capture — region capture + clamping");
@@ -127,6 +311,15 @@ fn main() {
     var rz = scap_mgr_capture(mr, comp, fb, RG, 0, 0, 0, 100, RAW, 0, NOW);
     assert_eq(rz, 0, "zero-dim region returns 0");
     assert_eq(scap_mgr_last_err(mr), ScapErr.SCAP_ERR_REGION_OOB, "zero-dim last_err == REGION_OOB");
+    # negative sizes: unrepresentable in Rust's u32, refused with the same RegionOutOfBounds
+    var hist_before = vec_len(scap_mgr_capture_history(mr));
+    assert_eq(scap_mgr_capture(mr, comp, fb, RG, 0, 0, 0 - 5, 10, PNG, 0, NOW), 0, "w=-5 region returns 0");
+    assert_eq(scap_mgr_last_err(mr), ScapErr.SCAP_ERR_REGION_OOB, "w=-5 last_err == REGION_OOB");
+    assert_eq(scap_mgr_capture(mr, comp, fb, RG, 0, 0, 10, 0 - 3, PNG, 0, NOW), 0, "h=-3 region returns 0");
+    assert_eq(scap_mgr_last_err(mr), ScapErr.SCAP_ERR_REGION_OOB, "h=-3 last_err == REGION_OOB");
+    assert_eq(scap_mgr_capture(mr, comp, fb, RG, 0, 0, 0 - 2, 0 - 2, BMP, 0, NOW), 0, "w=h=-2 region returns 0");
+    assert_eq(scap_mgr_last_err(mr), ScapErr.SCAP_ERR_REGION_OOB, "w=h=-2 last_err == REGION_OOB");
+    assert_eq(vec_len(scap_mgr_capture_history(mr)), hist_before, "refused captures leave no history");
 
     # -----------------------------------------------------------------------
     test_group("screen_capture — window capture");
@@ -143,6 +336,14 @@ fn main() {
     var wnf = scap_mgr_capture(mw, compw, fb, WN, 999999, 0, 0, 0, RAW, 0, NOW);
     assert_eq(wnf, 0, "absent window returns 0");
     assert_eq(scap_mgr_last_err(mw), ScapErr.SCAP_ERR_WINDOW_NOT_FOUND, "last_err == WINDOW_NOT_FOUND");
+    # a window of width or height <= 0 goes through capture_region's refusal (Rust: same path)
+    var wz = comp_create_window(compw, 10, 10, 50, 50, "Zero");
+    win_resize(wz, 0, 50);
+    assert_eq(scap_mgr_capture(mw, compw, fb, WN, win_id(wz), 0, 0, 0, PNG, 0, NOW), 0, "w=0 window refused");
+    assert_eq(scap_mgr_last_err(mw), ScapErr.SCAP_ERR_REGION_OOB, "w=0 window last_err == REGION_OOB");
+    win_resize(wz, 0 - 7, 0 - 7);
+    assert_eq(scap_mgr_capture(mw, compw, fb, WN, win_id(wz), 0, 0, 0, RAW, 0, NOW), 0, "w=h=-7 window refused");
+    assert_eq(scap_mgr_last_err(mw), ScapErr.SCAP_ERR_REGION_OOB, "w=h=-7 window last_err == REGION_OOB");
 
     # -----------------------------------------------------------------------
     test_group("screen_capture — secure mode");
@@ -237,8 +438,10 @@ fn main() {
     # test_grant_and_revoke_permission
     scap_mgr_grant_full_access(mg, "agent-x", NOW);
     assert(t_ok(scap_mgr_get_permission(mg, "agent-x")), "granted agent-x present");
+    assert_eq(vec_len(scap_mgr_list_permissions(mg)), 1, "one permission listed after grant");
     assert_eq(scap_mgr_revoke(mg, "agent-x"), 1, "revoke returns true");
     assert_eq(scap_mgr_get_permission(mg, "agent-x"), 0, "agent-x gone after revoke");
+    assert_eq(vec_len(scap_mgr_list_permissions(mg)), 0, "no permissions listed after revoke");
     # test_revoke_nonexistent_returns_false
     assert_eq(scap_mgr_revoke(mg, "ghost"), 0, "revoke nonexistent returns false");
     # regrant overwrites (HashMap::insert): second grant wins, still one entry
@@ -282,7 +485,102 @@ fn main() {
     assert_eq(load8(pdat + 0), 0x33, "raw byte0 B == 0x33");
     assert_eq(load8(pdat + 1), 0x22, "raw byte1 G == 0x22");
     assert_eq(load8(pdat + 2), 0x11, "raw byte2 R == 0x11");
-    assert_eq(load8(pdat + 3), 0, "raw byte3 X == 0");
+    assert_eq(load8(pdat + 3), 0xFF, "raw byte3 A == 0xFF (the fb's X byte is 0)");
+    # a full-screen read of an fb that reports no pixels is refused before allocating
+    var zfb = bhumi_fb_new(4, 4);
+    store64(zfb + BHUMI_FB_WIDTH, 0);
+    assert_eq(scap_mgr_capture(mpx, comppx, zfb, FS, 0, 0, 0, 0, PNG, 0, NOW), 0, "0-wide fb full-screen refused");
+    assert_eq(scap_mgr_last_err(mpx), ScapErr.SCAP_ERR_REGION_OOB, "0-wide fb last_err == REGION_OOB");
+
+    # -----------------------------------------------------------------------
+    test_group("screen_capture — decode round-trips over 64 KB (PNG via chitra, BMP, RAW)");
+    var mrt = scap_mgr_new();
+    var crt = comp_new();
+    var rtfb = pat_fb(300, 200);
+    # region 200x100 at (50,40): 100 * (1 + 800) = 80,100 raw bytes -> 2 stored blocks
+    var rp2 = scap_mgr_capture(mrt, crt, rtfb, RG, 50, 40, 200, 100, PNG, 0, NOW);
+    assert(t_ok(rp2), "200x100 png region captured");
+    assert_eq(png_idat_blocks(scap_result_data(rp2)), 2, "80,100 raw bytes -> 2 stored blocks");
+    assert_eq(png_mismatches(scap_result_data(rp2), scap_result_data_size(rp2), 50, 40, 200, 100), 0,
+      "chitra: 200x100 region == the fb pixels, alpha 0xFF");
+    scap_result_free(rp2);
+    # full 300x200: 200 * 1201 = 240,200 raw bytes -> 4 stored blocks
+    var rp4 = scap_mgr_capture(mrt, crt, rtfb, FS, 0, 0, 0, 0, PNG, 0, NOW);
+    assert_eq(png_idat_blocks(scap_result_data(rp4)), 4, "240,200 raw bytes -> 4 stored blocks");
+    assert_eq(png_mismatches(scap_result_data(rp4), scap_result_data_size(rp4), 0, 0, 300, 200), 0,
+      "chitra: 300x200 full screen == the fb pixels, alpha 0xFF");
+    scap_result_free(rp4);
+    # 64x255: 255 * 257 = 65,535 raw bytes -> exactly one full block
+    var rp1 = scap_mgr_capture(mrt, crt, pat_fb(64, 255), FS, 0, 0, 0, 0, PNG, 0, NOW);
+    assert_eq(png_idat_blocks(scap_result_data(rp1)), 1, "65,535 raw bytes -> exactly 1 block");
+    assert_eq(png_mismatches(scap_result_data(rp1), scap_result_data_size(rp1), 0, 0, 64, 255), 0,
+      "chitra: 64x255 (one full block) round-trips");
+    scap_result_free(rp1);
+    # 21x1542: 1542 * 85 = 131,070 raw bytes -> exactly two full blocks
+    var rpx2 = scap_mgr_capture(mrt, crt, pat_fb(21, 1542), FS, 0, 0, 0, 0, PNG, 0, NOW);
+    assert_eq(png_idat_blocks(scap_result_data(rpx2)), 2, "131,070 raw bytes -> exactly 2 blocks");
+    assert_eq(png_mismatches(scap_result_data(rpx2), scap_result_data_size(rpx2), 0, 0, 21, 1542), 0,
+      "chitra: 21x1542 (two full blocks) round-trips");
+    scap_result_free(rpx2);
+    # BMP and RAW of the same 300x200 (240,000 pixel bytes each)
+    var rb = scap_mgr_capture(mrt, crt, rtfb, FS, 0, 0, 0, 0, BMP, 0, NOW);
+    assert_eq(bmp_mismatches(scap_result_data(rb), scap_result_data_size(rb), 300, 200), 0,
+      "bmp: 300x200 decodes to the fb pixels, alpha 0xFF");
+    scap_result_free(rb);
+    var rr = scap_mgr_capture(mrt, crt, rtfb, FS, 0, 0, 0, 0, RAW, 0, NOW);
+    assert_eq(scap_result_data_size(rr), 300 * 200 * 4, "raw 300x200 size");
+    assert_eq(raw_mismatches(scap_result_data(rr), 300, 200), 0, "raw: 300x200 == 0xFF<<24 | the fb pixels");
+    scap_result_free(rr);
+
+    # -----------------------------------------------------------------------
+    test_group("screen_capture — per-capture memory is freed");
+    var mmem = scap_mgr_new();
+    var cmem = comp_new();
+    var memfb = pat_fb(256, 256);
+    # warm-up: fill the history ring to its cap (its vec stops growing) and touch each path once
+    var wu = 0;
+    while (wu < ScapCap.SCAP_MAX_HISTORY) {
+        scap_result_free(scap_mgr_capture(mmem, cmem, fbs, FS, 0, 0, 0, 0, RAW, 0, NOW));
+        wu = wu + 1;
+    }
+    scap_result_free(scap_mgr_capture(mmem, cmem, memfb, FS, 0, 0, 0, 0, PNG, 0, NOW));
+    scap_result_free(scap_mgr_capture(mmem, cmem, memfb, FS, 0, 0, 0, 0, BMP, 0, NOW));
+    var bump0 = alloc_used();
+    var rss0 = rss_pages();
+    assert_eq(rss0 > 0, 1, "rss readable from /proc/self/statm");
+    # 30 PNG + 10 BMP + 10 RAW at 256x256: each leaked ~0.8-1 MB before (pixels 512 KB,
+    # raw image, output) — 40+ MB in all
+    var mi = 0;
+    var mok = 0;
+    while (mi < 50) {
+        var mfmt = PNG;
+        if (mi >= 30) { mfmt = BMP; }
+        if (mi >= 40) { mfmt = RAW; }
+        var mres = scap_mgr_capture(mmem, cmem, memfb, FS, 0, 0, 0, 0, mfmt, 0, NOW);
+        if (mres != 0) { mok = mok + 1; }
+        scap_result_free(mres);
+        mi = mi + 1;
+    }
+    assert_eq(mok, 50, "50 captures succeed");
+    assert_eq(alloc_used() - bump0, 0, "50 captures past the history cap: 0 B of bump allocator");
+    var rss_grow = rss_pages() - rss0;
+    assert_eq(rss_grow < 512, 1, "50 freed 256x256 captures: resident set grows < 2 MB");
+    assert_eq(vec_len(scap_mgr_capture_history(mmem)), ScapCap.SCAP_MAX_HISTORY, "history still at cap");
+    # the evicted history entry is freed. ⚠ A deliberate read of freed memory: fl's poison
+    # mode (enabled at the top of main; it is compile-time opt-in otherwise) fills a freed
+    # small block with 0xA5, and nothing allocates between the eviction and this read.
+    assert_eq(fl_poison_active(), 1, "fl poison mode on (the next check depends on it)");
+    var oldest_h = vec_get(scap_mgr_capture_history(mmem), 0);
+    var oldest_id = scap_hist_id(oldest_h);
+    scap_result_free(scap_mgr_capture(mmem, cmem, fbs, FS, 0, 0, 0, 0, RAW, 0, NOW));
+    assert_eq(scap_hist_id(vec_get(scap_mgr_capture_history(mmem), 0)) != oldest_id, 1, "oldest entry evicted");
+    assert_eq(load64(oldest_h + SCAP_H_ID), 0xA5A5A5A5A5A5A5A5, "evicted history entry was freed (poisoned)");
+    # a held result is the caller's: its bytes are resident until scap_result_free
+    var held = scap_mgr_capture(mmem, cmem, memfb, FS, 0, 0, 0, 0, RAW, 0, NOW);
+    var rss_held = rss_pages();
+    scap_result_free(held);
+    assert_eq(rss_held - rss_pages() >= 60, 1, "scap_result_free returns a 256 KB result's pages");
+    assert_eq(fl_poison_violations(), 0, "no freed block's redzone was overrun");
 
     return assert_summary();
 }

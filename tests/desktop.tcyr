@@ -71,8 +71,57 @@ fn t_gauge_from(v, p, tol): i64 {
 fn t_le(a, b): i64 { if (a <= b) { return 1; } return 0; }
 fn t_ge(a, b): i64 { if (a >= b) { return 1; } return 0; }
 
+var t_dport = 0;   # the port the last t_dbind gave
+
+# A TCP socket bound to 127.0.0.1 on an ephemeral port (left in t_dport), listening when `listen`
+# is 1. Bound and not listening, the port refuses every connect and no one else can take it.
+fn t_dbind(listen): i64 {
+    var fd = sys_socket(AF_INET, SOCK_STREAM | 2048, 0);
+    var sa[16];
+    memset(&sa, 0, 16);
+    store16(&sa, AF_INET);
+    store32(&sa + 4, 0x0100007F);
+    if (sys_bind(fd, &sa, 16) < 0) { return 0 - 1; }
+    if (listen == 1) { if (sys_listen(fd, 8) < 0) { return 0 - 1; } }
+    var sl[8];
+    store64(&sl, 16);
+    sys_getsockname(fd, &sa, &sl);
+    t_dport = (load8(&sa + 2) << 8) | load8(&sa + 3);
+    return fd;
+}
+
+# Fork a one-shot fake daimon on listener `lfd`: accept one connection, read the request's head,
+# answer the `rlen` bytes at `resp`, hang up. A separate process, so a client that blocks fails the
+# checks below instead of deadlocking this suite. -> its pid.
+fn t_dserve(lfd, resp, rlen): i64 {
+    var pid = sys_fork();
+    if (pid == 0) {
+        var req = alloc(4096);
+        var t_end = clock_now_ns() + 3000000000;
+        var conn = 0 - 1;
+        while (conn < 0 && clock_now_ns() < t_end) { conn = sys_accept4(lfd, 0, 0, 2048); }
+        var got = 0;
+        while (conn >= 0 && dmn_head_end(req, 0, got) == 0 && clock_now_ns() < t_end) {
+            var n = sys_recvfrom(conn, req + got, 4000 - got, 64, 0, 0);
+            if (n > 0) { got = got + n; }
+            if (n == 0) { t_end = 0; }
+        }
+        if (conn >= 0) {
+            if (memeq(req, "GET /v1/agents HTTP/1.1\r\n", 25) == 1) { sys_sendto(conn, resp, rlen, 16384, 0, 0); }
+            sys_close(conn);
+        }
+        sys_exit(0);
+    }
+    return pid;
+}
+
 fn main() {
     alloc_init();
+    # ⛔ desktop_status_poll starts daimon's agent-list GET on every tick. Point it at a port of this
+    # test's own that refuses, NEVER at 127.0.0.1:8090, where a real daimon may be running.
+    var dsink = t_dbind(0);
+    var dsink_port = t_dport;
+    daimon_set_endpoint(0x0100007F, dsink_port);
 
     # ----- ⭐⭐ THE ACTIVE WINDOW IS THE TOP LAYER — PROVEN IN COMPOSITED PIXELS ------------------
     # ⛔ SEEN ON IRON 2026-08-17: *"active window should be the highest layer"* — puka focused with crab
@@ -439,6 +488,56 @@ fn main() {
     assert_eq(vec_len(ai_history(pai)), ph0 + 2, "two ticks, two UserPresent events");
     assert_eq(desktop_status_poll(pd, 0 - 1, 120, 120), 1, "a -1 clock falls back to the frame cadence");
     assert_eq(desk_last_tick_us, 6000000, "  ...without recording -1 as the last tick");
+
+    # -----------------------------------------------------------------------
+    test_group("desktop — the tick polls daimon's agent list, and the panel's agent gauge reads it (ADR 0004)");
+    var gd = desktop_new();
+    var gai = desk_ai(gd);
+    var gsh = desk_shell(gd);
+    var glfd = t_dbind(1);
+    assert_gt(glfd, 0 - 1, "a fake daimon listens on a port of this test's own");
+    daimon_set_endpoint(0x0100007F, t_dport);
+    var gbody = "{\"agents\":[{\"id\":1,\"name\":\"a\",\"type\":\"User\",\"status\":2,\"pid\":7,\"exit_code\":null,\"limits_enforced\":true,\"contained\":true},{\"id\":2,\"name\":\"b\",\"type\":\"User\",\"status\":0,\"pid\":0,\"exit_code\":null},{\"id\":3,\"name\":\"c\",\"type\":\"Service\",\"status\":6,\"pid\":0,\"exit_code\":1}],\"count\":3}";
+    var gsb = str_builder_new();
+    str_builder_add_cstr(gsb, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ");
+    str_builder_add_int(gsb, strlen(gbody));
+    str_builder_add_cstr(gsb, "\r\nConnection: close\r\n\r\n");
+    str_builder_add_cstr(gsb, gbody);
+    var gresp = str_builder_build(gsb);
+    var gpid = t_dserve(glfd, str_data(gresp), str_len(gresp));
+    desk_last_tick_us = 0 - 1;
+    var g0 = clock_now_ns() / 1000;
+    assert_eq(desktop_status_poll(gd, g0, 0, 120), 1, "the first frame ticks");
+    assert_eq(daimon_poll_busy(), 1, "  ...and the tick started GET /v1/agents");
+    assert_eq(shell_status_agents(shell_status(gsh)), 0, "  ...the gauge read 0 agents before any answer");
+    # The frames that follow step the GET while the fake daimon (it answers only that request) runs.
+    var gframe = 1;
+    var gticks = 0;
+    var gt_end = clock_now_ns() + 3000000000;
+    while (ai_agent_hud_count(gai) != 3 && clock_now_ns() < gt_end) {
+        gticks = gticks + desktop_status_poll(gd, clock_now_ns() / 1000, gframe, 120);
+        gframe = gframe + 1;
+    }
+    var gst[8];
+    sys_waitpid(gpid, &gst, 0);
+    assert_eq(ai_agent_hud_count(gai), 3, "later frames landed daimon's three agents in the HUD");
+    assert_eq(gticks, 0, "  ...frames that did not tick (the GET is stepped every frame, not every tick)");
+    assert_eq(daimon_poll_last(), DmnResult.DMN_R_FED, "  ...a fed poll");
+    var g3 = ai_get_agent_hud_state(gai, 3);
+    var g3st = 0 - 1;                                  # a missing state fails the check, not faults
+    if (g3 != 0) { g3st = ai_hud_status(g3); }
+    assert_eq(g3st, AI_AgentStatus.AI_AS_ERROR, "  ...agent 3 failed -> Error");
+    assert_eq(desktop_status_poll(gd, g0 + 5000000, gframe, 120), 1, "5 s after the first, the tick is due");
+    assert_eq(shell_status_agents(shell_status(gsh)), 3, "  ...and the panel's agent gauge reads the three");
+    # That tick started the next GET. The fake daimon goes away, so it fails, and the HUD keeps three.
+    sys_close(glfd);
+    var gend = clock_now_ns() + 3000000000;
+    while (daimon_poll_busy() == 1 && clock_now_ns() < gend) { daimon_step(gai, clock_now_ns() / 1000); }
+    assert_eq(daimon_poll_busy(), 0, "the next GET ended when its daimon went away");
+    assert_neq(daimon_poll_last(), DmnResult.DMN_R_FED, "  ...unfed");
+    assert_eq(ai_agent_hud_count(gai), 3, "  ...and the HUD kept the three");
+    daimon_set_endpoint(0x0100007F, dsink_port);
+    sys_close(dsink);
 
     return assert_summary();
 }

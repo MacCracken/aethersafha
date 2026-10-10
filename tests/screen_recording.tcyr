@@ -14,8 +14,42 @@ fn t_ok(x): i64 {
     return 0;
 }
 
+# rss_pages(): resident pages of this process, from /proc/self/statm (field 2) — an
+# oracle outside both allocators (a 64 KB frame is its own mapping, unmapped on free).
+fn rss_pages(): i64 {
+    var sb[128];
+    var n = file_read_all("/proc/self/statm", &sb, 120);
+    if (n <= 0) { return 0 - 1; }
+    var i = 0;
+    while ((i < n) && (load8(&sb + i) != 32)) { i = i + 1; }
+    i = i + 1;
+    var v = 0;
+    while ((i < n) && (load8(&sb + i) >= 48) && (load8(&sb + i) <= 57)) {
+        v = v * 10 + (load8(&sb + i) - 48);
+        i = i + 1;
+    }
+    return v;
+}
+
+# raw_frame_ok(f, rgb): every pixel of a RAW frame is [B,G,R,0xFF] of rgb — the
+# bytes are live (a freed block reads 0xA5 poison, or faults once unmapped).
+fn raw_frame_ok(f, rgb): i64 {
+    if (f == 0) { return 0; }
+    var d = srec_frame_data(f);
+    if (d == 0) { return 0; }
+    var n = srec_frame_data_size(f) / 4;
+    var i = 0;
+    while (i < n) {
+        if (load32(d + i * 4) != (0xFF000000 | rgb)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
 fn main() {
     alloc_init();
+    # freed fl blocks read 0xA5 and redzone overruns are counted: the free checks need both
+    fl_poison_enable();
     var NOW = 1000000000;
     var err = alloc(8);
     var fbs = bhumi_fb_new(4, 4);   # small fb — frame counts/state are what we assert
@@ -176,7 +210,12 @@ fn main() {
     var idb = srec_mgr_start_recording(moa, coa, soa, srec_cfg_agent("agent-x"), NOW, err);
     assert_eq(idb, 0, "agent-x second recording blocked");
     assert_eq(load64(err), SrecErr.SREC_ERR_ALREADY_RECORDING, "err ALREADY_RECORDING");
+    assert_eq(srec_mgr_err_id(moa), ida, "AlreadyRecording carries the existing recording's id");
     assert_eq(vec_len(srec_mgr_list_sessions(moa)), 1, "still one session");
+    # the payload is per error: a later success clears it
+    var ido = srec_mgr_start_recording(moa, coa, soa, srec_cfg_default(), NOW, err);
+    assert(t_ok(ido), "a system recording beside it starts");
+    assert_eq(srec_mgr_err_id(moa), 0, "err_id reset by a successful start");
 
     # -----------------------------------------------------------------------
     test_group("screen_recording — session + frame queries");
@@ -256,6 +295,85 @@ fn main() {
     assert(t_ok(idsys), "system recording starts (no agent)");
     assert_eq(srec_sess_agent_id(srec_mgr_get_session(msys, idsys)), 0, "system session agent_id 0");
     assert(t_ok(srec_mgr_capture_frame(msys, csys, ssys, fbs, idsys, NOW, err)), "system frame captured");
+
+    # -----------------------------------------------------------------------
+    test_group("screen_recording — frames own their data (moved out of the capture)");
+    var fbc = bhumi_fb_new(4, 4);
+    bhumi_fb_clear(fbc, bhumi_xrgb(0x12, 0x34, 0x56));
+    var mo = srec_mgr_new();
+    var co = comp_new();
+    var so = scap_mgr_new();
+    var ido2 = srec_mgr_start_recording(mo, co, so, srec_cfg_new(FS, 0, 0, 0, 0, 100, 0 - 1, 0 - 1, RAW, 0), NOW, err);
+    var fo = srec_mgr_capture_frame(mo, co, so, fbc, ido2, NOW, err);
+    assert_eq(srec_frame_data_size(fo), 4 * 4 * 4, "raw 4x4 frame is 64 bytes");
+    assert_eq(raw_frame_ok(fo, 0x123456), 1, "frame bytes live after the capture result is freed, alpha 0xFF");
+    srec_mgr_capture_frame(mo, co, so, fbc, ido2, NOW, err);
+    assert_eq(raw_frame_ok(fo, 0x123456), 1, "frame 0 untouched by the next capture");
+    # stop keeps the frames (screen_recording.rs:390-392)
+    assert(t_ok(srec_mgr_stop_recording(mo, ido2, err)), "stop ok");
+    var fafter = srec_mgr_get_frames(mo, ido2, 0 - 1, err);
+    assert_eq(vec_len(fafter), 2, "both frames readable after stop");
+    var f1after = 0;
+    if (vec_len(fafter) == 2) { f1after = vec_get(fafter, 1); }
+    assert_eq(raw_frame_ok(f1after, 0x123456), 1, "frame 1 data intact after stop");
+
+    # -----------------------------------------------------------------------
+    test_group("screen_recording — the ring frees what it evicts; remove frees the rest");
+    var fbm = bhumi_fb_new(128, 128);   # RAW frame = 65,536 B: its own mapping, unmapped on free
+    bhumi_fb_clear(fbm, bhumi_xrgb(0x01, 0x02, 0x03));
+    var mm = srec_mgr_new();
+    var cm = comp_new();
+    var sm = scap_mgr_new();
+    var unl = srec_cfg_new(FS, 0, 0, 0, 0, 100, 0 - 1, 0 - 1, RAW, 0);
+    var idm = srec_mgr_start_recording(mm, cm, sm, unl, NOW, err);
+    var w = 0;
+    while (w < SrecCap.SREC_MAX_RING_BUFFER_FRAMES) {      # fill the ring (and D1's history)
+        srec_mgr_capture_frame(mm, cm, sm, fbm, idm, NOW, err);
+        w = w + 1;
+    }
+    var bump0 = alloc_used();
+    var rss0 = rss_pages();
+    assert_eq(rss0 > 0, 1, "rss readable from /proc/self/statm");
+    var e = 0;
+    var eok = 0;
+    while (e < 150) {                                      # 150 evictions: 9.6 MB if kept
+        if (t_ok(srec_mgr_capture_frame(mm, cm, sm, fbm, idm, NOW, err)) == 1) { eok = eok + 1; }
+        e = e + 1;
+    }
+    assert_eq(eok, 150, "150 frames past the ring bound captured");
+    var msess = srec_mgr_get_session(mm, idm);
+    assert_eq(srec_sess_frame_count(msess), 250, "frame_count 250");
+    assert_eq(vec_len(srec_sess_frames(msess)), SrecCap.SREC_MAX_RING_BUFFER_FRAMES, "ring holds 100");
+    assert_eq(alloc_used() - bump0, 0, "150 evicting captures: 0 B of bump allocator");
+    assert_eq(rss_pages() - rss0 < 256, 1, "150 evicting captures: resident set grows < 1 MB");
+    var newest = srec_mgr_get_latest_frame(mm, idm, err);
+    assert_eq(srec_frame_sequence(newest), 249, "newest seq 249");
+    assert_eq(raw_frame_ok(newest, 0x010203), 1, "newest frame live");
+    assert_eq(raw_frame_ok(vec_get(srec_sess_frames(msess), 0), 0x010203), 1, "oldest retained frame live");
+    # the evicted frame HEADER is freed too. ⚠ A deliberate read of freed memory: poison
+    # mode fills a freed small block with 0xA5, and nothing allocates after the eviction.
+    var ev = vec_get(srec_sess_frames(msess), 0);
+    srec_mgr_capture_frame(mm, cm, sm, fbm, idm, NOW, err);
+    assert_eq(srec_frame_sequence(vec_get(srec_sess_frames(msess), 0)), 151, "seq 150 evicted");
+    assert_eq(load64(ev + SREC_F_SEQUENCE), 0xA5A5A5A5A5A5A5A5, "evicted frame header was freed (poisoned)");
+    # remove: every ring frame is freed, the session is gone, its header stays readable
+    var rss_full = rss_pages();
+    assert_eq(srec_mgr_remove_recording(mm, idm), SrecErr.SREC_OK, "remove ok");
+    assert_eq(rss_full - rss_pages() >= 1400, 1, "remove returns the ring's ~6.4 MB (>= 1400 pages)");
+    assert_eq(vec_len(srec_sess_frames(msess)), 0, "removed session's ring is empty");
+    assert_eq(srec_mgr_get_session(mm, idm), 0, "removed session is gone");
+    assert_eq(srec_mgr_remove_recording(mm, idm), SrecErr.SREC_ERR_SESSION_NOT_FOUND, "remove twice -> NOT_FOUND");
+    assert_eq(srec_mgr_capture_frame(mm, cm, sm, fbm, idm, NOW, err), 0, "capture on a removed id -> 0");
+    assert_eq(load64(err), SrecErr.SREC_ERR_SESSION_NOT_FOUND, "capture on a removed id -> NOT_FOUND");
+    # removing an agent's ACTIVE recording frees its slot (stop is not required first)
+    var mar = srec_mgr_new();
+    var sar = scap_mgr_new();
+    scap_mgr_grant_full_access(sar, "agent-r", NOW);
+    var idr1 = srec_mgr_start_recording(mar, cm, sar, srec_cfg_agent("agent-r"), NOW, err);
+    assert_eq(srec_mgr_remove_recording(mar, idr1), SrecErr.SREC_OK, "remove active agent recording");
+    var idr2 = srec_mgr_start_recording(mar, cm, sar, srec_cfg_agent("agent-r"), NOW, err);
+    assert(t_ok(idr2), "agent-r can record again after remove");
+    assert_eq(fl_poison_violations(), 0, "no freed block's redzone was overrun");
 
     return assert_summary();
 }

@@ -50,6 +50,34 @@ fn count_title(v, title_cstr): i64 {
     return c;
 }
 
+# Is the cstr `s` exactly `want`? -> 1 / 0.
+fn t_cstr_is(s, want): i64 {
+    var n = strlen(want);
+    if (strlen(s) != n) { return 0; }
+    return memeq(s, want, n);
+}
+
+# The epoch seconds of an RFC 3339 cstr, or -999 when it does not parse.
+fn t_rfc(s): i64 {
+    var out[8];
+    if (ai_rfc3339_secs(s, strlen(s), &out) != 1) { return 0 - 999; }
+    return load64(&out);
+}
+
+# Does the cstr parse as RFC 3339? -> 1 / 0.
+fn t_rfc_ok(s): i64 {
+    var out[8];
+    return ai_rfc3339_secs(s, strlen(s), &out);
+}
+
+# HUD state `id` of f, or a stand-in of -1s, so a missing state FAILS the checks rather than faults.
+fn t_state(f, id): i64 {
+    var s = ai_get_agent_hud_state(f, id);
+    if (s != 0) { return s; }
+    return ai_hud_new(0, str_from("<missing>"), 0 - 1, str_from("<missing>"), 0 - 1, 0 - 1,
+      ai_res_new(0 - 1, 0 - 1, 0 - 1));
+}
+
 fn main() {
     alloc_init();
 
@@ -514,6 +542,258 @@ fn main() {
     assert_eq(ai_status_from_str("failed"), AI_AgentStatus.AI_AS_ERROR, "failed -> Error");
     assert_eq(ai_status_from_str("waiting"), AI_AgentStatus.AI_AS_WAITING, "waiting -> Waiting");
     assert_eq(ai_status_from_str("unknown"), AI_AgentStatus.AI_AS_IDLE, "unknown -> Idle");
+
+    # --- poll_agents against daimon 2.4.3 (ai_features.rs:496-546; the transport is
+    #     tests/daimon_client.tcyr) ---
+    test_group("ai_features — poll: daimon's integer statuses, by daimon's name, through Rust's table");
+    assert_eq(t_cstr_is(ai_daimon_status_name(0), "pending"), 1, "0 is pending (daimon agent.cyr:6)");
+    assert_eq(t_cstr_is(ai_daimon_status_name(1), "starting"), 1, "1 is starting");
+    assert_eq(t_cstr_is(ai_daimon_status_name(2), "running"), 1, "2 is running");
+    assert_eq(t_cstr_is(ai_daimon_status_name(3), "paused"), 1, "3 is paused");
+    assert_eq(t_cstr_is(ai_daimon_status_name(4), "stopping"), 1, "4 is stopping");
+    assert_eq(t_cstr_is(ai_daimon_status_name(5), "stopped"), 1, "5 is stopped");
+    assert_eq(t_cstr_is(ai_daimon_status_name(6), "failed"), 1, "6 is failed");
+    assert_eq(t_cstr_is(ai_daimon_status_name(7), "unknown"), 1, "7 is not daimon's");
+    assert_eq(ai_status_from_daimon(0), AI_AgentStatus.AI_AS_IDLE, "0 pending -> Idle (Rust's registered)");
+    assert_eq(ai_status_from_daimon(1), AI_AgentStatus.AI_AS_IDLE, "1 starting -> Idle (Rust's _)");
+    assert_eq(ai_status_from_daimon(2), AI_AgentStatus.AI_AS_ACTING, "2 running -> Acting");
+    assert_eq(ai_status_from_daimon(3), AI_AgentStatus.AI_AS_IDLE, "3 paused -> Idle (Rust's _)");
+    assert_eq(ai_status_from_daimon(4), AI_AgentStatus.AI_AS_IDLE, "4 stopping -> Idle (Rust's _)");
+    assert_eq(ai_status_from_daimon(5), AI_AgentStatus.AI_AS_IDLE, "5 stopped -> Idle (Rust's _)");
+    assert_eq(ai_status_from_daimon(6), AI_AgentStatus.AI_AS_ERROR, "6 failed -> Error");
+    assert_eq(ai_status_from_daimon(7), AI_AgentStatus.AI_AS_IDLE, "7 -> Idle (Rust's unknown)");
+    assert_eq(ai_status_from_daimon(0 - 1), AI_AgentStatus.AI_AS_IDLE, "-1 -> Idle");
+
+    test_group("ai_features — poll: a status string matches whole bytes, and costs no heap");
+    var rb = alloc(16);
+    memcpy(rb, "running", 7);
+    store8(rb + 7, 0);
+    store8(rb + 8, 120);
+    assert_eq(ai_status_from_bytes(rb, 7), AI_AgentStatus.AI_AS_ACTING, "the 7 bytes running -> Acting");
+    assert_eq(ai_status_from_bytes(rb, 9), AI_AgentStatus.AI_AS_IDLE, "running, NUL, x is not running (Rust's &str)");
+    assert_eq(ai_status_from_bytes(rb, 4), AI_AgentStatus.AI_AS_IDLE, "runn is not running");
+    var sh0 = alloc_used();
+    ai_status_from_str("failed");
+    ai_status_from_str("nope");
+    ai_status_from_daimon(2);
+    assert_eq(alloc_used() - sh0, 0, "the status table allocates nothing (it built six Strs a call)");
+
+    test_group("ai_features — poll: daimon's integer id is the id; anything else is minted (Rust: Uuid::new_v4)");
+    assert_eq(ai_poll_agent_id(bayan_json_v_int_new(17)), 17, "17 -> 17 (ADR 0003: Uuid -> i64)");
+    assert_eq(ai_poll_agent_id(bayan_json_v_int_new(0x4000000000000000)), 0x4000000000000000, "2^62 is below the minted base");
+    var mint_a = ai_poll_agent_id(0);
+    var mint_b = ai_poll_agent_id(bayan_json_v_str_new(str_from("17")));
+    assert_gte(mint_a, AI_HUD_ID_MINTED_BASE, "no id -> minted");
+    assert_gte(mint_b, AI_HUD_ID_MINTED_BASE, "a string id -> minted");
+    assert_neq(mint_a, mint_b, "each minted id is new");
+    assert_gte(ai_poll_agent_id(bayan_json_v_int_new(0)), AI_HUD_ID_MINTED_BASE, "0 -> minted (the HUD map cannot hold it)");
+    assert_gte(ai_poll_agent_id(bayan_json_v_int_new(0 - 4)), AI_HUD_ID_MINTED_BASE, "negative -> minted");
+    assert_gte(ai_poll_agent_id(bayan_json_v_float_new(f64_from(17))), AI_HUD_ID_MINTED_BASE, "17.0 -> minted");
+    assert_gt(ai_poll_agent_id(bayan_json_v_int_new(AI_HUD_ID_MINTED_BASE)), AI_HUD_ID_MINTED_BASE,
+      "an id at the minted base is not taken as one");
+
+    test_group("ai_features — poll: cpu_percent and memory_mb keep Rust's as_f64 / as_u64 defaults");
+    assert_eq(ai_poll_cpu_permille(bayan_json_v_int_new(12)), 120, "12 % -> 120 permille");
+    assert_eq(ai_poll_cpu_permille(bayan_json_v_float_new(f64_div(f64_from(91), f64_from(2)))), 455, "45.5 % -> 455");
+    assert_eq(ai_poll_cpu_permille(bayan_json_v_float_new(f64_div(f64_from(0 - 5), f64_from(2)))), 0 - 25, "-2.5 % -> -25");
+    assert_eq(ai_poll_cpu_permille(bayan_json_v_str_new(str_from("12"))), 0, "a string -> 0");
+    assert_eq(ai_poll_cpu_permille(0), 0, "missing -> 0");
+    assert_eq(ai_poll_cpu_permille(bayan_json_v_int_new(9223372036854775807)), AI_PCT_LIMIT, "a huge integer saturates");
+    var e19 = f64_mul(f64_from(1000000000), f64_from(10000000000));
+    assert_eq(ai_poll_cpu_permille(bayan_json_v_float_new(e19)), AI_PCT_LIMIT, "a huge float saturates");
+    assert_eq(ai_poll_mem_mb(bayan_json_v_int_new(512)), 512, "512 -> 512");
+    assert_eq(ai_poll_mem_mb(bayan_json_v_int_new(0 - 1)), 0, "-1 is no u64 -> 0");
+    assert_eq(ai_poll_mem_mb(bayan_json_v_float_new(f64_from(5))), 0, "5.0 is no u64 -> 0");
+    assert_eq(ai_poll_mem_mb(0), 0, "missing -> 0");
+
+    test_group("ai_features — poll: days from the civil date (any year 0000-9999)");
+    assert_eq(ai_days_from_civil(1970, 1, 1), 0, "1970-01-01 is day 0");
+    assert_eq(ai_days_from_civil(1970, 1, 2), 1, "1970-01-02 is day 1");
+    assert_eq(ai_days_from_civil(2000, 3, 1), 11017, "2000-03-01, the day after a 400-year leap day");
+    assert_eq(ai_days_from_civil(1969, 12, 31), 0 - 1, "1969-12-31 is day -1");
+    assert_eq(ai_days_from_civil(1600, 3, 1), 0 - 135080, "1600-03-01 (python: -11670912000 s)");
+    assert_eq(ai_days_from_civil(0, 1, 1), 0 - 719528, "0000-01-01");
+
+    test_group("ai_features — poll: last_heartbeat is RFC 3339 (chrono 0.4.44 parse_from_rfc3339)");
+    assert_eq(t_rfc("1970-01-01T00:00:00Z"), 0, "the epoch");
+    assert_eq(t_rfc("2026-10-10T12:34:56Z"), 1791635696, "2026-10-10T12:34:56Z");
+    assert_eq(t_rfc("2026-10-10T12:34:56+02:00"), 1791635696 - 7200, "+02:00 is two hours earlier in UTC");
+    assert_eq(t_rfc("2026-10-10T12:34:56-05:30"), 1791635696 + 19800, "-05:30");
+    assert_eq(t_rfc("2026-10-10t12:34:56.123456789123z"), 1791635696, "lower-case t and z, a fraction of any length");
+    assert_eq(t_rfc("2026-10-10 12:34:56Z"), 1791635696, "a space between date and time");
+    assert_eq(t_rfc("2026-10-10T23:59:60Z"), t_rfc("2026-10-10T23:59:59Z"), "second 60 is chrono's leap second, :59");
+    assert_eq(t_rfc("2024-02-29T00:00:00Z"), 1709164800, "Feb 29 of a leap year");
+    assert_eq(t_rfc("2000-02-29T00:00:00Z"), 951782400, "Feb 29 of 2000 (divisible by 400)");
+    assert_eq(t_rfc("1969-12-31T23:59:59Z"), 0 - 1, "before 1970 the epoch is negative");
+    assert_eq(t_rfc("0000-01-01T00:00:00Z"), 0 - 62167219200, "year 0000");
+    assert_eq(t_rfc("9999-12-31T23:59:59Z"), 253402300799, "year 9999");
+    assert_eq(t_rfc("2026-10-10T12:34:56+23:59"), 1791635696 - 86340, "+23:59, the largest offset");
+    var minus = alloc(32);
+    memcpy(minus, "2026-10-10T12:34:56", 19);
+    store8(minus + 19, 0xE2);
+    store8(minus + 20, 0x88);
+    store8(minus + 21, 0x92);
+    memcpy(minus + 22, "05:00", 5);
+    var mt = alloc(8);
+    assert_eq(ai_rfc3339_secs(minus, 27, mt), 1, "U+2212 MINUS SIGN as the offset's sign");
+    assert_eq(load64(mt), 1791635696 + 18000, "  ...-05:00");
+    assert_eq(t_rfc_ok("2023-02-29T00:00:00Z"), 0, "Feb 29 of a common year");
+    assert_eq(t_rfc_ok("1900-02-29T00:00:00Z"), 0, "Feb 29 of 1900");
+    assert_eq(t_rfc_ok("2026-04-31T00:00:00Z"), 0, "April 31");
+    assert_eq(t_rfc_ok("2026-13-01T00:00:00Z"), 0, "month 13");
+    assert_eq(t_rfc_ok("2026-00-01T00:00:00Z"), 0, "month 0");
+    assert_eq(t_rfc_ok("2026-10-00T00:00:00Z"), 0, "day 0");
+    assert_eq(t_rfc_ok("2026-10-10T24:00:00Z"), 0, "hour 24");
+    assert_eq(t_rfc_ok("2026-10-10T12:60:00Z"), 0, "minute 60");
+    assert_eq(t_rfc_ok("2026-10-10T12:34:61Z"), 0, "second 61");
+    assert_eq(t_rfc_ok("2026-10-10T12:34:56"), 0, "no offset");
+    assert_eq(t_rfc_ok("2026-10-10T12:34:56Z "), 0, "anything after it");
+    assert_eq(t_rfc_ok("2026-10-10T12:34:56+24:00"), 0, "+24:00");
+    assert_eq(t_rfc_ok("2026-10-10T12:34:56+12:60"), 0, "an offset's minute 60");
+    assert_eq(t_rfc_ok("2026-10-10T12:34:56+0200"), 0, "an offset with no colon");
+    assert_eq(t_rfc_ok("2026-10-10T12:34:56.Z"), 0, "a point with no digits");
+    assert_eq(t_rfc_ok("2026-10-10X12:34:56Z"), 0, "X between date and time");
+    assert_eq(t_rfc_ok("26-10-10T12:34:56Z"), 0, "a two-digit year");
+    assert_eq(t_rfc_ok("2026-1a-10T12:34:56Z"), 0, "a letter in the month");
+    assert_eq(ai_poll_activity(bayan_json_v_str_new(str_from("2026-10-10T12:34:56Z")), 5), 1791635696, "a heartbeat is the activity");
+    assert_eq(ai_poll_activity(bayan_json_v_str_new(str_from("yesterday")), 5), 5, "a bad one is now");
+    assert_eq(ai_poll_activity(bayan_json_v_int_new(1791635696), 5), 5, "a number is no string: now");
+    assert_eq(ai_poll_activity(0, 5), 5, "missing: now");
+
+    test_group("ai_features — poll: one agent's state, built in an arena (ai_features.rs:510-541)");
+    var sa = arena_allocator_growable(4096);
+    var sps[48];
+    var sobj = "{\"id\":41,\"name\":\"solo\",\"status\":2,\"current_task\":\"t\",\"memory_mb\":64}";
+    var sroot = bayan_json_v_parse_ctx_a(sa, &sps, sobj, strlen(sobj));
+    var sh1 = alloc_used();
+    var sst = ai_poll_agent_state(sa, sroot, 77);
+    assert_eq(alloc_used() - sh1, 0, "the state and its metrics come from the arena, not the heap");
+    assert_eq(ai_hud_id(sst), 41, "id 41");
+    assert_eq(str_eq(ai_hud_name(sst), str_from("solo")), 1, "name solo");
+    assert_eq(ai_hud_status(sst), AI_AgentStatus.AI_AS_ACTING, "status 2 -> Acting");
+    assert_eq(str_eq(ai_hud_task(sst), str_from("t")), 1, "current_task t");
+    assert_eq(ai_hud_progress(sst), 0, "progress 0");
+    assert_eq(ai_hud_activity(sst), 77, "activity: now");
+    assert_eq(ai_res_cpu(ai_hud_res(sst)), 0, "cpu 0");
+    assert_eq(ai_res_mem(ai_hud_res(sst)), 64, "memory 64");
+    assert_eq(ai_res_gpu(ai_hud_res(sst)), AI_GPU_NONE, "gpu None");
+    var ra = ai_res_new_a(sa, 1, 2, 3);
+    assert_eq(ai_res_cpu(ra) + ai_res_mem(ra) * 10 + ai_res_gpu(ra) * 100, 321, "ai_res_new_a writes cpu, mem, gpu");
+    var ha = ai_hud_new_a(sa, 8, str_from("h"), AI_AgentStatus.AI_AS_WAITING, str_from(""), 500, 9, ra);
+    assert_eq(ai_hud_id(ha) + ai_hud_progress(ha) + ai_hud_activity(ha), 517, "ai_hud_new_a writes id, progress, activity");
+    assert_eq(ai_hud_status(ha), AI_AgentStatus.AI_AS_WAITING, "  ...and status");
+    assert_eq(ai_hud_res(ha), ra, "  ...and the metrics");
+
+    test_group("ai_features — poll: clear + insert keeps the last of a repeated id");
+    var rf = ai_new();
+    ai_register_agent_hud(rf, 1, str_from("old"));
+    var rv = vec_new();
+    vec_push(rv, ai_hud_new(4, str_from("first"), 0, str_from(""), 0, 0, ai_res_new(0, 0, AI_GPU_NONE)));
+    vec_push(rv, ai_hud_new(4, str_from("second"), 0, str_from(""), 0, 0, ai_res_new(0, 0, AI_GPU_NONE)));
+    ai_hud_refresh_replace(rf, rv);
+    assert_eq(ai_agent_hud_count(rf), 1, "one id");
+    assert_eq(ai_get_agent_hud_state(rf, 1), 0, "the old entry is cleared");
+    assert_eq(str_eq(ai_hud_name(t_state(rf, 4)), str_from("second")), 1, "the second of id 4 (HashMap::insert)");
+    assert_eq(ai_poll_mem(rf), ai_poll_mem(rf), "a desktop's poll arenas are made once");
+    assert_neq(ai_poll_mem(rf), ai_poll_mem(ai_new()), "  ...and are its own");
+
+    test_group("ai_features — poll: daimon 2.4.3's body replaces the HUD (clear + insert)");
+    var pf = ai_new();
+    assert_eq(load64(pf + AI_FEAT_POLL), 0, "no poll arenas before the first poll");
+    ai_register_agent_hud(pf, 3, str_from("stale"));
+    var b1 = "{\"agents\":[{\"id\":1,\"name\":\"a\",\"type\":\"User\",\"status\":2,\"pid\":7,\"exit_code\":null,\"limits_enforced\":true,\"contained\":true},{\"id\":2,\"name\":\"b\",\"type\":\"System\",\"status\":6,\"pid\":0,\"exit_code\":1}],\"count\":2}";
+    assert_eq(ai_poll_agents_apply(pf, b1, strlen(b1), 1700000123), 2, "two agents");
+    assert_eq(ai_agent_hud_count(pf), 2, "the HUD holds exactly them");
+    assert_eq(ai_get_agent_hud_state(pf, 3), 0, "the stale entry is cleared");
+    var p1 = t_state(pf, 1);
+    var p2 = t_state(pf, 2);
+    assert_eq(str_eq(ai_hud_name(p1), str_from("a")), 1, "agent 1 is named a");
+    assert_eq(ai_hud_status(p1), AI_AgentStatus.AI_AS_ACTING, "  ...running -> Acting");
+    assert_eq(ai_hud_activity(p1), 1700000123, "  ...stamped with the caller's now");
+    assert_eq(str_len(ai_hud_task(p1)), 0, "  ...no current_task: empty");
+    assert_eq(ai_hud_progress(p1), 0, "  ...progress 0");
+    assert_eq(ai_res_gpu(ai_hud_res(p1)), AI_GPU_NONE, "  ...gpu None");
+    assert_eq(ai_hud_status(p2), AI_AgentStatus.AI_AS_ERROR, "agent 2: failed -> Error");
+    assert_eq(load64(load64(pf + AI_FEAT_POLL) + AI_POLL_CUR), 0, "the states live in arena 0");
+
+    test_group("ai_features — poll: a body that is not JSON leaves the HUD as it was");
+    assert_eq(ai_poll_agents_apply(pf, "nope", 4, 1), 0 - 1, "garbage: -1");
+    assert_eq(ai_poll_agents_apply(pf, "", 0, 1), 0 - 1, "an empty body: -1 (serde: EOF)");
+    var tr = "{\"agents\":[]} x";
+    assert_eq(ai_poll_agents_apply(pf, tr, strlen(tr), 1), 0 - 1, "trailing content: -1");
+    assert_eq(ai_agent_hud_count(pf), 2, "  ...the HUD keeps its two");
+    assert_eq(str_eq(ai_hud_name(t_state(pf, 1)), str_from("a")), 1, "  ...readable as they were");
+    assert_eq(load64(load64(pf + AI_FEAT_POLL) + AI_POLL_CUR), 0, "  ...still from arena 0");
+
+    test_group("ai_features — poll: JSON of another shape is Rust's empty list, and CLEARS the HUD");
+    assert_eq(ai_poll_agents_apply(pf, "{}", 2, 1), 0, "{}: no agents array");
+    assert_eq(ai_agent_hud_count(pf), 0, "  ...the HUD is empty");
+    ai_register_agent_hud(pf, 3, str_from("x"));
+    assert_eq(ai_poll_agents_apply(pf, "[]", 2, 1), 0, "[]: not an object");
+    assert_eq(ai_agent_hud_count(pf), 0, "  ...empty");
+    ai_register_agent_hud(pf, 3, str_from("x"));
+    var b5 = "{\"agents\":5}";
+    assert_eq(ai_poll_agents_apply(pf, b5, strlen(b5), 1), 0, "agents is not an array");
+    assert_eq(ai_agent_hud_count(pf), 0, "  ...empty");
+    var bdup = "{\"agents\":[{\"id\":1}],\"agents\":[]}";
+    assert_eq(ai_poll_agents_apply(pf, bdup, strlen(bdup), 1), 0, "two agents keys: the last wins (serde_json)");
+    var bne = "{\"agents\":[1,\"x\",null]}";
+    assert_eq(ai_poll_agents_apply(pf, bne, strlen(bne), 9), 3, "elements that are not objects are still agents");
+    assert_eq(ai_agent_hud_count(pf), 3, "  ...three, each under a minted id");
+    var ne = ai_get_agent_hud_states(pf);
+    var nei = 0;
+    var ne_ok = 0;
+    while (nei < vec_len(ne)) {
+        var ns = vec_get(ne, nei);
+        if (ai_hud_id(ns) >= AI_HUD_ID_MINTED_BASE && str_eq(ai_hud_name(ns), str_from("unknown")) == 1) {
+            if (ai_hud_status(ns) == AI_AgentStatus.AI_AS_IDLE && ai_hud_activity(ns) == 9) { ne_ok = ne_ok + 1; }
+        }
+        nei = nei + 1;
+    }
+    assert_eq(ne_ok, 3, "  ...each minted, named unknown, Idle, stamped now");
+
+    test_group("ai_features — poll: fields of another type keep Rust's defaults; Rust's own shape still reads");
+    var bw = "{\"agents\":[{\"id\":1,\"id\":2,\"name\":7,\"name\":\"last\",\"status\":\"running\",\"status\":\"failed\"},{\"id\":5,\"name\":\"first\"},{\"id\":5,\"name\":\"second\",\"status\":2.0},{\"id\":6,\"name\":\"rusty\",\"status\":\"waiting\",\"current_task\":\"build\",\"last_heartbeat\":\"2026-10-10T12:34:56Z\",\"cpu_percent\":45.5,\"memory_mb\":512},{\"id\":7,\"name\":{\"x\":1},\"current_task\":3,\"status\":null}]}";
+    assert_eq(ai_poll_agents_apply(pf, bw, strlen(bw), 1700000000), 5, "five agents listed");
+    assert_eq(ai_agent_hud_count(pf), 4, "  ...four ids: a repeated id keeps the last (HashMap::insert)");
+    assert_eq(ai_get_agent_hud_state(pf, 1), 0, "a repeated key keeps the last: id 2, not 1");
+    var w2 = t_state(pf, 2);
+    assert_eq(str_eq(ai_hud_name(w2), str_from("last")), 1, "  ...name last");
+    assert_eq(ai_hud_status(w2), AI_AgentStatus.AI_AS_ERROR, "  ...status failed -> Error");
+    var w5 = t_state(pf, 5);
+    assert_eq(str_eq(ai_hud_name(w5), str_from("second")), 1, "id 5 twice: the second");
+    assert_eq(ai_hud_status(w5), AI_AgentStatus.AI_AS_IDLE, "  ...a float status 2.0 is no integer: Idle");
+    var w6 = t_state(pf, 6);
+    assert_eq(ai_hud_status(w6), AI_AgentStatus.AI_AS_WAITING, "a string status reads Rust's table: waiting -> Waiting");
+    assert_eq(str_eq(ai_hud_task(w6), str_from("build")), 1, "  ...current_task build");
+    assert_eq(ai_hud_activity(w6), 1791635696, "  ...last_heartbeat is the activity");
+    assert_eq(ai_res_cpu(ai_hud_res(w6)), 455, "  ...cpu 45.5 % -> 455 permille");
+    assert_eq(ai_res_mem(ai_hud_res(w6)), 512, "  ...memory 512 MB");
+    var w7 = t_state(pf, 7);
+    assert_eq(str_eq(ai_hud_name(w7), str_from("unknown")), 1, "an object name -> unknown");
+    assert_eq(str_len(ai_hud_task(w7)), 0, "  ...a numeric task -> empty");
+    assert_eq(ai_hud_status(w7), AI_AgentStatus.AI_AS_IDLE, "  ...a null status -> Idle");
+    assert_eq(ai_hud_activity(w7), 1700000000, "  ...no heartbeat: now");
+
+    test_group("ai_features — a poll allocates nothing that lasts (two arenas, reused)");
+    var mf = ai_new();
+    ai_poll_agents_apply(mf, b1, strlen(b1), 1);
+    var keep = t_state(mf, 1);
+    ai_poll_agents_apply(mf, b1, strlen(b1), 2);
+    assert_eq(str_eq(ai_hud_name(keep), str_from("a")), 1, "a state that left the map lives until the next poll");
+    assert_eq(load64(load64(mf + AI_FEAT_POLL) + AI_POLL_CUR), 1, "  ...the polls alternate arenas");
+    ai_poll_agents_apply(mf, bw, strlen(bw), 3);
+    ai_poll_agents_apply(mf, b1, strlen(b1), 4);
+    var m0 = alloc_used();
+    var mi = 0;
+    while (mi < 10) {
+        ai_poll_agents_apply(mf, bw, strlen(bw), 5);
+        ai_poll_agents_apply(mf, b1, strlen(b1), 6);
+        mi = mi + 1;
+    }
+    assert_eq(alloc_used() - m0, 0, "twenty more polls: 0 B of heap");
+    assert_eq(ai_agent_hud_count(mf), 2, "  ...and the HUD holds the last poll's two");
+    assert_eq(ai_hud_activity(t_state(mf, 2)), 6, "  ...from the last poll");
 
     return assert_summary();
 }

@@ -25,6 +25,8 @@ stdlib = [
     "sha1", "keccak", "sigil", "sakshi",
     # chitra → sankoch (PNG inflate); sankoch's lock calls mutex_lock, hence "thread":
     "sankoch", "thread",
+    # JSON: plugin messages, the security audit log, daimon's agent list
+    "bayan",
 ]
 # "sys" is not listed: src/sysprobe.cyr includes lib/sys.cyr by path.
 

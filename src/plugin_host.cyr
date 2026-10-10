@@ -2,7 +2,8 @@
 # Parity: rust-old/src/plugin_host.rs
 #   (PluginInfo, PluginType, PluginState, PluginCapability, PluginMessage,
 #    PluginSandboxProfile, PluginHost + lifecycle / heartbeat / health /
-#    per-type sandbox profiles + JSON-RPC message model.)
+#    per-type sandbox profiles + JSON-RPC message model and its JSON.)
+#   Rust had no socket transport for the messages, and neither does the port.
 #
 # Heap-object idiom: every Rust struct is arena-allocated with a named-offset
 # enum; fields via load64/store64 (same convention as src/window.cyr,
@@ -23,12 +24,10 @@
 #   - Vec<PluginCapability>           -> stdlib vec of PLG_Capability ints.
 #   - Vec<String> syscalls/paths      -> stdlib vec of cstr pointers.
 #   - thiserror PluginHostError       -> i64 error codes (PLG_ERR_*). 0 == Ok.
-#   - serde_json to_json/from_json    -> STUBBED (no serde). Message TYPES are
-#                                        modeled as heap objects; the JSON wire
-#                                        encode/decode is a parity TODO.
-#   - Unix-domain-socket IPC transport-> STUBBED (# TODO parity: socket IPC).
-#                                        This module models message TYPES only;
-#                                        the transport is out of scope.
+#   - serde_json to_json/from_json    -> plug_msg_to_json / plug_msg_from_json:
+#                                        serde's text and acceptance rules (see
+#                                        the PluginMessage JSON section).
+#   - String message fields           -> Str (a Rust String can hold U+0000).
 #
 # LIBRARY MODULE: definitions only, no main / no top-level statements.
 
@@ -40,7 +39,7 @@ enum PLG_Err {
     PLG_ERR_PLUGIN_NOT_FOUND     = 1;   # PluginNotFound(Uuid)
     PLG_ERR_MAX_PLUGINS_REACHED  = 2;   # MaxPluginsReached { max }
     PLG_ERR_INVALID_TRANSITION   = 3;   # InvalidStateTransition { from, to }
-    PLG_ERR_SERIALIZATION        = 4;   # Serialization(serde_json::Error) [stub]
+    PLG_ERR_SERIALIZATION        = 4;   # Serialization(serde_json::Error)
 }
 
 # rust: PluginType — role / default-capability class.
@@ -89,6 +88,7 @@ enum PLG_MsgKind {
 # Health / timing constants (rust literals).
 enum PLG_Const {
     PLG_HEALTHY_WINDOW_SECS = 30;   # is_healthy(): heartbeat within 30 s.
+    PLG_JSON_MAX_DEPTH      = 127;  # serde_json's recursion limit refuses the 128th container.
 }
 
 # ---------------------------------------------------------------------------
@@ -187,8 +187,8 @@ fn plug_info_uptime(p, now): i64 {
 # The eight variants carry disjoint payloads. Rather than eight structs we use
 # one fixed-layout record with generic slots; each constructor fills only the
 # slots its variant uses (unused slots are 0 / null). Field meaning depends on
-# the kind (documented per constructor). This models the message TYPES; the
-# JSON wire form (serde) is stubbed — see plug_msg_to_json / plug_msg_from_json.
+# the kind (documented per constructor). String fields are Str. The JSON wire
+# form is plug_msg_to_json / plug_msg_from_json below.
 # ---------------------------------------------------------------------------
 enum PLG_MsgOff {
     M_KIND   = 0;    # PLG_MsgKind discriminant
@@ -197,8 +197,8 @@ enum PLG_MsgOff {
     M_C      = 24;   # i64 slot C  (y / height)
     M_D      = 32;   # i64 slot D  (width)
     M_E      = 40;   # i64 slot E  (height)
-    M_S0     = 48;   # pointer slot 0 (version / format / event_type)
-    M_S1     = 56;   # pointer slot 1 (data)
+    M_S0     = 48;   # Str slot 0 (version / format / event_type)
+    M_S1     = 56;   # Str slot 1 (data)
     M_PTR    = 64;   # pointer slot  (capabilities vec / palette map)
     PLG_M_SZ = 72;   # not M_SZ: enum members are global, so a bare name collides across modules
 }
@@ -222,7 +222,7 @@ fn plug_msg_alloc(kind): i64 {
 fn plug_msg_kind(p) { return load64(p + M_KIND); }
 
 # rust: PluginMessage::Init { plugin_type, version, capabilities }.
-# version is a cstr/Str pointer; capabilities is a vec of PLG_Capability.
+# version is a Str; capabilities is a vec of PLG_Capability (0 reads as empty).
 fn plug_msg_init(plugin_type, version, capabilities): i64 {
     var p = plug_msg_alloc(PLG_MsgKind.PLG_MSG_INIT);
     if (p == 0) { return 0; }
@@ -236,6 +236,7 @@ fn plug_msg_init_version(p) { return load64(p + M_S0); }
 fn plug_msg_init_caps(p)  { return load64(p + M_PTR); }
 
 # rust: PluginMessage::SurfaceGrant { surface_id, x, y, width, height }.
+# surface_id is a u64 bit pattern; x / y are i32 and width / height u32 values.
 fn plug_msg_surface_grant(surface_id, x, y, width, height): i64 {
     var p = plug_msg_alloc(PLG_MsgKind.PLG_MSG_SURFACE_GRANT);
     if (p == 0) { return 0; }
@@ -262,7 +263,7 @@ fn plug_msg_render_request(surface_id): i64 {
 fn plug_msg_req_surface(p) { return load64(p + M_A); }
 
 # rust: PluginMessage::RenderResponse { surface_id, format, width, height }.
-# format is a cstr/Str pointer.
+# format is a Str.
 fn plug_msg_render_response(surface_id, format, width, height): i64 {
     var p = plug_msg_alloc(PLG_MsgKind.PLG_MSG_RENDER_RESPONSE);
     if (p == 0) { return 0; }
@@ -278,7 +279,7 @@ fn plug_msg_resp_w(p)       { return load64(p + M_D); }
 fn plug_msg_resp_h(p)       { return load64(p + M_E); }
 
 # rust: PluginMessage::InputEvent { event_type, data }.
-# Both fields are cstr/Str pointers.
+# Both fields are Strs.
 fn plug_msg_input_event(event_type, data): i64 {
     var p = plug_msg_alloc(PLG_MsgKind.PLG_MSG_INPUT_EVENT);
     if (p == 0) { return 0; }
@@ -290,7 +291,8 @@ fn plug_msg_input_type(p) { return load64(p + M_S0); }
 fn plug_msg_input_data(p) { return load64(p + M_S1); }
 
 # rust: PluginMessage::ThemeUpdate { palette }.
-# palette is a cstr-keyed map (String -> String); stored in the pointer slot.
+# palette is a Str-keyed map (map_new_str) of Str values (HashMap<String,
+# String>; 0 reads as empty); stored in the pointer slot.
 fn plug_msg_theme_update(palette): i64 {
     var p = plug_msg_alloc(PLG_MsgKind.PLG_MSG_THEME_UPDATE);
     if (p == 0) { return 0; }
@@ -309,23 +311,961 @@ fn plug_msg_shutdown(): i64 {
     return plug_msg_alloc(PLG_MsgKind.PLG_MSG_SHUTDOWN);
 }
 
-# --- STUB: serde_json (de)serialization ------------------------------------
-# rust: PluginMessage::to_json / from_json use serde_json over the `type`-tagged
-# enum. There is no serde in Cyrius; a hand-rolled JSON codec that mirrors the
-# `#[serde(tag = "type")]` shape (e.g. {"type":"Heartbeat"}) is a parity TODO.
-# These stubs preserve the signatures so callers compile and the transport can
-# be layered on later.
+# rust: #[derive(PartialEq)] on PluginMessage. 1 when `a` and `b` are the same
+# variant with equal fields, else 0. Strings compare by bytes, capabilities in
+# order, the palette as a map (same size, every key present with an equal
+# value). A 0 capabilities vec or palette is empty, as plug_msg_to_json reads it.
+fn plug_msg_eq(a, b): i64 {
+    if (a == b) { return 1; }
+    if (a == 0 || b == 0) { return 0; }
+    var kind = load64(a + M_KIND);
+    if (kind != load64(b + M_KIND)) { return 0; }
+    if (kind == PLG_MsgKind.PLG_MSG_INIT) {
+        if (load64(a + M_A) != load64(b + M_A)) { return 0; }
+        if (plug_str_same(load64(a + M_S0), load64(b + M_S0)) == 0) { return 0; }
+        return plug_caps_same(load64(a + M_PTR), load64(b + M_PTR));
+    }
+    if (kind == PLG_MsgKind.PLG_MSG_RENDER_RESPONSE) {
+        if (plug_str_same(load64(a + M_S0), load64(b + M_S0)) == 0) { return 0; }
+    }
+    if (kind == PLG_MsgKind.PLG_MSG_INPUT_EVENT) {
+        if (plug_str_same(load64(a + M_S0), load64(b + M_S0)) == 0) { return 0; }
+        return plug_str_same(load64(a + M_S1), load64(b + M_S1));
+    }
+    if (kind == PLG_MsgKind.PLG_MSG_THEME_UPDATE) {
+        return plug_palette_same(load64(a + M_PTR), load64(b + M_PTR));
+    }
+    # The integer slots: every variant leaves the ones it does not use at 0.
+    if (load64(a + M_A) != load64(b + M_A)) { return 0; }
+    if (load64(a + M_B) != load64(b + M_B)) { return 0; }
+    if (load64(a + M_C) != load64(b + M_C)) { return 0; }
+    if (load64(a + M_D) != load64(b + M_D)) { return 0; }
+    if (load64(a + M_E) != load64(b + M_E)) { return 0; }
+    return 1;
+}
+
+# Two Str fields equal by bytes (a 0 Str only equals another 0).
+fn plug_str_same(a, b): i64 {
+    if (a == b) { return 1; }
+    if (a == 0 || b == 0) { return 0; }
+    return str_eq(a, b);
+}
+
+fn plug_caps_same(a, b): i64 {
+    var na = 0;
+    var nb = 0;
+    if (a != 0) { na = vec_len(a); }
+    if (b != 0) { nb = vec_len(b); }
+    if (na != nb) { return 0; }
+    var i = 0;
+    while (i < na) {
+        if (vec_get(a, i) != vec_get(b, i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn plug_palette_same(a, b): i64 {
+    var na = 0;
+    var nb = 0;
+    if (a != 0) { na = map_size(a); }
+    if (b != 0) { nb = map_size(b); }
+    if (na != nb) { return 0; }
+    if (na == 0) { return 1; }
+    var keys = map_keys(a);
+    var i = 0;
+    while (i < na) {
+        var k = vec_get(keys, i);
+        if (map_has(b, k) == 0) { return 0; }
+        if (plug_str_same(map_get(a, k), map_get(b, k)) == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# PluginMessage JSON (rust: to_json = serde_json::to_string, from_json =
+# serde_json::from_str, plugin_host.rs:172-182, over #[serde(tag = "type")]).
 #
-# plug_msg_to_json(msg) -> Str (0 == would-be serde error). STUB returns 0.
-fn plug_msg_to_json(msg): i64 {
-    # TODO parity: serde_json::to_string over the tagged PluginMessage enum.
+# Checked against serde 1.0.228 / serde_json 1.0.149, the versions in
+# rust-old/Cargo.lock. The wire form is the variant name under "type", then the
+# fields in declaration order; PluginType and PluginCapability are their
+# variant names (no serde attributes on either):
+#   {"type":"Init","plugin_type":"PanelWidget","version":"2.0.0","capabilities":["WaylandSurface"]}
+#   {"type":"SurfaceGrant","surface_id":42,"x":100,"y":200,"width":800,"height":600}
+#   {"type":"Heartbeat"}
+#
+# String fields are Str (a Rust String can hold U+0000; a cstr cannot). The
+# palette is a Str-keyed map (map_new_str) of Str values. surface_id is a u64
+# held as its bit pattern in the i64 slot: 2^63 and above read negative through
+# the getters but serialize and parse as Rust's u64 does.
+# ---------------------------------------------------------------------------
+
+# rust: PluginType's serde name (the variant name), or 0 for a bad discriminant.
+fn plug_type_name(t): i64 {
+    if (t == PLG_Type.PLG_TYPE_THEME)            { return "Theme"; }
+    if (t == PLG_Type.PLG_TYPE_PANEL_WIDGET)     { return "PanelWidget"; }
+    if (t == PLG_Type.PLG_TYPE_WINDOW_DECORATOR) { return "WindowDecorator"; }
+    if (t == PLG_Type.PLG_TYPE_INPUT_METHOD)     { return "InputMethod"; }
+    if (t == PLG_Type.PLG_TYPE_OVERLAY)          { return "Overlay"; }
+    if (t == PLG_Type.PLG_TYPE_NOTIFICATION)     { return "Notification"; }
+    if (t == PLG_Type.PLG_TYPE_DESKTOP_APP)      { return "DesktopApp"; }
     return 0;
 }
-# plug_msg_from_json(s) -> *PluginMessage, or 0 on parse failure
-# (rust: Err(PluginHostError::Serialization)). STUB returns 0.
-fn plug_msg_from_json(s): i64 {
-    # TODO parity: serde_json::from_str with #[serde(tag = "type")] dispatch.
+
+# rust: PluginCapability's serde name, or 0 for a bad discriminant.
+fn plug_cap_name(c): i64 {
+    if (c == PLG_Capability.PLG_CAP_FILESYSTEM_READ) { return "FilesystemRead"; }
+    if (c == PLG_Capability.PLG_CAP_WAYLAND_SURFACE) { return "WaylandSurface"; }
+    if (c == PLG_Capability.PLG_CAP_INPUT_EVENTS)    { return "InputEvents"; }
+    if (c == PLG_Capability.PLG_CAP_NETWORK_ACCESS)  { return "NetworkAccess"; }
+    if (c == PLG_Capability.PLG_CAP_OVERLAY)         { return "Overlay"; }
     return 0;
+}
+
+# rust: the "type" tag of each PluginMessage variant, or 0 for a bad kind.
+fn plug_msg_kind_name(k): i64 {
+    if (k == PLG_MsgKind.PLG_MSG_INIT)            { return "Init"; }
+    if (k == PLG_MsgKind.PLG_MSG_SURFACE_GRANT)   { return "SurfaceGrant"; }
+    if (k == PLG_MsgKind.PLG_MSG_RENDER_REQUEST)  { return "RenderRequest"; }
+    if (k == PLG_MsgKind.PLG_MSG_RENDER_RESPONSE) { return "RenderResponse"; }
+    if (k == PLG_MsgKind.PLG_MSG_INPUT_EVENT)     { return "InputEvent"; }
+    if (k == PLG_MsgKind.PLG_MSG_THEME_UPDATE)    { return "ThemeUpdate"; }
+    if (k == PLG_MsgKind.PLG_MSG_HEARTBEAT)       { return "Heartbeat"; }
+    if (k == PLG_MsgKind.PLG_MSG_SHUTDOWN)        { return "Shutdown"; }
+    return 0;
+}
+
+# Reverse lookups over the three name tables: the discriminant whose name is
+# exactly the Str `s` (case-sensitive, as serde is), or -1. which: 0 = message
+# kind, 1 = PluginType, 2 = PluginCapability.
+fn plug_name_lookup(s, which): i64 {
+    var i = 0;
+    while (i < 8) {
+        var name = plug_msg_kind_name(i);
+        if (which == 1) { name = plug_type_name(i); }
+        if (which == 2) { name = plug_cap_name(i); }
+        if (name != 0) {
+            if (str_eq_cstr(s, name) == 1) { return i; }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# --- to_json ----------------------------------------------------------------
+
+# Append a JSON string. ⭐ bayan's escaper is serde_json's to the byte: `"` `\`
+# and \b \f \n \r \t get their short escapes, other bytes below 0x20 become
+# \u00xx in lowercase hex, and everything else, '/', DEL and non-ASCII included,
+# is copied raw. Returns 0 for a 0 Str.
+fn plug_json_put_string(sb, s): i64 {
+    if (s == 0) { return 0; }
+    str_builder_add(sb, bayan_json_v_build(bayan_json_v_str_new(s)));
+    return 1;
+}
+
+# Append the u64 whose bit pattern is `v`, in decimal.
+fn plug_json_put_u64(sb, v): i64 {
+    if (v >= 0) { str_builder_add_int(sb, v); return 0; }
+    # Unsigned v / 10 through a halving shift, so it fits a positive i64.
+    var q = ((v >> 1) & 0x7FFFFFFFFFFFFFFF) / 5;
+    str_builder_add_int(sb, q);
+    str_builder_putc(sb, 48 + (v - q * 10));
+    return 0;
+}
+
+# Append `,"name":` (field names are fixed ASCII identifiers; nothing to escape).
+fn plug_json_key(sb, name): i64 {
+    str_builder_add_cstr(sb, ",\"");
+    str_builder_add_cstr(sb, name);
+    str_builder_add_cstr(sb, "\":");
+    return 0;
+}
+
+# Append an i32 / u32 field. 0 when the slot holds a value the Rust type cannot.
+fn plug_json_put_i32(sb, v): i64 {
+    var lo = 0 - 2147483648;
+    if (v < lo || v > 2147483647) { return 0; }
+    str_builder_add_int(sb, v);
+    return 1;
+}
+fn plug_json_put_u32(sb, v): i64 {
+    if (v < 0 || v > 4294967295) { return 0; }
+    str_builder_add_int(sb, v);
+    return 1;
+}
+
+# Byte order of two Strs: <0, 0 or >0 (a prefix sorts first).
+fn plug_str_cmp(a, b): i64 {
+    var la = str_len(a);
+    var lb = str_len(b);
+    var n = la;
+    if (lb < n) { n = lb; }
+    var pa = str_data(a);
+    var pb = str_data(b);
+    var i = 0;
+    while (i < n) {
+        var ca = load8(pa + i);
+        var cb = load8(pb + i);
+        if (ca != cb) { return ca - cb; }
+        i = i + 1;
+    }
+    return la - lb;
+}
+
+# Append the palette object. ⚠ Rust's HashMap fixes no order, so any order is a
+# serde output; the port emits the keys in ascending byte order (what serde
+# writes for a BTreeMap<String, String>) so the text is deterministic.
+# A 0 palette is {}. 0 when the map is not Str-keyed or holds a 0 value.
+fn plug_json_put_palette(sb, m): i64 {
+    if (m == 0) { str_builder_add_cstr(sb, "{}"); return 1; }
+    if (load64(m + 24) != KeyType.KeyTypeStr) { return 0; }   # map header: key_type @24
+    var keys = map_keys(m);
+    var n = vec_len(keys);
+    # Insertion sort: a palette is a handful of entries.
+    var i = 1;
+    while (i < n) {
+        var k = vec_get(keys, i);
+        var j = i - 1;
+        var moving = 1;
+        while (moving == 1) {
+            if (j < 0) { moving = 0; }
+            elif (plug_str_cmp(vec_get(keys, j), k) > 0) {
+                vec_set(keys, j + 1, vec_get(keys, j));
+                j = j - 1;
+            } else { moving = 0; }
+        }
+        vec_set(keys, j + 1, k);
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "{");
+    var e = 0;
+    while (e < n) {
+        if (e > 0) { str_builder_add_cstr(sb, ","); }
+        var key = vec_get(keys, e);
+        plug_json_put_string(sb, key);
+        str_builder_add_cstr(sb, ":");
+        if (plug_json_put_string(sb, map_get(m, key)) == 0) { return 0; }
+        e = e + 1;
+    }
+    str_builder_add_cstr(sb, "}");
+    return 1;
+}
+
+# Append the fields after the "type" tag. 1, or 0 when the message holds
+# something its Rust type cannot (a bad enum value, an out-of-range i32/u32, a
+# 0 string).
+fn plug_json_put_fields(sb, msg, kind): i64 {
+    if (kind == PLG_MsgKind.PLG_MSG_INIT) {
+        var tname = plug_type_name(load64(msg + M_A));
+        if (tname == 0) { return 0; }
+        plug_json_key(sb, "plugin_type");
+        str_builder_add_cstr(sb, "\"");
+        str_builder_add_cstr(sb, tname);
+        str_builder_add_cstr(sb, "\"");
+        plug_json_key(sb, "version");
+        if (plug_json_put_string(sb, load64(msg + M_S0)) == 0) { return 0; }
+        plug_json_key(sb, "capabilities");
+        str_builder_add_cstr(sb, "[");
+        var caps = load64(msg + M_PTR);
+        var nc = 0;
+        if (caps != 0) { nc = vec_len(caps); }
+        var ci = 0;
+        while (ci < nc) {
+            var cname = plug_cap_name(vec_get(caps, ci));
+            if (cname == 0) { return 0; }
+            if (ci > 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "\"");
+            str_builder_add_cstr(sb, cname);
+            str_builder_add_cstr(sb, "\"");
+            ci = ci + 1;
+        }
+        str_builder_add_cstr(sb, "]");
+        return 1;
+    }
+    if (kind == PLG_MsgKind.PLG_MSG_SURFACE_GRANT) {
+        plug_json_key(sb, "surface_id");
+        plug_json_put_u64(sb, load64(msg + M_A));
+        plug_json_key(sb, "x");
+        if (plug_json_put_i32(sb, load64(msg + M_B)) == 0) { return 0; }
+        plug_json_key(sb, "y");
+        if (plug_json_put_i32(sb, load64(msg + M_C)) == 0) { return 0; }
+        plug_json_key(sb, "width");
+        if (plug_json_put_u32(sb, load64(msg + M_D)) == 0) { return 0; }
+        plug_json_key(sb, "height");
+        return plug_json_put_u32(sb, load64(msg + M_E));
+    }
+    if (kind == PLG_MsgKind.PLG_MSG_RENDER_REQUEST) {
+        plug_json_key(sb, "surface_id");
+        plug_json_put_u64(sb, load64(msg + M_A));
+        return 1;
+    }
+    if (kind == PLG_MsgKind.PLG_MSG_RENDER_RESPONSE) {
+        plug_json_key(sb, "surface_id");
+        plug_json_put_u64(sb, load64(msg + M_A));
+        plug_json_key(sb, "format");
+        if (plug_json_put_string(sb, load64(msg + M_S0)) == 0) { return 0; }
+        plug_json_key(sb, "width");
+        if (plug_json_put_u32(sb, load64(msg + M_D)) == 0) { return 0; }
+        plug_json_key(sb, "height");
+        return plug_json_put_u32(sb, load64(msg + M_E));
+    }
+    if (kind == PLG_MsgKind.PLG_MSG_INPUT_EVENT) {
+        plug_json_key(sb, "event_type");
+        if (plug_json_put_string(sb, load64(msg + M_S0)) == 0) { return 0; }
+        plug_json_key(sb, "data");
+        return plug_json_put_string(sb, load64(msg + M_S1));
+    }
+    if (kind == PLG_MsgKind.PLG_MSG_THEME_UPDATE) {
+        plug_json_key(sb, "palette");
+        return plug_json_put_palette(sb, load64(msg + M_PTR));
+    }
+    return 1;   # Heartbeat / Shutdown: the tag alone.
+}
+
+# rust PluginMessage::to_json: serde_json::to_string's exact text, compact.
+# -> Str, or 0 for a message no Rust PluginMessage could be (Rust's to_json
+# cannot fail for this enum; a 0 here is a port-side construction error).
+fn plug_msg_to_json(msg): i64 {
+    if (msg == 0) { return 0; }
+    var kind = load64(msg + M_KIND);
+    var name = plug_msg_kind_name(kind);
+    if (name == 0) { return 0; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"type\":\"");
+    str_builder_add_cstr(sb, name);
+    str_builder_add_cstr(sb, "\"");
+    if (plug_json_put_fields(sb, msg, kind) == 0) { return 0; }
+    str_builder_add_cstr(sb, "}");
+    return str_builder_build(sb);
+}
+
+# --- from_json: a strict JSON reader ---------------------------------------
+#
+# ⛔ Not bayan's tree parser (measured, bayan 1.5.8): it accepts what serde_json
+# refuses (`07`, a raw TAB in a string, `1e400`), reads `-0` as the integer 0
+# where serde reads a float, and refuses 2^63 and up, which serde reads as u64.
+# Each of those changes what from_json accepts, so this reader follows
+# serde_json's grammar and number classes exactly and keeps only what the
+# decode needs: a small tree, numbers classed U64 / I64 / F64 as serde does.
+
+enum PLG_JKind {
+    PLG_J_NULL = 0;
+    PLG_J_BOOL = 1;
+    PLG_J_U64  = 2;   # a non-negative integer (bit pattern; u64 range)
+    PLG_J_I64  = 3;   # a negative integer, -1 .. -2^63
+    PLG_J_F64  = 4;   # anything else numeric: fraction, exponent, -0, past u64
+    PLG_J_STR  = 5;   # A = decoded Str
+    PLG_J_ARR  = 6;   # A = vec of nodes
+    PLG_J_OBJ  = 7;   # A = vec of key Strs, B = vec of value nodes, in order
+}
+
+enum PLG_JNodeOff {
+    PJN_KIND = 0;
+    PJN_A    = 8;
+    PJN_B    = 16;
+    PJN_SZ   = 24;
+}
+
+# Reader / decoder state.
+enum PLG_JpOff {
+    PJP_BUF   = 0;    # input bytes
+    PJP_LEN   = 8;
+    PJP_POS   = 16;
+    PJP_DEPTH = 24;   # open containers
+    PJP_ERR   = 32;   # 1 once a decode step has refused
+    PJP_SZ    = 40;
+}
+
+fn plug_jn_new(kind, a, b): i64 {
+    var n = alloc(PJN_SZ);
+    store64(n + PJN_KIND, kind);
+    store64(n + PJN_A, a);
+    store64(n + PJN_B, b);
+    return n;
+}
+
+fn plug_jp_skip_ws(ps): i64 {
+    var buf = load64(ps + PJP_BUF);
+    var len = load64(ps + PJP_LEN);
+    var pos = load64(ps + PJP_POS);
+    while (pos < len) {
+        var c = load8(buf + pos);
+        if (c != 32 && c != 9 && c != 10 && c != 13) { break; }
+        pos = pos + 1;
+    }
+    store64(ps + PJP_POS, pos);
+    return 0;
+}
+
+# Four hex digits at buf[pos..pos+4) -> 0..0xFFFF, or -1.
+fn plug_jp_hex4(buf, pos, len): i64 {
+    if (pos + 4 > len) { return 0 - 1; }
+    var v = 0;
+    var i = 0;
+    while (i < 4) {
+        var c = load8(buf + pos + i);
+        var d = 0 - 1;
+        if (c >= 48 && c <= 57) { d = c - 48; }
+        if (c >= 97 && c <= 102) { d = c - 87; }
+        if (c >= 65 && c <= 70) { d = c - 55; }
+        if (d < 0) { return 0 - 1; }
+        v = v * 16 + d;
+        i = i + 1;
+    }
+    return v;
+}
+
+# Length (2..4) of the well-formed UTF-8 sequence at p, or 0 (Unicode Table 3-7).
+# ⚠ Rust's &str cannot hold ill-formed UTF-8, so serde never sees it; the port
+# takes bytes and refuses it here.
+fn plug_jp_utf8_len(p, avail): i64 {
+    var b0 = load8(p);
+    var n = 0;
+    var lo = 128;
+    var hi = 191;
+    if (b0 >= 194 && b0 <= 223) { n = 2; }
+    elif (b0 == 224) { n = 3; lo = 160; }
+    elif (b0 == 237) { n = 3; hi = 159; }
+    elif (b0 >= 225 && b0 <= 239) { n = 3; }
+    elif (b0 == 240) { n = 4; lo = 144; }
+    elif (b0 >= 241 && b0 <= 243) { n = 4; }
+    elif (b0 == 244) { n = 4; hi = 143; }
+    else { return 0; }
+    if (n > avail) { return 0; }
+    var b1 = load8(p + 1);
+    if (b1 < lo || b1 > hi) { return 0; }
+    var i = 2;
+    while (i < n) {
+        var bc = load8(p + i);
+        if (bc < 128 || bc > 191) { return 0; }
+        i = i + 1;
+    }
+    return n;
+}
+
+# Encode code point cp as UTF-8 at dst; returns the byte count.
+fn plug_jp_put_utf8(dst, cp): i64 {
+    if (cp < 128) { store8(dst, cp); return 1; }
+    if (cp < 2048) {
+        store8(dst, 192 | (cp >> 6));
+        store8(dst + 1, 128 | (cp & 63));
+        return 2;
+    }
+    if (cp < 65536) {
+        store8(dst, 224 | (cp >> 12));
+        store8(dst + 1, 128 | ((cp >> 6) & 63));
+        store8(dst + 2, 128 | (cp & 63));
+        return 3;
+    }
+    store8(dst, 240 | (cp >> 18));
+    store8(dst + 1, 128 | ((cp >> 12) & 63));
+    store8(dst + 2, 128 | ((cp >> 6) & 63));
+    store8(dst + 3, 128 | (cp & 63));
+    return 4;
+}
+
+# A string at the cursor (which is on its opening quote) -> decoded Str, or 0.
+# serde_json refuses a raw byte below 0x20, an unknown escape, a short or bad
+# \u, and any surrogate that is not a high-low pair.
+fn plug_jp_string(ps): i64 {
+    var buf = load64(ps + PJP_BUF);
+    var len = load64(ps + PJP_LEN);
+    var pos = load64(ps + PJP_POS) + 1;
+    # Size from this string's own raw span: decoding never lengthens it.
+    var scan = pos;
+    while (scan < len) {
+        var sc = load8(buf + scan);
+        if (sc == 34) { break; }
+        if (sc == 92) { scan = scan + 1; }
+        scan = scan + 1;
+    }
+    if (scan >= len) { return 0; }
+    var out = alloc(scan - pos + 1);
+    var oi = 0;
+    while (pos < len) {
+        var c = load8(buf + pos);
+        if (c == 34) {
+            store64(ps + PJP_POS, pos + 1);
+            return str_new(out, oi);
+        }
+        if (c < 32) { return 0; }
+        if (c == 92) {
+            if (pos + 1 >= len) { return 0; }
+            var e = load8(buf + pos + 1);
+            pos = pos + 2;
+            var ch = 0 - 1;
+            if (e == 34 || e == 92 || e == 47) { ch = e; }
+            if (e == 98)  { ch = 8; }
+            if (e == 102) { ch = 12; }
+            if (e == 110) { ch = 10; }
+            if (e == 114) { ch = 13; }
+            if (e == 116) { ch = 9; }
+            if (ch >= 0) {
+                store8(out + oi, ch);
+                oi = oi + 1;
+            } elif (e == 117) {
+                var cp = plug_jp_hex4(buf, pos, len);
+                if (cp < 0) { return 0; }
+                pos = pos + 4;
+                if (cp >= 56320 && cp <= 57343) { return 0; }   # a lone low surrogate
+                if (cp >= 55296 && cp <= 56319) {
+                    if (pos + 1 >= len) { return 0; }
+                    if (load8(buf + pos) != 92 || load8(buf + pos + 1) != 117) { return 0; }
+                    var low = plug_jp_hex4(buf, pos + 2, len);
+                    if (low < 56320 || low > 57343) { return 0; }
+                    pos = pos + 6;
+                    cp = 65536 + ((cp - 55296) << 10) + (low - 56320);
+                }
+                oi = oi + plug_jp_put_utf8(out + oi, cp);
+            } else { return 0; }
+        } elif (c >= 128) {
+            var n = plug_jp_utf8_len(buf + pos, len - pos);
+            if (n == 0) { return 0; }
+            memcpy(out + oi, buf + pos, n);
+            oi = oi + n;
+            pos = pos + n;
+        } else {
+            store8(out + oi, c);
+            oi = oi + 1;
+            pos = pos + 1;
+        }
+    }
+    return 0;
+}
+
+# 1 when the n ASCII digits at p are <= the n-digit bound (both same length).
+fn plug_jp_digits_le(p, bound, n): i64 {
+    var i = 0;
+    while (i < n) {
+        var d = load8(p + i);
+        var b = load8(bound + i);
+        if (d < b) { return 1; }
+        if (d > b) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# A number at the cursor -> node, or 0. serde_json's grammar: no leading zero,
+# no '+', digits on both sides of '.', digits in an exponent. Its classes: an
+# integer token is U64 when it fits u64 and I64 when negative and >= -2^63;
+# `-0` and every other integer are F64, as are fractions and exponents. An F64
+# that overflows to infinity is an error ("number out of range").
+fn plug_jp_number(ps): i64 {
+    var buf = load64(ps + PJP_BUF);
+    var len = load64(ps + PJP_LEN);
+    var start = load64(ps + PJP_POS);
+    var pos = start;
+    var neg = 0;
+    if (load8(buf + pos) == 45) { neg = 1; pos = pos + 1; }
+    if (pos >= len) { return 0; }
+    var d0 = load8(buf + pos);
+    if (d0 < 48 || d0 > 57) { return 0; }
+    var int_start = pos;
+    pos = pos + 1;
+    # A leading 0 is the whole integer part: a digit after it ends the token,
+    # and the caller then refuses that digit (serde: "invalid number").
+    if (d0 != 48) {
+        while (pos < len) {
+            var dc = load8(buf + pos);
+            if (dc < 48 || dc > 57) { break; }
+            pos = pos + 1;
+        }
+    }
+    var digits = pos - int_start;
+    var is_float = 0;
+    if (pos < len && load8(buf + pos) == 46) {
+        pos = pos + 1;
+        var fd = 0;
+        while (pos < len) {
+            var fc = load8(buf + pos);
+            if (fc < 48 || fc > 57) { break; }
+            pos = pos + 1;
+            fd = fd + 1;
+        }
+        if (fd == 0) { return 0; }
+        is_float = 1;
+    }
+    if (pos < len) {
+        var ec = load8(buf + pos);
+        if (ec == 101 || ec == 69) {
+            pos = pos + 1;
+            if (pos < len) {
+                var sg = load8(buf + pos);
+                if (sg == 43 || sg == 45) { pos = pos + 1; }
+            }
+            var xd = 0;
+            while (pos < len) {
+                var xc = load8(buf + pos);
+                if (xc < 48 || xc > 57) { break; }
+                pos = pos + 1;
+                xd = xd + 1;
+            }
+            if (xd == 0) { return 0; }
+            is_float = 1;
+        }
+    }
+    store64(ps + PJP_POS, pos);
+    var fits_u64 = 0;
+    if (digits < 20) { fits_u64 = 1; }
+    if (digits == 20) { fits_u64 = plug_jp_digits_le(buf + int_start, "18446744073709551615", 20); }
+    if (is_float == 1 || fits_u64 == 0) {
+        var bits = bayan_f64_parse(buf + start, pos - start);
+        var inf = 0x7FF0000000000000;
+        if ((bits & inf) == inf) { return 0; }
+        return plug_jn_new(PLG_JKind.PLG_J_F64, 0, 0);
+    }
+    var mag = 0;
+    var k = int_start;
+    while (k < int_start + digits) {
+        mag = mag * 10 + (load8(buf + k) - 48);   # wraps mod 2^64 = the u64 value
+        k = k + 1;
+    }
+    if (neg == 0) { return plug_jn_new(PLG_JKind.PLG_J_U64, mag, 0); }
+    var fits_i64 = 0;
+    if (digits < 19) { fits_i64 = 1; }
+    if (digits == 19) { fits_i64 = plug_jp_digits_le(buf + int_start, "9223372036854775808", 19); }
+    if (mag == 0 || fits_i64 == 0) { return plug_jn_new(PLG_JKind.PLG_J_F64, 0, 0); }
+    return plug_jn_new(PLG_JKind.PLG_J_I64, 0 - mag, 0);
+}
+
+# Enter / leave a container. ⚠ serde_json refuses the 128th open container
+# (its recursion limit), so a document nests at most 127 deep.
+fn plug_jp_enter(ps): i64 {
+    var depth = load64(ps + PJP_DEPTH) + 1;
+    if (depth > PLG_Const.PLG_JSON_MAX_DEPTH) { return 0; }
+    store64(ps + PJP_DEPTH, depth);
+    store64(ps + PJP_POS, load64(ps + PJP_POS) + 1);
+    return 1;
+}
+fn plug_jp_leave(ps): i64 {
+    store64(ps + PJP_DEPTH, load64(ps + PJP_DEPTH) - 1);
+    store64(ps + PJP_POS, load64(ps + PJP_POS) + 1);
+    return 0;
+}
+
+# The byte at the cursor, or -1 at the end.
+fn plug_jp_peek(ps): i64 {
+    var pos = load64(ps + PJP_POS);
+    if (pos >= load64(ps + PJP_LEN)) { return 0 - 1; }
+    return load8(load64(ps + PJP_BUF) + pos);
+}
+
+fn plug_jp_array(ps): i64 {
+    if (plug_jp_enter(ps) == 0) { return 0; }
+    var items = vec_new();
+    plug_jp_skip_ws(ps);
+    if (plug_jp_peek(ps) == 93) { plug_jp_leave(ps); return plug_jn_new(PLG_JKind.PLG_J_ARR, items, 0); }
+    while (1 == 1) {
+        var v = plug_jp_value(ps);   # a ']' after ',' is no value: serde's "trailing comma"
+        if (v == 0) { return 0; }
+        vec_push(items, v);
+        plug_jp_skip_ws(ps);
+        var c = plug_jp_peek(ps);
+        if (c == 93) { plug_jp_leave(ps); return plug_jn_new(PLG_JKind.PLG_J_ARR, items, 0); }
+        if (c != 44) { return 0; }
+        store64(ps + PJP_POS, load64(ps + PJP_POS) + 1);
+    }
+    return 0;
+}
+
+fn plug_jp_object(ps): i64 {
+    if (plug_jp_enter(ps) == 0) { return 0; }
+    var keys = vec_new();
+    var vals = vec_new();
+    plug_jp_skip_ws(ps);
+    if (plug_jp_peek(ps) == 125) { plug_jp_leave(ps); return plug_jn_new(PLG_JKind.PLG_J_OBJ, keys, vals); }
+    while (1 == 1) {
+        plug_jp_skip_ws(ps);
+        if (plug_jp_peek(ps) != 34) { return 0; }   # a key must be a string
+        var k = plug_jp_string(ps);
+        if (k == 0) { return 0; }
+        plug_jp_skip_ws(ps);
+        if (plug_jp_peek(ps) != 58) { return 0; }
+        store64(ps + PJP_POS, load64(ps + PJP_POS) + 1);
+        var v = plug_jp_value(ps);
+        if (v == 0) { return 0; }
+        vec_push(keys, k);
+        vec_push(vals, v);
+        plug_jp_skip_ws(ps);
+        var c = plug_jp_peek(ps);
+        if (c == 125) { plug_jp_leave(ps); return plug_jn_new(PLG_JKind.PLG_J_OBJ, keys, vals); }
+        if (c != 44) { return 0; }
+        store64(ps + PJP_POS, load64(ps + PJP_POS) + 1);
+    }
+    return 0;
+}
+
+# Match the literal `word` (n bytes) at the cursor; 1 and advance, else 0.
+fn plug_jp_literal(ps, word, n): i64 {
+    var pos = load64(ps + PJP_POS);
+    if (pos + n > load64(ps + PJP_LEN)) { return 0; }
+    if (memeq(load64(ps + PJP_BUF) + pos, word, n) == 0) { return 0; }
+    store64(ps + PJP_POS, pos + n);
+    return 1;
+}
+
+# Any JSON value at the cursor (after whitespace) -> node, or 0.
+fn plug_jp_value(ps): i64 {
+    plug_jp_skip_ws(ps);
+    var c = plug_jp_peek(ps);
+    if (c == 123) { return plug_jp_object(ps); }
+    if (c == 91) { return plug_jp_array(ps); }
+    if (c == 34) {
+        var s = plug_jp_string(ps);
+        if (s == 0) { return 0; }
+        return plug_jn_new(PLG_JKind.PLG_J_STR, s, 0);
+    }
+    if (c == 45 || (c >= 48 && c <= 57)) { return plug_jp_number(ps); }
+    if (c == 116) {
+        if (plug_jp_literal(ps, "true", 4) == 1) { return plug_jn_new(PLG_JKind.PLG_J_BOOL, 1, 0); }
+        return 0;
+    }
+    if (c == 102) {
+        if (plug_jp_literal(ps, "false", 5) == 1) { return plug_jn_new(PLG_JKind.PLG_J_BOOL, 0, 0); }
+        return 0;
+    }
+    if (c == 110) {
+        if (plug_jp_literal(ps, "null", 4) == 1) { return plug_jn_new(PLG_JKind.PLG_J_NULL, 0, 0); }
+        return 0;
+    }
+    return 0;
+}
+
+# --- from_json: serde's decode rules over the tree ---------------------------
+
+fn plug_de_fail(ps): i64 {
+    store64(ps + PJP_ERR, 1);
+    return 0;
+}
+
+fn plug_jn_kind(n): i64 {
+    if (n == 0) { return 0 - 1; }
+    return load64(n + PJN_KIND);
+}
+
+# u64 (max < 0) or u32 (max = 4294967295): a U64 node within range.
+fn plug_de_uint(ps, n, max): i64 {
+    if (plug_jn_kind(n) != PLG_JKind.PLG_J_U64) { return plug_de_fail(ps); }
+    var v = load64(n + PJN_A);
+    if (max < 0) { return v; }
+    if (v < 0 || v > max) { return plug_de_fail(ps); }
+    return v;
+}
+
+# i32: a U64 node up to 2^31-1 or an I64 node down to -2^31.
+fn plug_de_i32(ps, n): i64 {
+    var k = plug_jn_kind(n);
+    if (k == PLG_JKind.PLG_J_U64) {
+        var u = load64(n + PJN_A);
+        if (u >= 0 && u <= 2147483647) { return u; }
+    }
+    if (k == PLG_JKind.PLG_J_I64) {
+        var s = load64(n + PJN_A);
+        var lo = 0 - 2147483648;
+        if (s >= lo) { return s; }
+    }
+    return plug_de_fail(ps);
+}
+
+# String: a STR node -> its Str.
+fn plug_de_string(ps, n): i64 {
+    if (plug_jn_kind(n) != PLG_JKind.PLG_J_STR) { return plug_de_fail(ps); }
+    return load64(n + PJN_A);
+}
+
+# A unit-only enum (which: 1 = PluginType, 2 = PluginCapability). serde takes
+# the variant name as a string, or as a map of exactly one entry whose value is
+# null or {} ({"PanelWidget":null}); anything else is refused.
+fn plug_de_enum(ps, n, which): i64 {
+    var k = plug_jn_kind(n);
+    var name = 0;
+    if (k == PLG_JKind.PLG_J_STR) { name = load64(n + PJN_A); }
+    elif (k == PLG_JKind.PLG_J_OBJ) {
+        var keys = load64(n + PJN_A);
+        if (vec_len(keys) != 1) { return plug_de_fail(ps); }
+        var unit = vec_get(load64(n + PJN_B), 0);
+        var uk = plug_jn_kind(unit);
+        var empty_map = 0;
+        if (uk == PLG_JKind.PLG_J_OBJ) {
+            if (vec_len(load64(unit + PJN_A)) == 0) { empty_map = 1; }
+        }
+        if (uk != PLG_JKind.PLG_J_NULL && empty_map == 0) { return plug_de_fail(ps); }
+        name = vec_get(keys, 0);
+    } else { return plug_de_fail(ps); }
+    var id = plug_name_lookup(name, which);
+    if (id < 0) { return plug_de_fail(ps); }
+    return id;
+}
+
+# Vec<PluginCapability>: an ARR node -> vec of PLG_Capability.
+fn plug_de_caps(ps, n): i64 {
+    var out = vec_new();
+    if (plug_jn_kind(n) != PLG_JKind.PLG_J_ARR) { plug_de_fail(ps); return out; }
+    var items = load64(n + PJN_A);
+    var cnt = vec_len(items);
+    var i = 0;
+    while (i < cnt) {
+        vec_push(out, plug_de_enum(ps, vec_get(items, i), 2));
+        i = i + 1;
+    }
+    return out;
+}
+
+# HashMap<String, String>: an OBJ node of STR values -> Str-keyed map. A
+# repeated key keeps the last value (HashMap::insert, as serde does).
+fn plug_de_palette(ps, n): i64 {
+    var m = map_new_str();
+    if (plug_jn_kind(n) != PLG_JKind.PLG_J_OBJ) { plug_de_fail(ps); return m; }
+    var keys = load64(n + PJN_A);
+    var vals = load64(n + PJN_B);
+    var cnt = vec_len(keys);
+    var i = 0;
+    while (i < cnt) {
+        map_set(m, vec_get(keys, i), plug_de_string(ps, vec_get(vals, i)));
+        i = i + 1;
+    }
+    return m;
+}
+
+# Field `idx` / `name` of the variant body. serde reads an internally tagged
+# enum from a map (fields by name; a repeated field is refused, unknown ones are
+# ignored) or from a sequence (["SurfaceGrant",42,100,200,800,600]: fields by
+# position after the tag). -> the value node, or 0 with the error set.
+fn plug_de_field(ps, root, idx, name): i64 {
+    if (load64(root + PJN_KIND) == PLG_JKind.PLG_J_ARR) {
+        var items = load64(root + PJN_A);
+        if (idx + 1 >= vec_len(items)) { return plug_de_fail(ps); }
+        return vec_get(items, idx + 1);
+    }
+    var keys = load64(root + PJN_A);
+    var vals = load64(root + PJN_B);
+    var cnt = vec_len(keys);
+    var hits = 0;
+    var found = 0;
+    var i = 0;
+    while (i < cnt) {
+        if (str_eq_cstr(vec_get(keys, i), name) == 1) {
+            hits = hits + 1;
+            found = vec_get(vals, i);
+        }
+        i = i + 1;
+    }
+    if (hits != 1) { return plug_de_fail(ps); }
+    return found;
+}
+
+# The sequence form must carry exactly the variant's fields after the tag
+# (serde: "invalid length"); a unit variant takes none.
+fn plug_de_arity(ps, root, nfields): i64 {
+    if (load64(root + PJN_KIND) != PLG_JKind.PLG_J_ARR) { return 0; }
+    if (vec_len(load64(root + PJN_A)) != nfields + 1) { plug_de_fail(ps); }
+    return 0;
+}
+
+# The "type" tag -> its Str, or 0. In a map it may sit anywhere but only once;
+# in a sequence it is the first element. It must be a string.
+fn plug_de_tag(root): i64 {
+    var k = load64(root + PJN_KIND);
+    var tag = 0;
+    if (k == PLG_JKind.PLG_J_ARR) {
+        var items = load64(root + PJN_A);
+        if (vec_len(items) == 0) { return 0; }
+        tag = vec_get(items, 0);
+    } elif (k == PLG_JKind.PLG_J_OBJ) {
+        var keys = load64(root + PJN_A);
+        var cnt = vec_len(keys);
+        var hits = 0;
+        var i = 0;
+        while (i < cnt) {
+            if (str_eq_cstr(vec_get(keys, i), "type") == 1) {
+                hits = hits + 1;
+                tag = vec_get(load64(root + PJN_B), i);
+            }
+            i = i + 1;
+        }
+        if (hits != 1) { return 0; }
+    } else { return 0; }
+    if (plug_jn_kind(tag) != PLG_JKind.PLG_J_STR) { return 0; }
+    return load64(tag + PJN_A);
+}
+
+# Build the message of `kind` from the variant body. The caller checks PJP_ERR.
+fn plug_de_variant(ps, root, kind): i64 {
+    var u32max = 4294967295;
+    if (kind == PLG_MsgKind.PLG_MSG_INIT) {
+        plug_de_arity(ps, root, 3);
+        var ptype = plug_de_enum(ps, plug_de_field(ps, root, 0, "plugin_type"), 1);
+        var version = plug_de_string(ps, plug_de_field(ps, root, 1, "version"));
+        var caps = plug_de_caps(ps, plug_de_field(ps, root, 2, "capabilities"));
+        return plug_msg_init(ptype, version, caps);
+    }
+    if (kind == PLG_MsgKind.PLG_MSG_SURFACE_GRANT) {
+        plug_de_arity(ps, root, 5);
+        var sid = plug_de_uint(ps, plug_de_field(ps, root, 0, "surface_id"), 0 - 1);
+        var x = plug_de_i32(ps, plug_de_field(ps, root, 1, "x"));
+        var y = plug_de_i32(ps, plug_de_field(ps, root, 2, "y"));
+        var w = plug_de_uint(ps, plug_de_field(ps, root, 3, "width"), u32max);
+        var h = plug_de_uint(ps, plug_de_field(ps, root, 4, "height"), u32max);
+        return plug_msg_surface_grant(sid, x, y, w, h);
+    }
+    if (kind == PLG_MsgKind.PLG_MSG_RENDER_REQUEST) {
+        plug_de_arity(ps, root, 1);
+        var rsid = plug_de_uint(ps, plug_de_field(ps, root, 0, "surface_id"), 0 - 1);
+        return plug_msg_render_request(rsid);
+    }
+    if (kind == PLG_MsgKind.PLG_MSG_RENDER_RESPONSE) {
+        plug_de_arity(ps, root, 4);
+        var qsid = plug_de_uint(ps, plug_de_field(ps, root, 0, "surface_id"), 0 - 1);
+        var format_s = plug_de_string(ps, plug_de_field(ps, root, 1, "format"));
+        var rw = plug_de_uint(ps, plug_de_field(ps, root, 2, "width"), u32max);
+        var rh = plug_de_uint(ps, plug_de_field(ps, root, 3, "height"), u32max);
+        return plug_msg_render_response(qsid, format_s, rw, rh);
+    }
+    if (kind == PLG_MsgKind.PLG_MSG_INPUT_EVENT) {
+        plug_de_arity(ps, root, 2);
+        var etype = plug_de_string(ps, plug_de_field(ps, root, 0, "event_type"));
+        var data = plug_de_string(ps, plug_de_field(ps, root, 1, "data"));
+        return plug_msg_input_event(etype, data);
+    }
+    if (kind == PLG_MsgKind.PLG_MSG_THEME_UPDATE) {
+        plug_de_arity(ps, root, 1);
+        return plug_msg_theme_update(plug_de_palette(ps, plug_de_field(ps, root, 0, "palette")));
+    }
+    # Heartbeat / Shutdown: a map may carry anything else (ignored); a
+    # sequence must be the tag alone.
+    plug_de_arity(ps, root, 0);
+    return plug_msg_alloc(kind);
+}
+
+# rust PluginMessage::from_json(s): serde_json::from_str. `s` is a Str. ->
+# *PluginMessage, or 0 - PLG_ERR_SERIALIZATION (rust: Err(Serialization)) for
+# malformed JSON, trailing content, a missing / repeated / non-string / unknown
+# "type", a missing or repeated field, a field of the wrong JSON type, or an
+# integer outside its Rust type (u64, i32, u32). Unknown fields are ignored.
+fn plug_msg_from_json(s): i64 {
+    var fail = 0 - PLG_Err.PLG_ERR_SERIALIZATION;
+    if (s == 0) { return fail; }
+    var ps = alloc(PJP_SZ);
+    store64(ps + PJP_BUF, str_data(s));
+    store64(ps + PJP_LEN, str_len(s));
+    store64(ps + PJP_POS, 0);
+    store64(ps + PJP_DEPTH, 0);
+    store64(ps + PJP_ERR, 0);
+    var root = plug_jp_value(ps);
+    if (root == 0) { return fail; }
+    plug_jp_skip_ws(ps);
+    if (load64(ps + PJP_POS) != str_len(s)) { return fail; }   # serde: "trailing characters"
+    var tag = plug_de_tag(root);
+    if (tag == 0) { return fail; }
+    var kind = plug_name_lookup(tag, 0);
+    if (kind < 0) { return fail; }
+    var msg = plug_de_variant(ps, root, kind);
+    if (load64(ps + PJP_ERR) != 0) { return fail; }
+    if (msg == 0) { return fail; }
+    return msg;
 }
 
 # ---------------------------------------------------------------------------
@@ -729,30 +1669,4 @@ fn plug_host_sandbox_profile_for(h, ptype): i64 {
     var paths = vec_new();
     vec_push(paths, "/usr/share/themes");
     return plug_sandbox_new(paths, base, 0, plug_mb(32), 5000);
-}
-
-# ===========================================================================
-# STUBBED — Unix-domain-socket IPC transport (rust ADR-017: plugins run as
-# separate processes talking over per-plugin Unix sockets at socket_path).
-#
-# # TODO parity: socket IPC
-#
-# The Rust module models the message TYPES (PluginMessage) and their JSON
-# serialization; the ACTUAL socket transport (bind/listen/accept on the Unix
-# socket, framing, send/recv of serialized PluginMessage, per-plugin reader
-# tasks, crash isolation) lives in the runtime, not in this file. Cyrius has no
-# async runtime / tokio and this port keeps the pure data model, so the
-# transport is stubbed here as signatures returning "not implemented".
-#
-# plug_ipc_send(socket_path, msg) -> 0 == not implemented.
-fn plug_ipc_send(socket_path, msg): i64 {
-    # TODO parity: connect to the plugin's Unix socket, serialize `msg`
-    # (plug_msg_to_json), frame + write. Requires socket syscalls + serde.
-    return 0;
-}
-# plug_ipc_recv(socket_path) -> *PluginMessage, 0 == not implemented / no msg.
-fn plug_ipc_recv(socket_path): i64 {
-    # TODO parity: read a framed JSON message off the Unix socket and decode
-    # via plug_msg_from_json. Requires socket syscalls + serde.
-    return 0;
 }

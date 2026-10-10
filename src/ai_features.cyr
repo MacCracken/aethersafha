@@ -17,7 +17,7 @@
 #   - Arc<RwLock<..>> -> plain field (single-threaded arena model; see stubbed).
 #
 # Depends (auto-prepended via cyrius.cyml / included by main.cyr):
-#   lib/alloc, lib/str, lib/string, lib/vec, lib/hashmap, lib/chrono.
+#   lib/alloc, lib/str, lib/string, lib/vec, lib/hashmap, lib/chrono, lib/bayan (the agent poll).
 
 # ---------------------------------------------------------------------------
 # Enums (Rust enums -> Cyrius enums)
@@ -172,13 +172,18 @@ enum AI_ResOff {
     AI_RES_SZ  = 24;
 }
 
-fn ai_res_new(cpu, mem, gpu): i64 {
-    var p = alloc(AI_RES_SZ);
+# Allocator-as-first-arg form: the agent poll builds its states in an arena (see AI_PollOff).
+fn ai_res_new_a(a, cpu, mem, gpu): i64 {
+    var p = alloc_via(a, AI_RES_SZ);
     if (p == 0) { return 0; }
     store64(p + AI_RES_CPU, cpu);
     store64(p + AI_RES_MEM, mem);
     store64(p + AI_RES_GPU, gpu);
     return p;
+}
+
+fn ai_res_new(cpu, mem, gpu): i64 {
+    return ai_res_new_a(default_alloc(), cpu, mem, gpu);
 }
 
 fn ai_res_cpu(p) { return load64(p + AI_RES_CPU); }
@@ -206,7 +211,12 @@ enum AI_HudOff {
 }
 
 fn ai_hud_new(id, name, status, task, progress, activity, res): i64 {
-    var p = alloc(AI_HUD_SZ);
+    return ai_hud_new_a(default_alloc(), id, name, status, task, progress, activity, res);
+}
+
+# Allocator-as-first-arg form (see ai_res_new_a).
+fn ai_hud_new_a(a, id, name, status, task, progress, activity, res): i64 {
+    var p = alloc_via(a, AI_HUD_SZ);
     if (p == 0) { return 0; }
     store64(p + AI_HUD_ID, id);
     store64(p + AI_HUD_NAME, name);
@@ -329,7 +339,8 @@ enum AI_FeatOff {
     AI_FEAT_CONTEXT     = 24;   # *DesktopContext
     AI_FEAT_PROACTIVE   = 32;   # bool 0/1
     AI_FEAT_AMBIENT     = 40;   # bool 0/1
-    AI_FEAT_SZ          = 48;
+    AI_FEAT_POLL        = 48;   # *AI_PollOff record, made by the first poll (0 before)
+    AI_FEAT_SZ          = 56;
 }
 
 # ai_new — parity: `AIDesktopFeatures::new()`. proactive & ambient default true.
@@ -342,6 +353,7 @@ fn ai_new(): i64 {
     store64(f + AI_FEAT_CONTEXT, ai_context_default());
     store64(f + AI_FEAT_PROACTIVE, 1);
     store64(f + AI_FEAT_AMBIENT, 1);
+    store64(f + AI_FEAT_POLL, 0);
     return f;
 }
 
@@ -740,15 +752,24 @@ fn ai_optimize_resources(id): i64 {
 }
 
 # ---------------------------------------------------------------------------
-# TODO parity: start_hud_polling / poll_agents.
-# The rust impl spawns a tokio task that polls http://localhost:8090/v1/agents
-# with reqwest + serde_json and refreshes the HUD map every `interval`.
-# No async/tokio/reqwest/serde analog in this module — deferred. See stubbed[].
-# A synchronous refresh entry point is provided so the caller (which owns the
-# HTTP transport via lib/http.cyr) can push already-parsed agent states in.
+# poll_agents — parity: rust-old/src/ai_features.rs:496-546, and the clear + insert of its caller
+# start_hud_polling (:479-485).
+# The TRANSPORT is src/daimon_client.cyr: a non-blocking GET /v1/agents that the 5 s status tick
+# starts and every frame advances (Rust's tokio task, :462-494). It hands a 2xx body to
+# ai_poll_agents_apply; everything from Rust's `resp.json()` on is here.
 #
-# ai_hud_refresh_replace — clear the HUD map and repopulate from a vec of
-# *AgentHUDState (mirrors poll_agents' "clear stale entries, insert fresh").
+# ⚠ THE BODY IS daimon 2.4.3's (daimon src/api_agent.cyr:50-131):
+#   {"agents":[{"id":<int>,"name":"..","type":"System|User|Service","status":<int 0-6>,
+#    "pid":<int>,"exit_code":<int|null>[,"limits_enforced":bool,"contained":bool]}],"count":<int>}
+# Rust read a STRING id (as a Uuid) and a STRING status, so against this daimon it minted a random
+# id for every agent on every poll and read every status as "unknown", i.e. Idle. The port reads
+# the integers (ADR 0003: Uuid -> i64) and keeps Rust's table for a string status. Every other
+# field keeps Rust's `as_str()` / `as_f64()` / `as_u64()` default when it is missing or mistyped.
+# ---------------------------------------------------------------------------
+
+# ai_hud_refresh_replace — clear the HUD map and insert every *AgentHUDState in `states`: Rust's
+# "Clear stale entries and replace with fresh data" (ai_features.rs:481-485). A repeated id keeps
+# the last, as HashMap::insert does.
 fn ai_hud_refresh_replace(f, states): i64 {
     var hud = load64(f + AI_FEAT_HUD);
     map_u64_clear(hud);
@@ -762,25 +783,328 @@ fn ai_hud_refresh_replace(f, states): i64 {
     return 0;
 }
 
-# ai_status_from_str — parity: poll_agents status string mapping.
-# "running"->Acting, "registered"->Idle, "error"/"failed"->Error,
-# "waiting"->Waiting, else Idle. Arg is a cstr.
-fn ai_status_from_str(s): i64 {
-    var running = str_from("running");
-    var registered = str_from("registered");
-    var err = str_from("error");
-    var failed = str_from("failed");
-    var waiting = str_from("waiting");
-    var sv = str_from(s);
-    var is_running = str_eq(sv, running);
-    if (is_running == 1) { return AI_AgentStatus.AI_AS_ACTING; }
-    var is_reg = str_eq(sv, registered);
-    if (is_reg == 1) { return AI_AgentStatus.AI_AS_IDLE; }
-    var is_err = str_eq(sv, err);
-    if (is_err == 1) { return AI_AgentStatus.AI_AS_ERROR; }
-    var is_failed = str_eq(sv, failed);
-    if (is_failed == 1) { return AI_AgentStatus.AI_AS_ERROR; }
-    var is_wait = str_eq(sv, waiting);
-    if (is_wait == 1) { return AI_AgentStatus.AI_AS_WAITING; }
+# ai_status_from_bytes(p, n) — Rust's status table (ai_features.rs:514-521) on the n bytes at p:
+# "running" -> Acting, "registered" -> Idle, "error" / "failed" -> Error, "waiting" -> Waiting,
+# anything else -> Idle. Exact bytes, as Rust's &str match: "running" with a NUL after it is not
+# "running", which a C-string compare would have said it was.
+fn ai_status_from_bytes(p, n): i64 {
+    if (_ai_bytes_are(p, n, "running") == 1) { return AI_AgentStatus.AI_AS_ACTING; }
+    if (_ai_bytes_are(p, n, "registered") == 1) { return AI_AgentStatus.AI_AS_IDLE; }
+    if (_ai_bytes_are(p, n, "error") == 1) { return AI_AgentStatus.AI_AS_ERROR; }
+    if (_ai_bytes_are(p, n, "failed") == 1) { return AI_AgentStatus.AI_AS_ERROR; }
+    if (_ai_bytes_are(p, n, "waiting") == 1) { return AI_AgentStatus.AI_AS_WAITING; }
     return AI_AgentStatus.AI_AS_IDLE;
+}
+
+# Are the n bytes at p exactly the cstr `lit`? -> 1 / 0.
+fn _ai_bytes_are(p, n, lit): i64 {
+    if (n != strlen(lit)) { return 0; }
+    return memeq(p, lit, n);
+}
+
+# ai_status_from_str — the same table on a cstr.
+# ⚠ It built six Strs a call on the never-freeing bump; it allocates nothing now that the poll
+# reaches it for every agent.
+fn ai_status_from_str(s): i64 {
+    return ai_status_from_bytes(s, strlen(s));
+}
+
+# The name daimon 2.4.3 gives each integer status (daimon src/agent.cyr:5-13, agnostik's
+# AgentStatus names in its order). -> a cstr; "unknown" for an integer daimon does not define.
+fn ai_daimon_status_name(n): i64 {
+    if (n == 0) { return "pending"; }
+    if (n == 1) { return "starting"; }
+    if (n == 2) { return "running"; }
+    if (n == 3) { return "paused"; }
+    if (n == 4) { return "stopping"; }
+    if (n == 5) { return "stopped"; }
+    if (n == 6) { return "failed"; }
+    return "unknown";
+}
+
+# ai_status_from_daimon(n) — an integer status through RUST'S OWN TABLE, by daimon's name for it.
+# ⭐ No mapping is invented here; this is what Rust's table says of each state daimon has:
+#   0 pending  -> Idle    registered, never started: Rust's "registered" (daimon answers a
+#                         registration with status 0, api_agent.cyr:180)
+#   1 starting -> Idle    Rust's `_`. daimon sets it and then RUNNING or FAILED within one request
+#                         (agent.cyr:1307-1326), so a GET does not see it
+#   2 running  -> Acting  Rust's "running"
+#   3 paused   -> Idle    Rust's `_`. Not Waiting: Rust's "waiting" is a status daimon does not
+#                         have, and a paused agent was suspended by the operator, not left waiting
+#   4 stopping -> Idle    Rust's `_`: SIGTERM sent, the grace period running (agent.cyr:1551)
+#   5 stopped  -> Idle    Rust's `_`
+#   6 failed   -> Error   Rust's "failed": its process exited nonzero (agent.cyr:1659-1660)
+#   any other  -> Idle    Rust's "unknown"
+fn ai_status_from_daimon(n): i64 {
+    var name = ai_daimon_status_name(n);
+    return ai_status_from_bytes(name, strlen(name));
+}
+
+# Minted HUD ids start above any id daimon hands out (sequential from 1, daimon agent.cyr:142).
+var AI_HUD_ID_MINTED_BASE = 0x4000000000000001;   # 2^62 + 1
+var ai_hud_mint_seq = 0;
+
+# The HUD id for an agent's "id" value `v` (0 when absent). daimon's integer id IS the id
+# (ADR 0003). Anything else (missing, a string, a float, 0, negative, or at or above the minted
+# base) is Rust's unparsable-Uuid case (ai_features.rs:511-512) and gets what `Uuid::new_v4()` gave
+# it: an id no other agent has, new on every poll as Rust's was.
+# ⚠ A string id is minted too. The port has no Uuid, so Rust's own shape, a valid UUID string,
+# does not keep one id across polls; no daimon sends it.
+fn ai_poll_agent_id(v): i64 {
+    if (bayan_json_v_is_int(v) == 1) {
+        var n = bayan_json_v_int(v);
+        if (n >= 1) { if (n < AI_HUD_ID_MINTED_BASE) { return n; } }
+    }
+    var id = AI_HUD_ID_MINTED_BASE + ai_hud_mint_seq;
+    ai_hud_mint_seq = ai_hud_mint_seq + 1;
+    return id;
+}
+
+var AI_PCT_LIMIT = 0x4000000000000000;   # 2^62: a cpu permille saturates here rather than wrapping
+
+# cpu_percent: Rust's `as_f64().unwrap_or(0.0) as f32` (ai_features.rs:537), so any JSON number
+# and 0 for anything else, as the module's permille (100 % = 1000), rounded to nearest.
+fn ai_poll_cpu_permille(v): i64 {
+    if (bayan_json_v_is_int(v) == 1) {
+        var n = bayan_json_v_int(v);
+        if (n > AI_PCT_LIMIT / 10) { return AI_PCT_LIMIT; }
+        if (n < 0 - AI_PCT_LIMIT / 10) { return 0 - AI_PCT_LIMIT; }
+        return n * 10;
+    }
+    if (bayan_json_v_is_float(v) == 1) {
+        var p = f64_mul(bayan_json_v_float(v), f64_from(10));
+        if (f64_gt(p, f64_from(AI_PCT_LIMIT)) == 1) { return AI_PCT_LIMIT; }
+        if (f64_lt(p, f64_from(0 - AI_PCT_LIMIT)) == 1) { return 0 - AI_PCT_LIMIT; }
+        return f64_to(f64_round(p));
+    }
+    return 0;
+}
+
+# memory_mb: Rust's `as_u64().unwrap_or(0)` (ai_features.rs:538). A non-negative integer, else 0;
+# a float is no u64, not even 5.0.
+fn ai_poll_mem_mb(v): i64 {
+    if (bayan_json_v_is_int(v) == 1) {
+        var n = bayan_json_v_int(v);
+        if (n >= 0) { return n; }
+    }
+    return 0;
+}
+
+# last_activity: the RFC 3339 "last_heartbeat", or `now` when it is missing, not a string or not
+# RFC 3339 (ai_features.rs:523-527). daimon 2.4.3 sends none, so a poll stamps each agent `now`.
+fn ai_poll_activity(v, now): i64 {
+    var s = bayan_json_v_str(v);
+    if (s == 0) { return now; }
+    var t[8];
+    if (ai_rfc3339_secs(str_data(s), str_len(s), &t) == 1) { return load64(&t); }
+    return now;
+}
+
+# The value of the k ASCII digits at p, or -1 if one is not a digit.
+fn _ai_dec(p, k): i64 {
+    var v = 0;
+    var i = 0;
+    while (i < k) {
+        var c = load8(p + i);
+        if (c < 48 || c > 57) { return 0 - 1; }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    return v;
+}
+
+# Days from 1970-01-01 to y-m-d, proleptic Gregorian, negative before 1970 (H. Hinnant's
+# days_from_civil). ⚠ Not chrono.cyr's iso8601_parse, which counts up from 1970 and so reads every
+# earlier year as 1970.
+fn ai_days_from_civil(y, m, d): i64 {
+    if (m <= 2) { y = y - 1; }
+    var era = y / 400;
+    if (y < 0) { era = (y - 399) / 400; }
+    var yoe = y - era * 400;
+    var mp = m - 3;
+    if (m <= 2) { mp = m + 9; }
+    var doy = (153 * mp + 2) / 5 + d - 1;
+    var doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+# ai_rfc3339_secs(p, n, out): chrono 0.4.44's DateTime::parse_from_rfc3339 (rust-old Cargo.lock)
+# on the n bytes at p, as epoch seconds stored at `out`. -> 1 parsed / 0 not (out untouched).
+#   YYYY-MM-DD (T | t | space) HH:MM:SS [. 1+ digits] (Z | z | (+ | - | U+2212) HH:MM), and nothing
+#   after it. The date must exist (Feb 29 only in a leap year); second 60 is chrono's leap second,
+#   which reads as :59; an offset is at most 23:59. Years 0000-9999, so the epoch can be negative.
+fn ai_rfc3339_secs(p, n, out): i64 {
+    if (n < 20) { return 0; }
+    var yr = _ai_dec(p, 4);
+    var mo = _ai_dec(p + 5, 2);
+    var dy = _ai_dec(p + 8, 2);
+    var hr = _ai_dec(p + 11, 2);
+    var mi = _ai_dec(p + 14, 2);
+    var se = _ai_dec(p + 17, 2);
+    if (yr < 0 || mo < 0 || dy < 0 || hr < 0 || mi < 0 || se < 0) { return 0; }
+    if (load8(p + 4) != 45 || load8(p + 7) != 45) { return 0; }        # '-'
+    if (load8(p + 13) != 58 || load8(p + 16) != 58) { return 0; }      # ':'
+    var sep = load8(p + 10);
+    if (sep != 84 && sep != 116 && sep != 32) { return 0; }            # 'T' 't' ' '
+    if (mo < 1 || mo > 12) { return 0; }
+    if (dy < 1) { return 0; }
+    var mdays = 31;
+    if (mo == 4 || mo == 6 || mo == 9 || mo == 11) { mdays = 30; }
+    if (mo == 2) { mdays = 28 + is_leap_year(yr); }
+    if (dy > mdays) { return 0; }
+    if (hr > 23 || mi > 59 || se > 60) { return 0; }
+    if (se == 60) { se = 59; }
+    var i = 19;
+    if (load8(p + i) == 46) {                                          # '.' then 1+ digits
+        i = i + 1;
+        var d0 = i;
+        while (i < n) {
+            var c = load8(p + i);
+            if (c < 48 || c > 57) { break; }
+            i = i + 1;
+        }
+        if (i == d0) { return 0; }
+    }
+    if (i >= n) { return 0; }
+    var off = 0;
+    var c0 = load8(p + i);
+    if (c0 == 90 || c0 == 122) {                                       # 'Z' 'z'
+        i = i + 1;
+    } else {
+        var neg = 0;
+        var sign = 0;
+        if (c0 == 43) { sign = 1; }
+        if (c0 == 45) { sign = 1; neg = 1; }
+        if (sign == 1) { i = i + 1; }
+        if (sign == 0) {
+            if (c0 != 0xE2) { return 0; }                             # U+2212 MINUS SIGN, 3 bytes
+            if (i + 3 > n) { return 0; }
+            if (load8(p + i + 1) != 0x88 || load8(p + i + 2) != 0x92) { return 0; }
+            neg = 1;
+            i = i + 3;
+        }
+        if (i + 5 > n) { return 0; }
+        var oh = _ai_dec(p + i, 2);
+        var om = _ai_dec(p + i + 3, 2);
+        if (oh < 0 || om < 0 || om > 59) { return 0; }
+        if (load8(p + i + 2) != 58) { return 0; }
+        off = oh * 3600 + om * 60;
+        if (off > 23 * 3600 + 59 * 60) { return 0; }
+        if (neg == 1) { off = 0 - off; }
+        i = i + 5;
+    }
+    if (i != n) { return 0; }
+    store64(out, ai_days_from_civil(yr, mo, dy) * 86400 + hr * 3600 + mi * 60 + se - off);
+    return 1;
+}
+
+# `v[key]` as serde_json's Value indexing reads it (Rust's `agent["id"]`): the LAST pair named
+# `key` (serde_json's map keeps the last duplicate, where bayan's obj_get returns the first), and 0,
+# Rust's Null, when `v` is not an object or has no such key. `key` is a cstr.
+fn _ai_json_at(v, key): i64 {
+    var n = bayan_json_v_obj_len(v);
+    var klen = strlen(key);
+    var found = 0;
+    var i = 0;
+    while (i < n) {
+        var k = bayan_json_v_obj_key(v, i);
+        if (str_len(k) == klen) {
+            if (memeq(str_data(k), key, klen) == 1) { found = bayan_json_v_obj_val(v, i); }
+        }
+        i = i + 1;
+    }
+    return found;
+}
+
+# A string field as a Str in arena `a`, or the cstr `dflt` (Rust's `as_str().unwrap_or(dflt)`).
+# ⭐ The parsed Str is already in `a`, where the body was parsed, so it lives exactly as long as
+# the state that holds it.
+fn _ai_poll_str(a, v, dflt): i64 {
+    var s = bayan_json_v_str(v);
+    if (s != 0) { return s; }
+    return str_from_a(a, dflt);
+}
+
+# One AgentHUDState for the agent value `agent`, built in arena `a` (ai_features.rs:510-541).
+# `now` is epoch seconds. -> the state, or 0 when the arena could not grow.
+fn ai_poll_agent_state(a, agent, now): i64 {
+    var id = ai_poll_agent_id(_ai_json_at(agent, "id"));
+    var sv = _ai_json_at(agent, "status");
+    var status = AI_AgentStatus.AI_AS_IDLE;                   # Rust: as_str() None -> "unknown"
+    if (bayan_json_v_is_int(sv) == 1) { status = ai_status_from_daimon(bayan_json_v_int(sv)); }
+    var ss = bayan_json_v_str(sv);
+    if (ss != 0) { status = ai_status_from_bytes(str_data(ss), str_len(ss)); }
+    var name = _ai_poll_str(a, _ai_json_at(agent, "name"), "unknown");
+    var task = _ai_poll_str(a, _ai_json_at(agent, "current_task"), "");
+    var activity = ai_poll_activity(_ai_json_at(agent, "last_heartbeat"), now);
+    var res = ai_res_new_a(a, ai_poll_cpu_permille(_ai_json_at(agent, "cpu_percent")),
+      ai_poll_mem_mb(_ai_json_at(agent, "memory_mb")), AI_GPU_NONE);
+    if (name == 0 || task == 0 || res == 0) { return 0; }
+    return ai_hud_new_a(a, id, name, status, task, 0, activity, res);
+}
+
+# Each AIDesktopFeatures gets two growable arenas the first time a poll lands. A poll parses its
+# body INTO the arena the HUD map does not point into, builds its states there, then swaps.
+# ⭐ SO A POLL ALLOCATES NOTHING THAT LASTS. On the never-freeing bump every poll would leak its
+# parse tree and its states, every 5 s for the life of the desktop, and a body at the client's
+# 256 KiB bound a whole tree at a time (while daimon is down, any local process may hold 8090).
+# Two arenas hold at most two bodies' worth, reused once they have grown to fit.
+# ⚠ A STATE LIVES UNTIL THE NEXT BODY AFTER IT LEAVES THE MAP: that poll resets its arena. Read
+# the HUD fresh; never keep a state across polls (nothing in src/ does).
+enum AI_PollOff {
+    AI_POLL_ARENA0 = 0;    # *Allocator (growable arena)
+    AI_POLL_ARENA1 = 8;    # *Allocator (growable arena)
+    AI_POLL_CUR    = 16;   # the arena the map's poll states live in: 0 / 1, -1 before the first
+    AI_POLL_SZ     = 24;
+}
+var AI_POLL_CHUNK = 16384;   # one chunk holds a body of a few agents, its tree and its states
+
+# f's poll arenas, made on first use. -> the record, or 0 on OOM.
+fn ai_poll_mem(f): i64 {
+    var pm = load64(f + AI_FEAT_POLL);
+    if (pm != 0) { return pm; }
+    pm = alloc(AI_POLL_SZ);
+    if (pm == 0) { return 0; }
+    var a0 = arena_allocator_growable(AI_POLL_CHUNK);
+    var a1 = arena_allocator_growable(AI_POLL_CHUNK);
+    if (a0 == 0 || a1 == 0) { return 0; }
+    store64(pm + AI_POLL_ARENA0, a0);
+    store64(pm + AI_POLL_ARENA1, a1);
+    store64(pm + AI_POLL_CUR, 0 - 1);
+    store64(f + AI_FEAT_POLL, pm);
+    return pm;
+}
+
+# ai_poll_agents_apply(f, body, len, now): a 2xx body of GET /v1/agents onto f's HUD: Rust's
+# `resp.json()` and poll_agents (ai_features.rs:506-545), then the caller's clear + insert
+# (:479-485). `now` is epoch seconds, the default last_activity.
+# -> the number of agents the body lists (the HUD holds them, a repeated id once), or -1 when the
+#    body is not JSON (Rust's `resp.json()` Err) or memory ran out. On -1 the HUD is untouched.
+# ⚠ A JSON body of any other shape is Rust's EMPTY list and CLEARS the HUD:
+#   `body["agents"].as_array()` is None for `{}`, `[]` or `{"agents":5}`. An element that is not an
+#   object is still an agent with every field defaulted, as `agent["id"]` on it is Null.
+fn ai_poll_agents_apply(f, body, len, now): i64 {
+    var pm = ai_poll_mem(f);
+    if (pm == 0) { return 0 - 1; }
+    var spare = 0;
+    if (load64(pm + AI_POLL_CUR) == 0) { spare = 1; }
+    var a = load64(pm + spare * 8);
+    reset_via(a);                       # its states left the map at the last poll that landed
+    var ps[48];
+    var root = bayan_json_v_parse_ctx_a(a, &ps, body, len);
+    if (root == 0) { return 0 - 1; }
+    var states = vec_new_a(a);
+    if (states == 0) { return 0 - 1; }
+    var agents = _ai_json_at(root, "agents");
+    var n = bayan_json_v_arr_len(agents);   # 0 unless an array
+    var i = 0;
+    while (i < n) {
+        var st = ai_poll_agent_state(a, bayan_json_v_arr_get(agents, i), now);
+        if (st == 0) { return 0 - 1; }
+        if (vec_push_a(a, states, st) != 0) { return 0 - 1; }
+        i = i + 1;
+    }
+    ai_hud_refresh_replace(f, states);
+    store64(pm + AI_POLL_CUR, spare);
+    return n;
 }

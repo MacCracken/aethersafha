@@ -1,0 +1,673 @@
+# aethersafha — the daimon client: the agent list for the HUD, and the emergency kill's deregistration
+# Parity: rust-old/src/ai_features.rs:462-504 (start_hud_polling, the GET half of poll_agents) and
+#         rust-old/src/security_ui.rs:546-559 (emergency_kill_agent's fire-and-forget DELETE).
+# daimon 2.4.3 serves both on 127.0.0.1:8090 (daimon src/config.cyr:10-11, src/router.cyr:56-70).
+#
+# ⛔⛔ NOTHING HERE MAY BLOCK THE FRAME LOOP — not with daimon absent, slow, or ACCEPTING AND NEVER
+# ANSWERING (roadmap D12: setu's blocking reads already let one silent peer wedge the compositor).
+# Rust ran the poll on a tokio task; the port has one thread and a frame loop (ADR 0003), so a
+# request is a STATE MACHINE over a non-blocking socket, advanced once per frame:
+#   - the socket is opened SOCK_NONBLOCK, so connect() returns at once (EINPROGRESS), and connect()
+#     again asks how it went: EALREADY not yet, 0 or EISCONN connected, anything else failed;
+#   - every send and recv passes MSG_DONTWAIT, and every send MSG_NOSIGNAL: a send to a peer that
+#     reset must not raise SIGPIPE, whose default action would end the compositor;
+#   - a step is one bounded round of those calls: it takes what has arrived and returns;
+#   - Rust's 5 s client timeout is an overall DEADLINE, checked on every step;
+#   - an answer is bounded (DMN_RESP_MAX), and one GET is in flight at most.
+# ⚠ lib/http.cyr and sandhi's client both BLOCK (a connect, then recv until EOF; sandhi only up to its
+# timeouts), so neither is used: a 5 s bound is still a 5 s frozen frame. A thread or a child process
+# could block in our place, but the HUD would then need a lock or a pipe back to the frame loop; the
+# state machine needs neither, and costs one non-blocking call a frame only while a request is out.
+#
+# ⛔ agnos: EVERY ENTRY POINT IS A NO-OP. agnos has no non-blocking connect: sock_connect #47 blocks
+# the caller until the SYN-ACK, a RST or its 8 s ceiling (agnos kernel/core/syscall.cyr:11525-11548,
+# core/net_tcp.cyr:921-976), and a SYN to a port nobody listens on is DROPPED, never reset
+# (net_tcp.cyr:1441-1443). With daimon down, every poll would freeze the desktop for 8 s. sock_send
+# #48 also blocks until its bytes are ACKed; only #49 recv is non-blocking. A thread does not help
+# there: agnos threads run serially, inline (lib/thread_agnos.cyr, THREADS_CONCURRENT = 0). Wire agnos
+# when it has a non-blocking connect.
+
+# The module the poll feeds; include-once makes main.cyr's own include of it a no-op.
+include "src/ai_features.cyr"
+
+enum DmnState {
+    DMN_ST_IDLE       = 0;   # no request: the slot may start one
+    DMN_ST_CONNECTING = 1;   # the non-blocking connect is under way
+    DMN_ST_SENDING    = 2;   # the request is being written
+    DMN_ST_RECEIVING  = 3;   # the answer is being read
+    DMN_ST_DONE       = 4;   # finished; DMN_RQ_RESULT says how, and the owner returns it to IDLE
+}
+
+enum DmnResult {
+    DMN_R_NONE      = 0;    # nothing finished
+    DMN_R_OK        = 1;    # a whole HTTP/1.x answer is in the buffer
+    DMN_R_FED       = 2;    # the poll: a 2xx JSON answer replaced the HUD
+    DMN_R_STATUS    = 3;    # the poll: a non-2xx status (Rust: "API returned {}"); HUD untouched
+    DMN_R_JSON      = 4;    # the poll: a 2xx body that is not JSON (Rust: resp.json() failed)
+    DMN_R_CONNECT   = 5;    # the connect failed: nothing listens (refused), or no route
+    DMN_R_IO        = 6;    # a send or a receive failed (the peer reset)
+    DMN_R_TIMEOUT   = 7;    # the deadline passed first (Rust: reqwest's 5 s timeout)
+    DMN_R_TOO_LARGE = 8;    # the answer is over the bound
+    # Not an answer this client reads: no HTTP/1.x status line, a Transfer-Encoding, a Content-Length
+    # it cannot read, or cut short by the close.
+    DMN_R_PROTOCOL  = 9;
+    DMN_R_SOCKET    = 10;   # no socket could be opened
+}
+
+# One request: its state, its socket and both buffers, all owned by the slot and reused, so a request
+# allocates nothing.
+enum DmnReqOff {
+    DMN_RQ_STATE    = 0;     # DmnState
+    DMN_RQ_FD       = 8;     # the socket, or -1
+    DMN_RQ_DEADLINE = 16;    # monotonic µs: give up at or after this
+    DMN_RQ_REQ      = 24;    # the request bytes (DMN_REQ_CAP)
+    DMN_RQ_REQ_LEN  = 32;
+    DMN_RQ_SENT     = 40;    # request bytes sent so far
+    DMN_RQ_BUF      = 48;    # the answer (DMN_RQ_BUFCAP + 1 bytes)
+    DMN_RQ_BUFCAP   = 56;    # the largest bound this slot can hold
+    DMN_RQ_CAP      = 64;    # this request's bound (<= BUFCAP)
+    DMN_RQ_LEN      = 72;    # answer bytes held
+    DMN_RQ_SCAN     = 80;    # where the search for the end of the head resumes
+    DMN_RQ_HEAD     = 88;    # the head's length, blank line included; 0 until it has ended
+    DMN_RQ_CLEN     = 96;    # the Content-Length, or -1: the body runs to EOF
+    DMN_RQ_STATUS   = 104;   # the HTTP status code once the head has ended, else 0
+    DMN_RQ_RESULT   = 112;   # a DmnResult, once DONE
+    DMN_RQ_SA       = 120;   # the sockaddr_in, 16 B inline
+    DMN_RQ_SZ       = 136;
+}
+
+var DMN_REQ_CAP = 256;          # the longest request is a DELETE with a 20-digit id: ~110 B
+# The bound on the agent list: daimon's own cap of max_agents 1000 (daimon src/config.cyr:13) at
+# ~250 B a record. A larger answer is a failed poll, and the HUD keeps what it had.
+var DMN_RESP_MAX = 262144;
+var DMN_DEL_RESP_MAX = 4096;    # a DELETE's answer is read and dropped
+var DMN_DEL_SLOTS = 4;          # DELETEs in flight at once; Rust spawned one task per kill
+var DMN_RECV_ROUNDS = 16;       # recv calls a step makes at most, each non-blocking
+
+# The endpoint and limits. Tests point them at a fake daimon of their own: ⛔ a test must NEVER
+# reach the real one, which may be running here, and a DELETE deregisters a real agent.
+var dmn_addr = 0x0100007F;      # 127.0.0.1, network byte order (net.cyr INADDR_LOOPBACK)
+var dmn_port = 8090;
+var dmn_timeout_us = 5000000;   # Rust: reqwest's timeout(5 s), ai_features.rs:469-472, security_ui.rs:553
+var dmn_resp_max = 262144;      # the bound in force (<= DMN_RESP_MAX)
+
+var dmn_poll = 0;               # the GET slot, made by the first kick
+var dmn_dels: i64[4];           # the DMN_DEL_SLOTS DELETE slots, made as kills need them
+var dmn_poll_last = 0;          # the last finished GET's DmnResult
+var dmn_poll_code = 0;          # its HTTP status, or 0
+var dmn_del_last = 0;           # the last finished DELETE's DmnResult
+
+# Linux errnos, as -errno from the syscall wrappers.
+var _DMN_EINTR = 4;
+var _DMN_EAGAIN = 11;
+var _DMN_EISCONN = 106;
+var _DMN_EALREADY = 114;
+var _DMN_EINPROGRESS = 115;
+
+# Point the client at another daimon: `addr` is an IPv4 address in network byte order (127.0.0.1
+# is 0x0100007F), `port` host order. Applies to requests started afterwards.
+fn daimon_set_endpoint(addr, port): i64 {
+    dmn_addr = addr;
+    dmn_port = port;
+    return 0;
+}
+
+# Set the overall deadline (µs) and the bound on the agent list's answer (bytes, at most
+# DMN_RESP_MAX). Applies to requests started afterwards. -> 0, or -1 for a value out of range.
+fn daimon_set_limits(timeout_us, resp_max): i64 {
+    if (timeout_us <= 0) { return 0 - 1; }
+    if (resp_max <= 0 || resp_max > DMN_RESP_MAX) { return 0 - 1; }
+    dmn_timeout_us = timeout_us;
+    dmn_resp_max = resp_max;
+    return 0;
+}
+
+fn daimon_poll_last(): i64 { return dmn_poll_last; }
+fn daimon_poll_last_code(): i64 { return dmn_poll_code; }
+fn daimon_delete_last(): i64 { return dmn_del_last; }
+
+# Is a GET in flight? -> 1 / 0.
+fn daimon_poll_busy(): i64 {
+    if (dmn_poll == 0) { return 0; }
+    if (load64(dmn_poll + DMN_RQ_STATE) == DmnState.DMN_ST_IDLE) { return 0; }
+    return 1;
+}
+
+# How many DELETEs are in flight.
+fn daimon_delete_busy(): i64 {
+    var busy = 0;
+    var i = 0;
+    while (i < DMN_DEL_SLOTS) {
+        var r = load64(&dmn_dels + i * 8);
+        if (r != 0) { if (load64(r + DMN_RQ_STATE) != DmnState.DMN_ST_IDLE) { busy = busy + 1; } }
+        i = i + 1;
+    }
+    return busy;
+}
+
+# ============================================================================================
+# The socket primitives: Linux syscalls, and failures on agnos (see the banner) so the state
+# machine above them compiles on both.
+# ============================================================================================
+
+# A non-blocking TCP socket. SOCK_CLOEXEC: a client the launcher spawns mid-request must not
+# inherit the connection. -> fd, or -errno.
+fn _dmn_os_socket(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return sys_socket(AF_INET, SOCK_STREAM | 2048 | 524288, 0);   # SOCK_NONBLOCK | SOCK_CLOEXEC
+    #endif
+}
+
+# connect(), or on a socket already connecting the question "how did it go". -> 0 or -errno.
+fn _dmn_os_connect(fd, sa): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return sys_connect(fd, sa, 16);
+    #endif
+}
+
+# -> bytes sent, or -errno (-EAGAIN when the socket cannot take more now).
+fn _dmn_os_send(fd, p, n): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return sys_sendto(fd, p, n, 64 | 16384, 0, 0);                # MSG_DONTWAIT | MSG_NOSIGNAL
+    #endif
+}
+
+# -> bytes read, 0 at EOF, or -errno (-EAGAIN when nothing has arrived).
+fn _dmn_os_recv(fd, p, n): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return sys_recvfrom(fd, p, n, 64, 0, 0);                      # MSG_DONTWAIT
+    #endif
+}
+
+fn _dmn_os_close(fd): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return sys_close(fd);
+    #endif
+}
+
+# The monotonic clock in µs: ae_now_us()'s source on Linux (CLOCK_MONOTONIC), for the one entry
+# point with no frame time to hand.
+fn _dmn_clock_us(): i64 {
+    return clock_now_ns() / 1000;
+}
+
+# ============================================================================================
+# HTTP/1.1, as much as daimon's answer needs (daimon src/http.cyr:328-344: a status line,
+# Content-Type, Content-Length, Connection: close). Pure, so a test reads every rule directly.
+# ============================================================================================
+
+# Copy the cstr s to b + o. -> the offset after it.
+fn _dmn_put(b, o, s): i64 {
+    var n = strlen(s);
+    memcpy(b + o, s, n);
+    return o + n;
+}
+
+# Write n in decimal at b + o (a '-' first when negative; i64's minimum too). -> the offset after it.
+fn dmn_put_int(b, o, n): i64 {
+    var tmp[24];
+    var k = 0;
+    if (n < 0) {
+        store8(b + o, 45);
+        o = o + 1;
+    }
+    while (1 == 1) {
+        var d = n % 10;
+        if (d < 0) { d = 0 - d; }
+        store8(&tmp + k, 48 + d);
+        k = k + 1;
+        n = n / 10;
+        if (n == 0) { break; }
+    }
+    while (k > 0) {
+        k = k - 1;
+        store8(b + o, load8(&tmp + k));
+        o = o + 1;
+    }
+    return o;
+}
+
+# Write the request "`method` `path`[id]" into b (DMN_REQ_CAP bytes). -> its length.
+# The headers are reqwest's (a Host naming the URL's host and port, `accept: */*`), plus
+# Connection: close, so the answer ends at EOF as daimon's does anyway.
+fn dmn_req_write(b, method, path, has_id, id, port): i64 {
+    var o = _dmn_put(b, 0, method);
+    store8(b + o, 32);
+    o = _dmn_put(b, o + 1, path);
+    if (has_id == 1) { o = dmn_put_int(b, o, id); }
+    o = _dmn_put(b, o, " HTTP/1.1\r\nHost: localhost:");
+    o = dmn_put_int(b, o, port);
+    return _dmn_put(b, o, "\r\nAccept: */*\r\nConnection: close\r\n\r\n");
+}
+
+# The offset just past the first CRLF CRLF in b[from, n), or 0 when there is none yet.
+fn dmn_head_end(b, from, n): i64 {
+    var i = from;
+    if (i < 0) { i = 0; }
+    while (i + 3 < n) {
+        if (load8(b + i) == 13) { if (load8(b + i + 1) == 10) {
+                if (load8(b + i + 2) == 13) { if (load8(b + i + 3) == 10) { return i + 4; } }
+            } }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# The status code of the head's status line: "HTTP/1.0" or "HTTP/1.1" (what hyper reads), a space,
+# three digits 100-999, then a space or the line's end. `n` is the head's length. -> code, or -1.
+fn dmn_http_status_code(b, n): i64 {
+    if (n < 14) { return 0 - 1; }                    # "HTTP/1.1 200\r\n"
+    if (memeq(b, "HTTP/1.", 7) != 1) { return 0 - 1; }
+    var minor = load8(b + 7);
+    if (minor != 48 && minor != 49) { return 0 - 1; }
+    if (load8(b + 8) != 32) { return 0 - 1; }
+    var code = 0;
+    var i = 9;
+    while (i < 12) {
+        var c = load8(b + i);
+        if (c < 48 || c > 57) { return 0 - 1; }
+        code = code * 10 + (c - 48);
+        i = i + 1;
+    }
+    if (code < 100) { return 0 - 1; }
+    var after = load8(b + 12);
+    if (after != 32 && after != 13) { return 0 - 1; }
+    return code;
+}
+
+# The offset of the CR that ends the head line starting at i (the head is `head` bytes and ends
+# CRLF CRLF, so there always is one).
+fn _dmn_line_end(b, i, head): i64 {
+    while (i + 1 < head) {
+        if (load8(b + i) == 13) { if (load8(b + i + 1) == 10) { return i; } }
+        i = i + 1;
+    }
+    return head - 2;
+}
+
+# If the header line b[i, e) is named `name` (any case), the offset of its value: after the colon
+# and any spaces or tabs. -> that offset, or -1.
+fn _dmn_header_value(b, i, e, name): i64 {
+    var nl = strlen(name);
+    if (i + nl >= e) { return 0 - 1; }
+    var k = 0;
+    while (k < nl) {
+        var c = load8(b + i + k);
+        if (c >= 65 && c <= 90) { c = c + 32; }
+        if (c != load8(name + k)) { return 0 - 1; }
+        k = k + 1;
+    }
+    var v = i + nl;
+    if (load8(b + v) != 58) { return 0 - 1; }       # ':' right after the name, as hyper requires
+    v = v + 1;
+    while (v < e) {
+        var w = load8(b + v);
+        if (w != 32 && w != 9) { break; }
+        v = v + 1;
+    }
+    return v;
+}
+
+# The Content-Length of the head (`head` bytes at b). -> the length, -1 when there is none, or -2
+# when it is not digits or two disagree (hyper refuses both). A length past 2^50 reads as 2^50 + 1,
+# beyond any bound.
+fn dmn_http_content_length(b, head): i64 {
+    var found = 0 - 1;
+    var i = _dmn_line_end(b, 0, head) + 2;           # past the status line
+    while (i < head - 2) {
+        var e = _dmn_line_end(b, i, head);
+        var v = _dmn_header_value(b, i, e, "content-length");
+        if (v >= 0) {
+            var end = e;
+            while (end > v) {
+                var t = load8(b + end - 1);
+                if (t != 32 && t != 9) { break; }
+                end = end - 1;
+            }
+            if (end == v) { return 0 - 2; }
+            var len = 0;
+            while (v < end) {
+                var c = load8(b + v);
+                if (c < 48 || c > 57) { return 0 - 2; }
+                if (len <= 0x4000000000000) { len = len * 10 + (c - 48); }
+                v = v + 1;
+            }
+            if (len > 0x4000000000000) { len = 0x4000000000001; }
+            if (found >= 0) { if (found != len) { return 0 - 2; } }
+            found = len;
+        }
+        i = e + 2;
+    }
+    return found;
+}
+
+# Does the head carry a Transfer-Encoding? -> 1 / 0. This client reads none: daimon never sends one,
+# so a chunked answer is a failed poll rather than a body read wrong.
+fn dmn_http_transfer_encoded(b, head): i64 {
+    var i = _dmn_line_end(b, 0, head) + 2;
+    while (i < head - 2) {
+        var e = _dmn_line_end(b, i, head);
+        if (_dmn_header_value(b, i, e, "transfer-encoding") >= 0) { return 1; }
+        i = e + 2;
+    }
+    return 0;
+}
+
+# ============================================================================================
+# The request state machine
+# ============================================================================================
+
+# A slot whose answer buffer holds `bufcap` bytes (+1, so an answer one byte over the bound can be
+# told from one exactly at it). Made once and reused. -> the slot, or 0 on OOM.
+fn _dmn_req_new(bufcap): i64 {
+    var r = alloc(DMN_RQ_SZ);
+    var q = alloc(DMN_REQ_CAP);
+    var b = alloc(bufcap + 1);
+    if (r == 0 || q == 0 || b == 0) { return 0; }
+    store64(r + DMN_RQ_STATE, DmnState.DMN_ST_IDLE);
+    store64(r + DMN_RQ_FD, 0 - 1);
+    store64(r + DMN_RQ_REQ, q);
+    store64(r + DMN_RQ_REQ_LEN, 0);
+    store64(r + DMN_RQ_BUF, b);
+    store64(r + DMN_RQ_BUFCAP, bufcap);
+    store64(r + DMN_RQ_RESULT, DmnResult.DMN_R_NONE);
+    return r;
+}
+
+# Close the socket and record how the request ended. The owner reads DMN_RQ_RESULT and sets IDLE.
+fn _dmn_req_finish(r, result): i64 {
+    var fd = load64(r + DMN_RQ_FD);
+    if (fd >= 0) { _dmn_os_close(fd); }
+    store64(r + DMN_RQ_FD, 0 - 1);
+    store64(r + DMN_RQ_RESULT, result);
+    store64(r + DMN_RQ_STATE, DmnState.DMN_ST_DONE);
+    return 0;
+}
+
+# Start the request written into idle slot `r` at `now_us`, its answer bounded at `cap` bytes: open
+# a non-blocking socket, connect, and take one step at once. -> 1 under way or already finished (a
+# refusal can come back inside connect()), 0 when the slot is busy.
+fn _dmn_req_begin(r, now_us, cap): i64 {
+    if (load64(r + DMN_RQ_STATE) != DmnState.DMN_ST_IDLE) { return 0; }
+    if (cap > load64(r + DMN_RQ_BUFCAP)) { cap = load64(r + DMN_RQ_BUFCAP); }   # never past the buffer
+    store64(r + DMN_RQ_DEADLINE, now_us + dmn_timeout_us);
+    store64(r + DMN_RQ_SENT, 0);
+    store64(r + DMN_RQ_CAP, cap);
+    store64(r + DMN_RQ_LEN, 0);
+    store64(r + DMN_RQ_SCAN, 0);
+    store64(r + DMN_RQ_HEAD, 0);
+    store64(r + DMN_RQ_CLEN, 0 - 1);
+    store64(r + DMN_RQ_STATUS, 0);
+    store64(r + DMN_RQ_RESULT, DmnResult.DMN_R_NONE);
+    var sa = r + DMN_RQ_SA;                          # sockaddr_in: family, port and address in network order
+    store64(sa, 0);
+    store64(sa + 8, 0);
+    store16(sa, AF_INET);
+    store8(sa + 2, (dmn_port >> 8) & 0xFF);
+    store8(sa + 3, dmn_port & 0xFF);
+    store32(sa + 4, dmn_addr);
+    store64(r + DMN_RQ_STATE, DmnState.DMN_ST_CONNECTING);
+    var fd = _dmn_os_socket();
+    if (fd < 0) {
+        _dmn_req_finish(r, DmnResult.DMN_R_SOCKET);
+        return 1;
+    }
+    store64(r + DMN_RQ_FD, fd);
+    var c = _dmn_os_connect(fd, sa);
+    if (c == 0) { store64(r + DMN_RQ_STATE, DmnState.DMN_ST_SENDING); }
+    if (c < 0) {
+        if (c != 0 - _DMN_EINPROGRESS && c != 0 - _DMN_EINTR) {
+            _dmn_req_finish(r, DmnResult.DMN_R_CONNECT);
+            return 1;
+        }
+    }
+    _dmn_req_step(r, now_us);
+    return 1;
+}
+
+# Read what the answer holds so far: find the end of the head, its status and its length, then
+# decide whether the answer is whole. `eof` = 1 when the server has closed. -> 1 finished, 0 wait.
+fn _dmn_scan(r, eof): i64 {
+    var b = load64(r + DMN_RQ_BUF);
+    var len = load64(r + DMN_RQ_LEN);
+    var head = load64(r + DMN_RQ_HEAD);
+    if (head == 0) {
+        head = dmn_head_end(b, load64(r + DMN_RQ_SCAN), len);
+        if (head == 0) {
+            if (len > 3) { store64(r + DMN_RQ_SCAN, len - 3); }
+            if (eof == 1) {
+                _dmn_req_finish(r, DmnResult.DMN_R_PROTOCOL);   # closed before the head ended
+                return 1;
+            }
+            return 0;
+        }
+        store64(r + DMN_RQ_HEAD, head);
+        var code = dmn_http_status_code(b, head);
+        var cl = dmn_http_content_length(b, head);
+        store64(r + DMN_RQ_STATUS, code);
+        store64(r + DMN_RQ_CLEN, cl);
+        if (code < 0 || cl == 0 - 2 || dmn_http_transfer_encoded(b, head) == 1) {
+            _dmn_req_finish(r, DmnResult.DMN_R_PROTOCOL);
+            return 1;
+        }
+        if (cl >= 0) {
+            if (head + cl > load64(r + DMN_RQ_CAP)) {
+                _dmn_req_finish(r, DmnResult.DMN_R_TOO_LARGE);   # refused on the header, unread
+                return 1;
+            }
+        }
+    }
+    var clen = load64(r + DMN_RQ_CLEN);
+    if (clen >= 0) {
+        if (len >= head + clen) {
+            _dmn_req_finish(r, DmnResult.DMN_R_OK);
+            return 1;
+        }
+        if (eof == 1) {
+            _dmn_req_finish(r, DmnResult.DMN_R_PROTOCOL);       # closed short of its length
+            return 1;
+        }
+        return 0;
+    }
+    if (eof == 1) {
+        _dmn_req_finish(r, DmnResult.DMN_R_OK);                 # no length: the body runs to EOF
+        return 1;
+    }
+    return 0;
+}
+
+# Advance slot `r` by one bounded round of non-blocking calls, then hold it to its deadline.
+# `now_us` is the monotonic clock; -1 (no clock) skips the deadline for this step only.
+# -> the slot's state afterwards. An idle or finished slot is left as it is.
+fn _dmn_req_step(r, now_us): i64 {
+    var fd = load64(r + DMN_RQ_FD);
+    if (load64(r + DMN_RQ_STATE) == DmnState.DMN_ST_CONNECTING) {
+        var c = _dmn_os_connect(fd, r + DMN_RQ_SA);
+        if (c == 0 || c == 0 - _DMN_EISCONN) {
+            store64(r + DMN_RQ_STATE, DmnState.DMN_ST_SENDING);
+        } elif (c != 0 - _DMN_EALREADY && c != 0 - _DMN_EINPROGRESS && c != 0 - _DMN_EINTR) {
+            _dmn_req_finish(r, DmnResult.DMN_R_CONNECT);
+        }
+    }
+    if (load64(r + DMN_RQ_STATE) == DmnState.DMN_ST_SENDING) {
+        var q = load64(r + DMN_RQ_REQ);
+        var qlen = load64(r + DMN_RQ_REQ_LEN);
+        var go = 1;
+        while (go == 1) {
+            var sent = load64(r + DMN_RQ_SENT);
+            if (sent >= qlen) {
+                store64(r + DMN_RQ_STATE, DmnState.DMN_ST_RECEIVING);
+                go = 0;
+            } else {
+                var n = _dmn_os_send(fd, q + sent, qlen - sent);
+                if (n > 0) {
+                    store64(r + DMN_RQ_SENT, sent + n);
+                } elif (n == 0 || n == 0 - _DMN_EAGAIN || n == 0 - _DMN_EINTR) {
+                    go = 0;                                       # the socket is full: next frame
+                } else {
+                    _dmn_req_finish(r, DmnResult.DMN_R_IO);
+                    go = 0;
+                }
+            }
+        }
+    }
+    if (load64(r + DMN_RQ_STATE) == DmnState.DMN_ST_RECEIVING) {
+        var b = load64(r + DMN_RQ_BUF);
+        var rounds = 0;
+        while (rounds < DMN_RECV_ROUNDS) {
+            var len = load64(r + DMN_RQ_LEN);
+            var room = load64(r + DMN_RQ_CAP) + 1 - len;
+            if (room <= 0) {
+                _dmn_req_finish(r, DmnResult.DMN_R_TOO_LARGE);
+                rounds = DMN_RECV_ROUNDS;
+            } else {
+                var got = _dmn_os_recv(fd, b + len, room);
+                if (got > 0) {
+                    store64(r + DMN_RQ_LEN, len + got);
+                    if (_dmn_scan(r, 0) == 1) { rounds = DMN_RECV_ROUNDS; }
+                } elif (got == 0) {
+                    _dmn_scan(r, 1);
+                    rounds = DMN_RECV_ROUNDS;
+                } elif (got == 0 - _DMN_EAGAIN || got == 0 - _DMN_EINTR) {
+                    rounds = DMN_RECV_ROUNDS;                     # nothing more yet: next frame
+                } else {
+                    _dmn_req_finish(r, DmnResult.DMN_R_IO);
+                    rounds = DMN_RECV_ROUNDS;
+                }
+            }
+            rounds = rounds + 1;
+        }
+    }
+    var st = load64(r + DMN_RQ_STATE);
+    if (st != DmnState.DMN_ST_IDLE && st != DmnState.DMN_ST_DONE) {
+        if (now_us >= 0) {
+            if (now_us >= load64(r + DMN_RQ_DEADLINE)) { _dmn_req_finish(r, DmnResult.DMN_R_TIMEOUT); }
+        }
+    }
+    return load64(r + DMN_RQ_STATE);
+}
+
+# ============================================================================================
+# The agent poll: GET /v1/agents
+# ============================================================================================
+
+# daimon_poll_kick(now_us): Rust's poll tick (ai_features.rs:474-476): start GET /v1/agents unless
+# one is in flight. `now_us` is the monotonic clock. -> 1 started, 0 not (one in flight, no clock
+# to hold a deadline to, or agnos).
+fn daimon_poll_kick(now_us): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (now_us < 0) { return 0; }
+    if (dmn_poll == 0) { dmn_poll = _dmn_req_new(DMN_RESP_MAX); }
+    if (dmn_poll == 0) { return 0; }
+    if (load64(dmn_poll + DMN_RQ_STATE) != DmnState.DMN_ST_IDLE) { return 0; }
+    var q = load64(dmn_poll + DMN_RQ_REQ);
+    store64(dmn_poll + DMN_RQ_REQ_LEN, dmn_req_write(q, "GET", "/v1/agents", 0, 0, dmn_port));
+    return _dmn_req_begin(dmn_poll, now_us, dmn_resp_max);
+    #endif
+}
+
+# A finished GET onto `ai`'s HUD: a 2xx answer's body goes to ai_poll_agents_apply, which replaces
+# the HUD; anything else leaves the HUD as it was (Rust's Err arm, ai_features.rs:488-490).
+# -> the GET's DmnResult.
+fn _dmn_poll_land(ai, r): i64 {
+    var res = load64(r + DMN_RQ_RESULT);
+    dmn_poll_code = load64(r + DMN_RQ_STATUS);
+    if (res != DmnResult.DMN_R_OK) { return res; }
+    if (dmn_poll_code < 200 || dmn_poll_code > 299) { return DmnResult.DMN_R_STATUS; }
+    var head = load64(r + DMN_RQ_HEAD);
+    var blen = load64(r + DMN_RQ_CLEN);
+    if (blen < 0) { blen = load64(r + DMN_RQ_LEN) - head; }
+    var n = ai_poll_agents_apply(ai, load64(r + DMN_RQ_BUF) + head, blen, clock_epoch_secs());
+    if (n < 0) { return DmnResult.DMN_R_JSON; }
+    return DmnResult.DMN_R_FED;
+}
+
+# daimon_step(ai, now_us): the frame loop's call. Advance every request in flight by one bounded
+# round of non-blocking calls; a finished GET lands on `ai`'s HUD, a finished DELETE is dropped.
+# -> the GET's DmnResult when it finished in this call, else DMN_R_NONE.
+fn daimon_step(ai, now_us): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return DmnResult.DMN_R_NONE;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var i = 0;
+    while (i < DMN_DEL_SLOTS) {
+        var dr = load64(&dmn_dels + i * 8);
+        if (dr != 0) {
+            if (load64(dr + DMN_RQ_STATE) != DmnState.DMN_ST_IDLE) {
+                if (_dmn_req_step(dr, now_us) == DmnState.DMN_ST_DONE) {
+                    dmn_del_last = load64(dr + DMN_RQ_RESULT);
+                    store64(dr + DMN_RQ_STATE, DmnState.DMN_ST_IDLE);
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if (dmn_poll == 0) { return DmnResult.DMN_R_NONE; }
+    if (load64(dmn_poll + DMN_RQ_STATE) == DmnState.DMN_ST_IDLE) { return DmnResult.DMN_R_NONE; }
+    if (_dmn_req_step(dmn_poll, now_us) != DmnState.DMN_ST_DONE) { return DmnResult.DMN_R_NONE; }
+    var out = _dmn_poll_land(ai, dmn_poll);
+    store64(dmn_poll + DMN_RQ_STATE, DmnState.DMN_ST_IDLE);
+    dmn_poll_last = out;
+    return out;
+    #endif
+}
+
+# ============================================================================================
+# The emergency kill's deregistration: DELETE /v1/agents/<id>
+# ============================================================================================
+
+# daimon_agent_delete_at(agent_id, now_us): rust security_ui.rs:546-559, a fire-and-forget
+# `DELETE http://localhost:8090/v1/agents/<id>` with a 5 s timeout. It starts now and finishes on
+# later frames (daimon_step); the answer is read and dropped. -> 1 under way or done, 0 not sent
+# (every slot busy, no clock, or agnos).
+# ⚠ Rust spawned it only inside a tokio runtime (security_ui.rs:547-559); here it needs daimon_step to
+# keep running, so a compositor that exits at once may not finish it. Fire-and-forget either way.
+fn daimon_agent_delete_at(agent_id, now_us): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (now_us < 0) { return 0; }
+    var i = 0;
+    while (i < DMN_DEL_SLOTS) {
+        var r = load64(&dmn_dels + i * 8);
+        if (r == 0) {
+            r = _dmn_req_new(DMN_DEL_RESP_MAX);
+            store64(&dmn_dels + i * 8, r);
+        }
+        if (r != 0) {
+            if (load64(r + DMN_RQ_STATE) == DmnState.DMN_ST_IDLE) {
+                var q = load64(r + DMN_RQ_REQ);
+                store64(r + DMN_RQ_REQ_LEN, dmn_req_write(q, "DELETE", "/v1/agents/", 1, agent_id, dmn_port));
+                return _dmn_req_begin(r, now_us, DMN_DEL_RESP_MAX);
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+    #endif
+}
+
+# daimon_agent_delete(agent_id): the security UI's call, on the monotonic clock.
+fn daimon_agent_delete(agent_id): i64 {
+    return daimon_agent_delete_at(agent_id, _dmn_clock_us());
+}

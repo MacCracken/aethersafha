@@ -1,0 +1,546 @@
+# aethersafha daimon client test: GET /v1/agents into the agent HUD, and the emergency kill's DELETE,
+# against a FAKE daimon this test runs itself on 127.0.0.1 and an ephemeral port.
+# ⛔ SAFETY: a real daimon may be running on this machine at 127.0.0.1:8090, and a DELETE there
+# deregisters a real agent. main() points the client at a port of its own before any request, and
+# every scenario sets its own endpoint first.
+# ⭐ Each fake daimon is a FORKED process, so a client that blocks fails an assertion here instead of
+# deadlocking the suite: its read returns once the daimon answers or hangs up, and the step that
+# blocked is measured.
+# Stdlib + [deps.*] auto-included; daimon_client.cyr includes ai_features.cyr.
+include "src/daimon_client.cyr"
+
+# ---- the fake daimon ------------------------------------------------------------------------
+
+var t_port = 0;          # the port the last t_bind gave
+var t_req[512];          # the request the fake daimon read (512 u64 = 4 KiB)
+var t_req_len = 0;
+var t_resp = 0;          # the answer t_answer built
+var t_resp_len = 0;
+var t_pipe: i64[1];      # the fake daimon's pipe back: two i32 fds, read end first
+var t_child = 0;         # the fake daimon's pid
+var t_worst = 0;         # the longest kick or step (ns) since a scenario zeroed it
+
+# A TCP socket bound to 127.0.0.1 on an ephemeral port (left in t_port), listening when `listen`
+# is 1. Bound and not listening, the port refuses every connect and no one else can take it.
+fn t_bind(listen): i64 {
+    var fd = sys_socket(AF_INET, SOCK_STREAM | 2048, 0);
+    var sa[16];
+    memset(&sa, 0, 16);
+    store16(&sa, AF_INET);
+    store32(&sa + 4, 0x0100007F);
+    if (sys_bind(fd, &sa, 16) < 0) { return 0 - 1; }
+    if (listen == 1) { if (sys_listen(fd, 8) < 0) { return 0 - 1; } }
+    var sl[8];
+    store64(&sl, 16);
+    sys_getsockname(fd, &sa, &sl);
+    t_port = (load8(&sa + 2) << 8) | load8(&sa + 3);
+    return fd;
+}
+
+fn t_sleep_ms(ms): i64 {
+    var ts[16];
+    store64(&ts, ms / 1000);
+    store64(&ts + 8, (ms % 1000) * 1000000);
+    sys_nanosleep(&ts, 0);
+    return 0;
+}
+
+fn t_now_us(): i64 { return clock_now_ns() / 1000; }
+
+# One agent exactly as daimon 2.4.3 writes it: _api_agent_json, daimon src/api_agent.cyr:50-75.
+# `name` is already JSON-escaped (daimon escapes it with json_escape_str); exit_code < 0 is null.
+fn t_agent_json(sb, id, name, type, status, pid, exit_code, limits, contained): i64 {
+    str_builder_add_cstr(sb, "{\"id\":");
+    str_builder_add_int(sb, id);
+    str_builder_add_cstr(sb, ",\"name\":\"");
+    str_builder_add_cstr(sb, name);
+    str_builder_add_cstr(sb, "\",\"type\":\"");
+    str_builder_add_cstr(sb, type);
+    str_builder_add_cstr(sb, "\",\"status\":");
+    str_builder_add_int(sb, status);
+    str_builder_add_cstr(sb, ",\"pid\":");
+    str_builder_add_int(sb, pid);
+    str_builder_add_cstr(sb, ",\"exit_code\":");
+    if (exit_code < 0) { str_builder_add_cstr(sb, "null"); }
+    else { str_builder_add_int(sb, exit_code); }
+    if (pid > 0) {
+        if (limits == 1) { str_builder_add_cstr(sb, ",\"limits_enforced\":true"); }
+        else { str_builder_add_cstr(sb, ",\"limits_enforced\":false"); }
+        if (contained == 1) { str_builder_add_cstr(sb, ",\"contained\":true"); }
+        else { str_builder_add_cstr(sb, ",\"contained\":false"); }
+    }
+    str_builder_add_cstr(sb, "}");
+    return 0;
+}
+
+# daimon's GET /v1/agents body (api_list_agents, api_agent.cyr:116-131): seven agents, one in each
+# AgentStatus 0-6, with ids 11-17; exit_code null while an agent has never exited.
+fn t_daimon_body(): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"agents\":[");
+    t_agent_json(sb, 11, "pending-agent", "User", 0, 0, 0 - 1, 0, 0);
+    str_builder_add_cstr(sb, ",");
+    t_agent_json(sb, 12, "starting-agent", "System", 1, 0, 0 - 1, 0, 0);
+    str_builder_add_cstr(sb, ",");
+    t_agent_json(sb, 13, "run \\\"fast\\\"", "Service", 2, 4242, 0 - 1, 1, 1);
+    str_builder_add_cstr(sb, ",");
+    t_agent_json(sb, 14, "paused-agent", "User", 3, 4243, 0 - 1, 1, 0);
+    str_builder_add_cstr(sb, ",");
+    t_agent_json(sb, 15, "stopping-agent", "User", 4, 4244, 0 - 1, 0, 0);
+    str_builder_add_cstr(sb, ",");
+    t_agent_json(sb, 16, "stopped-agent", "User", 5, 0, 0, 0, 0);
+    str_builder_add_cstr(sb, ",");
+    t_agent_json(sb, 17, "failed-agent", "User", 6, 0, 1, 0, 0);
+    str_builder_add_cstr(sb, "],\"count\":7}");
+    return str_builder_build(sb);
+}
+
+# A whole HTTP answer as daimon's writer frames it (daimon src/http.cyr:328-344): the status line,
+# Content-Type, Content-Length unless `with_len` is 0, Connection: close, then `blen` body bytes.
+# Left in t_resp / t_resp_len.
+fn t_answer(status_line, body, blen, with_len): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, status_line);
+    str_builder_add_cstr(sb, "\r\nContent-Type: application/json\r\n");
+    if (with_len == 1) {
+        str_builder_add_cstr(sb, "Content-Length: ");
+        str_builder_add_int(sb, blen);
+        str_builder_add_cstr(sb, "\r\n");
+    }
+    str_builder_add_cstr(sb, "Connection: close\r\n\r\n");
+    var head = str_builder_build(sb);
+    var hl = str_len(head);
+    t_resp = alloc(hl + blen + 1);
+    memcpy(t_resp, str_data(head), hl);
+    memcpy(t_resp + hl, body, blen);
+    t_resp_len = hl + blen;
+    return t_resp_len;
+}
+
+# Fork a one-shot fake daimon on listener `lfd`. It accepts one connection and reads the request's
+# head; then it writes t_resp and closes (`silent` 0), or says NOTHING for 1.5 s and hangs up
+# (`silent` 1). The request it read comes back on a pipe (t_collect). The parent keeps `lfd`.
+fn t_daimon(lfd, silent): i64 {
+    sys_pipe(&t_pipe);
+    var rfd = load32(&t_pipe);
+    var wfd = load32(&t_pipe + 4);
+    var pid = sys_fork();
+    if (pid == 0) {
+        sys_close(rfd);
+        var t_end = clock_now_ns() + 3000000000;
+        var conn = 0 - 1;
+        while (conn < 0 && clock_now_ns() < t_end) {
+            conn = sys_accept4(lfd, 0, 0, 0);
+            if (conn < 0) { t_sleep_ms(1); }
+        }
+        var got = 0;
+        var reading = 1;
+        while (conn >= 0 && reading == 1 && clock_now_ns() < t_end) {
+            var n = sys_recvfrom(conn, &t_req + got, 4000 - got, 64, 0, 0);
+            if (n > 0) { got = got + n; }
+            if (n == 0) { reading = 0; }
+            if (dmn_head_end(&t_req, 0, got) > 0) { reading = 0; }
+            if (reading == 1) { t_sleep_ms(1); }
+        }
+        sys_write(wfd, &t_req, got);
+        sys_close(wfd);
+        if (conn >= 0) {
+            if (silent == 1) { t_sleep_ms(1500); }
+            var sent = 0;
+            while (silent == 0 && sent < t_resp_len) {
+                var w = sys_sendto(conn, t_resp + sent, t_resp_len - sent, 16384, 0, 0);
+                if (w <= 0) { sent = t_resp_len; }   # the client hung up first (MSG_NOSIGNAL)
+                if (w > 0) { sent = sent + w; }
+            }
+            sys_close(conn);
+        }
+        sys_exit(0);
+    }
+    sys_close(wfd);
+    t_child = pid;
+    return pid;
+}
+
+# Reap the fake daimon and read the request it was sent into t_req.
+fn t_collect(): i64 {
+    var st[8];
+    sys_waitpid(t_child, &st, 0);
+    var rfd = load32(&t_pipe);
+    t_req_len = 0;
+    var n = 1;
+    while (n > 0 && t_req_len < 4000) {
+        n = sys_read(rfd, &t_req + t_req_len, 4000 - t_req_len);
+        if (n > 0) { t_req_len = t_req_len + n; }
+    }
+    sys_close(rfd);
+    return t_req_len;
+}
+
+# Step the client as the frame loop would (a step, then a millisecond of frame) until the GET lands,
+# or 3 s. Every step is timed into t_worst. -> the GET's DmnResult.
+fn t_get(ai): i64 {
+    var out = 0;
+    var t_end = clock_now_ns() + 3000000000;
+    while (out == 0 && clock_now_ns() < t_end) {
+        var s0 = clock_now_ns();
+        out = daimon_step(ai, s0 / 1000);
+        var dt = clock_now_ns() - s0;
+        if (dt > t_worst) { t_worst = dt; }
+        if (out == 0) { t_sleep_ms(1); }
+    }
+    return out;
+}
+
+# The same until no DELETE is in flight, or 3 s.
+fn t_del_wait(ai): i64 {
+    var t_end = clock_now_ns() + 3000000000;
+    while (daimon_delete_busy() > 0 && clock_now_ns() < t_end) {
+        var s0 = clock_now_ns();
+        daimon_step(ai, s0 / 1000);
+        var dt = clock_now_ns() - s0;
+        if (dt > t_worst) { t_worst = dt; }
+        t_sleep_ms(1);
+    }
+    return daimon_delete_busy();
+}
+
+# A kick, timed into t_worst. -> what daimon_poll_kick said.
+fn t_kick(): i64 {
+    var s0 = clock_now_ns();
+    var k = daimon_poll_kick(s0 / 1000);
+    var dt = clock_now_ns() - s0;
+    if (dt > t_worst) { t_worst = dt; }
+    return k;
+}
+
+# Serve t_resp once from a fresh fake daimon and run one GET against it. -> the GET's DmnResult.
+fn t_exchange(ai, lfd): i64 {
+    t_daimon(lfd, 0);
+    t_kick();
+    var r = t_get(ai);
+    t_collect();
+    return r;
+}
+
+# Does the request the fake daimon read start with the cstr `want`? -> 1 / 0.
+fn t_req_starts(want): i64 {
+    var n = strlen(want);
+    if (t_req_len < n) { return 0; }
+    return memeq(&t_req, want, n);
+}
+
+# Does it contain the cstr `want` anywhere? -> 1 / 0.
+fn t_req_has(want): i64 {
+    var n = strlen(want);
+    var i = 0;
+    while (i + n <= t_req_len) {
+        if (memeq(&t_req + i, want, n) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn t_streq_n(p, n, want): i64 {
+    if (n != strlen(want)) { return 0; }
+    return memeq(p, want, n);
+}
+
+# Is HUD state `id` there with name `name` and status `st`? -> 1 / 0.
+fn t_hud_is(ai, id, name, st): i64 {
+    var s = ai_get_agent_hud_state(ai, id);
+    if (s == 0) { return 0; }
+    if (str_eq(ai_hud_name(s), str_from(name)) != 1) { return 0; }
+    if (ai_hud_status(s) != st) { return 0; }
+    return 1;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("daimon — the default endpoint is daimon 2.4.3's, and the test leaves it at once");
+    assert_eq(dmn_addr, 0x0100007F, "127.0.0.1 (daimon config.cyr:10)");
+    assert_eq(dmn_port, 8090, "port 8090 (daimon config.cyr:11)");
+    assert_eq(dmn_timeout_us, 5000000, "Rust's 5 s client timeout");
+    assert_eq(dmn_resp_max, DMN_RESP_MAX, "the agent list's bound is in force");
+    # ⛔ From here on, a refusing port of this test's own until a scenario sets a fake daimon.
+    var sink = t_bind(0);
+    var sink_port = t_port;
+    assert_gt(sink, 0 - 1, "a refusing port is bound");
+    daimon_set_endpoint(0x0100007F, sink_port);
+    assert_neq(dmn_port, 8090, "the client no longer points at 8090");
+
+    # -----------------------------------------------------------------------
+    test_group("daimon — the request bytes");
+    var qb = alloc(DMN_REQ_CAP);
+    var ql = dmn_req_write(qb, "GET", "/v1/agents", 0, 0, 8090);
+    assert_eq(t_streq_n(qb, ql, "GET /v1/agents HTTP/1.1\r\nHost: localhost:8090\r\nAccept: */*\r\nConnection: close\r\n\r\n"), 1,
+      "GET: reqwest's Host and Accept, plus Connection: close");
+    var dl = dmn_req_write(qb, "DELETE", "/v1/agents/", 1, 17, 8090);
+    assert_eq(t_streq_n(qb, dl, "DELETE /v1/agents/17 HTTP/1.1\r\nHost: localhost:8090\r\nAccept: */*\r\nConnection: close\r\n\r\n"), 1,
+      "DELETE /v1/agents/<id> (security_ui.rs:552)");
+    var big = dmn_req_write(qb, "DELETE", "/v1/agents/", 1, 0 - 9223372036854775807 - 1, 65535);
+    assert_lt(big, DMN_REQ_CAP, "the longest request fits the slot's buffer");
+    var ib = alloc(32);
+    assert_eq(t_streq_n(ib, dmn_put_int(ib, 0, 0), "0"), 1, "0");
+    assert_eq(t_streq_n(ib, dmn_put_int(ib, 0, 4242), "4242"), 1, "4242");
+    assert_eq(t_streq_n(ib, dmn_put_int(ib, 0, 0 - 42), "-42"), 1, "-42");
+    assert_eq(t_streq_n(ib, dmn_put_int(ib, 0, 9223372036854775807), "9223372036854775807"), 1, "i64 max");
+    assert_eq(t_streq_n(ib, dmn_put_int(ib, 0, 0 - 9223372036854775807 - 1), "-9223372036854775808"), 1,
+      "i64 min, which has no positive twin");
+    assert_eq(dmn_put_int(ib, 5, 123), 8, "writes at the offset and returns the end");
+
+    # -----------------------------------------------------------------------
+    test_group("daimon — reading an answer's head (what hyper reads of daimon's)");
+    var h1 = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 42\r\nConnection: close\r\n\r\n{";
+    var h1n = strlen(h1);
+    var h1e = dmn_head_end(h1, 0, h1n);
+    assert_eq(h1e, h1n - 1, "the head ends after its blank line");
+    assert_eq(dmn_head_end(h1, 0, h1n - 3), 0, "no blank line yet: 0");
+    assert_eq(dmn_head_end(h1, h1e - 4, h1n), h1e, "a resumed search finds the same end");
+    assert_eq(dmn_http_status_code(h1, h1e), 200, "status 200");
+    assert_eq(dmn_http_content_length(h1, h1e), 42, "Content-Length 42");
+    assert_eq(dmn_http_transfer_encoded(h1, h1e), 0, "no Transfer-Encoding");
+    var h2 = "HTTP/1.0 404 Not Found\r\ncontent-length:  7 \r\n\r\n";
+    assert_eq(dmn_http_status_code(h2, strlen(h2)), 404, "HTTP/1.0 404");
+    assert_eq(dmn_http_content_length(h2, strlen(h2)), 7, "the name in any case, the value trimmed");
+    var h3 = "HTTP/1.1 500\r\n\r\n";
+    assert_eq(dmn_http_status_code(h3, strlen(h3)), 500, "a status line without a reason");
+    assert_eq(dmn_http_content_length(h3, strlen(h3)), 0 - 1, "no Content-Length: -1, read to EOF");
+    var h4 = "HTTP/2 200 OK\r\n\r\n";
+    assert_eq(dmn_http_status_code(h4, strlen(h4)), 0 - 1, "HTTP/2 is not an HTTP/1.x status line");
+    var h5 = "HTTP/1.1 20 OK\r\n\r\n";
+    assert_eq(dmn_http_status_code(h5, strlen(h5)), 0 - 1, "two digits");
+    var h6 = "HTTP/1.1 2000 OK\r\n\r\n";
+    assert_eq(dmn_http_status_code(h6, strlen(h6)), 0 - 1, "four digits");
+    var h7 = "HTTP/1.1 099 Low\r\n\r\n";
+    assert_eq(dmn_http_status_code(h7, strlen(h7)), 0 - 1, "below 100");
+    var h8 = "ICY 200 OK\r\n\r\n";
+    assert_eq(dmn_http_status_code(h8, strlen(h8)), 0 - 1, "not HTTP");
+    var h9 = "HTTP/1.1 200 OK\r\nContent-Length: 1x\r\n\r\n";
+    assert_eq(dmn_http_content_length(h9, strlen(h9)), 0 - 2, "a Content-Length that is not digits: -2");
+    var h10 = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\n";
+    assert_eq(dmn_http_content_length(h10, strlen(h10)), 0 - 2, "two that disagree: -2");
+    var h11 = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\n";
+    assert_eq(dmn_http_content_length(h11, strlen(h11)), 5, "two that agree: the value");
+    var h12 = "HTTP/1.1 200 OK\r\nContent-Length:\r\n\r\n";
+    assert_eq(dmn_http_content_length(h12, strlen(h12)), 0 - 2, "an empty one: -2");
+    var h13 = "HTTP/1.1 200 OK\r\nContent-Length: 99999999999999999999999\r\n\r\n";
+    assert_gt(dmn_http_content_length(h13, strlen(h13)), DMN_RESP_MAX, "a huge one saturates past any bound");
+    var h14 = "HTTP/1.1 200 OK\r\nX-Content-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n";
+    assert_eq(dmn_http_content_length(h14, strlen(h14)), 0 - 1, "a header that only ends in the name is not it");
+    assert_eq(dmn_http_transfer_encoded(h14, strlen(h14)), 1, "Transfer-Encoding seen");
+    var h15 = "HTTP/1.1 200 OK\r\nContent-Length : 5\r\n\r\n";
+    assert_eq(dmn_http_content_length(h15, strlen(h15)), 0 - 1, "a space before the colon is not the header");
+
+    # -----------------------------------------------------------------------
+    test_group("daimon — the limits a test may set");
+    assert_eq(daimon_set_limits(0, 4096), 0 - 1, "a zero timeout is refused");
+    assert_eq(daimon_set_limits(1000000, 0), 0 - 1, "a zero bound is refused");
+    assert_eq(daimon_set_limits(1000000, DMN_RESP_MAX + 1), 0 - 1, "a bound past the buffer is refused");
+    assert_eq(dmn_timeout_us, 5000000, "  ...and a refusal changes nothing");
+    assert_eq(daimon_set_limits(5000000, DMN_RESP_MAX), 0, "the defaults are accepted");
+
+    # -----------------------------------------------------------------------
+    test_group("daimon — no clock, no request");
+    assert_eq(daimon_poll_kick(0 - 1), 0, "a GET needs a clock to hold its deadline to");
+    assert_eq(daimon_poll_busy(), 0, "  ...so none is in flight");
+    assert_eq(daimon_agent_delete_at(5, 0 - 1), 0, "a DELETE too");
+    assert_eq(daimon_delete_busy(), 0, "  ...none in flight");
+
+    # -----------------------------------------------------------------------
+    test_group("daimon — daimon absent: the connect is refused, at once");
+    var ai = ai_new();
+    ai_register_agent_hud(ai, 99, str_from("registered-before"));
+    t_worst = 0;
+    var r0 = clock_now_ns();
+    assert_eq(t_kick(), 1, "the kick runs");
+    assert_eq(t_get(ai), DmnResult.DMN_R_CONNECT, "refused: a failed connect");
+    assert_lt(clock_now_ns() - r0, 100000000, "  ...known within 100 ms, no wait for any timeout");
+    assert_eq(ai_agent_hud_count(ai), 1, "  ...the HUD keeps what it had");
+
+    # -----------------------------------------------------------------------
+    test_group("daimon — a daimon that ACCEPTS AND NEVER ANSWERS: every step returns at once, the deadline ends it");
+    var lfd = t_bind(1);
+    assert_gt(lfd, 0 - 1, "the fake daimon listens");
+    daimon_set_endpoint(0x0100007F, t_port);
+    assert_eq(daimon_set_limits(400000, DMN_RESP_MAX), 0, "a 400 ms deadline for the test (5 s in the desktop)");
+    t_daimon(lfd, 1);
+    t_worst = 0;
+    var s0 = clock_now_ns();
+    t_kick();
+    var sres = t_get(ai);
+    var spent = clock_now_ns() - s0;
+    t_collect();
+    assert_eq(sres, DmnResult.DMN_R_TIMEOUT, "the poll ends on its deadline");
+    assert_gte(spent, 400000000, "  ...no sooner than 400 ms");
+    assert_lt(spent, 1400000000, "  ...and long before the silent daimon hangs up at 1.5 s");
+    assert_lt(t_worst, 50000000, "no kick or step took 50 ms (a blocking read takes 1.5 s)");
+    assert_eq(t_req_starts("GET /v1/agents HTTP/1.1\r\n"), 1, "  ...though the request did reach it");
+    assert_eq(ai_agent_hud_count(ai), 1, "the HUD keeps what it had");
+    assert_eq(daimon_set_limits(5000000, DMN_RESP_MAX), 0, "the default deadline again");
+
+    # -----------------------------------------------------------------------
+    test_group("daimon — daimon's answer lands in the HUD (all seven statuses, Rust's table)");
+    var body = t_daimon_body();
+    t_answer("HTTP/1.1 200 OK", str_data(body), str_len(body), 1);
+    t_daimon(lfd, 0);
+    assert_eq(t_kick(), 1, "the kick starts GET /v1/agents");
+    assert_eq(daimon_poll_busy(), 1, "  ...which is in flight");
+    assert_eq(daimon_poll_kick(t_now_us()), 0, "a second kick starts nothing: one GET in flight at most");
+    assert_eq(t_get(ai), DmnResult.DMN_R_FED, "the answer replaced the HUD");
+    t_collect();
+    assert_eq(daimon_poll_last(), DmnResult.DMN_R_FED, "  ...recorded as the last poll");
+    assert_eq(daimon_poll_last_code(), 200, "  ...status 200");
+    assert_eq(daimon_poll_busy(), 0, "  ...and nothing is in flight now");
+    assert_eq(t_req_starts("GET /v1/agents HTTP/1.1\r\n"), 1, "the fake daimon read GET /v1/agents");
+    var host_line = alloc(64);
+    var hl_end = _dmn_put(host_line, 0, "Host: localhost:");
+    store8(host_line + dmn_put_int(host_line, hl_end, t_port), 0);
+    assert_eq(t_req_has(host_line), 1, "  ...with Host: localhost:<the endpoint's port>");
+    assert_eq(ai_agent_hud_count(ai), 7, "seven agents: the stale one registered before is gone (clear + insert)");
+    assert_eq(ai_get_agent_hud_state(ai, 99), 0, "  ...registered-before was cleared");
+    assert_eq(t_hud_is(ai, 11, "pending-agent", AI_AgentStatus.AI_AS_IDLE), 1, "11 pending -> Idle");
+    assert_eq(t_hud_is(ai, 12, "starting-agent", AI_AgentStatus.AI_AS_IDLE), 1, "12 starting -> Idle");
+    assert_eq(t_hud_is(ai, 13, "run \"fast\"", AI_AgentStatus.AI_AS_ACTING), 1, "13 running -> Acting, its escaped name decoded");
+    assert_eq(t_hud_is(ai, 14, "paused-agent", AI_AgentStatus.AI_AS_IDLE), 1, "14 paused -> Idle");
+    assert_eq(t_hud_is(ai, 15, "stopping-agent", AI_AgentStatus.AI_AS_IDLE), 1, "15 stopping -> Idle");
+    assert_eq(t_hud_is(ai, 16, "stopped-agent", AI_AgentStatus.AI_AS_IDLE), 1, "16 stopped -> Idle");
+    assert_eq(t_hud_is(ai, 17, "failed-agent", AI_AgentStatus.AI_AS_ERROR), 1, "17 failed -> Error");
+    var s13 = ai_get_agent_hud_state(ai, 13);
+    if (s13 == 0) { s13 = ai_hud_new(0, str_from(""), 0, str_from("x"), 9, 0, ai_res_new(9, 9, 9)); }
+    assert_eq(str_len(ai_hud_task(s13)), 0, "no current_task: empty");
+    assert_eq(ai_hud_progress(s13), 0, "progress 0");
+    assert_gt(ai_hud_activity(s13), 1700000000, "no last_heartbeat: stamped now (epoch secs)");
+    assert_eq(ai_res_cpu(ai_hud_res(s13)), 0, "no cpu_percent: 0");
+    assert_eq(ai_res_mem(ai_hud_res(s13)), 0, "no memory_mb: 0");
+    assert_eq(ai_res_has_gpu(ai_hud_res(s13)), 0, "gpu None");
+    # ⛔ The desktop polls every 5 s for days, on a heap that never frees. Once both of the HUD's arenas
+    # have held a body, a whole GET (connect, send, read, parse, land) must cost nothing.
+    assert_eq(t_exchange(ai, lfd), DmnResult.DMN_R_FED, "a second poll lands too (both arenas now warm)");
+    var wh0 = alloc_used();
+    assert_eq(t_exchange(ai, lfd), DmnResult.DMN_R_FED, "  ...and a third");
+    assert_eq(alloc_used() - wh0, 0, "  ...which allocated 0 B of heap from kick to HUD");
+    assert_eq(ai_agent_hud_count(ai), 7, "  ...seven agents still");
+
+    # -----------------------------------------------------------------------
+    test_group("daimon — every failed poll leaves the HUD as it was (Rust's Err arm)");
+    var nb = "{\"agents\":[]}";
+    t_answer("HTTP/1.1 500 Internal Server Error", nb, strlen(nb), 1);
+    assert_eq(t_exchange(ai, lfd), DmnResult.DMN_R_STATUS, "500: a non-2xx status");
+    assert_eq(daimon_poll_last_code(), 500, "  ...status 500");
+    assert_eq(ai_agent_hud_count(ai), 7, "  ...the HUD keeps its seven, though the body was a valid empty list");
+    t_answer("HTTP/1.1 200 OK", "hello", 5, 1);
+    assert_eq(t_exchange(ai, lfd), DmnResult.DMN_R_JSON, "200 with garbage: not JSON");
+    assert_eq(ai_agent_hud_count(ai), 7, "  ...the HUD keeps its seven");
+    t_answer("HTTP/1.1 200 OK", nb, strlen(nb), 0);
+    t_resp_len = t_resp_len - strlen(nb) - 3;          # the server hangs up mid-head
+    assert_eq(t_exchange(ai, lfd), DmnResult.DMN_R_PROTOCOL, "a head cut short by the close");
+    assert_eq(ai_agent_hud_count(ai), 7, "  ...the HUD keeps its seven");
+    t_answer("HTTP/1.1 200 OK", nb, strlen(nb), 0);
+    t_resp_len = t_resp_len - 3;                       # no length, and the close cuts the body
+    assert_eq(t_exchange(ai, lfd), DmnResult.DMN_R_JSON, "a body the close cut, with no length to miss: not JSON");
+    assert_eq(ai_agent_hud_count(ai), 7, "  ...the HUD keeps its seven");
+    t_answer("HTTP/1.1 200 OK", nb, strlen(nb), 1);
+    t_resp_len = t_resp_len - 2;                       # two body bytes short of Content-Length
+    assert_eq(t_exchange(ai, lfd), DmnResult.DMN_R_PROTOCOL, "a body short of its Content-Length");
+    assert_eq(ai_agent_hud_count(ai), 7, "  ...the HUD keeps its seven");
+    var ck = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nd\r\n{\"agents\":[]}\r\n0\r\n\r\n";
+    t_resp = ck;
+    t_resp_len = strlen(ck);
+    assert_eq(t_exchange(ai, lfd), DmnResult.DMN_R_PROTOCOL, "a chunked answer is refused, not misread");
+    assert_eq(ai_agent_hud_count(ai), 7, "  ...the HUD keeps its seven");
+    # ⚠ Content-Length BOUNDS the body (hyper reads exactly that many bytes): junk after it is never
+    # parsed. A client that parsed to the close would read `...]}JUNK` and refuse a good answer.
+    var cl_body = t_daimon_body();
+    t_answer("HTTP/1.1 200 OK", str_data(cl_body), str_len(cl_body), 1);
+    var cl_buf = alloc(t_resp_len + 16);
+    memcpy(cl_buf, t_resp, t_resp_len);
+    memcpy(cl_buf + t_resp_len, "]}JUNK", 6);
+    t_resp = cl_buf;
+    t_resp_len = t_resp_len + 6;
+    assert_eq(t_exchange(ai, lfd), DmnResult.DMN_R_FED, "bytes past Content-Length are not the body: the answer lands");
+    assert_eq(ai_agent_hud_count(ai), 7, "  ...with daimon's seven agents");
+
+    # -----------------------------------------------------------------------
+    test_group("daimon — the bound: at it lands, one byte past it does not");
+    assert_eq(daimon_set_limits(5000000, 4096), 0, "a 4 KiB bound for the test");
+    # Pad a valid empty list with trailing spaces (JSON allows them) to an exact answer length.
+    var pad = alloc(8192);
+    memset(pad, 32, 8192);
+    memcpy(pad, nb, strlen(nb));
+    var fit = 4096 - t_answer("HTTP/1.1 200 OK", pad, 0, 1);   # a guess: the head with Content-Length: 0
+    fit = fit - (t_answer("HTTP/1.1 200 OK", pad, fit, 1) - 4096);   # less the digits the length grew by
+    t_answer("HTTP/1.1 200 OK", pad, fit, 1);
+    assert_eq(t_resp_len, 4096, "the answer is exactly 4096 bytes");
+    assert_eq(t_exchange(ai, lfd), DmnResult.DMN_R_FED, "4096 bytes with its length: lands (Rust's empty list)");
+    assert_eq(ai_agent_hud_count(ai), 0, "  ...and the empty list CLEARS the HUD");
+    ai_register_agent_hud(ai, 5, str_from("kept"));
+    t_answer("HTTP/1.1 200 OK", pad, fit + 1, 1);
+    assert_eq(t_resp_len, 4097, "one byte more");
+    assert_eq(t_exchange(ai, lfd), DmnResult.DMN_R_TOO_LARGE, "4097 bytes: refused on its Content-Length");
+    assert_eq(ai_agent_hud_count(ai), 1, "  ...the HUD keeps what it had");
+    var nolen = t_answer("HTTP/1.1 200 OK", pad, 0, 0);
+    t_answer("HTTP/1.1 200 OK", pad, 4096 - nolen, 0);
+    assert_eq(t_resp_len, 4096, "4096 bytes with no length, ended by the close");
+    assert_eq(t_exchange(ai, lfd), DmnResult.DMN_R_FED, "  ...lands");
+    ai_register_agent_hud(ai, 5, str_from("kept"));
+    t_answer("HTTP/1.1 200 OK", pad, 4097 - nolen, 0);
+    assert_eq(t_exchange(ai, lfd), DmnResult.DMN_R_TOO_LARGE, "4097 bytes with no length: refused as it is read");
+    assert_eq(ai_agent_hud_count(ai), 1, "  ...the HUD keeps what it had");
+    assert_eq(daimon_set_limits(5000000, DMN_RESP_MAX), 0, "the default bound again");
+    var huge = alloc(DMN_RESP_MAX + 16);
+    memset(huge, 32, DMN_RESP_MAX + 16);
+    memcpy(huge, nb, strlen(nb));
+    t_answer("HTTP/1.1 200 OK", huge, DMN_RESP_MAX, 1);
+    assert_eq(t_exchange(ai, lfd), DmnResult.DMN_R_TOO_LARGE, "a body of DMN_RESP_MAX plus its head is over the default bound");
+    assert_eq(ai_agent_hud_count(ai), 1, "  ...the HUD keeps what it had");
+
+    # -----------------------------------------------------------------------
+    test_group("daimon — the emergency kill's DELETE (fire-and-forget, never blocking)");
+    var db = "{\"deleted\":true}";
+    t_answer("HTTP/1.1 200 OK", db, strlen(db), 1);
+    t_daimon(lfd, 0);
+    assert_eq(daimon_agent_delete(17), 1, "the DELETE starts");
+    assert_eq(daimon_delete_busy(), 1, "  ...one in flight");
+    assert_eq(t_del_wait(ai), 0, "  ...and finished");
+    t_collect();
+    assert_eq(daimon_delete_last(), DmnResult.DMN_R_OK, "  ...answered, the answer dropped");
+    assert_eq(t_req_starts("DELETE /v1/agents/17 HTTP/1.1\r\n"), 1, "the fake daimon read DELETE /v1/agents/17");
+    assert_eq(ai_agent_hud_count(ai), 1, "a DELETE does not touch the HUD");
+    # Against a daimon that never answers: four kills fill the slots, a fifth is refused, none blocks.
+    # ⚠ Its own listener, closed here once forked: when the silent daimon exits, so does the listener,
+    # and the three connections it never accepted are reset too — a blocking client's reads all return.
+    assert_eq(daimon_set_limits(300000, DMN_RESP_MAX), 0, "a 300 ms deadline");
+    var sdfd = t_bind(1);
+    daimon_set_endpoint(0x0100007F, t_port);
+    t_daimon(sdfd, 1);
+    sys_close(sdfd);
+    t_worst = 0;
+    var d0 = clock_now_ns();
+    var di = 0;
+    var dstarted = 0;
+    while (di < 5) {
+        var e0 = clock_now_ns();
+        dstarted = dstarted + daimon_agent_delete(100 + di);
+        var edt = clock_now_ns() - e0;
+        if (edt > t_worst) { t_worst = edt; }
+        di = di + 1;
+    }
+    assert_eq(dstarted, 4, "four DELETEs start, the fifth finds every slot busy");
+    assert_eq(daimon_delete_busy(), 4, "  ...four in flight");
+    assert_eq(t_del_wait(ai), 0, "every DELETE ended");
+    var dspent = clock_now_ns() - d0;
+    t_collect();
+    assert_eq(daimon_delete_last(), DmnResult.DMN_R_TIMEOUT, "  ...on its deadline");
+    assert_lt(dspent, 1400000000, "  ...before the silent daimon hung up");
+    assert_lt(t_worst, 50000000, "no DELETE call or step took 50 ms");
+    assert_eq(daimon_set_limits(5000000, DMN_RESP_MAX), 0, "the default deadline again");
+    sys_close(lfd);
+    daimon_set_endpoint(0x0100007F, sink_port);
+    sys_close(sink);
+
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);

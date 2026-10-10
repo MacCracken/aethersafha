@@ -9,6 +9,10 @@
 # input→gestures) follows. theme_bridge and the shell_integration tray were retired
 # at 0.17.0 (ADR 0004).
 
+# The status poll steps daimon's agent-list GET (desktop_status_poll); include-once makes a second
+# include of it a no-op.
+include "src/daimon_client.cyr"
+
 enum DeskOff {
     DSK_COMP  = 0;    # *Compositor
     DSK_SHELL = 8;    # DesktopShell
@@ -284,7 +288,7 @@ var desk_evt_seq = 0;   # parity: Uuid::new_v4 per event -> monotonic i64 (ADR 0
 # then sends the AI context a UserPresent event from "desktop". `now` is epoch seconds. -> 0 / -1.
 # ⛔ TWO FIELDS DIVERGE ON PURPOSE. Rust hardcoded `Connected` and `agent_count: 0` (main.rs:173-174)
 # with nothing measuring either. Net is UNKNOWN until a producer exists; agents is the live count of
-# the ai_features agent registry (0 until daimon feeds it).
+# the ai_features agent registry, which daimon's agent list feeds (desktop_status_poll).
 # ⚠ cpu/mem/disk are -1 when unmeasured, where Rust's `unwrap_or(0.0)` reported a plausible 0.
 # ⚠ Written in place rather than through a fresh `shell_status_new`: same fields, no 48 B per tick.
 fn desktop_status_tick(d, now): i64 {
@@ -329,9 +333,14 @@ var desk_last_tick_us = 0 - 1;
 
 # desktop_status_poll(d, now_us, frame, every): the frame loop's call — tick when due. -> 1 ticked.
 # ⚠ The epoch read happens only on a due frame; this runs every frame.
+# ⭐ The tick also starts Rust's HUD poll, GET /v1/agents (ai_features.rs:462-494, never called by
+# the Rust binary; wired by ADR 0004), and every frame advances it without blocking. The panel's
+# agent gauge reads what it landed at the next tick.
 fn desktop_status_poll(d, now_us, frame, every): i64 {
+    daimon_step(desk_ai(d), now_us);
     if (desk_tick_due(now_us, desk_last_tick_us, frame, every) == 0) { return 0; }
     if (now_us >= 0) { desk_last_tick_us = now_us; }
     desktop_status_tick(d, clock_epoch_secs());
+    daimon_poll_kick(now_us);
     return 1;
 }
