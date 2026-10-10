@@ -78,6 +78,239 @@ fn t_state(f, id): i64 {
       ai_res_new(0 - 1, 0 - 1, 0 - 1));
 }
 
+# Build a FileOpened event carrying {"file": <file Str>}.
+fn make_file_event_str(id, file): i64 {
+    var meta = map_new();
+    map_set(meta, "file", file);
+    return ai_event_new(id, AI_ContextEventType.AI_CE_FILE_OPENED,
+      str_from("test"), clock_epoch_secs(), meta);
+}
+
+# Rust's format!("{prefix}{i}{suffix}") as a Str.
+fn t_fmt(prefix, i, suffix): i64 {
+    return str_cat(str_cat(str_from(prefix), str_from_int(i)), str_from(suffix));
+}
+
+# Index of the first element of a vec<Str*> that equals the cstr `want`, or -1.
+fn t_vec_find(v, want): i64 {
+    var w = str_from(want);
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        if (str_eq(vec_get(v, i), w) == 1) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Does the vec<Str*> hold the cstr `want`? -> 1 / 0. Rust's Vec::contains.
+fn t_vec_has(v, want): i64 {
+    if (t_vec_find(v, want) >= 0) { return 1; }
+    return 0;
+}
+
+# Two vec<Str*>s are equal element by element (Rust's Vec<String> ==). -> 1 / 0.
+fn t_vec_str_eq(a, b): i64 {
+    var n = vec_len(a);
+    if (vec_len(b) != n) { return 0; }
+    var i = 0;
+    while (i < n) {
+        if (str_eq(vec_get(a, i), vec_get(b, i)) != 1) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# DesktopContext's derived PartialEq, field by field: every field of the Rust struct
+# (ai_features.rs DesktopContext) has a port slot, and the port has no == of its own (ADR 0004
+# retires the derives; this compares what the derive compared).
+fn t_ctx_eq(a, b): i64 {
+    if (ai_context_type(a) != ai_context_type(b)) { return 0; }
+    if (t_vec_str_eq(ai_context_apps(a), ai_context_apps(b)) != 1) { return 0; }
+    if (t_vec_str_eq(ai_context_files(a), ai_context_files(b)) != 1) { return 0; }
+    if (t_vec_str_eq(ai_context_cmds(a), ai_context_cmds(b)) != 1) { return 0; }
+    if (ai_context_tod(a) != ai_context_tod(b)) { return 0; }
+    if (ai_context_activity(a) != ai_context_activity(b)) { return 0; }
+    return 1;
+}
+
+# Rust's own hour -> TimeOfDay match (ai_features.rs analyze_context, and
+# test_analyze_context_updates_time_of_day), written out here so the check does not lean on
+# ai_time_of_day_for_hour, the code under test.
+fn t_tod_expected(hour): i64 {
+    if (hour >= 5 && hour <= 11) { return AI_TimeOfDay.AI_TOD_MORNING; }
+    if (hour >= 12 && hour <= 16) { return AI_TimeOfDay.AI_TOD_AFTERNOON; }
+    if (hour >= 17 && hour <= 20) { return AI_TimeOfDay.AI_TOD_EVENING; }
+    return AI_TimeOfDay.AI_TOD_NIGHT;
+}
+
+# The UTC hour now, by arithmetic (chrono::Utc::now().hour()).
+fn t_hour_now(): i64 {
+    return (clock_epoch_secs() % 86400) / 3600;
+}
+
+# --- test_ai_suggestion_custom, test_resource_metrics ---
+fn t_struct_literals(): i64 {
+    test_group("ai_features — a custom suggestion and resource metrics (struct literals)");
+    # test_ai_suggestion_custom: TaskRecommendation, 0.85, action Some("break").
+    var cs = ai_suggestion_new(1, AI_SuggestionType.AI_ST_TASK_RECOMMENDATION, str_from("Take a break"),
+      str_from("You've been working for 2 hours"), 850, str_from("break"), 0, clock_epoch_secs());
+    assert_eq(ai_suggestion_conf(cs), 850, "custom confidence 0.85 -> 850");
+    assert_eq(ai_suggestion_has_action(cs), 1, "custom action is_some");
+    assert_eq(str_eq(ai_suggestion_action(cs), str_from("break")), 1, "  ...and is break");
+    # test_resource_metrics: cpu 30.0 %, 1024 MB, gpu Some(75.0) (percent -> permille, as the poll).
+    var rm = ai_res_new(300, 1024, 750);
+    assert_eq(ai_res_cpu(rm), 300, "cpu 30.0 % -> 300 permille");
+    assert_eq(ai_res_mem(rm), 1024, "memory 1024 MB");
+    assert_eq(ai_res_has_gpu(rm), 1, "gpu is_some");
+    assert_eq(ai_res_gpu(rm), 750, "  ...75.0 % -> 750");
+    return 0;
+}
+
+# --- test_ai_desktop_features_analyze_context, test_analyze_context_returns_valid,
+#     test_analyze_context_updates_time_of_day ---
+fn t_analyze_context(): i64 {
+    test_group("ai_features — analyze_context: Idle, and the time of day from the current hour");
+    var f = ai_new();
+    var c = ai_analyze_context(f);
+    assert_eq(ai_context_type(c), AI_ContextType.AI_CT_IDLE, "a new desktop analyses as Idle");
+    var tod = ai_context_tod(c);
+    assert_eq(tod >= AI_TimeOfDay.AI_TOD_MORNING && tod <= AI_TimeOfDay.AI_TOD_NIGHT, 1,
+      "time_of_day is one of Morning / Afternoon / Evening / Night");
+    # The default is Afternoon, so an analyse that never wrote the field passes Rust's check every
+    # afternoon. Seed the field with a value the hour cannot give, then analyse. Re-read the hour
+    # around the call, and retry across an hour boundary, as Rust's test raced it.
+    var tries = 0;
+    var got = 0 - 1;
+    var want = 0 - 2;
+    while (tries < 3) {
+        var h0 = t_hour_now();
+        var expect = t_tod_expected(h0);
+        ai_context_set_tod(c, (expect + 1) % 4);
+        got = ai_context_tod(ai_analyze_context(f));
+        want = expect;
+        if (t_hour_now() == h0) { tries = 3; }
+        tries = tries + 1;
+    }
+    assert_eq(got, want, "time_of_day is the current hour's (5-11 / 12-16 / 17-20 / else)");
+    assert_eq(ai_analyze_context(f), ai_get_context(f), "it is the live context (ADR 0003: live getters)");
+    return 0;
+}
+
+# --- test_update_context_command_executed, test_update_context_file_opened,
+#     test_update_context_file_opened_cap_at_10, test_multiple_file_open_events_ordering ---
+fn t_update_context(): i64 {
+    test_group("ai_features — CommandExecuted changes no context field");
+    var fc = ai_new();
+    ai_update_context(fc, make_bare_event(1, AI_ContextEventType.AI_CE_COMMAND_EXECUTED));
+    assert_eq(vec_len(ai_context_apps(ai_get_context(fc))), 0, "active_apps empty (Rust's _ => {})");
+    # Rust's test carries no metadata; with an app and a file it is still `_ => {}`.
+    var meta = map_new();
+    map_set(meta, "app", str_from("vscode"));
+    map_set(meta, "file", str_from("/a.rs"));
+    ai_update_context(fc, ai_event_new(2, AI_ContextEventType.AI_CE_COMMAND_EXECUTED, str_from("test"),
+        clock_epoch_secs(), meta));
+    assert_eq(vec_len(ai_context_apps(ai_get_context(fc))), 0, "  ...even carrying an app");
+    assert_eq(vec_len(ai_context_files(ai_get_context(fc))), 0, "  ...or a file");
+    assert_eq(ai_context_type(ai_get_context(fc)), AI_ContextType.AI_CT_IDLE, "  ...so the context stays Idle");
+    assert_eq(vec_len(ai_history(fc)), 2, "  ...but both events reach the history");
+
+    test_group("ai_features — FileOpened records the path");
+    var ff = ai_new();
+    ai_update_context(ff, make_file_event(3, "/home/user/doc.txt"));
+    assert_eq(t_vec_has(ai_context_files(ai_get_context(ff)), "/home/user/doc.txt"), 1,
+      "open_files contains /home/user/doc.txt");
+
+    test_group("ai_features — open_files keeps the newest 10");
+    var f15 = ai_new();
+    var i = 0;
+    while (i < 15) {
+        ai_update_context(f15, make_file_event_str(10 + i, t_fmt("file_", i, ".txt")));
+        i = i + 1;
+    }
+    var files15 = ai_context_files(ai_get_context(f15));
+    assert_eq(vec_len(files15) <= 10, 1, "15 opens: at most 10 kept");
+    assert_eq(vec_len(files15), 10, "  ...exactly 10");
+    assert_eq(t_vec_has(files15, "file_14.txt"), 1, "  ...the last file_14.txt among them");
+
+    var f12 = ai_new();
+    var j = 0;
+    while (j < 12) {
+        ai_update_context(f12, make_file_event_str(30 + j, t_fmt("/path/file_", j, ".rs")));
+        j = j + 1;
+    }
+    var files12 = ai_context_files(ai_get_context(f12));
+    assert_eq(vec_len(files12), 10, "12 opens: 10 kept");
+    assert_eq(t_vec_has(files12, "/path/file_11.rs"), 1, "  ...the newest, file_11, present");
+    assert_eq(t_vec_has(files12, "/path/file_0.rs"), 0, "  ...the oldest, file_0, evicted");
+    assert_eq(t_vec_has(files12, "/path/file_1.rs"), 0, "  ...and file_1");
+    assert_eq(t_vec_find(files12, "/path/file_2.rs"), 0, "  ...file_2 first (Vec::drain keeps order)");
+    assert_eq(t_vec_find(files12, "/path/file_11.rs"), 9, "  ...file_11 last");
+    return 0;
+}
+
+# --- test_dismiss_nonexistent_suggestion, test_unregister_nonexistent_agent_no_panic ---
+fn t_unknown_ids(): i64 {
+    test_group("ai_features — dismissing an unknown suggestion is a no-op");
+    var fe = ai_new();
+    assert_eq(ai_dismiss_suggestion(fe, 4242), 0, "on an empty desktop: returns, no panic");
+    var fd = ai_new();
+    var keep = ai_generate_suggestion(5, AI_SuggestionType.AI_ST_PRODUCTIVITY, str_from("Keep"), str_from("D"), 800);
+    ai_add_suggestion(fd, keep);
+    ai_dismiss_suggestion(fd, 4242);
+    assert_eq(ai_suggestion_dismissed(keep), 0, "  ...and another suggestion is not dismissed");
+    assert_eq(vec_len(ai_proactive_suggestions(fd)), 1, "  ...it is still offered");
+
+    test_group("ai_features — unregistering an unknown agent is a no-op");
+    var fu = ai_new();
+    ai_unregister_agent_hud(fu, 4242);
+    assert_eq(vec_len(ai_get_agent_hud_states(fu)), 0, "no agents, and no panic");
+    ai_register_agent_hud(fu, 1, str_from("one"));
+    ai_unregister_agent_hud(fu, 4242);
+    assert_eq(ai_agent_hud_count(fu), 1, "  ...a registered agent stays");
+    return 0;
+}
+
+# --- test_update_agent_hud_updates_last_activity ---
+fn t_hud_last_activity(): i64 {
+    test_group("ai_features — update_agent_hud stamps last_activity");
+    var f = ai_new();
+    ai_register_agent_hud(f, 9, str_from("agent"));
+    # register stamps now too, so Rust's `>= before` holds even if the update never stamps.
+    # Backdate the live state first (ADR 0003: getters hand out the live object).
+    store64(ai_get_agent_hud_state(f, 9) + AI_HUD_ACTIVITY, 0);
+    var before = clock_epoch_secs();
+    ai_update_agent_hud(f, 9, AI_AgentStatus.AI_AS_ACTING, str_from("task"), 750);
+    # states.iter().find(|s| s.agent_id == id)
+    var states = ai_get_agent_hud_states(f);
+    var st = 0;
+    var k = 0;
+    while (k < vec_len(states)) {
+        if (ai_hud_id(vec_get(states, k)) == 9) { st = vec_get(states, k); }
+        k = k + 1;
+    }
+    assert(t_ok(st), "the agent is found by id");
+    if (st == 0) { return 0; }
+    assert_eq(ai_hud_activity(st) >= before, 1, "last_activity >= before");
+    assert_eq(ai_hud_status(st), AI_AgentStatus.AI_AS_ACTING, "status Acting");
+    assert_eq(str_eq(ai_hud_task(st), str_from("task")), 1, "current_task task");
+    assert_eq(ai_hud_progress(st), 750, "progress 0.75 -> 750");
+    return 0;
+}
+
+# --- test_desktop_context_equality ---
+fn t_context_equality(): i64 {
+    test_group("ai_features — DesktopContext equality");
+    var c1 = ai_context_default();
+    var c2 = ai_context_default();
+    assert_eq(t_ctx_eq(c1, c2), 1, "two defaults are equal");
+    # DesktopContext { context_type: Development, ..DesktopContext::default() }
+    var c3 = ai_context_default();
+    ai_context_set_type(c3, AI_ContextType.AI_CT_DEVELOPMENT);
+    assert_eq(t_ctx_eq(c1, c3), 0, "a Development context is not the default");
+    return 0;
+}
+
 fn main() {
     alloc_init();
 
@@ -794,6 +1027,13 @@ fn main() {
     assert_eq(alloc_used() - m0, 0, "twenty more polls: 0 B of heap");
     assert_eq(ai_agent_hud_count(mf), 2, "  ...and the HUD holds the last poll's two");
     assert_eq(ai_hud_activity(t_state(mf, 2)), 6, "  ...from the last poll");
+
+    t_struct_literals();
+    t_analyze_context();
+    t_update_context();
+    t_unknown_ids();
+    t_hud_last_activity();
+    t_context_equality();
 
     return assert_summary();
 }

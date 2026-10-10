@@ -1,188 +1,205 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run criterion benchmarks, append results to CSV history, and generate benchmarks.md
-# with a 3-point trend table (baseline → previous → current).
+# Run the Cyrius benches for the series Rust benchmarked, append one row per bench to the history CSV,
+# and regenerate the port's table in docs/benchmarks.md (baseline -> previous -> current, beside Rust's
+# record).
 #
 # Usage:
-#   ./scripts/bench-history.sh              # defaults to bench-history.csv
-#   ./scripts/bench-history.sh results.csv  # custom output file
+#   ./scripts/bench-history.sh                      # appends to docs/benchmarks/history.csv
+#   ./scripts/bench-history.sh other-history.csv    # a different history file, relative to where you run it;
+#                                                   # its machine rows go to runs.csv beside it
+#
+# ⭐ WHAT IT READS. Each bench prints `@row <series> <picoseconds per op>` after its bench_report line, and
+# that is the only thing parsed here, so the human line's format can change without breaking the history.
+# The series names are Rust's (`renderer/render_frame/1`, `screen_capture/png_encode/full_screen/4K`, ...),
+# so a row lines up with its Rust row in docs/benchmarks/rust-a460c3a.csv.
+#
+# ⛔ A FAILED BENCH RECORDS NOTHING. Every bench checks that its op did the work (a frame that drew the
+# surfaces, a band of the right extent, a capture that was not refused) and exits non-zero otherwise; one
+# failure aborts the whole run before the CSV is touched, so the history never holds a timed early return.
+#
+# ⚠ THE MACHINE IS RECORDED PER RUN (docs/benchmarks/runs.csv: CPU model, clocksource, toolchain), because
+# the numbers mean nothing without it: Rust's record carries no machine at all, and the bench timer floor
+# moves with the clocksource (see the header of lib/bench.cyr).
+#
+# No network. Needs bash, awk, git (for the commit, optional) and the cyrius toolchain.
 
-HISTORY_FILE="${1:-bench-history.csv}"
-BENCHMARKS_MD="benchmarks.md"
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+CALLER_PWD=$(pwd)
+cd "$ROOT"
+
+# A relative argument means relative to where the script was RUN, not to the repo root it cds into.
+HISTORY_FILE="docs/benchmarks/history.csv"
+if [ $# -ge 1 ]; then
+    case "$1" in
+        /*) HISTORY_FILE="$1" ;;
+        *)  HISTORY_FILE="$CALLER_PWD/$1" ;;
+    esac
+fi
+# The machine record lives beside the history it describes (the default: docs/benchmarks/runs.csv).
+RUNS_FILE="$(dirname "$HISTORY_FILE")/runs.csv"
+RUST_FILE="docs/benchmarks/rust-a460c3a.csv"
+BENCHMARKS_MD="docs/benchmarks.md"
+BENCHES=(tests/compositor_bench.bcyr tests/screen_capture_bench.bcyr)
+
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
+# A run over uncommitted benches or source is not the commit it names; say so in the commit column.
+if [ "$COMMIT" != "unknown" ] && [ -n "$(git status --porcelain -- src tests lib 2>/dev/null)" ]; then
+    COMMIT="${COMMIT}+dirty"
+fi
+BRANCH=$(git branch --show-current 2>/dev/null || true)
+if [ -z "$BRANCH" ]; then BRANCH="unknown"; fi
+CPU=$(awk -F': ' '/^model name/ { print $2; exit }' /proc/cpuinfo 2>/dev/null || true)
+if [ -z "$CPU" ]; then CPU="unknown"; fi
+CPU=$(printf '%s' "$CPU" | tr ',' ';')
+CLOCK=$(cat /sys/devices/system/clocksource/clocksource0/current_clocksource 2>/dev/null || echo "unknown")
+PIN=$(awk -F'"' '/^cyrius[[:space:]]*=/ { print $2; exit }' cyrius.cyml)
+TOOL=$(cyrius --version 2>/dev/null | awk 'NR == 1 { print $2 }')
+if [ -z "$TOOL" ]; then TOOL="unknown"; fi
 
-# Create header if file doesn't exist
+if ! grep -q '^<!-- port-table:begin' "$BENCHMARKS_MD" || ! grep -q '^<!-- port-table:end' "$BENCHMARKS_MD"; then
+    echo "bench-history: ${BENCHMARKS_MD} has no port-table markers; refusing to rewrite it" >&2
+    exit 1
+fi
+
+echo "aethersafha benchmarks"
+echo "  commit: ${COMMIT}   branch: ${BRANCH}   date: ${TIMESTAMP}"
+echo "  machine: ${CPU} (clocksource ${CLOCK})   cyrius ${TOOL} (pin ${PIN})"
+echo ""
+
+ROWS=$(mktemp)
+TABLE=$(mktemp)
+NEWMD=$(mktemp)
+trap 'rm -f "$ROWS" "$TABLE" "$NEWMD"' EXIT
+
+for bench in "${BENCHES[@]}"; do
+    echo "== ${bench}"
+    if ! out=$(cyrius bench "$bench" 2>&1); then
+        printf '%s\n' "$out" | grep -v '^warning' || true
+        echo "bench-history: ${bench} FAILED; nothing recorded" >&2
+        exit 1
+    fi
+    printf '%s\n' "$out" | grep -E '^=== |^  [A-Za-z_]+/[^ ]+: |^  \[' || true
+    printf '%s\n' "$out" | awk '$1 == "@row" { printf "%s,%.3f\n", $2, $3 / 1000 }' >> "$ROWS"
+done
+
+COUNT=$(wc -l < "$ROWS" | tr -d ' ')
+if [ "$COUNT" -eq 0 ]; then
+    echo "bench-history: the benches printed no @row lines; nothing recorded" >&2
+    exit 1
+fi
+
+mkdir -p "$(dirname "$HISTORY_FILE")"
 if [ ! -f "$HISTORY_FILE" ]; then
     echo "timestamp,commit,branch,benchmark,estimate_ns" > "$HISTORY_FILE"
 fi
+awk -v ts="$TIMESTAMP" -v c="$COMMIT" -v br="$BRANCH" '{ print ts "," c "," br "," $0 }' "$ROWS" >> "$HISTORY_FILE"
 
-echo "╔══════════════════════════════════════════╗"
-echo "║        aethersafha benchmark suite           ║"
-echo "╠══════════════════════════════════════════╣"
-echo "║  commit: $COMMIT                          ║"
-echo "║  branch: $BRANCH                            ║"
-echo "║  date:   $TIMESTAMP   ║"
-echo "╚══════════════════════════════════════════╝"
-echo ""
+if [ ! -f "$RUNS_FILE" ]; then
+    echo "timestamp,commit,branch,cpu,clocksource,cyrius" > "$RUNS_FILE"
+fi
+echo "${TIMESTAMP},${COMMIT},${BRANCH},${CPU},${CLOCK},${TOOL}" >> "$RUNS_FILE"
 
-# Run benchmarks and capture output, stripping ANSI escape codes
-BENCH_OUTPUT=$(cargo bench --all-features 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
-
-# Show full output
-echo "$BENCH_OUTPUT"
-echo ""
-
-# Collect results for CSV
-declare -a BENCH_NAMES=()
-declare -a BENCH_NS=()
-
-PREV_LINE=""
-while IFS= read -r line; do
-    if [[ "$line" == *"time:"*"["* ]]; then
-        BENCH_NAME=$(echo "$line" | sed -E 's/[[:space:]]*time:.*//' | xargs)
-        if [ -z "$BENCH_NAME" ]; then
-            BENCH_NAME=$(echo "$PREV_LINE" | xargs)
-        fi
-
-        VALS=$(echo "$line" | sed -E 's/.*\[(.+)\]/\1/')
-        MEDIAN=$(echo "$VALS" | awk '{print $3}')
-        UNIT=$(echo "$VALS" | awk '{print $4}')
-
-        # Normalize to nanoseconds
-        case "$UNIT" in
-            ps)  NS=$(echo "$MEDIAN" | awk '{printf "%.4f", $1 / 1000}') ;;
-            ns)  NS="$MEDIAN" ;;
-            µs|us)  NS=$(echo "$MEDIAN" | awk '{printf "%.4f", $1 * 1000}') ;;
-            ms)  NS=$(echo "$MEDIAN" | awk '{printf "%.4f", $1 * 1000000}') ;;
-            s)   NS=$(echo "$MEDIAN" | awk '{printf "%.4f", $1 * 1000000000}') ;;
-            *)   NS="$MEDIAN" ;;
-        esac
-
-        echo "${TIMESTAMP},${COMMIT},${BRANCH},${BENCH_NAME},${NS}" >> "$HISTORY_FILE"
-        BENCH_NAMES+=("$BENCH_NAME")
-        BENCH_NS+=("$NS")
-    fi
-    PREV_LINE="$line"
-done <<< "$BENCH_OUTPUT"
-
-COUNT=${#BENCH_NAMES[@]}
-
-# Generate benchmarks.md with 3-point trend using python
-python3 - "$HISTORY_FILE" "$BENCHMARKS_MD" <<'PYEOF'
-import csv, sys
-from collections import OrderedDict
-
-history_file = sys.argv[1]
-md_file = sys.argv[2]
-
-rows = list(csv.DictReader(open(history_file)))
-if not rows:
-    sys.exit(0)
-
-# Get unique timestamps (runs) in order
-timestamps = list(OrderedDict.fromkeys(r["timestamp"] for r in rows))
-
-# Pick up to 3: first, middle-ish, last
-if len(timestamps) >= 3:
-    pick = [timestamps[0], timestamps[len(timestamps)//2], timestamps[-1]]
-elif len(timestamps) == 2:
-    pick = [timestamps[0], timestamps[-1]]
-else:
-    pick = [timestamps[0]]
-
-# Deduplicate while preserving order
-seen = set()
-pick = [t for t in pick if not (t in seen or seen.add(t))]
-
-# Build data: {benchmark: {timestamp: ns}}
-data = {}
-commits = {}
-for r in rows:
-    ts = r["timestamp"]
-    if ts in pick:
-        data.setdefault(r["benchmark"], {})[ts] = float(r["estimate_ns"])
-        commits[ts] = r["commit"]
-
-# Labels for columns
-labels = []
-for i, ts in enumerate(pick):
-    if i == 0 and len(pick) > 1:
-        labels.append(f"Baseline (`{commits[ts]}`)")
-    elif i == len(pick) - 1:
-        labels.append(f"Current (`{commits[ts]}`)")
-    else:
-        labels.append(f"Mid (`{commits[ts]}`)")
-
-def fmt_ns(ns):
-    if ns >= 1_000_000_000:
-        return f"{ns/1_000_000_000:.2f} s"
-    elif ns >= 1_000_000:
-        return f"{ns/1_000_000:.1f} ms"
-    elif ns >= 1_000:
-        return f"{ns/1_000:.1f} µs"
-    elif ns >= 100:
-        return f"{ns:.1f} ns"
-    else:
-        return f"{ns:.2f} ns"
-
-def delta(old, new):
-    if old == 0:
-        return ""
-    pct = ((new - old) / old) * 100
-    if pct < -3:
-        return f" **{pct:+.0f}%**"
-    elif pct > 3:
-        return f" {pct:+.0f}%"
+# The table: every series of the latest port run (in its order), Rust's two runs beside it, and up to
+# three port runs — the first ever (baseline), the one before this (previous) and this one (current).
+# Deltas are against the PORT's baseline only. Rust's column is a record from an unknown machine; no
+# delta is computed across the two.
+awk -F',' -v rustf="$RUST_FILE" -v runsf="$RUNS_FILE" '
+function fmt_ns(ns) {
+    if (ns >= 1000000000) { return sprintf("%.2f s", ns / 1000000000) }
+    if (ns >= 1000000)    { return sprintf("%.1f ms", ns / 1000000) }
+    if (ns >= 1000)       { return sprintf("%.1f µs", ns / 1000) }
+    if (ns >= 100)        { return sprintf("%.1f ns", ns) }
+    return sprintf("%.2f ns", ns)
+}
+function delta(old, new,    pct) {
+    if (old == 0) { return "" }
+    pct = (new - old) / old * 100
+    if (pct < -3) { return sprintf(" **%+.0f%%**", pct) }
+    if (pct > 3)  { return sprintf(" %+.0f%%", pct) }
     return ""
+}
+BEGIN {
+    while ((getline line < rustf) > 0) {
+        split(line, f, ",")
+        if (f[1] == "timestamp") { continue }
+        if (!(f[1] in rseen)) { rseen[f[1]] = 1; rts[++nr] = f[1] }
+        rval[f[1], f[4]] = f[5]
+    }
+    while ((getline line < runsf) > 0) {
+        split(line, f, ",")
+        if (f[1] == "timestamp") { continue }
+        rcommit[f[1]] = f[2]; rcpu[f[1]] = f[4]; rclock[f[1]] = f[5]; rtool[f[1]] = f[6]
+    }
+}
+FNR == 1 && $1 == "timestamp" { next }
+{
+    if (!($1 in seen)) { seen[$1] = 1; ts[++n] = $1 }
+    if (!(($1, $4) in val)) { cnt[$1]++; ord[$1, cnt[$1]] = $4 }
+    val[$1, $4] = $5
+    commit[$1] = $2
+}
+END {
+    if (n == 0) { exit 1 }
+    cur = ts[n]
+    np = 0
+    if (n >= 3) { pick[++np] = ts[1]; label[np] = "Port baseline"; pick[++np] = ts[n - 1]; label[np] = "Port previous" }
+    if (n == 2) { pick[++np] = ts[1]; label[np] = "Port baseline" }
+    pick[++np] = cur; label[np] = "Port current"
 
-with open(md_file, "w") as f:
-    f.write("# Benchmarks\n\n")
-    ts_last = pick[-1]
-    f.write(f"Latest: **{ts_last}** — commit `{commits[ts_last]}`\n\n")
-    if len(pick) >= 3:
-        f.write(f"Tracking: `{commits[pick[0]]}` (baseline) → `{commits[pick[1]]}` (optimized) → `{commits[pick[-1]]}` (current)\n\n")
+    print "Port runs in this table (UTC, from `docs/benchmarks/runs.csv`):"
+    print ""
+    print "| Column | Run | Commit | Machine | Clocksource | cyrius |"
+    print "|---|---|---|---|---|---|"
+    for (i = 1; i <= np; i++) {
+        t = pick[i]
+        m = (t in rcpu) ? rcpu[t] : "unknown"
+        k = (t in rclock) ? rclock[t] : "unknown"
+        v = (t in rtool) ? rtool[t] : "unknown"
+        printf "| %s | %s | `%s` | %s | %s | %s |\n", label[i], t, commit[t], m, k, v
+    }
+    print ""
 
-    # Group by prefix
-    groups = OrderedDict()
-    for bench in data:
-        group = bench.split("/")[0]
-        groups.setdefault(group, []).append(bench)
+    hdr = "| Series"
+    sep = "|---"
+    for (j = 1; j <= nr; j++) { hdr = hdr sprintf(" | Rust `a460c3a` run %d", j); sep = sep "|---:" }
+    for (i = 1; i <= np; i++) { hdr = hdr " | " label[i]; sep = sep "|---:" }
+    print hdr " |"
+    print sep "|"
+    # Series order: the current run first, then any series only an older picked run has.
+    ns = 0
+    for (k = 1; k <= cnt[cur]; k++) { b = ord[cur, k]; if (!(b in listed)) { listed[b] = 1; order[++ns] = b } }
+    for (i = 1; i < np; i++) {
+        t = pick[i]
+        for (k = 1; k <= cnt[t]; k++) { b = ord[t, k]; if (!(b in listed)) { listed[b] = 1; order[++ns] = b } }
+    }
+    for (s = 1; s <= ns; s++) {
+        b = order[s]
+        row = "| `" b "`"
+        for (j = 1; j <= nr; j++) {
+            row = row " | " (((rts[j], b) in rval) ? fmt_ns(rval[rts[j], b] + 0) : "—")
+        }
+        for (i = 1; i <= np; i++) {
+            if (!((pick[i], b) in val)) { row = row " | —"; continue }
+            cell = fmt_ns(val[pick[i], b] + 0)
+            if (i > 1 && ((pick[1], b) in val)) { cell = cell delta(val[pick[1], b] + 0, val[pick[i], b] + 0) }
+            row = row " | " cell
+        }
+        print row " |"
+    }
+}' "$HISTORY_FILE" > "$TABLE"
 
-    for group, benches in groups.items():
-        f.write(f"## {group}\n\n")
-        # Header
-        cols = " | ".join(labels)
-        f.write(f"| Benchmark | {cols} |\n")
-        f.write(f"|-----------|{'|'.join(['------'] * len(labels))}|\n")
+awk -v table="$TABLE" '
+/^<!-- port-table:begin/ { print; while ((getline line < table) > 0) { print line }; skip = 1; next }
+/^<!-- port-table:end/   { skip = 0 }
+!skip { print }
+' "$BENCHMARKS_MD" > "$NEWMD"
+cat "$NEWMD" > "$BENCHMARKS_MD"
 
-        for bench in benches:
-            name = bench.split("/")[1]
-            vals = data[bench]
-            cells = []
-            for ts in pick:
-                ns = vals.get(ts)
-                if ns is None:
-                    cells.append("—")
-                else:
-                    cell = fmt_ns(ns)
-                    # Add delta vs baseline if not the first column
-                    if ts != pick[0] and pick[0] in vals:
-                        cell += delta(vals[pick[0]], ns)
-                    cells.append(cell)
-            f.write(f"| `{name}` | {' | '.join(cells)} |\n")
-        f.write("\n")
-
-    f.write("---\n\n")
-    f.write("Generated by `./scripts/bench-history.sh`. History in `bench-history.csv`.\n")
-
-print(f"  Generated {md_file} with {len(pick)}-point trend across {len(data)} benchmarks")
-PYEOF
-
-echo "════════════════════════════════════════════"
+echo ""
 echo "  ${COUNT} benchmarks recorded"
 echo "  CSV:      ${HISTORY_FILE}"
+echo "  Runs:     ${RUNS_FILE}"
 echo "  Markdown: ${BENCHMARKS_MD}"
-echo "════════════════════════════════════════════"

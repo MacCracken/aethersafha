@@ -1,0 +1,292 @@
+# aethersafha — the series Rust benchmarked in rust-old/benches/compositor_benchmarks.rs, re-expressed.
+# Stdlib + [deps.*] auto-included via cyrius.cyml.
+#
+# ⭐ EACH BENCH IS NAMED AFTER RUST'S SERIES, so the two columns of docs/benchmarks.md line up row for row
+# (`renderer/render_frame/1` here is `renderer/render_frame/1` in rust-old/bench-history.csv). What each one
+# runs in the port is said beside it; where the port has no such operation (ADR 0003: no scene graph, no
+# damage region list) the row measures the port's replacement and says which.
+#
+# ⛔ A RECORD, NOT A RACE. Rust's numbers are two runs at a460c3a on a machine nobody wrote down. These run
+# on whatever box runs them. The two columns are not a speedup claim in either direction.
+#
+# ⭐ Every row ends with an `@row <series> <ps per op>` line. scripts/bench-history.sh reads only those, so
+# bench_report's human line can change its format without breaking the history.
+#
+# ⚠ The include set is tests/desktop.tcyr's: `render_desktop` is the one frame path (src/desktop.cyr) and
+# it reaches the shell panel, the launcher, the wallpaper, the cursor and gpu.cyr's frame flags.
+include "src/frametime.cyr"
+include "src/sysprobe.cyr"
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/gestures.cyr"
+include "src/accessibility.cyr"
+include "src/ai_features.cyr"
+include "src/shell.cyr"
+include "src/security_ui.cyr"
+include "src/plugin_host.cyr"
+include "src/desktop.cyr"
+include "lib/bhumi.cyr"
+include "src/theme.cyr"
+include "src/cursor.cyr"
+include "src/render.cyr"
+include "src/wallpaper.cyr"
+include "src/launcher.cyr"
+include "src/input.cyr"
+include "src/shell_render.cyr"
+include "src/gpu.cyr"
+
+# Print bench_report's line, then the machine row the history script reads: the series name and the mean
+# cost of ONE op in picoseconds (bench_avg_ps — the ns accessor rounds a 4 ns op by up to 25 %).
+fn bench_row(b): i64 {
+    bench_report(b);
+    var nm = bench_name(b);
+    print("  @row ", 7);
+    print(nm, strlen(nm));
+    print(" ", 1);
+    print_num(bench_avg_ps(b));
+    println("");
+    return 0;
+}
+
+# A w*h XRGB surface filled with one word — what a setu client presents. Rust's buffers were
+# `Framebuffer::new(400, 300, 0xFF336699)`; the port's framebuffer has no alpha byte (ADR 0003), so the
+# same colour is 0x00336699.
+fn bench_surface(w, h, word): i64 {
+    var px = alloc(w * h * 4);
+    if (px == 0) { return 0; }
+    var i = 0;
+    while (i < w * h) { store32(px + i * 4, word); i = i + 1; }
+    return px;
+}
+
+# ============================================================================================
+# renderer/render_frame/{1,5,10,20} — Rust: `DesktopRenderer::render_frame` over a 1920x1080 back buffer
+# with N 400x300 Normal-layer surfaces at ((i*50) % 1600, (i*40) % 800), each with a submitted buffer.
+# Port: `render_desktop` over a 1920x1080 bhumi framebuffer, CPU path (`ae_gpu_frame_ok = 0`), N windows
+# whose CONTENT is 400x300 at the same origins, each with a 400x300 client surface.
+# ⚠ The port's frame does more than Rust's: the titlebar sits above the 300 px content (Rust's was inside
+# its rect), and the shell status panel, the launcher check and the cursor are drawn every frame.
+# ⚠ No damage trackers are allocated here (`ae_frame_dmg == 0`, as in every unit test), so the band is
+# invalid and the background is cleared full-screen every frame — Rust's `back.clear` — rather than the
+# AE-0a band the live loop uses. That is the like-for-like frame; the band has its own rows in
+# tests/aethersafha.bcyr.
+# ============================================================================================
+fn bench_render_frame(n, iters): i64 {
+    var d = desktop_new();
+    var c = desk_comp(d);
+    var fb = bhumi_fb_new(1920, 1080);
+    if (fb == 0) { println("  fb alloc FAILED"); return 1; }
+    var i = 0;
+    while (i < n) {
+        var win = comp_create_window(c, (i * 50) % 1600, (i * 40) % 800, 400, 300, "Window");
+        win_set_pix(win, bench_surface(400, 300, 0x00336699));
+        i = i + 1;
+    }
+    ae_gpu_frame_ok = 0;
+    render_desktop(d, fb);   # warm: the font, the wallpaper and the first-frame state are set up once
+    var name = "renderer/render_frame/1";
+    if (n == 5) { name = "renderer/render_frame/5"; }
+    if (n == 10) { name = "renderer/render_frame/10"; }
+    if (n == 20) { name = "renderer/render_frame/20"; }
+    var b = bench_new(name);
+    bench_batch_start(b);
+    i = 0;
+    while (i < iters) { render_desktop(d, fb); i = i + 1; }
+    bench_batch_stop(b, iters);
+    # ⛔ A FRAME THAT DREW NO SURFACE WOULD STILL TIME (and faster). The topmost window's client pixels
+    # must be on screen inside its body, or this row measured chrome and a clear.
+    var top = comp_get(c, n - 1);
+    if (bhumi_fb_get(fb, win_x(top) + 10, win_body_y(top) + 10) != 0x00336699) {
+        println("  the frame did NOT composite the surfaces");
+        return 1;
+    }
+    bench_row(b);
+    return 0;
+}
+
+# ============================================================================================
+# scene_graph/* — Rust had a SceneGraph of Layer-sorted surfaces. The port has none (ADR 0003: "a `Layer`
+# type ordering the scene" -> "the window vector's order, with raise-on-focus"), so these two rows measure
+# the window stack that replaced it.
+# ============================================================================================
+
+# scene_graph/add_100_surfaces — Rust: a fresh SceneGraph and 100 `add_surface` (layers cycling, a title
+# formatted per surface). Port: a fresh compositor and 100 `comp_create_window` at the same geometry. No
+# layers, and the title is a borrowed cstr rather than a formatted String.
+# ⚠ Neither the compositor nor its windows have a free (they are arena-allocated for the process), so this
+# row runs a bounded number of rounds: ~30 KB each.
+fn bench_add_100(rounds): i64 {
+    var b = bench_new("scene_graph/add_100_surfaces");
+    bench_batch_start(b);
+    var r = 0;
+    while (r < rounds) {
+        var c = comp_new();
+        var i = 0;
+        while (i < 100) {
+            comp_create_window(c, i * 10, 0, 200, 150, "Window");
+            i = i + 1;
+        }
+        r = r + 1;
+    }
+    bench_batch_stop(b, rounds);
+    bench_row(b);
+    return 0;
+}
+
+# scene_graph/z_order_rebuild_50_surfaces — Rust: `surfaces_in_order()` over 50 surfaces, i.e. filter the
+# visible ones and sort by layer. Port: the operation that CHANGES paint order, `comp_focus` on the bottom
+# window, which raises it to the top of the 50-window vector (a remove at 0 and a push).
+# ⚠ Always index 0, so every op moves a window and none is the already-on-top no-op.
+fn bench_z_order_50(iters): i64 {
+    var c = comp_new();
+    var i = 0;
+    while (i < 50) {
+        comp_create_window(c, i * 10, 0, 200, 150, "Window");
+        i = i + 1;
+    }
+    var b = bench_new("scene_graph/z_order_rebuild_50_surfaces");
+    bench_batch_start(b);
+    i = 0;
+    while (i < iters) { comp_focus(c, 0); i = i + 1; }
+    bench_batch_stop(b, iters);
+    bench_row(b);
+    return 0;
+}
+
+# ============================================================================================
+# framebuffer/*
+# ============================================================================================
+
+# framebuffer/create_1080p — Rust: `Framebuffer::new(1920, 1080, 0xFF000000)`, a filled Vec, dropped each
+# iteration. Port: `bhumi_fb_new(1920, 1080)` and the fill (`bhumi_fb_clear`), since bhumi_fb_new does not
+# fill. ⚠ bhumi's framebuffer is arena-allocated with no per-object free, so every op keeps its 8.3 MB:
+# this row runs few rounds on purpose.
+fn bench_fb_create(rounds): i64 {
+    var b = bench_new("framebuffer/create_1080p");
+    bench_batch_start(b);
+    var r = 0;
+    while (r < rounds) {
+        var fb = bhumi_fb_new(1920, 1080);
+        bhumi_fb_clear(fb, 0x00000000);
+        r = r + 1;
+    }
+    bench_batch_stop(b, rounds);
+    bench_row(b);
+    return 0;
+}
+
+# framebuffer/clear_1080p — Rust: `fb.clear(0xFF222222)`. Port: `bhumi_fb_clear`.
+fn bench_fb_clear(iters): i64 {
+    var fb = bhumi_fb_new(1920, 1080);
+    var b = bench_new("framebuffer/clear_1080p");
+    bench_batch_start(b);
+    var i = 0;
+    while (i < iters) { bhumi_fb_clear(fb, 0x00222222); i = i + 1; }
+    bench_batch_stop(b, iters);
+    bench_row(b);
+    return 0;
+}
+
+# framebuffer/blit_400x300 — Rust: `dst.blit(&src, 100, 100)` of an opaque 400x300 onto 1080p (its
+# all-opaque row fast path, a copy). Port: `blit_rect`, the CPU surface copy render_window issues for a
+# non-premultiplied surface.
+fn bench_fb_blit(iters): i64 {
+    var dst = bhumi_fb_new(1920, 1080);
+    var src = bench_surface(400, 300, 0x00336699);
+    var b = bench_new("framebuffer/blit_400x300");
+    bench_batch_start(b);
+    var i = 0;
+    while (i < iters) { blit_rect(dst, 100, 100, src, 400, 300); i = i + 1; }
+    bench_batch_stop(b, iters);
+    if (bhumi_fb_get(dst, 499, 399) != 0x00336699) { println("  blit did NOT copy"); return 1; }
+    bench_row(b);
+    return 0;
+}
+
+# screen_capture/blit/to_1080p/<WxH> — Rust's screen_capture_bench.rs group: `dst.blit(&src, 0, 0)` of an
+# opaque source onto 1080p. Port: `blit_rect` at (0, 0). Benched in THIS file because this one links
+# render.cyr; tests/screen_capture_bench.bcyr links only the capture path.
+fn bench_blit_to_1080p(name, sw, sh, iters): i64 {
+    var dst = bhumi_fb_new(1920, 1080);
+    var src = fl_alloc(sw * sh * 4);
+    if (src == 0) { println("  alloc FAILED"); return 1; }
+    var k = 0;
+    while (k < sw * sh) { store32(src + k * 4, 0x00336699); k = k + 1; }
+    var b = bench_new(name);
+    bench_batch_start(b);
+    var i = 0;
+    while (i < iters) { blit_rect(dst, 0, 0, src, sw, sh); i = i + 1; }
+    bench_batch_stop(b, iters);
+    # ⛔ A blit that copied nothing would still time: the far corner of the source must have landed.
+    if (bhumi_fb_get(dst, sw - 1, sh - 1) != 0x00336699) { println("  blit did NOT copy"); fl_free(src); return 1; }
+    fl_free(src);
+    bench_row(b);
+    return 0;
+}
+
+# ============================================================================================
+# damage_tracker/add_50_damage_regions — Rust: a fresh 1920x1080 DamageTracker, `flush`, then 50
+# `add_damage` of a 100x80 rect at (i*30, i*20). The port has no region list (ADR 0003: "a damage band:
+# union(cur, prev) rows"), so the row is the port's per-frame damage step over the same 50 rects: roll the
+# tracker into prev, clear it, fold the 50 rects in (`rend_dmg_add_win`, border ring included) and compute
+# the band (`rend_band_compute`).
+# ⚠ Both trackers and the band state are render.cyr globals; this bench owns them, and resets them after,
+# so nothing else in this process runs against a live band.
+# ============================================================================================
+fn bench_damage_50(iters): i64 {
+    ae_frame_dmg = rend_dmg_new();
+    ae_prev_dmg = rend_dmg_new();
+    # Primed so no op is the "background changed" frame: that frame prints a diagnostic and refuses to band.
+    var bg = 0x00101018;
+    ae_last_bg = bg;
+    ae_last_wp = wp_serial();
+    ae_inval_owed = 0;
+    var b = bench_new("damage_tracker/add_50_damage_regions");
+    bench_batch_start(b);
+    var i = 0;
+    while (i < iters) {
+        rend_dmg_copy(ae_prev_dmg, ae_frame_dmg);
+        rend_dmg_clear(ae_frame_dmg);
+        var k = 0;
+        while (k < 50) {
+            rend_dmg_add_win(ae_frame_dmg, k * 30, k * 20, 100, 80);
+            k = k + 1;
+        }
+        rend_band_compute(1080, bg);
+        i = i + 1;
+    }
+    bench_batch_stop(b, iters);
+    # ⛔ A BAND THAT WAS NEVER COMPUTED WOULD STILL TIME. Rects at y = 0..980+80 make a band of every row
+    # but the bottom 19 (border ring included: rows 0..1061), so anything else means the op did not run.
+    if (rend_band_valid() != 1) { println("  damage band NOT computed"); return 1; }
+    if (rend_band_h() != 1061) { println("  damage band has the wrong extent"); return 1; }
+    bench_row(b);
+    ae_frame_dmg = 0;
+    ae_prev_dmg = 0;
+    rend_band_carry_reset();
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    println("=== rust-old/benches/compositor_benchmarks.rs, re-expressed (per op, lower is better) ===");
+    var rc = 0;
+    rc = rc + bench_render_frame(1, 20);
+    rc = rc + bench_render_frame(5, 20);
+    rc = rc + bench_render_frame(10, 20);
+    rc = rc + bench_render_frame(20, 20);
+    rc = rc + bench_add_100(200);
+    rc = rc + bench_z_order_50(100000);
+    rc = rc + bench_fb_create(10);
+    rc = rc + bench_fb_clear(50);
+    rc = rc + bench_fb_blit(200);
+    rc = rc + bench_damage_50(100000);
+    rc = rc + bench_blit_to_1080p("screen_capture/blit/to_1080p/256x256", 256, 256, 200);
+    rc = rc + bench_blit_to_1080p("screen_capture/blit/to_1080p/640x480", 640, 480, 50);
+    rc = rc + bench_blit_to_1080p("screen_capture/blit/to_1080p/1280x720", 1280, 720, 20);
+    return rc;
+}
+
+var r = main();
+syscall(60, r);

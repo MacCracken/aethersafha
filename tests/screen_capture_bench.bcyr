@@ -1,0 +1,234 @@
+# aethersafha — the series Rust benchmarked in rust-old/benches/screen_capture_bench.rs, re-expressed.
+# Stdlib + [deps.*] auto-included via cyrius.cyml.
+#
+# ⭐ EACH BENCH IS NAMED AFTER RUST'S SERIES (`screen_capture/png_encode/full_screen/4K` and so on), so the
+# two columns of docs/benchmarks.md line up row for row. Every row ends with an `@row <series> <ps per op>`
+# line, which is all scripts/bench-history.sh reads.
+#
+# ⛔ A RECORD, NOT A RACE. Rust's numbers are two runs at a460c3a on a machine nobody wrote down.
+#
+# ⭐ THE CAPTURE ROWS GO THROUGH THE MANAGER, as Rust's did: `scap_mgr_capture` with no agent (Rust's
+# `None`, the system path — only secure mode gates it), so each op is the pixel read, the encode, the
+# result and its history entry. Rust's `Compositor::with_resolution(w, h)` + `render()` is a framebuffer of
+# that size holding a rendered frame; here it is a bhumi framebuffer cleared to a desktop colour. The stored
+# PNG does not compress, so the pixel values do not change the cost.
+#
+# ⚠ Rust's `screen_capture/blit/to_1080p/*` rows are in tests/compositor_bench.bcyr, which links
+# src/render.cyr's `blit_rect`; this file links only the capture path.
+#
+# ⛔ FREE WHAT EACH OP ALLOCATES. A 4K capture is a 66 MB pixel read plus a 33 MB raw image plus a 33 MB
+# PNG; every op frees its result (`scap_result_free`), and the manager frees its own pixel read, so the 4K
+# series runs in constant memory. The history ring holds metadata only and evicts at its cap.
+include "lib/bhumi.cyr"
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/screen_capture.cyr"
+
+fn bench_row(b): i64 {
+    bench_report(b);
+    var nm = bench_name(b);
+    print("  @row ", 7);
+    print(nm, strlen(nm));
+    print(" ", 1);
+    print_num(bench_avg_ps(b));
+    println("");
+    return 0;
+}
+
+var bc_comp = 0;
+var bc_mgr = 0;
+
+# A w x h framebuffer holding a rendered frame — see the header. Arena-allocated once per resolution.
+fn bench_fb(w, h): i64 {
+    var fb = bhumi_fb_new(w, h);
+    if (fb == 0) { return 0; }
+    bhumi_fb_clear(fb, 0x00101018);
+    return fb;
+}
+
+# Did the capture produce the format it was asked for? -> 1 / 0. ⚠ Without this a wrong encoder dispatch
+# (BMP falling through to raw, say) would be timed and recorded under the right row's name.
+fn bench_format_ok(res, fmt): i64 {
+    var d = scap_result_data(res);
+    var n = scap_result_data_size(res);
+    if (d == 0) { return 0; }
+    if (fmt == ScapFmt.SCAP_FMT_PNG) {
+        if (n < 8) { return 0; }
+        if (load8(d) != 0x89) { return 0; }
+        if (load8(d + 1) != 80) { return 0; }        # 'P'
+        if (load8(d + 2) != 78) { return 0; }        # 'N'
+        if (load8(d + 3) != 71) { return 0; }        # 'G'
+        return 1;
+    }
+    if (fmt == ScapFmt.SCAP_FMT_BMP) {
+        if (n < 2) { return 0; }
+        if (load8(d) != 66) { return 0; }            # 'B'
+        if (load8(d + 1) != 77) { return 0; }        # 'M'
+        return 1;
+    }
+    # RAW: no header, so the size is the check — four bytes a pixel.
+    if (n != scap_result_width(res) * scap_result_height(res) * 4) { return 0; }
+    return 1;
+}
+
+# One capture through the manager, its result freed. -> 0, or 1 when the capture failed or produced the
+# wrong format (a row that timed either would not be measuring what it is named after).
+fn bench_capture_once(fb, kind, x, y, w, h, fmt): i64 {
+    var res = scap_mgr_capture(bc_mgr, bc_comp, fb, kind, x, y, w, h, fmt, 0, 0);
+    if (res == 0) { return 1; }
+    var ok = bench_format_ok(res, fmt);
+    scap_result_free(res);
+    if (ok != 1) { return 1; }
+    return 0;
+}
+
+# screen_capture/{png,bmp,raw}_encode/full_screen/<res> — Rust: `manager.capture(&compositor, FullScreen,
+# fmt, None)`. Port: `scap_mgr_capture(..., SCAP_KIND_FULLSCREEN, ..., fmt, 0, ...)`.
+fn bench_full(name, fb, fmt, iters): i64 {
+    if (bench_capture_once(fb, ScapKind.SCAP_KIND_FULLSCREEN, 0, 0, 0, 0, fmt) != 0) {
+        println("  capture FAILED");
+        return 1;
+    }
+    var b = bench_new(name);
+    var bad = 0;
+    bench_batch_start(b);
+    var i = 0;
+    while (i < iters) {
+        bad = bad + bench_capture_once(fb, ScapKind.SCAP_KIND_FULLSCREEN, 0, 0, 0, 0, fmt);
+        i = i + 1;
+    }
+    bench_batch_stop(b, iters);
+    if (bad != 0) { println("  capture FAILED"); return 1; }
+    bench_row(b);
+    return 0;
+}
+
+# screen_capture/region_png/capture/<WxH> — Rust: a Region at (0, 0) of that size from the 1080p
+# compositor, PNG. Port: the same region through `scap_mgr_capture`.
+fn bench_region(name, fb, w, h, iters): i64 {
+    var b = bench_new(name);
+    var bad = 0;
+    bench_batch_start(b);
+    var i = 0;
+    while (i < iters) {
+        bad = bad + bench_capture_once(fb, ScapKind.SCAP_KIND_REGION, 0, 0, w, h, ScapFmt.SCAP_FMT_PNG);
+        i = i + 1;
+    }
+    bench_batch_stop(b, iters);
+    if (bad != 0) { println("  capture FAILED"); return 1; }
+    bench_row(b);
+    return 0;
+}
+
+# screen_capture/pixel_buffer/clone/<res> — Rust: `fb.pixels.clone()`, a copy of the whole pixel buffer.
+# Port: the capture's own pixel read, `scap_capture_full_screen` — the whole framebuffer into the 8-byte
+# slots the encoders read — freed each op (`scap_pix_free`). It is the step a capture pays before any
+# encode, which is what the Rust row stood beside.
+fn bench_pixel_buffer(name, fb, iters): i64 {
+    var b = bench_new(name);
+    var err = ScapErr.SCAP_OK;
+    var bad = 0;
+    bench_batch_start(b);
+    var i = 0;
+    while (i < iters) {
+        var src = scap_capture_full_screen(fb, &err);
+        if (src == 0) { bad = bad + 1; }
+        if (src != 0) {
+            # The last pixel of the read must be the framebuffer's (bench_fb clears it to one colour).
+            var last = scap_pix_w(src) * scap_pix_h(src) - 1;
+            if (load64(scap_pix_ptr(src) + last * 8) != 0x00101018) { bad = bad + 1; }
+        }
+        scap_pix_free(src);
+        i = i + 1;
+    }
+    bench_batch_stop(b, iters);
+    if (bad != 0) { println("  pixel read FAILED"); return 1; }
+    bench_row(b);
+    return 0;
+}
+
+# screen_capture/argb_to_rgba/convert/<res> — Rust's row was a loop written IN THE BENCH, not library code:
+# a Vec<u32> of 0xFFAABBCC unpacked into a fresh RGBA byte Vec. Re-expressed as the same loop: 32-bit
+# source words, four byte stores each, into an fl_alloc'd buffer that is freed each op.
+# ⚠ The port's library does this conversion inside `scap_encode_png` (from XRGB, alpha forced opaque), where
+# it is not separable; this row is the bench-local loop, as Rust's was.
+fn bench_argb_to_rgba(name, w, h, iters): i64 {
+    var n = w * h;
+    var argb = fl_alloc(n * 4);
+    if (argb == 0) { println("  alloc FAILED"); return 1; }
+    var k = 0;
+    while (k < n) { store32(argb + k * 4, 0xFFAABBCC); k = k + 1; }
+    var b = bench_new(name);
+    var bad = 0;
+    bench_batch_start(b);
+    var i = 0;
+    while (i < iters) {
+        var rgba = fl_alloc(n * 4);
+        if (rgba == 0) { bad = bad + 1; }
+        if (rgba != 0) {
+            var j = 0;
+            while (j < n) {
+                var px = load32(argb + j * 4);
+                var o = rgba + j * 4;
+                store8(o + 0, (px >> 16) & 0xFF);
+                store8(o + 1, (px >> 8) & 0xFF);
+                store8(o + 2, px & 0xFF);
+                store8(o + 3, (px >> 24) & 0xFF);
+                j = j + 1;
+            }
+            # ⛔ The last pixel must have come out as R, G, B, A, or the row timed a conversion that is wrong.
+            if (load32(rgba + (n - 1) * 4) != 0xFFCCBBAA) { bad = bad + 1; }
+            fl_free(rgba);
+        }
+        i = i + 1;
+    }
+    bench_batch_stop(b, iters);
+    fl_free(argb);
+    if (bad != 0) { println("  convert FAILED"); return 1; }
+    bench_row(b);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    println("=== rust-old/benches/screen_capture_bench.rs, re-expressed (per op, lower is better) ===");
+    bc_comp = comp_new();
+    bc_mgr = scap_mgr_new();
+    var fb720 = bench_fb(1280, 720);
+    var fb1080 = bench_fb(1920, 1080);
+    var fb4k = bench_fb(3840, 2160);
+    if ((fb720 == 0) || (fb1080 == 0) || (fb4k == 0)) { println("  fb alloc FAILED"); return 1; }
+    var png = ScapFmt.SCAP_FMT_PNG;
+    var bmp = ScapFmt.SCAP_FMT_BMP;
+    var raw = ScapFmt.SCAP_FMT_RAW_ARGB;
+    var rc = 0;
+
+    rc = rc + bench_full("screen_capture/png_encode/full_screen/720p", fb720, png, 5);
+    rc = rc + bench_full("screen_capture/png_encode/full_screen/1080p", fb1080, png, 3);
+    rc = rc + bench_full("screen_capture/png_encode/full_screen/4K", fb4k, png, 2);
+    rc = rc + bench_full("screen_capture/bmp_encode/full_screen/720p", fb720, bmp, 5);
+    rc = rc + bench_full("screen_capture/bmp_encode/full_screen/1080p", fb1080, bmp, 3);
+    rc = rc + bench_full("screen_capture/bmp_encode/full_screen/4K", fb4k, bmp, 2);
+    rc = rc + bench_full("screen_capture/raw_encode/full_screen/720p", fb720, raw, 5);
+    rc = rc + bench_full("screen_capture/raw_encode/full_screen/1080p", fb1080, raw, 3);
+    rc = rc + bench_full("screen_capture/raw_encode/full_screen/4K", fb4k, raw, 2);
+
+    rc = rc + bench_region("screen_capture/region_png/capture/256x256", fb1080, 256, 256, 20);
+    rc = rc + bench_region("screen_capture/region_png/capture/640x480", fb1080, 640, 480, 10);
+    rc = rc + bench_region("screen_capture/region_png/capture/1280x720", fb1080, 1280, 720, 5);
+    rc = rc + bench_region("screen_capture/region_png/capture/1920x1080", fb1080, 1920, 1080, 3);
+
+    rc = rc + bench_pixel_buffer("screen_capture/pixel_buffer/clone/720p", fb720, 10);
+    rc = rc + bench_pixel_buffer("screen_capture/pixel_buffer/clone/1080p", fb1080, 5);
+    rc = rc + bench_pixel_buffer("screen_capture/pixel_buffer/clone/4K", fb4k, 3);
+
+    rc = rc + bench_argb_to_rgba("screen_capture/argb_to_rgba/convert/720p", 1280, 720, 10);
+    rc = rc + bench_argb_to_rgba("screen_capture/argb_to_rgba/convert/1080p", 1920, 1080, 5);
+    rc = rc + bench_argb_to_rgba("screen_capture/argb_to_rgba/convert/4K", 3840, 2160, 3);
+
+    return rc;
+}
+
+var r = main();
+syscall(60, r);

@@ -37,6 +37,21 @@ fn t_find_kind(v, kind): i64 {
     return 0;
 }
 
+# --- test_touch_point_fields ---
+# TouchPoint { id: 42, x: 1.5, y: 2.5, pressure: 0.8, timestamp_ms: 12345 }. ADR 0003: distances are
+# integer pixels and pressure is permille, so x/y are whole pixels (1, 2) and 0.8 is 800; Rust
+# asserted only the id and the pressure.
+fn t_touch_point_fields(): i64 {
+    test_group("gestures — TouchPoint fields");
+    var p = gest_point(42, 1, 2, 800, 12345);
+    assert_eq(gest_point_id(p), 42, "id 42");
+    assert_eq(gest_point_pressure(p), 800, "pressure 0.8 -> 800 permille");
+    assert_eq(gest_point_x(p), 1, "  ...x");
+    assert_eq(gest_point_y(p), 2, "  ...y");
+    assert_eq(gest_point_ts(p), 12345, "  ...timestamp_ms 12345");
+    return 0;
+}
+
 fn main() {
     alloc_init();
 
@@ -204,6 +219,8 @@ fn main() {
     assert(drain1_nonempty, "first drain non-empty");
     var drain2 = gest_recognized_gestures(rdr);
     assert_eq(vec_len(drain2), 0, "second drain empty (drained)");
+
+    t_touch_point_fields();
 
     return assert_summary();
 }

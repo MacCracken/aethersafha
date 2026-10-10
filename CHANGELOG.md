@@ -5,6 +5,68 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.17.5] — 2026-10-10 — every Rust test re-expressed, and benchmarks beside Rust's record
+
+> The arc's sixth bite (roadmap § 0.17.x). The parity plan's *Rust tests still to re-express* list is empty:
+> every test of every PORT row is re-expressed in a `.tcyr` suite, and what remains closes by ADR. The
+> Cyrius benches cover every series Rust benchmarked, with Rust's record kept beside them. The binary is
+> unchanged apart from its version string. The commit, the tag and the push are the operator's.
+
+### Added — the last Rust tests
+
+- **ai_features, shell, gestures** (`tests/ai_features.tcyr`, `tests/shell.tcyr`, `tests/gestures.tcyr`):
+  25 tests. Where a Rust assertion could not fail against a plausible defect, the port adds the check that
+  can: a backdated `last_activity`, a time of day the current hour cannot give, and an eviction with two
+  candidates that must take the OLDEST non-action notification. A newest-first eviction used to pass the
+  whole shell suite.
+- **The end-to-end system tests** (`tests/system.tcyr`, new): every `test_e2e_*` Rust ran, driven through
+  `desktop_new` and its subsystems.
+  - The apps, HUD-overlay and quick-settings scenarios close with ADR 0004.
+  - The kill-switch flow signals only its own child, writes its audit log to a temp file of its own, and
+    points the daimon client at a port it owns.
+- **The renderer integration tests**: 12 / 12. Damage is re-expressed on the band and the blend on the
+  kernel's rule (ADR 0003).
+- None of the ported tests found a defect in `src/`.
+
+### Added — benchmarks beside Rust's record
+
+- **`tests/compositor_bench.bcyr` and `tests/screen_capture_bench.bcyr`** cover every series Rust's
+  criterion benches had, named after Rust's rows: a desktop frame with 1 / 5 / 10 / 20 surfaces, the
+  window stack, framebuffer create / clear / blit, the damage band, and capture to PNG / BMP / RAW at 720p,
+  1080p and 4K plus region sizes.
+  - Every op checks that it did its work, so no row times an early return. That includes each capture
+    being the format its row names.
+  - Five series measure the port's replacement for a Rust operation (no scene graph, a damage band, no
+    framebuffer clone), and `docs/benchmarks.md` says which.
+- **`docs/benchmarks.md`** puts Rust's record beside the port's first run on this machine.
+  - Rust's record is its CSV, kept byte-identical as `docs/benchmarks/rust-a460c3a.csv`: two runs at
+    `a460c3a`, machine unknown, a record and not a target.
+  - The CPU model and toolchain are recorded per run in `docs/benchmarks/runs.csv`.
+- **`scripts/bench-history.sh` runs `cyrius bench`**, not `cargo bench`. It appends to
+  `docs/benchmarks/history.csv` and regenerates the port's baseline / previous / current table. A failed
+  bench records nothing.
+
+### Changed
+
+- CI's coverage floor rises to 68% (841 of 1,235 functions; it was 66), checked to fail at `--min 69`.
+
+### Docs
+
+- `parity-plan.md`: ai_features, shell, gestures, `system_tests.rs`, `tests/*.rs` and the benches are
+  CLOSED. Only the OBSOLETE row (the Cargo files, `lib.rs`, examples) is left, for 0.17.6.
+- ADR 0003 notes the small representation points the last tests met: no `DesktopRenderer` object, a
+  zero-size framebuffer is refused, and the agent flag is set on the window.
+
+### Verified
+
+- **Host 4,273,424 B** (sha256 `f7c7b1c4…`) · **`--agnos` 4,227,896 B** (sha256 `77d88fa8…`). Same sizes
+  as 0.17.4; only the version string differs.
+- **32 / 32 suites, 4,341 assertions, 0 failed** (0.17.4: 31 / 4,088). No compiler warning points at `src/`.
+- `scripts/qemu-linux-input.sh` → PASS for focus, hostile, sigint and drag, on this binary (same hash).
+- `check-dep-tags.sh` → 7 deps clean · `cyrius deps --verify` → 83 verified · CI's format check clean, and
+  the benches are fmt-clean too · `cyrius coverage --min 68` passes.
+- Both bench files run green, and every capture row checks its format.
+
 ## [0.17.4] — 2026-10-10 — compositor and renderer depth
 
 > The arc's fifth bite (roadmap § 0.17.x). Pointer routing leaves the frame loop for a module a test can

@@ -67,7 +67,7 @@ jobs:
       - name: Coverage floor
         # Reference coverage (functions a test references) — a floor, not a correctness proof, and the
         # tool says so. Set at the measured 61% (624 of 1,015 fns) when the 0.17.x parity arc opened,
-        # raised to the measured 63% (647 of 1,020) at 0.17.1 and 66% (725 of 1,097) at 0.17.2; the arc's
-        # test bites raise it toward the v1.0 criterion of 80%. Never lower it to make a red run green.
-        # Verified it can fail: `--min 67` exits 1 on this tree.
-        run: cyrius coverage --min 66
+        # raised to the measured 63% (647 of 1,020) at 0.17.1, 66% (725 of 1,097) at 0.17.2 and 68% (841 of
+        # 1,235) at 0.17.5; the v1.0 criterion is 80%. Never lower it to make a red run green.
+        # Verified it can fail: `--min 69` exits 1 on this tree.
+        run: cyrius coverage --min 68

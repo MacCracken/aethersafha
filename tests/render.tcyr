@@ -944,6 +944,113 @@ fn t_grp_minimized_r(): i64 {
     return 0;
 }
 
+# ---- rust-old/tests/renderer_integration.rs ----------------------------------------------------------------------
+# All twelve, re-expressed under ADR 0003: the framebuffer is bhumi's XRGB8888 (a fill is a clear, absent is -1),
+# the blend is the kernel's `#92` op 0x01, the font is kashi's 8x16 with a 9 px advance, and the damage region
+# list is the damage band. Rust's COLOR_BLACK / COLOR_WHITE are the XRGB words 0x00000000 / 0x00FFFFFF here.
+fn t_grp_integ_r(): i64 {
+    test_group("render — renderer_integration.rs: the framebuffer, the blend, blit, fill, damage, text");
+    var BLK = 0x00000000;
+    var WHT = 0x00FFFFFF;
+
+    # framebuffer_roundtrip
+    var fill = bhumi_xrgb(100, 150, 200);
+    var rfb = bhumi_fb_new(64, 64);
+    bhumi_fb_clear(rfb, fill);
+    assert_eq(bhumi_fb_width(rfb), 64, "framebuffer_roundtrip: width 64");
+    assert_eq(bhumi_fb_height(rfb), 64, "  height 64");
+    assert_eq(bhumi_fb_get(rfb, 0, 0), fill, "  (0,0) reads the fill");
+    assert_eq(bhumi_fb_get(rfb, 63, 63), fill, "  (63,63), the last pixel, reads the fill");
+    assert_eq(bhumi_fb_get(rfb, 64, 0), 0 - 1, "  (64,0) is out of bounds: -1 (Rust: None)");
+
+    # framebuffer_zero_dimension_is_empty — Rust made an empty framebuffer whose get was None; bhumi refuses
+    # the size, so there is no framebuffer and no pixel to read either way.
+    assert_eq(bhumi_fb_new(0, 100), 0, "framebuffer_zero_dimension_is_empty: 0x100 is refused (no pixels)");
+
+    # blend_opaque_over_anything
+    assert_eq(rend_px_premul(0xFF646464, 0xFFC8C8C8), 0xFF646464, "blend_opaque_over_anything: the source wins");
+    # blend_transparent_is_identity — ⚠ ADR 0003 (the CPU blend is #92's): a zero-alpha source ADDS its colour, so
+    # Rust's straight (0, 100, 100, 100) saturates every lane; transparent BLACK is the identity in both.
+    assert_eq(rend_px_premul(0x00000000, 0xFFC8C8C8), 0xFFC8C8C8, "blend_transparent_is_identity: transparent black leaves dst");
+    assert_eq(rend_px_premul(0x00646464, 0xFFC8C8C8), 0xFFFFFFFF, "  Rust's coloured zero-alpha source adds: 100 + 200 saturates");
+
+    # decompose_roundtrip — a word keeps all four lanes through the framebuffer (the CPU frame's X byte carries
+    # alpha, ADR 0003); bhumi_xrgb packs r, g, b with the X byte 0.
+    bhumi_fb_set(rfb, 5, 5, 0x0A141E28);
+    var dw = bhumi_fb_get(rfb, 5, 5);
+    assert_eq((dw >> 24) & 0xFF, 10, "decompose_roundtrip: a 10");
+    assert_eq((dw >> 16) & 0xFF, 20, "  r 20");
+    assert_eq((dw >> 8) & 0xFF, 30, "  g 30");
+    assert_eq(dw & 0xFF, 40, "  b 40");
+    assert_eq(bhumi_xrgb(20, 30, 40), 0x00141E28, "  bhumi_xrgb packs (20, 30, 40) with the X byte 0");
+
+    # blit_opaque_overwrites
+    var wsrc = alloc(5 * 5 * 4);
+    var wi = 0;
+    while (wi < 25) { store32(wsrc + wi * 4, WHT); wi = wi + 1; }
+    var bdst = bhumi_fb_new(10, 10);
+    bhumi_fb_clear(bdst, BLK);
+    blit_rect(bdst, 0, 0, wsrc, 5, 5);
+    assert_eq(bhumi_fb_get(bdst, 0, 0), WHT, "blit_opaque_overwrites: (0,0) white");
+    assert_eq(bhumi_fb_get(bdst, 4, 4), WHT, "  (4,4) white");
+    assert_eq(bhumi_fb_get(bdst, 5, 5), BLK, "  (5,5), outside the blit, black");
+
+    # blit_with_negative_offset_clips
+    bhumi_fb_clear(bdst, BLK);
+    blit_rect(bdst, 0 - 2, 0 - 2, wsrc, 5, 5);
+    assert_eq(bhumi_fb_get(bdst, 0, 0), WHT, "blit_with_negative_offset_clips: (0,0) white");
+    assert_eq(bhumi_fb_get(bdst, 2, 2), WHT, "  (2,2) white");
+    assert_eq(bhumi_fb_get(bdst, 3, 3), BLK, "  (3,3) black");
+
+    # fill_rect_clips_to_framebuffer
+    bhumi_fb_clear(bdst, BLK);
+    fill_rect(bdst, 0 - 5, 0 - 5, 20, 20, WHT);
+    assert_eq(bhumi_fb_get(bdst, 0, 0), WHT, "fill_rect_clips_to_framebuffer: (0,0) white");
+    assert_eq(bhumi_fb_get(bdst, 9, 9), WHT, "  (9,9) white");
+    assert_eq(t_count_not_r(bdst, 0, 10, 0, 10, WHT), 0, "  every pixel white");
+
+    # damage_tracker_lifecycle — on the damage band (ADR 0003). A fresh frame path has seen no background, so its
+    # first frame has no band (the whole screen, Rust's flush of 1920x1080); `#84` flips, so the second frame is
+    # whole-screen too where Rust's tracker was already clean. Rust's region_count closes with the region list.
+    ae_frame_dmg = rend_dmg_new();
+    ae_prev_dmg = rend_dmg_new();
+    ae_last_bg = 0 - 1;
+    ae_last_wp = 0 - 1;
+    ae_inval_owed = 0;
+    rend_band_carry_reset();
+    rend_band_compute(1080, 0x121218);
+    assert_eq(rend_band_valid(), 0, "damage_tracker_lifecycle: the first frame has no band — the whole screen");
+    rend_band_compute(1080, 0x121218);
+    assert_eq(rend_band_valid(), 0, "  and so does the second, for the other buffer (#84 flips)");
+    rend_band_compute(1080, 0x121218);
+    assert_eq(rend_band_valid(), 1, "  then nothing is damaged: a band...");
+    assert_eq(rend_band_h(), 0, "  ...of height 0 (Rust: !has_damage)");
+    rend_dmg_add(ae_frame_dmg, 10, 10, 100, 100);
+    assert_eq(rend_dmg_valid(ae_frame_dmg), 1, "  add_damage: the tracker has damage");
+    assert_eq(rend_dmg_x(ae_frame_dmg), 10, "  its bounds x 10");
+    assert_eq(rend_dmg_y(ae_frame_dmg), 10, "  its bounds y 10");
+    rend_band_compute(1080, 0x121218);
+    assert_eq(rend_band_y(), 10, "  the band starts at row 10");
+    assert_eq(rend_band_h(), 100, "  and is the damage's 100 rows");
+
+    # text_width_calculation — kashi's 8 px glyph and 1 px gap (ADR 0003), where Rust's was 5 + 1.
+    assert_eq(text_width(""), 0, "text_width_calculation: empty is 0");
+    assert_eq(text_width("A"), 8, "  one glyph, no trailing gap: 8 (Rust: 5)");
+    assert_eq(text_width("AB"), 17, "  8 + 1 + 8 (Rust: 5 + 1 + 5)");
+
+    # desktop_renderer_creates — the port has no renderer object: the screen is a bhumi framebuffer, the kernel's
+    # `#84` flip owns front and back (ADR 0003), and the damage tracker is allocated beside it (main.cyr).
+    var dfb = bhumi_fb_new(1920, 1080);
+    assert_eq(t_ne_r(dfb, 0), 1, "desktop_renderer_creates: a 1920x1080 framebuffer");
+    assert_eq(bhumi_fb_width(dfb), 1920, "  width 1920");
+    assert_eq(bhumi_fb_height(dfb), 1080, "  height 1080");
+    assert_eq(t_ne_r(rend_dmg_new(), 0), 1, "  and its damage tracker");
+
+    # as_bytes_length
+    assert_eq(bhumi_fb_size(bdst), 10 * 10 * 4, "as_bytes_length: 10x10 is 400 bytes");
+    return 0;
+}
+
 # ⚠ `src/gpu.cyr` cannot be included here (duplicate variable against this suite's own fixtures), and
 # `wp_fill_band`'s IMAGE arm references `ae_gpu_wp_on`. Under `wp_set_solid` that arm is never taken at
 # runtime — but it must LINK. A local stub keeps the suite honest: it exercises the SOLID path, which
@@ -2717,6 +2824,7 @@ fn main() {
     t_grp_border_r();
     t_grp_overlap_r();
     t_grp_minimized_r();
+    t_grp_integ_r();
 
     return assert_summary();
 }

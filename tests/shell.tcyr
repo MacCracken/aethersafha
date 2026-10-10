@@ -59,12 +59,193 @@ fn t_any_name_contains(results, needle) {
     return 0;
 }
 
+# Is the notification with id `id` still held? -> 1 / 0.
+fn t_has_notif(sh, id) {
+    if (shell_notif_find_index(sh, id) >= 0) { return 1; }
+    return 0;
+}
+
+# --- test_notification_default, test_notification_custom ---
+fn t_notification_records() {
+    test_group("shell — Notification::default and a custom notification");
+    var nd = shell_notif_default(7, 100);
+    assert_eq(shell_notif_priority(nd), SH_NotifPriority.SH_PRIO_NORMAL, "default priority Normal");
+    assert_eq(shell_notif_requires_action(nd), 0, "default not requires_action");
+    assert_eq(shell_notif_is_agent(nd), 0, "default not is_agent_related");
+    assert_eq(strlen(shell_notif_app_name(nd)) + strlen(shell_notif_title(nd)) + strlen(shell_notif_body(nd)), 0,
+      "default app_name, title and body empty");
+    var nc = shell_notif_new(8, "test", "Test Title", "Test Body", SH_NotifPriority.SH_PRIO_HIGH, 100, 1, 1);
+    assert_eq(streq(shell_notif_title(nc), "Test Title"), 1, "custom title Test Title");
+    assert_eq(shell_notif_requires_action(nc), 1, "custom requires_action");
+    assert_eq(shell_notif_priority(nc), SH_NotifPriority.SH_PRIO_HIGH, "  ...priority High");
+    assert_eq(shell_notif_is_agent(nc), 1, "  ...is_agent_related");
+    return 0;
+}
+
+# --- test_launcher_item, test_launcher_action ---
+fn t_launcher_records() {
+    test_group("shell — LauncherItem and LauncherAction");
+    # LauncherItem { app: None, action: None, is_suggested: false, relevance_score: 0.9 }
+    var li = shell_item_new(str_from("test"), str_from("Test App"), str_from("A test application"),
+      str_from("app"), 0, 0, 0, 900);
+    assert_eq(str_eq(shell_item_name(li), str_from("Test App")), 1, "item name Test App");
+    assert_eq(shell_item_relevance(li), 900, "relevance 0.9 -> 900 permille");
+    assert_eq(shell_item_has_app(li) + shell_item_has_action(li), 0, "  ...app and action None");
+    var a1 = shell_action_new(SH_LauncherActionKind.SH_ACT_OPEN_APP, "terminal");
+    var a2 = shell_action_new(SH_LauncherActionKind.SH_ACT_RUN_COMMAND, "ls");
+    var a3 = shell_action_new(SH_LauncherActionKind.SH_ACT_SEARCH_FILES, "query");
+    var a4 = shell_action_new(SH_LauncherActionKind.SH_ACT_WEB_SEARCH, "search");
+    assert_eq(shell_action_kind(a1), SH_LauncherActionKind.SH_ACT_OPEN_APP, "OpenApp(_)");
+    assert_eq(streq(shell_action_arg(a1), "terminal"), 1, "  ...carrying terminal");
+    assert_eq(shell_action_kind(a2), SH_LauncherActionKind.SH_ACT_RUN_COMMAND, "RunCommand(_)");
+    assert_eq(streq(shell_action_arg(a2), "ls"), 1, "  ...carrying ls");
+    assert_eq(shell_action_kind(a3), SH_LauncherActionKind.SH_ACT_SEARCH_FILES, "SearchFiles(_)");
+    assert_eq(streq(shell_action_arg(a3), "query"), 1, "  ...carrying query");
+    assert_eq(shell_action_kind(a4), SH_LauncherActionKind.SH_ACT_WEB_SEARCH, "WebSearch(_)");
+    assert_eq(streq(shell_action_arg(a4), "search"), 1, "  ...carrying search");
+    return 0;
+}
+
+# --- test_desktop_shell_multiple_notifications, test_desktop_shell_dismiss_multiple_notifications,
+#     test_notification_with_all_priorities ---
+fn t_many_notifications() {
+    test_group("shell — ten notifications are all held");
+    var s10 = shell_new();
+    var i = 0;
+    while (i < 10) {
+        shell_show_notification(s10, shell_notif_new(shell_next_notif_id(s10), "app", "Notif", "",
+            SH_NotifPriority.SH_PRIO_NORMAL, i, 0, 0));
+        i = i + 1;
+    }
+    assert_eq(shell_notification_count(s10), 10, "10 shown, 10 held");
+
+    test_group("shell — dismissing three of five leaves the other two");
+    var s5 = shell_new();
+    var ids = vec_new();
+    var k = 0;
+    while (k < 5) {
+        var nid = shell_next_notif_id(s5);
+        vec_push(ids, nid);
+        shell_show_notification(s5, shell_notif_default(nid, 100));
+        k = k + 1;
+    }
+    assert_eq(shell_notification_count(s5), 5, "five held");
+    var d = 0;
+    var dis_ok = 0;
+    while (d < 3) {
+        if (shell_dismiss_notification(s5, vec_get(ids, d)) == SH_Err.SH_OK) { dis_ok = dis_ok + 1; }
+        d = d + 1;
+    }
+    assert_eq(dis_ok, 3, "the first three dismiss Ok (unwrap)");
+    assert_eq(shell_notification_count(s5), 2, "two left");
+    assert_eq(t_has_notif(s5, vec_get(ids, 3)) + t_has_notif(s5, vec_get(ids, 4)), 2, "  ...the fourth and fifth");
+    # Dismissal is by id, not position: three dismissals from the front cannot tell the two apart.
+    shell_dismiss_notification(s5, vec_get(ids, 4));
+    assert_eq(t_has_notif(s5, vec_get(ids, 3)) * 10 + t_has_notif(s5, vec_get(ids, 4)), 10,
+      "  ...dismissing the fifth keeps the fourth");
+
+    test_group("shell — one notification of each priority");
+    var sp = shell_new();
+    var p = SH_NotifPriority.SH_PRIO_LOW;
+    while (p <= SH_NotifPriority.SH_PRIO_CRITICAL) {
+        shell_show_notification(sp, shell_notif_new(shell_next_notif_id(sp), "test", "P", "", p, 100, 0, 0));
+        p = p + 1;
+    }
+    assert_eq(shell_notification_count(sp), 4, "Low, Normal, High and Critical all held");
+    var pv = shell_get_notifications(sp);
+    var seen = 0;
+    var q = 0;
+    while (q < vec_len(pv)) {
+        seen = seen | (1 << shell_notif_priority(vec_get(pv, q)));
+        q = q + 1;
+    }
+    assert_eq(seen, 15, "  ...each priority once");
+    return 0;
+}
+
+# --- test_desktop_shell_notification_eviction_prefers_non_action ---
+fn t_eviction_prefers_non_action() {
+    test_group("shell — eviction takes only a notification that needs no action");
+    var se = shell_new();
+    var cap = SH_Limits.SH_MAX_NOTIFICATIONS;
+    var first = 0;
+    var i = 0;
+    while (i < cap) {
+        var aid = shell_next_notif_id(se);
+        if (i == 0) { first = aid; }
+        shell_show_notification(se, shell_notif_new(aid, "test", "Action", "", SH_NotifPriority.SH_PRIO_HIGH,
+            i, 1, 0));
+        i = i + 1;
+    }
+    # A non-action one at capacity: nothing is evictable (the new one is not in the map yet).
+    var oid = shell_next_notif_id(se);
+    shell_show_notification(se, shell_notif_new(oid, "overflow", "Overflow", "", SH_NotifPriority.SH_PRIO_LOW,
+        cap, 0, 0));
+    assert_eq(shell_notification_count(se) <= cap + 1, 1, "count <= MAX_NOTIFICATIONS + 1");
+    assert_eq(shell_notification_count(se), cap + 1, "  ...exactly MAX + 1: no action notification evicted");
+    assert_eq(t_has_notif(se, first), 1, "  ...the oldest action notification is kept");
+    # The next one evicts the only non-action notification, the overflow, not the older action ones.
+    var nid = shell_next_notif_id(se);
+    shell_show_notification(se, shell_notif_new(nid, "next", "Next", "", SH_NotifPriority.SH_PRIO_LOW,
+        cap + 1, 0, 0));
+    assert_eq(shell_notification_count(se), cap + 1, "one more: still MAX + 1");
+    assert_eq(t_has_notif(se, oid), 0, "  ...the overflow was evicted");
+    assert_eq(t_has_notif(se, first), 1, "  ...the oldest action notification still kept");
+    assert_eq(t_has_notif(se, nid), 1, "  ...the new one held");
+    return 0;
+}
+
+# The eviction picks the OLDEST non-action notification (shell.rs:401-410: min_by_key(timestamp)),
+# not merely some non-action one: with two evictable, the newer must survive.
+fn t_eviction_takes_oldest_non_action() {
+    test_group("shell — eviction takes the OLDEST notification that needs no action");
+    var so = shell_new();
+    var cap = SH_Limits.SH_MAX_NOTIFICATIONS;
+    var old_id = 0;
+    var new_id = 0;
+    var i = 0;
+    while (i < cap) {
+        var nid = shell_next_notif_id(so);
+        var needs = 1;
+        if (i == 5) { needs = 0; old_id = nid; }       # timestamp 5: the older non-action
+        if (i == 50) { needs = 0; new_id = nid; }      # timestamp 50: the newer non-action
+        shell_show_notification(so, shell_notif_new(nid, "test", "N", "", SH_NotifPriority.SH_PRIO_NORMAL,
+            i, needs, 0));
+        i = i + 1;
+    }
+    var extra = shell_next_notif_id(so);
+    shell_show_notification(so, shell_notif_new(extra, "extra", "Extra", "", SH_NotifPriority.SH_PRIO_LOW,
+        cap, 1, 0));
+    assert_eq(t_has_notif(so, old_id), 0, "the older non-action notification (timestamp 5) was evicted");
+    assert_eq(t_has_notif(so, new_id), 1, "  ...the newer one (timestamp 50) kept");
+    assert_eq(t_has_notif(so, extra), 1, "  ...and the new one held");
+    return 0;
+}
+
+# --- test_desktop_shell_lock_unlock_round_trip ---
+fn t_lock_round_trip() {
+    test_group("shell — lock / unlock round trip, with a double lock");
+    var sl = shell_new();
+    assert_eq(shell_is_locked(sl), 0, "unlocked at start");
+    shell_lock_screen(sl);
+    assert_eq(shell_is_locked(sl), 1, "locked");
+    shell_unlock_screen(sl);
+    assert_eq(shell_is_locked(sl), 0, "unlocked");
+    shell_lock_screen(sl);
+    shell_lock_screen(sl);
+    assert_eq(shell_is_locked(sl), 1, "a double lock is locked");
+    shell_unlock_screen(sl);
+    assert_eq(shell_is_locked(sl), 0, "  ...and one unlock unlocks it");
+    return 0;
+}
+
 fn main() {
     alloc_init();
 
     # ============================================================
     # DesktopShell::new + initial state
-    # (rust: test_desktop_shell_new, test_desktop_shell_initial_system_status)
+    # (rust: test_desktop_shell_new, test_desktop_shell_initial_system_status — re-expressed as
+    #  ADR 0003's UNKNOWN seed: the gauges and the net are UNKNOWN, not Rust's 0.0 and Connected)
     # ============================================================
     test_group("shell — construction + initial state");
     var sh = shell_new();
@@ -278,6 +459,8 @@ fn main() {
     shell_update_system_status(sh, newst);
     var cur = shell_get_system_status(sh);
     assert_eq(shell_status_cpu(cur), 999, "cpu updated");
+    assert_eq(shell_status_mem(cur), 875, "memory 87.5 -> 875");
+    assert_eq(shell_status_disk(cur), 552, "disk 55.2 -> 552");
     assert_eq(shell_status_battery(cur), 15, "battery updated to 15");
     assert_eq(shell_status_battery_is_none(cur), 0, "battery Some(15) not None");
     assert_eq(shell_status_net(cur), SH_NetStatus.SH_NET_ERROR, "net updated to Error");
@@ -314,6 +497,13 @@ fn main() {
         i = i + 1;
     }
     assert_eq(shell_notification_count(sh2), cap, "count capped at MAX_NOTIFICATIONS (200)");
+
+    t_notification_records();
+    t_launcher_records();
+    t_many_notifications();
+    t_eviction_prefers_non_action();
+    t_eviction_takes_oldest_non_action();
+    t_lock_round_trip();
 
     return assert_summary();
 }

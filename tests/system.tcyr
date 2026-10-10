@@ -1,0 +1,533 @@
+# aethersafha — end-to-end system tests.
+# Parity: rust-old/src/system_tests.rs, the `test_e2e_*` scenarios, each driven through the port's desktop
+# (`desktop_new` and its subsystems) where Rust built a Compositor, DesktopShell, SecurityUI and
+# AIDesktopFeatures side by side. Re-expressed under ADR 0003: i64 ids, epoch seconds passed in, permille for
+# Rust's f32 percentages, sentinels for Option, live getters.
+#
+# Closed, not ported:
+#   - ADR 0004 (the app layer, apps.rs): application_open_all_close_all, file_manager_navigation,
+#     audit_viewer_with_filters, model_manager_operations, agent_manager_multi_agent, and the apps half of
+#     full_desktop_startup_sequence, full_teardown_sequence and multi_app_concurrent_operations.
+#   - ADR 0004 (render_hud_overlay, test-only): hud_overlay_with_registered_agents.
+#   - ADR 0004 (quick settings): quick_settings_toggle_all, and the quick-settings count in
+#     full_desktop_startup_sequence.
+# The basic tests above the e2e block, and the e2e scenarios the module suites already cover, are not here.
+#
+# ⛔ SAFETY. Nothing here signals a process or reaches daimon: the kill-switch scenarios use
+# `sec_ui_emergency_kill_switch`, which flips state only. Even so, before any of them the audit log is pointed
+# at a temp file this suite creates and the daimon client at a port this suite owns that refuses, never at
+# 127.0.0.1:8090, where a real daimon may be running.
+include "src/frametime.cyr"   # render_desktop times the background clear through it
+include "src/sysprobe.cyr"    # desktop_status_tick reads the panel producers
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/gestures.cyr"
+include "src/accessibility.cyr"
+include "src/ai_features.cyr"
+include "src/shell.cyr"
+include "src/security_ui.cyr"
+include "src/plugin_host.cyr"
+include "src/desktop.cyr"
+# desktop.cyr's render_desktop must link, as in tests/desktop.tcyr.
+include "lib/bhumi.cyr"
+include "src/theme.cyr"
+include "src/cursor.cyr"
+include "src/render.cyr"
+include "src/wallpaper.cyr"
+include "src/launcher.cyr"
+include "src/input.cyr"
+include "src/shell_render.cyr"
+include "src/gpu.cyr"
+
+var T_NOW = 1760000000;   # a fixed epoch second for every `now` the subsystems take
+
+# 1 when the vec of *Window `v` holds a window with id `id`.
+fn t_has_win(v, id): i64 {
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        if (win_id(vec_get(v, i)) == id) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 when some HUD state in the vec `v` has status `st`.
+fn t_has_status(v, st): i64 {
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        if (ai_hud_status(vec_get(v, i)) == st) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# A vec of permission cstrs (Rust's vec!["file:read".to_string()]).
+fn t_perms1(p): i64 {
+    var v = vec_new();
+    vec_push(v, p);
+    return v;
+}
+
+# A TCP socket bound to 127.0.0.1 on an ephemeral port and NOT listening: every connect to it is refused,
+# and no one else can take the port while it is held. -> the fd; the port is left in t_dport.
+var t_dport = 0;
+fn t_dbind(): i64 {
+    var fd = sys_socket(AF_INET, SOCK_STREAM | 2048, 0);
+    var sa[16];
+    memset(&sa, 0, 16);
+    store16(&sa, AF_INET);
+    store32(&sa + 4, 0x0100007F);
+    if (sys_bind(fd, &sa, 16) < 0) { return 0 - 1; }
+    var sl[8];
+    store64(&sl, 16);
+    sys_getsockname(fd, &sa, &sl);
+    t_dport = (load8(&sa + 2) << 8) | load8(&sa + 3);
+    return fd;
+}
+
+# ---- test_e2e_full_desktop_startup_sequence ----------------------------------------------------------------------
+fn t_e2e_startup(): i64 {
+    test_group("system — full_desktop_startup_sequence: every subsystem of desktop_new starts empty");
+    var d = desktop_new();
+    assert_eq(d != 0, 1, "desktop_new made a desktop");
+    var c = desk_comp(d);
+    assert_eq(comp_count(c), 0, "the compositor has no windows");
+    assert_eq(vec_len(comp_active_windows(c)), 0, "  and none in the active workspace");
+    assert_eq(comp_workspace_count(c), 4, "  four default workspaces (the Rust comment)");
+    var sh = desk_shell(d);
+    assert_eq(shell_notification_count(sh), 0, "the shell has no notifications");
+    assert_eq(shell_is_locked(sh), 0, "  and is not locked");
+    var sec = desk_sec(d);
+    var dash = sec_ui_get_security_dashboard(sec, T_NOW);
+    assert_eq(sec_dash_active_alerts(dash), 0, "security: no active alerts");
+    assert_eq(sec_dash_pending_permissions(dash), 0, "  no pending permissions");
+    assert_eq(sec_ui_get_security_level(sec), SecLevel.SEC_LVL_STANDARD, "  level Standard");
+    assert_eq(sec_ui_is_emergency_mode(sec), 0, "  not in emergency mode");
+    var ai = desk_ai(d);
+    assert_eq(vec_len(ai_get_agent_hud_states(ai)), 0, "AI: no agents in the HUD");
+    var tod = ai_context_tod(ai_analyze_context(ai));
+    var tod_ok = 0;
+    if (tod >= AI_TimeOfDay.AI_TOD_MORNING) { if (tod <= AI_TimeOfDay.AI_TOD_NIGHT) { tod_ok = 1; } }
+    assert_eq(tod_ok, 1, "  analyze_context gives a time of day (Morning..Night)");
+    return 0;
+}
+
+# ---- test_workspace_switch ---------------------------------------------------------------------------------------
+fn t_e2e_ws_switch(): i64 {
+    test_group("system — workspace_switch");
+    var c = desk_comp(desktop_new());
+    assert_eq(comp_switch_workspace(c, 2), 0, "switch_workspace(2) succeeds");
+    assert_eq(comp_active_workspace(c), 2, "  workspace 2 is active");
+    assert_eq(vec_len(comp_active_windows(c)), 0, "  get_active_windows answers: it is empty");
+    return 0;
+}
+
+# ---- test_e2e_multi_window_workspace_management ------------------------------------------------------------------
+fn t_e2e_multi_ws(): i64 {
+    test_group("system — multi_window_workspace_management: five windows across three workspaces");
+    var c = desk_comp(desktop_new());
+    var w1 = win_id(comp_create_window(c, 10, 10, 300, 200, "Editor"));
+    var w2 = win_id(comp_create_window(c, 20, 20, 300, 200, "Terminal"));
+    assert_eq(vec_len(comp_active_windows(c)), 2, "workspace 0 holds 2");
+    comp_switch_workspace(c, 1);
+    var w3 = win_id(comp_create_window(c, 30, 30, 300, 200, "Browser"));
+    comp_create_window(c, 40, 40, 300, 200, "Chat");
+    assert_eq(vec_len(comp_active_windows(c)), 2, "workspace 1 holds 2");
+    comp_switch_workspace(c, 2);
+    # Rust's create_window(.., true): the port's agent flag is a window fact set on the window.
+    win_set_agent(comp_create_window(c, 50, 50, 300, 200, "Agent"), 1);
+    assert_eq(vec_len(comp_active_windows(c)), 1, "workspace 2 holds the agent window");
+    assert_eq(comp_count(c), 5, "five windows in all");
+    assert_eq(vec_len(comp_agent_windows(c)), 1, "  one of them an agent window");
+    comp_switch_workspace(c, 0);
+    var a0 = comp_active_windows(c);
+    assert_eq(vec_len(a0), 2, "back on workspace 0: 2 windows");
+    assert_eq(t_has_win(a0, w1), 1, "  Editor among them");
+    assert_eq(t_has_win(a0, w2), 1, "  Terminal among them");
+    comp_switch_workspace(c, 1);
+    assert_eq(comp_move_window_to_workspace(c, w3, 0), 0, "move Browser from workspace 1 to 0");
+    comp_switch_workspace(c, 0);
+    assert_eq(vec_len(comp_active_windows(c)), 3, "workspace 0 now holds 3");
+    comp_switch_workspace(c, 1);
+    assert_eq(vec_len(comp_active_windows(c)), 1, "workspace 1 keeps 1");
+    return 0;
+}
+
+# ---- test_e2e_notification_flood_and_dismiss ---------------------------------------------------------------------
+fn t_e2e_notif_flood(): i64 {
+    test_group("system — notification_flood_and_dismiss: 20 in, the 10 regular ones dismissed");
+    var sh = desk_shell(desktop_new());
+    var ids = vec_new();
+    var i = 0;
+    while (i < 10) {
+        var nid = shell_next_notif_id(sh);
+        vec_push(ids, nid);
+        shell_show_notification(sh, shell_notif_new(nid, "app", "Regular Notification", "Body",
+            SH_NotifPriority.SH_PRIO_NORMAL, T_NOW, 0, 0));
+        i = i + 1;
+    }
+    var j = 0;
+    while (j < 10) {
+        var req = 0;
+        if (j % 2 == 0) { req = 1; }   # alternating requires_action
+        shell_show_agent_notification(sh, "Agent Task", "Agent completed task", req, T_NOW);
+        j = j + 1;
+    }
+    assert_eq(shell_notification_count(sh), 20, "20 notifications");
+    var nv = shell_get_notifications(sh);
+    var agents = 0;
+    var k = 0;
+    while (k < vec_len(nv)) {
+        if (shell_notif_is_agent(vec_get(nv, k)) == 1) { agents = agents + 1; }
+        k = k + 1;
+    }
+    assert_eq(agents, 10, "  10 of them agent-related");
+    var bad = 0;
+    var m = 0;
+    while (m < 10) {
+        if (shell_dismiss_notification(sh, vec_get(ids, m)) != SH_Err.SH_OK) { bad = bad + 1; }
+        m = m + 1;
+    }
+    assert_eq(bad, 0, "every regular one dismisses Ok");
+    assert_eq(shell_notification_count(sh), 10, "10 remain");
+    var rest = 0;
+    var r = 0;
+    while (r < vec_len(nv)) {
+        if (shell_notif_is_agent(vec_get(nv, r)) == 1) { rest = rest + 1; }
+        r = r + 1;
+    }
+    assert_eq(rest, 10, "  all of them agent-related");
+    return 0;
+}
+
+# ---- test_e2e_ai_context_with_multiple_agents --------------------------------------------------------------------
+fn t_e2e_ai_agents(): i64 {
+    test_group("system — ai_context_with_multiple_agents: five agents, five statuses");
+    var ai = desk_ai(desktop_new());
+    var names = vec_new();
+    vec_push(names, "qa-agent");
+    vec_push(names, "file-manager");
+    vec_push(names, "code-reviewer");
+    vec_push(names, "build-agent");
+    vec_push(names, "deploy-agent");
+    var sts = vec_new();
+    vec_push(sts, AI_AgentStatus.AI_AS_ACTING);
+    vec_push(sts, AI_AgentStatus.AI_AS_IDLE);
+    vec_push(sts, AI_AgentStatus.AI_AS_THINKING);
+    vec_push(sts, AI_AgentStatus.AI_AS_WAITING);
+    vec_push(sts, AI_AgentStatus.AI_AS_ERROR);
+    var bad_st = 0;
+    var bad_task = 0;
+    var i = 0;
+    while (i < 5) {
+        var id = i + 1;
+        var nm = vec_get(names, i);
+        ai_register_agent_hud(ai, id, nm);
+        ai_update_agent_hud(ai, id, vec_get(sts, i), str_cat(str_from("Task for "), str_from(nm)), 500);
+        var st = ai_get_agent_hud_state(ai, id);
+        if (st == 0) { bad_st = bad_st + 1; }
+        if (st != 0) {
+            if (ai_hud_status(st) != vec_get(sts, i)) { bad_st = bad_st + 1; }
+            if (str_eq(ai_hud_task(st), str_cat(str_from("Task for "), str_from(nm))) != 1) { bad_task = bad_task + 1; }
+        }
+        i = i + 1;
+    }
+    assert_eq(bad_st, 0, "each update took: its status reads back");
+    assert_eq(bad_task, 0, "  and its task reads back as \"Task for <name>\"");
+    var hs = ai_get_agent_hud_states(ai);
+    assert_eq(vec_len(hs), 5, "five agents in the HUD");
+    assert_eq(t_has_status(hs, AI_AgentStatus.AI_AS_ACTING), 1, "  Acting present");
+    assert_eq(t_has_status(hs, AI_AgentStatus.AI_AS_IDLE), 1, "  Idle present");
+    assert_eq(t_has_status(hs, AI_AgentStatus.AI_AS_THINKING), 1, "  Thinking present");
+    assert_eq(t_has_status(hs, AI_AgentStatus.AI_AS_WAITING), 1, "  Waiting present");
+    assert_eq(t_has_status(hs, AI_AgentStatus.AI_AS_ERROR), 1, "  Error present");
+    return 0;
+}
+
+# ---- test_e2e_screen_lock_blocks_interactions --------------------------------------------------------------------
+fn t_e2e_lock(): i64 {
+    test_group("system — screen_lock_blocks_interactions");
+    var sh = desk_shell(desktop_new());
+    assert_eq(shell_is_locked(sh), 0, "unlocked at start");
+    shell_lock_screen(sh);
+    assert_eq(shell_is_locked(sh), 1, "locked");
+    # The shell does not enforce the lock on launch_app; a higher layer does (Rust's comment).
+    assert_eq(shell_launch_app(sh, "terminal"), SH_Err.SH_OK, "  launch_app(\"terminal\") still Ok while locked");
+    shell_show_agent_notification(sh, "Background task", "Completed while locked", 0, T_NOW);
+    assert_eq(shell_notification_count(sh), 1, "  a notification still accumulates");
+    shell_unlock_screen(sh);
+    assert_eq(shell_is_locked(sh), 0, "unlocked");
+    assert_eq(shell_launch_app(sh, "terminal"), SH_Err.SH_OK, "  launch_app Ok");
+    return 0;
+}
+
+# ---- test_e2e_emergency_kill_switch_flow -------------------------------------------------------------------------
+fn t_e2e_kill_switch(): i64 {
+    test_group("system — emergency_kill_switch_flow");
+    var sec = desk_sec(desktop_new());
+    sec_ui_set_agent_permissions(sec, 1, "agent-1", t_perms1("file:read"), T_NOW);
+    sec_ui_set_agent_permissions(sec, 2, "agent-2", t_perms1("network:outbound"), T_NOW);
+    assert_eq(sec_dash_running_agents(sec_ui_get_security_dashboard(sec, T_NOW)), 2, "two agents with permissions");
+    var oid = sec_ui_request_human_override(sec, "agent-1", "sudo-action", "needs root", T_NOW);
+    assert_eq(sec_ui_approve_override(sec, oid, "admin"), SecErr.SEC_ERR_OK, "the override is approved");
+    assert_eq(sec_ui_is_emergency_mode(sec), 0, "not in emergency mode");
+    sec_ui_emergency_kill_switch(sec);
+    assert_eq(sec_ui_is_emergency_mode(sec), 1, "the kill switch enters emergency mode");
+    var ov = sec_ui_get_override_requests(sec);
+    assert_eq(vec_len(ov), 1, "  the approval is revoked: the request is pending again");
+    var ov_approved = 1;
+    if (vec_len(ov) == 1) { ov_approved = sec_override_is_approved(vec_get(ov, 0)); }
+    assert_eq(ov_approved, 0, "  and reads unapproved");
+    sec_ui_deactivate_emergency(sec);
+    assert_eq(sec_ui_is_emergency_mode(sec), 0, "deactivated");
+    assert_eq(sec_dash_running_agents(sec_ui_get_security_dashboard(sec, T_NOW)), 2,
+      "the agents' permissions are intact");
+    return 0;
+}
+
+# ---- test_e2e_compositor_window_operations -----------------------------------------------------------------------
+fn t_e2e_win_ops(): i64 {
+    test_group("system — compositor_window_operations: maximize, minimize, normal, close");
+    var c = desk_comp(desktop_new());
+    var wid = win_id(comp_create_window(c, 100, 100, 400, 300, "Test Window"));
+    assert_eq(comp_count(c), 1, "one window");
+    assert_eq(win_state(comp_get(c, 0)), WinState.WS_NORMAL, "  Normal");
+    assert_eq(comp_set_window_state(c, wid, WinState.WS_MAXIMIZED, 1920, 1040), 0, "maximize");
+    assert_eq(win_state(comp_get(c, 0)), WinState.WS_MAXIMIZED, "  Maximized");
+    assert_eq(comp_set_window_state(c, wid, WinState.WS_MINIMIZED, 1920, 1040), 0, "minimize");
+    assert_eq(win_state(comp_get(c, 0)), WinState.WS_MINIMIZED, "  Minimized");
+    assert_eq(comp_set_window_state(c, wid, WinState.WS_NORMAL, 1920, 1040), 0, "back to normal");
+    assert_eq(win_state(comp_get(c, 0)), WinState.WS_NORMAL, "  Normal");
+    # ⚠ ADR 0003 (workspaces and window state): FULLSCREEN is owed by setu (ADR 0002) and FLOATING is retired
+    # (ADR 0004), so both are refused where Rust stored them, and the window keeps its state.
+    assert_eq(comp_set_window_state(c, wid, WinState.WS_FULLSCREEN, 1920, 1040), 0 - 1, "fullscreen is refused");
+    assert_eq(win_state(comp_get(c, 0)), WinState.WS_NORMAL, "  the window stays Normal");
+    assert_eq(comp_set_window_state(c, wid, WinState.WS_FLOATING, 1920, 1040), 0 - 1, "floating is refused");
+    assert_eq(win_state(comp_get(c, 0)), WinState.WS_NORMAL, "  the window stays Normal");
+    assert_eq(comp_close_window(c, wid), 0, "close");
+    assert_eq(comp_count(c), 0, "  no windows");
+    assert_eq(comp_close_window(c, wid), 0 - 1, "closing it again errs");
+    return 0;
+}
+
+# ---- test_e2e_multi_app_concurrent_operations --------------------------------------------------------------------
+# The app layer closes with ADR 0004 (AppWindow's app_type, AgentManagerApp's running_agents and "Starting").
+# What stays is the desktop's half: a terminal window and an agent window open together, an agent comes and
+# goes in the port's live agent registry (the AI HUD), and both windows are still open after it.
+fn t_e2e_multi_app(): i64 {
+    test_group("system — multi_app_concurrent_operations: two windows outlive an agent's lifecycle");
+    var d = desktop_new();
+    var c = desk_comp(d);
+    var ai = desk_ai(d);
+    var term = comp_create_window(c, 10, 10, 400, 300, "Terminal");
+    var mgr = comp_create_window(c, 60, 60, 400, 300, "Agent Manager");
+    win_set_agent(mgr, 1);
+    assert_eq(comp_count(c), 2, "two windows open");
+    assert_eq(win_is_agent(term), 0, "  the terminal is not an agent window");
+    assert_eq(win_is_agent(mgr), 1, "  the agent manager is");
+    ai_register_agent_hud(ai, 42, "test-agent");
+    assert_eq(ai_agent_hud_count(ai), 1, "the started agent is tracked");
+    assert_eq(ai_hud_id(ai_get_agent_hud_state(ai, 42)), 42, "  under its id");
+    ai_unregister_agent_hud(ai, 42);
+    assert_eq(ai_agent_hud_count(ai), 0, "stopped, it is gone");
+    assert_eq(comp_count(c), 2, "both windows are still open");
+    return 0;
+}
+
+# ---- test_e2e_full_teardown_sequence -----------------------------------------------------------------------------
+fn t_e2e_teardown(): i64 {
+    test_group("system — full_teardown_sequence: populate every subsystem, then tear it all down");
+    var d = desktop_new();
+    var c = desk_comp(d);
+    var sh = desk_shell(d);
+    var sec = desk_sec(d);
+    var ai = desk_ai(d);
+    var wids = vec_new();
+    var i = 0;
+    while (i < 3) {
+        var w = comp_create_window(c, 10 + i * 30, 10 + i * 30, 300, 200, "Window");
+        if (i == 2) { win_set_agent(w, 1); }   # the last one is an agent window
+        vec_push(wids, win_id(w));
+        i = i + 1;
+    }
+    assert_eq(comp_count(c), 3, "three windows");
+    var nids = vec_new();
+    var j = 0;
+    while (j < 5) {
+        var nid = shell_next_notif_id(sh);
+        vec_push(nids, nid);
+        shell_show_notification(sh, shell_notif_new(nid, "app", "Notif", "", SH_NotifPriority.SH_PRIO_NORMAL, T_NOW, 0, 0));
+        j = j + 1;
+    }
+    assert_eq(shell_notification_count(sh), 5, "five notifications");
+    var alert_id = 1;   # a caller's id, below SEC_ID_MINTED_BASE (ADR 0003)
+    sec_ui_show_security_alert(sec, sec_alert_new(alert_id, "Test alert", "For teardown",
+        SecThreatLevel.SEC_TL_MEDIUM, "test", T_NOW, 0, 0));
+    sec_ui_set_agent_permissions(sec, 7, "teardown-agent", t_perms1("file:read"), T_NOW);
+    ai_register_agent_hud(ai, 8, "teardown-ai-agent");
+    assert_eq(ai_agent_hud_count(ai), 1, "one agent in the HUD");
+
+    var bad_close = 0;
+    var k = 0;
+    while (k < 3) {
+        if (comp_close_window(c, vec_get(wids, k)) != 0) { bad_close = bad_close + 1; }
+        k = k + 1;
+    }
+    assert_eq(bad_close, 0, "every window closes Ok");
+    assert_eq(comp_count(c), 0, "  no windows left");
+    var bad_dismiss = 0;
+    var m = 0;
+    while (m < 5) {
+        if (shell_dismiss_notification(sh, vec_get(nids, m)) != SH_Err.SH_OK) { bad_dismiss = bad_dismiss + 1; }
+        m = m + 1;
+    }
+    assert_eq(bad_dismiss, 0, "every notification dismisses Ok");
+    assert_eq(shell_notification_count(sh), 0, "  none left");
+    assert_eq(sec_ui_dismiss_alert(sec, alert_id), SecErr.SEC_ERR_OK, "the alert dismisses Ok");
+    assert_eq(vec_len(sec_ui_get_active_alerts(sec)), 0, "  no active alerts");
+    assert_eq(sec_ui_revoke_agent_permissions(sec, 7), SecErr.SEC_ERR_OK, "the agent's permissions revoke Ok");
+    assert_eq(sec_dash_running_agents(sec_ui_get_security_dashboard(sec, T_NOW)), 0, "  no running agents");
+    ai_unregister_agent_hud(ai, 8);
+    assert_eq(ai_agent_hud_count(ai), 0, "the HUD agent is unregistered");
+
+    assert_eq(comp_count(c), 0, "clean: no windows");
+    assert_eq(shell_notification_count(sh), 0, "clean: no notifications");
+    assert_eq(shell_is_locked(sh), 0, "clean: not locked");
+    var dash = sec_ui_get_security_dashboard(sec, T_NOW);
+    assert_eq(vec_len(sec_ui_get_active_alerts(sec)), 0, "clean: no active alerts");
+    assert_eq(sec_dash_pending_permissions(dash), 0, "clean: no pending permissions");
+    assert_eq(sec_dash_running_agents(dash), 0, "clean: no running agents");
+    assert_eq(sec_ui_is_emergency_mode(sec), 0, "clean: not in emergency mode");
+    assert_eq(vec_len(ai_get_agent_hud_states(ai)), 0, "clean: an empty HUD");
+    return 0;
+}
+
+# ---- test_e2e_security_and_ai_combined ---------------------------------------------------------------------------
+fn t_e2e_sec_ai(): i64 {
+    test_group("system — security_and_ai_combined: alert, kill switch, unregister, revoke");
+    var d = desktop_new();
+    var sec = desk_sec(d);
+    var ai = desk_ai(d);
+    var agent = 5;
+    ai_register_agent_hud(ai, agent, "suspicious-agent");
+    sec_ui_set_agent_permissions(sec, agent, "suspicious-agent", t_perms1("file:read"), T_NOW);
+    ai_update_agent_hud(ai, agent, AI_AgentStatus.AI_AS_ACTING, str_from("Accessing /etc/shadow"), 500);
+    sec_ui_show_security_alert(sec, sec_alert_new(1, "Unauthorized file access",
+        "Agent attempting to read /etc/shadow", SecThreatLevel.SEC_TL_CRITICAL, "audit", T_NOW, 1, 0));
+    var dash = sec_ui_get_security_dashboard(sec, T_NOW);
+    assert_eq(sec_dash_threat_level(dash), SecThreatLevel.SEC_TL_CRITICAL, "the dashboard reads Critical");
+    assert_eq(sec_dash_active_alerts(dash), 1, "  one active alert");
+    sec_ui_emergency_kill_switch(sec);
+    assert_eq(sec_ui_is_emergency_mode(sec), 1, "the kill switch enters emergency mode");
+    ai_unregister_agent_hud(ai, agent);
+    assert_eq(vec_len(ai_get_agent_hud_states(ai)), 0, "the agent leaves the HUD");
+    assert_eq(sec_ui_revoke_agent_permissions(sec, agent), SecErr.SEC_ERR_OK, "its permissions revoke Ok");
+    assert_eq(sec_dash_running_agents(sec_ui_get_security_dashboard(sec, T_NOW)), 0, "  no running agents");
+    sec_ui_deactivate_emergency(sec);
+    assert_eq(sec_ui_is_emergency_mode(sec), 0, "deactivated");
+    return 0;
+}
+
+# ---- test_e2e_workspace_context_management -----------------------------------------------------------------------
+fn t_e2e_ws_context(): i64 {
+    test_group("system — workspace_context_management: four contexts, windows land in their workspace");
+    var c = desk_comp(desktop_new());
+    assert_eq(comp_set_workspace_context(c, 0, CtxType.CTX_DEVELOPMENT), 0, "set 0 Development");
+    assert_eq(comp_set_workspace_context(c, 1, CtxType.CTX_COMMUNICATION), 0, "set 1 Communication");
+    assert_eq(comp_set_workspace_context(c, 2, CtxType.CTX_DESIGN), 0, "set 2 Design");
+    assert_eq(comp_set_workspace_context(c, 3, CtxType.CTX_AGENT_OP), 0, "set 3 AgentOperation");
+    assert_eq(comp_workspace_context(c, 0), CtxType.CTX_DEVELOPMENT, "0 reads Development");
+    assert_eq(comp_workspace_context(c, 1), CtxType.CTX_COMMUNICATION, "1 reads Communication");
+    assert_eq(comp_workspace_context(c, 2), CtxType.CTX_DESIGN, "2 reads Design");
+    assert_eq(comp_workspace_context(c, 3), CtxType.CTX_AGENT_OP, "3 reads AgentOperation");
+    comp_switch_workspace(c, 0);
+    var dev = win_id(comp_create_window(c, 10, 10, 300, 200, "Editor"));
+    comp_switch_workspace(c, 3);
+    var agw = comp_create_window(c, 40, 40, 300, 200, "Agent Panel");
+    win_set_agent(agw, 1);
+    comp_switch_workspace(c, 0);
+    var a0 = comp_active_windows(c);
+    assert_eq(vec_len(a0), 1, "workspace 0 holds one window");
+    var a0id = 0;
+    if (vec_len(a0) == 1) { a0id = win_id(vec_get(a0, 0)); }
+    assert_eq(a0id, dev, "  the Editor");
+    comp_switch_workspace(c, 3);
+    var a3 = comp_active_windows(c);
+    assert_eq(vec_len(a3), 1, "workspace 3 holds one window");
+    var a3w = 0;
+    if (vec_len(a3) == 1) { a3w = vec_get(a3, 0); }
+    var a3id = 0;
+    var a3agent = 0;
+    if (a3w != 0) { a3id = win_id(a3w); a3agent = win_is_agent(a3w); }
+    assert_eq(a3id, win_id(agw), "  the Agent Panel");
+    assert_eq(a3agent, 1, "  an agent window");
+    return 0;
+}
+
+# ---- test_e2e_system_status_propagation --------------------------------------------------------------------------
+fn t_e2e_status(): i64 {
+    test_group("system — system_status_propagation");
+    var sh = desk_shell(desktop_new());
+    var st0 = shell_get_system_status(sh);
+    assert_eq(shell_status_agents(st0), 0, "initially 0 agents");
+    # ⚠ ADR 0003: the gauges are seeded UNKNOWN (-1), not Rust's 0.0.
+    assert_eq(shell_status_cpu(st0), 0 - 1, "  cpu UNKNOWN (Rust: 0.0)");
+    # Rust's 75.5 % / 60.0 % / 45.0 % are permille 755 / 600 / 450 (ADR 0003).
+    shell_update_system_status(sh, shell_status_new(755, 600, 450, 42, SH_NetStatus.SH_NET_CONNECTED, 3));
+    var st1 = shell_get_system_status(sh);
+    assert_eq(shell_status_cpu(st1), 755, "update: cpu 755 permille");
+    assert_eq(shell_status_mem(st1), 600, "  memory 600 permille");
+    assert_eq(shell_status_agents(st1), 3, "  3 agents");
+    assert_eq(shell_status_battery(st1), 42, "  battery 42 (Rust: Some(42))");
+    shell_set_agent_count(sh, 5);
+    var st2 = shell_get_system_status(sh);
+    assert_eq(shell_status_agents(st2), 5, "set_agent_count: 5 agents");
+    assert_eq(shell_status_cpu(st2), 755, "  cpu preserved");
+    assert_eq(shell_status_battery(st2), 42, "  battery preserved");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    # ⛔ Before any scenario: the daimon client points at a port of ours that refuses...
+    var dsink = t_dbind();
+    assert_eq(dsink >= 0, 1, "a refusing port of our own on 127.0.0.1");
+    if (dsink < 0) { return assert_summary(); }
+    daimon_set_endpoint(0x0100007F, t_dport);
+    # ...and the audit log goes to a temp file of ours (as tests/security_ui.tcyr does).
+    var tp_sb = str_builder_new();
+    str_builder_add_cstr(tp_sb, "/tmp/aethersafha-system-audit-");
+    str_builder_add_int(tp_sb, sys_getpid());
+    str_builder_add_cstr(tp_sb, ".log");
+    var audit_path = str_data(str_builder_build(tp_sb));
+    sys_unlink(audit_path);
+    var tfd = file_open(audit_path, O_WRONLY | O_CREAT | O_EXCL, 0x180);
+    assert_eq(tfd >= 0, 1, "created the temp audit log");
+    if (tfd < 0) { return assert_summary(); }
+    file_close(tfd);
+    sec_ui_set_audit_log_path(audit_path);
+
+    t_e2e_startup();
+    t_e2e_ws_switch();
+    t_e2e_multi_ws();
+    t_e2e_notif_flood();
+    t_e2e_ai_agents();
+    t_e2e_lock();
+    t_e2e_kill_switch();
+    t_e2e_win_ops();
+    t_e2e_multi_app();
+    t_e2e_teardown();
+    t_e2e_sec_ai();
+    t_e2e_ws_context();
+    t_e2e_status();
+
+    sys_unlink(audit_path);
+    sys_close(dsink);
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

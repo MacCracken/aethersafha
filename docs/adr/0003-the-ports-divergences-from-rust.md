@@ -208,6 +208,14 @@ fix.
   the ring one pixel OUTSIDE the window rect and moves nothing. Off screen the ring is dropped rather
   than clamped onto the edge, and it is not a hit region (Rust's 1 px border was).
 
+- **Small representation notes** (0.17.5, met while re-expressing the last Rust tests):
+  - There is no `DesktopRenderer` object. Its pieces are a bhumi framebuffer, the kernel's `#84` flip and
+    the frame loop's damage trackers.
+  - A zero-size framebuffer is refused: `bhumi_fb_new(0, h)` returns 0. Rust returned an empty framebuffer
+    whose every read was `None`, so no pixel can be read either way.
+  - A window's agent flag is set on the window (`win_set_agent`), not passed to `comp_create_window` as
+    Rust's `create_window` took it.
+
 ## Consequences
 
 - **Positive**:
