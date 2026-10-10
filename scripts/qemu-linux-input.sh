@@ -12,6 +12,7 @@
 #   ./scripts/qemu-linux-input.sh            # every scenario
 #   ./scripts/qemu-linux-input.sh focus      # focus notices, minimize and restore
 #   ./scripts/qemu-linux-input.sh hostile    # a client attaching at stride 4
+#   ./scripts/qemu-linux-input.sh sigint     # SIGINT from PID 1 runs the Ctrl+Q teardown; clients stay stoppable
 #   AE_INPUT_COMPOSITOR=/path/to/aethersafha ./scripts/qemu-linux-input.sh   # judge a prebuilt binary (A/B)
 #
 # The clients are `programs/focus_client.cyr` (and its `-D AE_HOSTILE` build). Screendumps, a montage and
@@ -24,7 +25,7 @@ cd "$(dirname "$0")/.."
 OUT=${AE_INPUT_OUT:-build/qemu-input}
 KERNEL=${AE_QEMU_KERNEL:-/boot/vmlinuz-linux}
 OVMF=${AE_QEMU_OVMF:-/usr/share/edk2/x64/OVMF.4m.fd}
-SCENARIOS=${*:-focus hostile}
+SCENARIOS=${*:-focus hostile sigint}
 
 [ -r "$KERNEL" ] || { echo "no kernel at $KERNEL (set AE_QEMU_KERNEL)"; exit 2; }
 [ -r "$OVMF" ] || { echo "no OVMF firmware at $OVMF (set AE_QEMU_OVMF)"; exit 2; }

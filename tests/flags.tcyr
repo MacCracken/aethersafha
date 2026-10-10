@@ -1,0 +1,303 @@
+# aethersafha command-line test — src/flags.cyr, and `--secure` applied to a real desktop.
+# Mirrors rust-old/src/main.rs tests (test_args_default_values, test_args_custom_values,
+# test_desktop_environment_new_secure_mode) over the port's flags, and pins every invocation the
+# harnesses use today (scripts/, programs/qemu_init.cyr, ~/Repos/agnos), so the strict parser cannot
+# start refusing one of them without this going red.
+# Stdlib + [deps.*] auto-included via cyrius.cyml.
+include "src/version_str.cyr"
+include "src/flags.cyr"
+# desktop_new and everything it instantiates (same set as tests/desktop.tcyr).
+include "src/frametime.cyr"
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/gestures.cyr"
+include "src/accessibility.cyr"
+include "src/ai_features.cyr"
+include "src/shell.cyr"
+include "src/security_ui.cyr"
+include "src/plugin_host.cyr"
+include "src/desktop.cyr"
+include "lib/bhumi.cyr"
+include "src/theme.cyr"
+include "src/cursor.cyr"
+include "src/render.cyr"
+include "src/wallpaper.cyr"
+include "src/launcher.cyr"
+include "src/input.cyr"
+include "src/shell_render.cyr"
+include "src/gpu.cyr"
+
+# Split `line` on spaces into a fresh argv-shaped vector; the count lands in `t_n`. Every token is its
+# own NUL-terminated copy, exactly what argv() hands main.
+var t_n = 0;
+fn t_args(line): i64 {
+    var len = strlen(line);
+    var av = alloc((len + 2) * 8);
+    var n = 0;
+    var i = 0;
+    while (i < len) {
+        while ((i < len) && (load8(line + i) == 32)) { i = i + 1; }
+        if (i < len) {
+            var st = i;
+            while ((i < len) && (load8(line + i) != 32)) { i = i + 1; }
+            var tok = alloc(i - st + 1);
+            var k = 0;
+            while (k < (i - st)) { store8(tok + k, load8(line + st + k)); k = k + 1; }
+            store8(tok + (i - st), 0);
+            store64(av + n * 8, tok);
+            n = n + 1;
+        }
+    }
+    t_n = n;
+    return av;
+}
+
+fn t_parse(line): i64 {
+    var av = t_args(line);
+    return flg_parse(t_n, av);
+}
+
+# 1 if `line` parses to RUN — the shape every working invocation must keep.
+fn t_runs(line): i64 {
+    var f = t_parse(line);
+    if (f == 0) { return 0; }
+    if (flg_kind(f) == FlgKind.FLG_RUN) { return 1; }
+    return 0;
+}
+
+# 1 if `a` is the string `b`. Null-safe, so a mutant that leaves a field 0 fails an assertion instead of
+# crashing the suite before it reaches a verdict.
+fn t_is(a, b): i64 {
+    if (a == 0) { return 0; }
+    return streq(a, b);
+}
+
+# 1 if the error names exactly `arg`. Null-safe: a record with no error argument is a 0, not a crash.
+fn t_err_names(f, arg): i64 {
+    var a = flg_err_arg(f);
+    if (a == 0) { return 0; }
+    return streq(a, arg);
+}
+
+fn main() {
+    alloc_init();
+
+    # ----- test_args_default_values (main.rs:320) --------------------------------------------------
+    test_group("flags — defaults (main.rs test_args_default_values)");
+    var d0 = t_parse("aethersafha");
+    assert_eq(flg_kind(d0), FlgKind.FLG_RUN, "no flags -> RUN");
+    assert_eq(flg_err(d0), FlgErr.FLG_E_NONE, "no flags -> no error");
+    assert_eq(flg_secure(d0), 0, "secure defaults off (Rust: !args.secure)");
+    assert_eq(flg_selftest(d0), 0, "selftest off");
+    assert_eq(flg_clients(d0), 0, "clients off");
+    assert_eq(flg_fullclear(d0), 0, "fullclear off");
+    assert_eq(flg_clearbg(d0), 0, "clearbg off");
+    assert_eq(flg_bandbg(d0), 0, "bandbg off");
+    assert_eq(flg_opacity(d0), 0 - 1, "opacity not given = -1");
+    assert_eq(flg_frames(d0), 0 - 1, "frames not given = -1 (main keeps its 400/3 default)");
+    assert_eq(flg_wallpaper(d0), 0, "wallpaper off");
+    assert_eq(flg_wp_file(d0), 0, "no wallpaper file");
+    assert_eq(flg_client_n(d0), 0, "no --client");
+    assert_eq(flg_spawn_n(d0), 0, "no --spawn");
+    # argv[0] is the program and is never read as a flag, whatever it is called.
+    assert_eq(t_runs("/bin/aethersafha"), 1, "agnos argv[0] (/bin/aethersafha) is skipped");
+    assert_eq(t_runs("--kiosk"), 1, "argv[0] is skipped even when it looks like a flag");
+
+    # ----- test_args_custom_values (main.rs:339) -------------------------------------------------
+    test_group("flags — every accepted flag at once (main.rs test_args_custom_values)");
+    var c0 = t_parse("ae --secure --selftest --clients --fullclear --clearbg --bandbg --opacity 128 --frames 600 --wallpaper /w.png --client /a --spawn thoth");
+    assert_eq(flg_kind(c0), FlgKind.FLG_RUN, "all accepted flags -> RUN");
+    assert_eq(flg_secure(c0), 1, "--secure");
+    assert_eq(flg_selftest(c0), 1, "--selftest");
+    assert_eq(flg_clients(c0), 1, "--clients");
+    assert_eq(flg_fullclear(c0), 1, "--fullclear");
+    assert_eq(flg_clearbg(c0), 1, "--clearbg");
+    assert_eq(flg_bandbg(c0), 1, "--bandbg");
+    assert_eq(flg_opacity(c0), 128, "--opacity 128");
+    assert_eq(flg_frames(c0), 600, "--frames 600");
+    assert_eq(flg_wallpaper(c0), 1, "--wallpaper given");
+    assert_eq(t_is(flg_wp_file(c0), "/w.png"), 1, "--wallpaper /w.png -> the file");
+    assert_eq(flg_client_n(c0), 1, "one --client");
+    assert_eq(t_is(flg_client_at(c0, 0), "/a"), 1, "  ...its path");
+    assert_eq(flg_spawn_n(c0), 1, "one --spawn");
+    assert_eq(t_is(flg_spawn_at(c0, 0), "thoth"), 1, "  ...its name");
+    var s0 = t_parse("ae -s");
+    assert_eq(flg_secure(s0), 1, "-s is --secure (clap short)");
+    assert_eq(flg_kind(s0), FlgKind.FLG_RUN, "-s -> RUN");
+    var s1 = t_parse("ae --secure --secure");
+    assert_eq(flg_secure(s1), 1, "a repeated boolean is harmless");
+    var z0 = t_parse("ae --frames 0");
+    assert_eq(flg_frames(z0), 0, "--frames 0 is 0 (run until quit), not 'absent'");
+    var z1 = t_parse("ae --opacity 300");
+    assert_eq(flg_opacity(z1), 300, "--opacity is passed as typed; win_set_default_opacity clamps");
+
+    # ----- repeatable and first-wins ---------------------------------------------------------------
+    test_group("flags — repeatable --client / --spawn, first-wins for single values");
+    var r0 = t_parse("ae --client /a --frames 2 --client /b --client /c");
+    assert_eq(flg_kind(r0), FlgKind.FLG_RUN, "interleaved --client -> RUN");
+    assert_eq(flg_client_n(r0), 3, "every --client is kept");
+    assert_eq(t_is(flg_client_at(r0, 0), "/a"), 1, "  ...in order (0)");
+    assert_eq(t_is(flg_client_at(r0, 1), "/b"), 1, "  ...in order (1)");
+    assert_eq(t_is(flg_client_at(r0, 2), "/c"), 1, "  ...in order (2)");
+    assert_eq(flg_frames(r0), 2, "  ...and the flag between them still reads");
+    var r1 = t_parse("ae --spawn puka --spawn crab");
+    assert_eq(flg_spawn_n(r1), 2, "every --spawn is kept");
+    assert_eq(t_is(flg_spawn_at(r1, 0), "puka"), 1, "  ...in order (0)");
+    assert_eq(t_is(flg_spawn_at(r1, 1), "crab"), 1, "  ...in order (1)");
+    var r2 = t_parse("ae --spawn notanapp");
+    assert_eq(flg_kind(r2), FlgKind.FLG_RUN, "--spawn takes ANY name; the registry check is at run time");
+    var r3 = t_parse("ae --frames 5 --frames 9 --opacity 10 --opacity 20");
+    assert_eq(flg_frames(r3), 5, "--frames: the FIRST wins (what ae_flag_int did)");
+    assert_eq(flg_opacity(r3), 10, "--opacity: the FIRST wins");
+    var r4 = t_parse("ae --wallpaper /one.png --wallpaper /two.png");
+    assert_eq(t_is(flg_wp_file(r4), "/one.png"), 1, "--wallpaper: the FIRST wins");
+    assert_eq(flg_kind(r4), FlgKind.FLG_RUN, "  ...and the second file is consumed, not stray");
+    var r5 = t_parse("ae --frames 5 --frames x");
+    assert_eq(flg_kind(r5), FlgKind.FLG_ERROR, "a later duplicate is still checked");
+
+    # ----- --wallpaper with and without a file -----------------------------------------------------
+    test_group("flags — --wallpaper [FILE]");
+    var w0 = t_parse("ae --wallpaper");
+    assert_eq(flg_wallpaper(w0), 1, "bare --wallpaper is given");
+    assert_eq(flg_wp_file(w0), 0, "  ...with no file (the gradient)");
+    var w1 = t_parse("ae --wallpaper --clients");
+    assert_eq(flg_kind(w1), FlgKind.FLG_RUN, "--wallpaper then a flag -> RUN");
+    assert_eq(flg_wp_file(w1), 0, "  ...the flag is NOT taken as the file");
+    assert_eq(flg_clients(w1), 1, "  ...and the flag itself still counts");
+    var w2 = t_parse("ae --wallpaper /x.png --frames 3");
+    assert_eq(t_is(flg_wp_file(w2), "/x.png"), 1, "--wallpaper FILE -> the file");
+    assert_eq(flg_frames(w2), 3, "  ...and parsing continues after it");
+
+    # ----- unknown flags, strays ------------------------------------------------------------------
+    test_group("flags — unknown flags are errors that name the argument");
+    var u0 = t_parse("ae --kiosk");
+    assert_eq(flg_kind(u0), FlgKind.FLG_ERROR, "--kiosk (retired Rust flag, ADR 0004) -> ERROR");
+    assert_eq(flg_err(u0), FlgErr.FLG_E_UNKNOWN, "  ...UNKNOWN");
+    assert_eq(t_err_names(u0, "--kiosk"), 1, "  ...naming --kiosk");
+    var u1 = t_parse("ae --clients --frmaes 0");
+    assert_eq(flg_err(u1), FlgErr.FLG_E_UNKNOWN, "a typo after a good flag -> UNKNOWN");
+    assert_eq(t_err_names(u1, "--frmaes"), 1, "  ...naming the typo");
+    var u2 = t_parse("ae --backend x11");
+    assert_eq(t_err_names(u2, "--backend"), 1, "--backend (retired) -> named");
+    var u3 = t_parse("ae --no-ai");
+    assert_eq(flg_err(u3), FlgErr.FLG_E_UNKNOWN, "--no-ai (retired) -> UNKNOWN");
+    var u4 = t_parse("ae --high-contrast");
+    assert_eq(flg_err(u4), FlgErr.FLG_E_UNKNOWN, "--high-contrast (retired) -> UNKNOWN");
+    var u5 = t_parse("ae --accessibility");
+    assert_eq(flg_err(u5), FlgErr.FLG_E_UNKNOWN, "--accessibility (retired) -> UNKNOWN");
+    var u6 = t_parse("ae -k");
+    assert_eq(t_err_names(u6, "-k"), 1, "-k (retired short) -> named");
+    var u7 = t_parse("ae foo");
+    assert_eq(flg_kind(u7), FlgKind.FLG_ERROR, "a bare word -> ERROR");
+    assert_eq(flg_err(u7), FlgErr.FLG_E_STRAY, "  ...STRAY");
+    assert_eq(t_err_names(u7, "foo"), 1, "  ...naming it");
+    var u8 = t_parse("ae --clients &");
+    assert_eq(flg_err(u8), FlgErr.FLG_E_STRAY, "a literal & reaching argv is a stray (agnsh strips it)");
+    var u9 = t_parse("ae --hold");
+    assert_eq(flg_err(u9), FlgErr.FLG_E_UNKNOWN, "--hold is qemu_init's, consumed before exec");
+
+    # ----- missing values -------------------------------------------------------------------------
+    test_group("flags — a value-taking flag with no value");
+    var m0 = t_parse("ae --frames");
+    assert_eq(flg_err(m0), FlgErr.FLG_E_NEEDS_VAL, "--frames last -> NEEDS_VAL");
+    assert_eq(t_err_names(m0, "--frames"), 1, "  ...naming --frames");
+    var m1 = t_parse("ae --opacity");
+    assert_eq(flg_err(m1), FlgErr.FLG_E_NEEDS_VAL, "--opacity last -> NEEDS_VAL (was: silently 255)");
+    var m2 = t_parse("ae --client");
+    assert_eq(t_err_names(m2, "--client"), 1, "--client last -> named (was: silently nothing)");
+    var m3 = t_parse("ae --spawn");
+    assert_eq(flg_err(m3), FlgErr.FLG_E_NEEDS_VAL, "--spawn last -> NEEDS_VAL");
+    var m4 = t_parse("ae --client --frames 5");
+    assert_eq(flg_err(m4), FlgErr.FLG_E_NEEDS_VAL, "--client followed by a flag -> NEEDS_VAL");
+    assert_eq(t_err_names(m4, "--client"), 1, "  ...naming --client, not a stray 5");
+    var m5 = t_parse("ae --frames -5");
+    assert_eq(flg_err(m5), FlgErr.FLG_E_NEEDS_VAL, "--frames -5: a dash word is not a value");
+
+    # ----- non-numeric values ---------------------------------------------------------------------
+    test_group("flags — a numeric flag with a non-number");
+    var n0 = t_parse("ae --frames abc");
+    assert_eq(flg_kind(n0), FlgKind.FLG_ERROR, "--frames abc -> ERROR (atoi read 0 = unbounded)");
+    assert_eq(flg_err(n0), FlgErr.FLG_E_NOT_NUMBER, "  ...NOT_NUMBER");
+    assert_eq(t_err_names(n0, "abc"), 1, "  ...naming the value");
+    assert_eq(t_is(flg_err_flag(n0), "--frames"), 1, "  ...and the flag it was for");
+    var n1 = t_parse("ae --frames 1O");
+    assert_eq(flg_err(n1), FlgErr.FLG_E_NOT_NUMBER, "--frames 1O (letter O) -> NOT_NUMBER (atoi read 1)");
+    var n2 = t_parse("ae --opacity 12abc");
+    assert_eq(flg_err(n2), FlgErr.FLG_E_NOT_NUMBER, "--opacity 12abc -> NOT_NUMBER");
+    assert_eq(t_is(flg_err_flag(n2), "--opacity"), 1, "  ...for --opacity");
+    assert_eq(flg_uint("0"), 0, "uint: 0");
+    assert_eq(flg_uint("007"), 7, "uint: leading zeros");
+    assert_eq(flg_uint("123456789012345678"), 123456789012345678, "uint: 18 digits");
+    assert_eq(flg_uint("1234567890123456789"), 0 - 1, "uint: 19 digits refused (overflow)");
+    assert_eq(flg_uint(""), 0 - 1, "uint: empty refused");
+    assert_eq(flg_uint("+5"), 0 - 1, "uint: a sign is refused");
+
+    # ----- --help / --version ---------------------------------------------------------------------
+    test_group("flags — --help and --version");
+    assert_eq(flg_kind(t_parse("ae --help")), FlgKind.FLG_HELP, "--help -> HELP");
+    assert_eq(flg_kind(t_parse("ae -h")), FlgKind.FLG_HELP, "-h -> HELP");
+    assert_eq(flg_kind(t_parse("ae --version")), FlgKind.FLG_VERSION, "--version -> VERSION");
+    assert_eq(flg_kind(t_parse("ae -V")), FlgKind.FLG_VERSION, "-V -> VERSION");
+    assert_eq(flg_kind(t_parse("ae --clients --help --bogus")), FlgKind.FLG_HELP, "--help stops the scan (clap)");
+    assert_eq(flg_kind(t_parse("ae --bogus --help")), FlgKind.FLG_ERROR, "  ...but an earlier bad flag wins");
+    assert_eq(flg_kind(t_parse("ae --version --frames")), FlgKind.FLG_VERSION, "--version stops the scan");
+    assert_eq(flg_kind(t_parse("ae --selftest --help")), FlgKind.FLG_HELP, "--help beats --selftest (no GPU run)");
+    # ⭐ The compiled-in version IS the VERSION file — the generator's job, checked from outside it.
+    var vbuf = alloc(64);
+    var vn = file_read_all("VERSION", vbuf, 63);
+    assert_gt(vn, 0, "VERSION is readable from the repo root");
+    while ((vn > 0) && (load8(vbuf + vn - 1) <= 32)) { vn = vn - 1; }
+    if (vn < 0) { vn = 0; }
+    store8(vbuf + vn, 0);
+    assert_streq(_VERSION_AETHERSAFHA, vbuf, "src/version_str.cyr matches VERSION (rerun scripts/version-bump.sh)");
+    assert_eq(_VERSION_LEN_AETHERSAFHA, strlen(_VERSION_STR_AETHERSAFHA), "the stored length is the string's");
+    assert_eq(memeq(_VERSION_STR_AETHERSAFHA, "aethersafha ", 12), 1, "--version prints 'aethersafha <version>'");
+    assert_eq(memeq(_VERSION_STR_AETHERSAFHA + 12, vbuf, vn), 1, "  ...with VERSION after the name");
+    assert_eq(load8(_VERSION_STR_AETHERSAFHA + 12 + vn), 10, "  ...then one newline");
+    assert_eq(_VERSION_LEN_AETHERSAFHA, 12 + vn + 1, "  ...and nothing else");
+
+    # ----- every invocation found in the tree and in agnos ----------------------------------------
+    test_group("flags — every invocation the harnesses use today still RUNS");
+    assert_eq(t_runs("/aethersafha --frames 0 --client /focus_client --client /focus_client"), 1, "qemu-input.py focus");
+    assert_eq(t_runs("/aethersafha --frames 0 --client /hostile_client --client /focus_client"), 1, "qemu-input.py hostile");
+    assert_eq(t_runs("/aethersafha --frames 600 --client /present_probe"), 1, "qemu-linux-desktop.sh default");
+    assert_eq(t_runs("/aethersafha --frames 600"), 1, "qemu-linux-desktop.sh with no setu");
+    assert_eq(t_runs("/aethersafha --clients"), 1, "qemu-linux-desktop.sh --clients; agnos aethersafha-clients-test.py");
+    assert_eq(t_runs("/bin/aethersafha --selftest"), 1, "agnos stage-tools.sh / burn-prep.sh --selftest");
+    assert_eq(t_runs("/bin/aethersafha"), 1, "agnos kernel main.cyr `run /bin/aethersafha`; launcher-mode harnesses");
+    assert_eq(t_runs("/bin/aethersafha --opacity 128 --client /present_probe"), 1, "agnos console-line-preserve-test.py");
+    assert_eq(t_runs("/bin/aethersafha --wallpaper /mudra.png"), 1, "agnos ae-wallpaper-load-test.py");
+
+    # ----- test_desktop_environment_new_secure_mode (main.rs:574) ---------------------------------
+    test_group("--secure applied to a desktop (main.rs test_desktop_environment_new_secure_mode)");
+    var plain = desktop_new();
+    assert_nonnull(plain, "desktop_new");
+    assert_eq(comp_secure_mode(desk_comp(plain)), 0, "a plain desktop is not in secure mode");
+    assert_eq(sec_ui_get_security_level(desk_sec(plain)), SecLevel.SEC_LVL_STANDARD, "  ...and is at Standard");
+    var sf = t_parse("ae --secure");
+    var sd = desktop_new();
+    if (flg_secure(sf) == 1) { desktop_apply_secure(sd); }
+    assert_eq(comp_secure_mode(desk_comp(sd)), 1, "--secure -> comp_secure_mode == 1 (main.rs:83)");
+    assert_eq(sec_ui_get_security_level(desk_sec(sd)), SecLevel.SEC_LVL_ELEVATED, "--secure -> security level Elevated (main.rs:84)");
+    assert_eq(sec_ui_is_emergency_mode(desk_sec(sd)), 0, "  ...and nothing else: no emergency mode");
+    assert_eq(desktop_apply_secure(0), 0, "a null desktop is refused, not dereferenced");
+
+    # ----- a lone `-` is a WORD (flg_is_flagish), so it can be a value but never a flag ---------------
+    test_group("flags — a lone '-' is a word, not a flag");
+    var dsh1 = t_parse("ae --client -");
+    assert_eq(flg_kind(dsh1), FlgKind.FLG_RUN, "--client - -> RUN (the '-' is the value)");
+    assert_eq(flg_client_n(dsh1), 1, "  ...one client");
+    assert_eq(t_is(flg_client_at(dsh1, 0), "-"), 1, "  ...called '-'");
+    var dsh2 = t_parse("ae --wallpaper -");
+    assert_eq(flg_wallpaper(dsh2), 1, "--wallpaper - -> wallpaper on");
+    assert_eq(t_is(flg_wp_file(dsh2), "-"), 1, "  ...with the file '-', not the gradient");
+    var dsh3 = t_parse("ae -");
+    assert_eq(flg_err(dsh3), FlgErr.FLG_E_STRAY, "a bare '-' is a stray word, not an unknown flag");
+    assert_eq(t_err_names(dsh3, "-"), 1, "  ...and the error names it");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

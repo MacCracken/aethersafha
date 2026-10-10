@@ -37,10 +37,23 @@ fn desktop_new(): i64 {
     store64(d + DSK_AI, ai_new());
     store64(d + DSK_SEC, sec_ui_new());   # sec_ui_new seeds the permission definitions
     store64(d + DSK_A11Y, a11y_tree_new());
+    comp_set_a11y(load64(d + DSK_COMP), load64(d + DSK_A11Y));   # the compositor mirrors its windows into it
     store64(d + DSK_GEST, desk_default_gestures());
     store64(d + DSK_PLUG, plug_host_new(16));
     store64(d + DSK_FOREIGN, vec_new());
     return d;
+}
+
+# desktop_apply_secure(d): `--secure`. Parity: rust-old/src/main.rs:82-85 — compositor secure mode on,
+# security level Elevated, in that order.
+# ⚠ In this binary neither gates anything yet: secure mode is read only by screen_capture.cyr and
+# screen_recording.cyr, which main.cyr does not link (nor did Rust's binary), and only Lockdown changes
+# a permission decision. The flag sets the state those paths read when they are linked.
+fn desktop_apply_secure(d): i64 {
+    if (d == 0) { return 0; }
+    comp_set_secure_mode(desk_comp(d), 1);
+    sec_ui_set_security_level(desk_sec(d), SecLevel.SEC_LVL_ELEVATED);
+    return 0;
 }
 
 fn desk_comp(d)  { return load64(d + DSK_COMP); }
@@ -53,19 +66,41 @@ fn desk_plug(d)  { return load64(d + DSK_PLUG); }
 fn desk_foreign(d) { return load64(d + DSK_FOREIGN); }
 fn desk_foreign_count(d): i64 { return vec_len(desk_foreign(d)); }
 
-# desktop_sync_accessibility(d): rebuild the a11y tree from the compositor's
-# window stack — one AX_ROLE_WINDOW node per window (name = window title).
-# Returns the number of window nodes added. (compositor ↔ accessibility)
+# desktop_sync_accessibility(d): RECONCILE the a11y tree with the compositor's window stack, keyed
+# by window id — remove a window node whose window is gone ("Window closed: ..."), add one for a window
+# that has none ("Window opened: ..."), then sync tree focus. -> the number of nodes added + removed.
+# ⭐ IDEMPOTENT, and normally a no-op: the compositor mirrors every create / close / focus itself
+# (comp_set_a11y, wired in desktop_new), so a 0 here means the hooks kept up. It used to APPEND a node
+# per window on every call, under tree-minted ids — a second call doubled the tree.
 fn desktop_sync_accessibility(d): i64 {
     var tree = desk_a11y(d);
-    var v = comp_windows(desk_comp(d));
-    var n = vec_len(v);
-    var i = 0;
-    while (i < n) {
-        a11y_tree_add(tree, AxRole.AX_ROLE_WINDOW, win_title(vec_get(v, i)));
-        i = i + 1;
+    var comp = desk_comp(d);
+    var changed = 0;
+    var nodes = a11y_tree_nodes(tree);
+    var i = vec_len(nodes) - 1;
+    while (i >= 0) {   # backwards: removing node i leaves 0..i-1 where they were
+        var node = vec_get(nodes, i);
+        if (a11y_node_role(node) == AxRole.AX_ROLE_WINDOW) {
+            if (comp_find_by_id(comp, a11y_node_id(node)) < 0) {
+                a11y_tree_window_close(tree, a11y_node_id(node), a11y_node_name(node));
+                changed = changed + 1;
+            }
+        }
+        i = i - 1;
     }
-    return n;
+    var v = comp_windows(comp);
+    var n = vec_len(v);
+    var j = 0;
+    while (j < n) {
+        var win = vec_get(v, j);
+        if (a11y_tree_get_node(tree, win_id(win)) == 0) {
+            a11y_tree_window_open(tree, win_id(win), win_title(win), win_x(win), win_y(win), win_w(win), win_h(win));
+            changed = changed + 1;
+        }
+        j = j + 1;
+    }
+    a11y_tree_follow_focus(tree, comp_focused_id(comp));
+    return changed;
 }
 
 # render_desktop(d, fb): the full desktop frame — compute damage, clear to the themed
@@ -217,4 +252,86 @@ fn render_desktop(d, fb): i64 {
     # of everything is not a cursor.
     render_cursor(fb);
     return 0;
+}
+
+# ============================================================================================
+# ⭐ WHAT THE RUST BINARY DID: initialize, then a 5 s status tick (rust-old/src/main.rs:112-183)
+# ============================================================================================
+
+# desktop_initialize(d, now): rust DesktopEnvironment::initialize (main.rs:112-133) — the welcome
+# notification, then proactive + ambient AI on. `now` is epoch seconds. -> 0, or -1 on OOM.
+# ⚠ ai_new already defaults both toggles on (ai_features.rs:186-187); Rust sets them again here and
+# so does this, so startup leaves them on whatever happened between construction and now.
+fn desktop_initialize(d, now): i64 {
+    var sh = desk_shell(d);
+    var nid = shell_next_notif_id(sh);
+    var note = shell_notif_new(nid, "AGNOS Desktop", "Welcome to AGNOS", "Your AI-native desktop environment", SH_NotifPriority.SH_PRIO_NORMAL, now, 0, 0);
+    if (note == 0) { return 0 - 1; }
+    shell_show_notification(sh, note);
+    var ai = desk_ai(d);
+    ai_set_proactive_mode(ai, 1);
+    ai_set_ambient_enabled(ai, 1);
+    return 0;
+}
+
+# The UserPresent source, minted once rather than per tick: the arena never frees.
+# ⚠ THE TICK STILL LEAKS ITS EVENT: a 40 B ContextEvent per tick (56 B measured), kept by the history
+# and orphaned when its cap drops it — about 1 MB/day at 5 s. Recycling it is ai_features' to do.
+var desk_src_desktop = 0;
+var desk_evt_seq = 0;   # parity: Uuid::new_v4 per event -> monotonic i64 (ADR 0003)
+
+# desktop_status_tick(d, now): rust update_system_status (main.rs:163-183). Writes the shell status,
+# then sends the AI context a UserPresent event from "desktop". `now` is epoch seconds. -> 0 / -1.
+# ⛔ TWO FIELDS DIVERGE ON PURPOSE. Rust hardcoded `Connected` and `agent_count: 0` (main.rs:173-174)
+# with nothing measuring either. Net is UNKNOWN until a producer exists; agents is the live count of
+# the ai_features agent registry (0 until daimon feeds it).
+# ⚠ cpu/mem/disk are -1 when unmeasured, where Rust's `unwrap_or(0.0)` reported a plausible 0.
+# ⚠ Written in place rather than through a fresh `shell_status_new`: same fields, no 48 B per tick.
+fn desktop_status_tick(d, now): i64 {
+    var sh = desk_shell(d);
+    var st = shell_status(sh);
+    if (st == 0) { return 0 - 1; }
+    shell_status_set_cpu(st, sysp_cpu_permille_now());
+    shell_status_set_mem(st, sysp_mem_permille_now());
+    shell_status_set_disk(st, sysp_disk_permille_now());
+    shell_status_set_battery(st, shell_battery_none());
+    shell_status_set_net(st, SH_NetStatus.SH_NET_UNKNOWN);
+    var ai = desk_ai(d);
+    shell_set_agent_count(sh, ai_agent_hud_count(ai));
+    if (desk_src_desktop == 0) { desk_src_desktop = str_from("desktop"); }
+    desk_evt_seq = desk_evt_seq + 1;
+    var ev = ai_event_new(desk_evt_seq, AI_ContextEventType.AI_CE_USER_PRESENT, desk_src_desktop, now, 0);
+    if (ev == 0) { return 0 - 1; }
+    ai_update_context(ai, ev);
+    return 0;
+}
+
+# rust: tokio::time::interval(Duration::from_secs(5)) (main.rs:140).
+var DESK_TICK_US = 5000000;
+
+# PURE: is the status tick due this frame? -> 1 / 0.
+#   now_us  — ae_now_us() this frame (-1 when #95 cannot answer)
+#   last_us — now_us of the last tick, -1 before the first
+# ⭐ ON A CLOCK, because Rust's tick is 5 s, not N frames: a frame count is 5 s at one frame rate only.
+# Monotonic (#95 uptime_us / CLOCK_MONOTONIC), not epoch, so a wall-clock step cannot stall it.
+# ⚠ No clock -> the frame cadence (`frame % every == 0`), never "never": a panel that stops updating
+# reads as a frozen machine. Both arms tick on the first frame, as tokio's first tick is immediate.
+# ⚠ A clock that runs backwards re-arms rather than waiting for it to catch up.
+fn desk_tick_due(now_us, last_us, frame, every): i64 {
+    if (now_us < 0) { return sysp_should_sample(frame, every); }
+    if (last_us < 0) { return 1; }
+    if (now_us < last_us) { return 1; }
+    if (now_us - last_us >= DESK_TICK_US) { return 1; }
+    return 0;
+}
+
+var desk_last_tick_us = 0 - 1;
+
+# desktop_status_poll(d, now_us, frame, every): the frame loop's call — tick when due. -> 1 ticked.
+# ⚠ The epoch read happens only on a due frame; this runs every frame.
+fn desktop_status_poll(d, now_us, frame, every): i64 {
+    if (desk_tick_due(now_us, desk_last_tick_us, frame, every) == 0) { return 0; }
+    if (now_us >= 0) { desk_last_tick_us = now_us; }
+    desktop_status_tick(d, clock_epoch_secs());
+    return 1;
 }

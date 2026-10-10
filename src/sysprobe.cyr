@@ -1,24 +1,26 @@
-# sysprobe.cyr — REAL numbers for the shell panel.
+# sysprobe.cyr — the panel's cpu / mem / disk readings, from the sources Rust's binary read.
+# Parity: rust-old/src/main.rs  (parse_cpu_line, read_cpu_usage, read_memory_usage, read_disk_usage)
 #
-# ⛔⛔ WHY THIS EXISTS. `render_shell_panel` has drawn cpu / mem / disk gauges and an agent count
-# since M7-F (0.16.4), and **nothing has ever fed them**: `shell_new` seeds `shell_status_new(0, 0,
-# 0, …)` with literal zeros. The panel has been showing four fabricated 0% bars on every burn. That
-# is the pattern named across this whole arc — state that exists with no producer — and it is the
-# reason the arc keeps shipping surfaces that look finished and are not.
+# Rust's status tick (`update_system_status`, main.rs:163-185) fed the panel from those four readers
+# (main.rs:213-290). What each gauge reads here:
 #
-# ⛔ NOT EVERY GAUGE HAS A SOURCE, AND THE HONEST ANSWER IS "UNKNOWN", NOT "0".
-#   · **mem**    — REAL. agnos `#35 sysinfo` gives totalram/freeram; Linux `#99` the same fields at
-#                  different offsets. `lib/sys.cyr` owns both layouts (see the manifest note).
-#   · **agents** — REAL. the `ai_features` agent-HUD registry is an actual live count.
-#   · **cpu**    — **NO SOURCE.** agnos exposes no loadavg and no per-process CPU accounting; the ABI
-#                  has nothing to read. Reports UNKNOWN on both targets rather than inventing one.
-#   · **disk**   — **NO SOURCE.** agnos has **no statfs / free-space syscall at all** (`st_blocks` in
-#                  `#33 stat` is per-FILE, not per-filesystem). Reports UNKNOWN.
+#          Linux                                                 agnos
+#   cpu    /proc/stat "cpu " line, from one call to the next     UNKNOWN (below)
+#   mem    /proc/meminfo MemTotal / MemAvailable                 sysinfo #35 totalram / freeram
+#   disk   statfs("/") f_blocks / f_bavail                       statfs #103 on "/", the same two fields
 #
-# ⛔ A 0% GAUGE AND AN UNKNOWN GAUGE MUST NOT RENDER THE SAME. `0%` reads as "idle" — a confident
-# claim — where `--%` reads as "not measured". This is the identical lesson to `#95 uptime_us`
-# returning -1 instead of a plausible 0, and to `ft_mean` refusing to average nothing. The panel
-# would otherwise assert, every frame, on every burn, that the disk is empty and the CPU is asleep.
+# ⛔ agnos KEEPS NO IDLE COUNT, SO IT HAS NO CPU UTILISATION TO GIVE. #35's per-core band charges every
+# 100 Hz tick to user or kernel by the ring it interrupted (agnos kernel/arch/x86_64/pic.cyr), so user +
+# kernel is the elapsed tick count, but the kernel half includes every tick taken halted in `arch_wait`
+# or the idle step ("system + halted", agnos-userland-abi.md §4.4). Rust's figure is non-idle over total;
+# user / (user + kernel) is %us, which reads a syscall-bound desktop as idle. #99's per-process ticks do
+# skip halted ones, but a process reaped between two samples takes its count with it.
+# ⚠ agnos `freeram` is the pages its PMM has not handed out. agnos has no page cache, swap or reclaim, so
+# that is what Linux calls MemAvailable. Linux's own sysinfo `freeram` is MemFree, which leaves out
+# reclaimable cache (on the dev host, 923 permille used against MemAvailable's 208), so the Linux arm
+# reads /proc/meminfo, as Rust did.
+# ⚠ Every reading is PERMILLE (0..1000, truncated), and one that cannot be made is UNKNOWN (-1), drawn
+# `--%`. Rust drew 0 (`unwrap_or(0.0)`), a claim nobody made (ADR 0003). The agent gauge is not fed here.
 
 # ⚠ EXPLICIT, because declaring "sys" in `[deps].stdlib` was ACCEPTED AND SILENTLY IGNORED — the
 # manifest took the entry, `cyrius deps` reported success, and `lib/sys.cyr` still never entered the
@@ -29,19 +31,279 @@ include "lib/sys.cyr"
 # The sentinel. ⚠ Any value < 0 is unknown; -1 is what producers emit.
 var SYSP_UNKNOWN = 0 - 1;
 
+# What sysp_parse_u64 returns instead of a value (values are >= 0): a token Rust's `u64::from_str`
+# rejects, and one it accepts that is above 2^63 - 1. Rust keeps the second; an i64 cannot hold it, so
+# a reading that contains one is UNKNOWN.
+var SYSP_TOK_BAD = 0 - 1;
+var SYSP_TOK_WIDE = 0 - 2;
+var SYSP_I64_MAX = 0x7FFFFFFFFFFFFFFF;
+
 # ---- Pure rules -----------------------------------------------------------------------------
 
-# PURE: used-memory in PERMILLE (0..1000) from total/free BYTE counts. -1 when unbelievable.
+# PURE: part / whole in PERMILLE, truncated, for 0 <= part <= whole and whole > 0 (callers check).
+# ⚠ Multiply before dividing — `(part / whole) * 1000` is 0 for every part below whole. When
+# `part * 1000` would overflow (whole above 2^63 / 1000), both are scaled down first, which can cost the
+# last permille. No real reading comes near that, but the rule stays total.
+fn sysp_ratio_permille(part, whole): i64 {
+    if (whole > SYSP_I64_MAX / 1000) { return ((part / 1000) * 1000) / (whole / 1000); }
+    return (part * 1000) / whole;
+}
+
+# PURE: the used share of a capacity, Rust's `(total - available) / total` (main.rs:268-273 for memory,
+# :284-289 for disk), in permille. A zero total is 0, as in Rust. UNKNOWN for a negative input, and for
+# available above total, where Rust returned a negative percentage.
 # ⛔ PERMILLE, NOT PERCENT — `SH_StatusOff` documents every gauge field as permille (the port's
 # representation of rust's f32 percent). Emitting percent here would under-report by 10x and look
 # entirely plausible on a bar that tops out at 100.
-# ⚠ Multiply before dividing — `(used / total) * 1000` is 0 for any machine with >1000 bytes of RAM,
-# the same defect `ft_pct` exists to avoid.
-fn sysp_mem_permille(total, free): i64 {
-    if (total <= 0) { return SYSP_UNKNOWN; }
-    if (free < 0)   { return SYSP_UNKNOWN; }
-    if (free > total) { return SYSP_UNKNOWN; }
-    return (total - free) * 1000 / total;
+fn sysp_used_permille(total, avail): i64 {
+    if (total < 0) { return SYSP_UNKNOWN; }
+    if (avail < 0) { return SYSP_UNKNOWN; }
+    if (total == 0) { return 0; }
+    if (avail > total) { return SYSP_UNKNOWN; }
+    return sysp_ratio_permille(total - avail, total);
+}
+
+# PURE: byte length of the whitespace character at s[i] (i < n), or 0. Rust's `split_whitespace` splits
+# on Unicode White_Space: the six ASCII ones (\t \n \v \f \r and space) and, in UTF-8, U+0085, U+00A0,
+# U+1680, U+2000-U+200A, U+2028, U+2029, U+202F, U+205F and U+3000. procfs writes only ASCII; the rest
+# are matched so the parser splits wherever Rust's did.
+fn sysp_ws_len(s, i, n): i64 {
+    var c = load8(s + i);
+    if (c == 32) { return 1; }
+    if (c >= 9) { if (c <= 13) { return 1; } }
+    if (c < 0xC2) { return 0; }
+    if (i + 1 >= n) { return 0; }
+    var c1 = load8(s + i + 1);
+    if (c == 0xC2) {
+        if (c1 == 0x85) { return 2; }
+        if (c1 == 0xA0) { return 2; }
+        return 0;
+    }
+    if (i + 2 >= n) { return 0; }
+    var c2 = load8(s + i + 2);
+    if (c == 0xE1) {
+        if (c1 == 0x9A) { if (c2 == 0x80) { return 3; } }
+        return 0;
+    }
+    if (c == 0xE2) {
+        if (c1 == 0x80) {
+            if (c2 >= 0x80) { if (c2 <= 0x8A) { return 3; } }
+            if (c2 == 0xA8) { return 3; }
+            if (c2 == 0xA9) { return 3; }
+            if (c2 == 0xAF) { return 3; }
+            return 0;
+        }
+        if (c1 == 0x81) { if (c2 == 0x9F) { return 3; } }
+        return 0;
+    }
+    if (c == 0xE3) { if (c1 == 0x80) { if (c2 == 0x80) { return 3; } } }
+    return 0;
+}
+
+# PURE: index of the first non-whitespace byte of s[i, n), or n.
+fn sysp_tok_start(s, i, n): i64 {
+    var j = i;
+    while (j < n) {
+        var w = sysp_ws_len(s, j, n);
+        if (w == 0) { return j; }
+        j = j + w;
+    }
+    return n;
+}
+
+# PURE: index just past the token that starts at s[i].
+fn sysp_tok_end(s, i, n): i64 {
+    var j = i;
+    while (j < n) {
+        if (sysp_ws_len(s, j, n) != 0) { return j; }
+        j = j + 1;
+    }
+    return n;
+}
+
+# PURE: compare `n` ASCII digits at p with the digit literal `lit` -> -1 / 0 / 1.
+fn sysp_digits_cmp(p, lit, n): i64 {
+    var k = 0;
+    while (k < n) {
+        var a = load8(p + k);
+        var b = load8(lit + k);
+        if (a < b) { return 0 - 1; }
+        if (a > b) { return 1; }
+        k = k + 1;
+    }
+    return 0;
+}
+
+# PURE: Rust's `u64::from_str` on the token s[a, b): its value, SYSP_TOK_BAD where Rust returns Err, or
+# SYSP_TOK_WIDE. Rust takes ASCII digits after at most one leading '+' (a '-', or a '+' alone, is an
+# error for an unsigned type), leading zeros included, up to 18446744073709551615.
+fn sysp_parse_u64(s, a, b): i64 {
+    var i = a;
+    if (i < b) { if (load8(s + i) == 43) { i = i + 1; } }
+    if (i >= b) { return SYSP_TOK_BAD; }
+    var k = i;
+    while (k < b) {
+        var c = load8(s + k);
+        if (c < 48) { return SYSP_TOK_BAD; }
+        if (c > 57) { return SYSP_TOK_BAD; }
+        k = k + 1;
+    }
+    while (i < b - 1) {
+        if (load8(s + i) != 48) { break; }
+        i = i + 1;
+    }
+    var nd = b - i;
+    if (nd > 20) { return SYSP_TOK_BAD; }
+    if (nd == 20) {
+        if (sysp_digits_cmp(s + i, "18446744073709551615", 20) > 0) { return SYSP_TOK_BAD; }
+        return SYSP_TOK_WIDE;
+    }
+    if (nd == 19) {
+        if (sysp_digits_cmp(s + i, "9223372036854775807", 19) > 0) { return SYSP_TOK_WIDE; }
+    }
+    var v = 0;
+    while (i < b) {
+        v = v * 10 + (load8(s + i) - 48);
+        i = i + 1;
+    }
+    return v;
+}
+
+# PURE: rust `parse_cpu_line` (main.rs:215-228) over s[0, n). Skips the first token, keeps every token
+# that parses as a u64, and needs four of them: total = their sum, idle = field 3 + field 4 (0 when there
+# is no field 4). -> 1 with out+0 = total and out+8 = idle, or 0 for None — also for a field or a sum
+# above 2^63 - 1, which Rust's u64 holds (or, for the sum, overflows) and an i64 cannot.
+# ⚠ Rust sums every field, guest and guest_nice included, though the kernel already counts those two
+# inside user and nice. Kept: the number is Rust's.
+fn sysp_parse_cpu_line(s, n, out): i64 {
+    var i = sysp_tok_end(s, sysp_tok_start(s, 0, n), n);
+    var nf = 0;
+    var total = 0;
+    var f3 = 0;
+    var f4 = 0;
+    while (i < n) {
+        var a = sysp_tok_start(s, i, n);
+        if (a >= n) { break; }
+        var b = sysp_tok_end(s, a, n);
+        var v = sysp_parse_u64(s, a, b);
+        if (v == SYSP_TOK_WIDE) { return 0; }
+        if (v >= 0) {
+            if (total > SYSP_I64_MAX - v) { return 0; }
+            total = total + v;
+            if (nf == 3) { f3 = v; }
+            if (nf == 4) { f4 = v; }
+            nf = nf + 1;
+        }
+        i = b;
+    }
+    if (nf < 4) { return 0; }
+    store64(out, total);
+    store64(out + 8, f3 + f4);
+    return 1;
+}
+
+# PURE: does the line s[0, n) start with the k bytes of `lit`? -> 1 / 0.
+fn sysp_starts(s, n, lit, k): i64 {
+    if (n < k) { return 0; }
+    return memeq(s, lit, k);
+}
+
+# PURE: byte length of the line that starts at text[ls] (up to, not including, its '\n').
+# ⚠ A "\r\n" line keeps its '\r' here, where Rust's `lines()` drops it. Every reader below only tests a
+# prefix and splits on whitespace, and '\r' is whitespace, so the results are the same.
+fn sysp_line_len(text, ls, n): i64 {
+    var le = ls;
+    while (le < n) {
+        if (load8(text + le) == 10) { return le - ls; }
+        le = le + 1;
+    }
+    return n - ls;
+}
+
+# PURE: rust `read_cpu_usage`'s `lines().find(|l| l.starts_with("cpu "))` then `parse_cpu_line`, over a
+# /proc/stat text. Only the FIRST "cpu " line is tried, as in Rust. -> 1 / 0, as sysp_parse_cpu_line.
+fn sysp_stat_cpu_sample(text, n, out): i64 {
+    var ls = 0;
+    while (ls < n) {
+        var ll = sysp_line_len(text, ls, n);
+        if (sysp_starts(text + ls, ll, "cpu ", 4) == 1) { return sysp_parse_cpu_line(text + ls, ll, out); }
+        ls = ls + ll + 1;
+    }
+    return 0;
+}
+
+# PURE: rust `read_cpu_usage`'s arithmetic (main.rs:242-248) over two (total, idle) samples: saturating
+# deltas, and a window with no ticks in it is 0, as in Rust. -> permille, or UNKNOWN for a negative
+# input and for idle growing by more than total, where Rust returned a negative percentage.
+fn sysp_cpu_permille(t1, i1, t2, i2): i64 {
+    if (t1 < 0) { return SYSP_UNKNOWN; }
+    if (i1 < 0) { return SYSP_UNKNOWN; }
+    if (t2 < 0) { return SYSP_UNKNOWN; }
+    if (i2 < 0) { return SYSP_UNKNOWN; }
+    var dt = 0;
+    if (t2 > t1) { dt = t2 - t1; }
+    var di = 0;
+    if (i2 > i1) { di = i2 - i1; }
+    if (dt == 0) { return 0; }
+    if (di > dt) { return SYSP_UNKNOWN; }
+    return sysp_ratio_permille(dt - di, dt);
+}
+
+# No syscalls, no globals — but it UPDATES `st`: one CPU producer call. `st` is the previous sample,
+# {have 0/1 @0, total @8, idle @16}, and is overwritten with this one; `ok` says whether this call read
+# one. -> permille / UNKNOWN.
+# ⚠ Rust read /proc/stat twice 100 ms apart inside one call. A frame loop cannot sleep for that, so the
+# window is the time since the previous call — the caller's interval — and the first call, with nothing
+# to difference against, is UNKNOWN. A failed read forgets the previous sample, so no reading spans one.
+fn sysp_cpu_step(st, ok, total, idle): i64 {
+    if (ok != 1) {
+        store64(st, 0);
+        return SYSP_UNKNOWN;
+    }
+    var r = SYSP_UNKNOWN;
+    if (load64(st) == 1) { r = sysp_cpu_permille(load64(st + 8), load64(st + 16), total, idle); }
+    store64(st, 1);
+    store64(st + 8, total);
+    store64(st + 16, idle);
+    return r;
+}
+
+# PURE: the u64 in the second whitespace token of the line s[0, n) — Rust's
+# `split_whitespace().nth(1).and_then(|v| v.parse().ok())` — or SYSP_TOK_BAD when there is none.
+fn sysp_nth1_u64(s, n): i64 {
+    var a = sysp_tok_start(s, sysp_tok_end(s, sysp_tok_start(s, 0, n), n), n);
+    if (a >= n) { return SYSP_TOK_BAD; }
+    return sysp_parse_u64(s, a, sysp_tok_end(s, a, n));
+}
+
+# PURE: rust `read_memory_usage` (main.rs:252-274) over a /proc/meminfo text: the second token of the
+# "MemTotal:" and "MemAvailable:" lines. A later line of either kind overwrites an earlier one, and the
+# scan stops once both are set, as Rust's loop does. -> permille, or UNKNOWN when either is missing or
+# does not parse.
+fn sysp_meminfo_permille(text, n): i64 {
+    var tot = SYSP_TOK_BAD;
+    var avl = SYSP_TOK_BAD;
+    var ls = 0;
+    while (ls < n) {
+        var ll = sysp_line_len(text, ls, n);
+        if (sysp_starts(text + ls, ll, "MemTotal:", 9) == 1) {
+            tot = sysp_nth1_u64(text + ls, ll);
+        } elif (sysp_starts(text + ls, ll, "MemAvailable:", 13) == 1) {
+            avl = sysp_nth1_u64(text + ls, ll);
+        }
+        if (tot != SYSP_TOK_BAD) { if (avl != SYSP_TOK_BAD) { break; } }
+        ls = ls + ll + 1;
+    }
+    if (tot < 0) { return SYSP_UNKNOWN; }
+    if (avl < 0) { return SYSP_UNKNOWN; }
+    return sysp_used_permille(tot, avl);
+}
+
+# PURE: rust `read_disk_usage` (main.rs:277-290) over a filled statfs record: f_blocks against f_bavail,
+# the space an unprivileged writer can still use, not f_bfree. Rust called statvfs; glibc fills its
+# f_blocks and f_bavail from statfs(2), so the ratio is the same. Offsets per target are lib's `Statfs`.
+fn sysp_statfs_permille(sfs): i64 {
+    return sysp_used_permille(load64(sfs + STATFS_BLOCKS), load64(sfs + STATFS_BAVAIL));
 }
 
 # PURE: is this gauge value a real measurement? -> 1 / 0.
@@ -50,22 +312,82 @@ fn sysp_is_known(v): i64 {
     return 1;
 }
 
-# ---- Producers ------------------------------------------------------------------------------
-
-# Used-memory percent from the live kernel, or -1 if the read failed.
-# ⛔ Goes through `sys_sysinfo` + `sysinfo_total_memory` / `sysinfo_free_memory` rather than reading
-# offsets here: agnos and Linux disagree on BOTH the offsets and the scaling (Linux multiplies by
-# `mem_unit`), and hand-rolling it is how a plausible wrong number gets shipped.
-fn sysp_mem_permille_now(): i64 {
-    var info[120];                       # >= SYSINFO_SIZE on both targets (agnos 40, Linux 120)
-    if (sys_sysinfo(&info) != 0) { return SYSP_UNKNOWN; }
-    return sysp_mem_permille(sysinfo_total_memory(&info), sysinfo_free_memory(&info));
+# PURE: how much of a read that returned `got` bytes into a `cap`-byte buffer is WHOLE lines: all of it
+# when the file ended inside the buffer, else up to the last '\n'. -1 for a failed read, or no '\n'.
+# ⚠ A buffer that filled may have cut its last line, and a cut "cpu " line parses as fewer fields — a
+# smaller total, a plausible wrong number — so the parsers only ever see whole lines.
+fn sysp_whole_lines(buf, got, cap): i64 {
+    if (got < 0) { return 0 - 1; }
+    if (got < cap) { return got; }
+    var k = got;
+    while (k > 0) {
+        if (load8(buf + k - 1) == 10) { return k; }
+        k = k - 1;
+    }
+    return 0 - 1;
 }
 
-# ⚠ NO SOURCE ON EITHER TARGET — see the banner. These exist so the call sites are honest and so the
-# day a syscall lands there is exactly one place to change.
-fn sysp_cpu_permille_now(): i64  { return SYSP_UNKNOWN; }
-fn sysp_disk_permille_now(): i64 { return SYSP_UNKNOWN; }
+# ---- Producers ------------------------------------------------------------------------------
+
+# Read the start of a /proc file into buf[0, cap) -> the length of its whole lines, or -1. Rust read the
+# whole file; 4 KB holds all of /proc/meminfo, and /proc/stat's first line is the only one used.
+fn sysp_read_lines(path, buf, cap): i64 {
+    return sysp_whole_lines(buf, file_read_all(path, buf, cap), cap);
+}
+
+# Used-memory permille from the live kernel, or UNKNOWN.
+fn sysp_mem_permille_now(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    # ⛔ Through `sys_sysinfo` + the accessors, never offsets read here: lib/sys.cyr owns both targets'
+    # layouts and Linux's mem_unit scaling.
+    var si[SYSINFO_SIZE];
+    if (sys_sysinfo(&si) != 0) { return SYSP_UNKNOWN; }
+    return sysp_used_permille(sysinfo_total_memory(&si), sysinfo_free_memory(&si));
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var mtext[4096];
+    var mn = sysp_read_lines("/proc/meminfo", &mtext, 4096);
+    if (mn < 0) { return SYSP_UNKNOWN; }
+    return sysp_meminfo_permille(&mtext, mn);
+    #endif
+}
+
+# The previous /proc/stat sample, for sysp_cpu_step: {have, total, idle}.
+var sysp_cpu_st[3];
+
+# Used-CPU permille since the previous call, or UNKNOWN (always on agnos — see the banner).
+fn sysp_cpu_permille_now(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return SYSP_UNKNOWN;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var ctext[4096];
+    var smp[16];
+    store64(&smp, 0);
+    store64(&smp + 8, 0);
+    var ok = 0;
+    var cn = sysp_read_lines("/proc/stat", &ctext, 4096);
+    if (cn >= 0) { ok = sysp_stat_cpu_sample(&ctext, cn, &smp); }
+    return sysp_cpu_step(&sysp_cpu_st, ok, load64(&smp), load64(&smp + 8));
+    #endif
+}
+
+# Used-disk permille of the filesystem holding "/", or UNKNOWN when statfs fails.
+fn sysp_disk_permille_now(): i64 {
+    var sfs[STATFS_BUFSZ];
+    var r = 0;
+    #ifdef CYRIUS_TARGET_AGNOS
+    # ⚠ ONE NAME, TWO CONTRACTS: agnos's #103 is (path, pathlen, buf), every other target's (path, buf).
+    # ⚠ On a FAT or exFAT root #103 scans the whole FAT or allocation bitmap per call (agnos ABI §4.7);
+    # ext2 answers from its superblock.
+    r = sys_statfs("/", 1, &sfs);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    r = sys_statfs("/", &sfs);
+    #endif
+    if (r != 0) { return SYSP_UNKNOWN; }
+    return sysp_statfs_permille(&sfs);
+}
 
 # PURE: should the panel re-sample this frame? Sampling every frame costs a syscall per frame for a
 # number that moves on a human timescale. -> 1 / 0.

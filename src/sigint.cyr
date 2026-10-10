@@ -1,0 +1,98 @@
+# sigint.cyr — SIGINT ends the Linux desktop through the SAME teardown Ctrl+Q runs.
+#
+# Rust's run loop selected on `signal::ctrl_c()`, broke out and ran `shutdown()`
+# (rust-old/src/main.rs:152-159). The port's Linux build kept the DEFAULT disposition, so Ctrl+C
+# killed the process outright: no listener close, no clients told to close, no AT EXIT timing.
+#
+# ⭐ NO HANDLER. SIGINT is BLOCKED and read from a non-blocking signalfd once per frame, so the frame
+# loop sees it as one more input and drops `running` exactly where Ctrl+Q does — one exit path, not a
+# second one that has to be kept in step with it. Nothing runs asynchronously.
+# ⚠ THE PRICE: SIGINT is seen only when the loop reaches its next frame. A compositor wedged inside a
+# blocking client read (setu's reads have no timeout) never does, so Ctrl+C no longer ends it — Ctrl+\
+# (SIGQUIT) or `kill` (SIGTERM) still do, both at their default disposition.
+#
+# ⚠ agnos: compiled to no-ops. The mechanism exists there (kill#16, sigprocmask#17, signalfd#18), but
+# SIGINT has NO default action on agnos (kill only sets a pending bit) and the console delivers Ctrl+C
+# as byte 3, not a signal — so nothing there skips the teardown, and nothing here needs to catch it.
+
+var SIGI_PROBE_EXIT = 130;   # an interrupted --clients probe: 128 + SIGINT, the shell's own convention
+var sigi_fd = 0 - 1;         # the signalfd; -1 = not set up (agnos, or setup refused — default disposition)
+var sigi_set = 0;            # 8-byte sigset holding SIGINT (heap)
+var sigi_old = 0;            # 8-byte sigset: the mask BEFORE setup, which a spawned child gets back
+var sigi_seen = 0;           # latched: at least one SIGINT has been consumed this run
+var sigi_info[16];           # one signalfd_siginfo (128 bytes; module scope, so 16 x u64)
+
+# Block SIGINT and open the signalfd that reports it. -> the fd (>= 0), or a negative errno with the
+# disposition left at its default. Idempotent.
+fn sigi_setup(): i64 {
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (sigi_fd >= 0) { return sigi_fd; }
+    sigi_set = sigset_new();
+    sigi_old = sigset_new();
+    if (sigi_set == 0) { return 0 - 12; }
+    if (sigi_old == 0) { return 0 - 12; }
+    sigset_add(sigi_set, SIGINT);
+    # ⛔ THE fd BEFORE THE BLOCK. Blocking first and then failing to open the fd would leave SIGINT
+    # blocked with nobody reading it — Ctrl+C would do NOTHING, which is worse than the default kill.
+    var fd = sys_signalfd(0 - 1, sigi_set, SFD_NONBLOCK | SFD_CLOEXEC);
+    if (fd < 0) { return fd; }
+    var rc = sys_sigprocmask(SIG_BLOCK, sigi_set, sigi_old);
+    if (rc < 0) {
+        sys_close(fd);
+        return rc;
+    }
+    sigi_fd = fd;
+    return fd;
+    #endif
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
+}
+
+# Consume every pending SIGINT. -> how many were consumed (0 when none, or when not set up).
+# ⚠ Standard signals do not queue: any number of Ctrl+C presses between two polls reads as ONE.
+fn sigi_poll(): i64 {
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (sigi_fd < 0) { return 0; }
+    var got = 0;
+    var reads = 0;
+    while (reads < 8) {
+        var n = sys_read(sigi_fd, &sigi_info, 128);
+        if (n != 128) { break; }                      # -EAGAIN: nothing (more) pending
+        if ((load64(&sigi_info) & 0xFFFFFFFF) == SIGINT) { got = got + 1; }   # ssi_signo (u32 at 0)
+        reads = reads + 1;
+    }
+    if (got > 0) { sigi_seen = 1; }
+    return got;
+    #endif
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+}
+
+# In a forked child, BEFORE execve: give back the mask the compositor had before setup, and close the
+# signalfd. -> the sigprocmask result (0), or 0 when there was nothing to undo.
+# ⛔ A BLOCKED MASK SURVIVES fork AND execve (only handlers are reset), so without this every client
+# the compositor launches is born deaf to Ctrl+C, for good. The fd is CLOEXEC already; closing it here
+# also covers the failed-execve exit path.
+fn sigi_child_reset(): i64 {
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (sigi_fd < 0) { return 0; }   # never set up (or refused): the mask is still the one we were given
+    sys_close(sigi_fd);
+    sigi_fd = 0 - 1;
+    return sys_sigprocmask(SIG_SETMASK, sigi_old, 0);
+    #endif
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+}
+
+# Whether an interrupted --clients probe must answer SIGI_PROBE_EXIT instead of its ladder. 1 / 0.
+# ⭐ Only a verdict the interrupt could have TRUNCATED is replaced: 94 and 93 mean "ran its whole budget
+# and they did not arrive", which an interrupted run cannot claim. 95 (both presented) is an answer
+# already in hand, and 92/91 are facts about boot, so those stand.
+fn sigi_probe_truncated(seen, accepted): i64 {
+    if (seen != 1) { return 0; }
+    if (accepted >= 2) { return 0; }
+    return 1;
+}

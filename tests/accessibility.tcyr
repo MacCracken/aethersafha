@@ -2,9 +2,10 @@
 # Mirrors rust-old/src/accessibility.rs #[cfg(test)] behaviors against the
 # Cyrius port in src/accessibility.cyr.
 #
-# accessibility.cyr is self-contained: it uses only stdlib intrinsics
-# (alloc/load64/store64/load8/strlen) and stdlib containers (vec_*), all
-# auto-prepended via cyrius.cyml [deps.stdlib]. No src/ includes are needed.
+# accessibility.cyr uses stdlib intrinsics (alloc/load64/store64/load8/strlen)
+# and stdlib containers (vec_*), auto-prepended via cyrius.cyml [deps.stdlib];
+# its window mirror (a11y_tree_window_open) also needs rect_new from geom.cyr.
+include "src/geom.cyr"
 include "src/accessibility.cyr"
 
 # assert(cond) passes only when cond == 1; normalize a non-zero pointer to 1.
@@ -59,6 +60,22 @@ fn main() {
     assert_eq(a11y_state_disabled(dstate), 0, "state disabled false");
     assert_eq(a11y_state_hidden(dstate), 0, "state hidden false");
     assert_eq(a11y_state_value(dstate), 0, "state value None (0)");
+    var ddesc = a11y_state_description(dstate);
+    assert(t_ok(ddesc), "state description is a string, not None");
+    if (ddesc != 0) { assert_eq(strlen(ddesc), 0, "state description is empty"); }
+    # test_accessibility_state_default proper: the state struct itself, not one reached through a node.
+    var sd = a11y_state_new();
+    assert(t_ok(sd), "state_new non-null");
+    assert_eq(a11y_state_focused(sd), 0, "default focused false");
+    assert_eq(a11y_state_selected(sd), 0, "default selected false");
+    assert_eq(a11y_state_expanded(sd), 0, "default expanded false");
+    assert_eq(a11y_state_checked(sd), AxTristate.AX_TRISTATE_NONE, "default checked None");
+    assert_eq(a11y_state_disabled(sd), 0, "default disabled false");
+    assert_eq(a11y_state_hidden(sd), 0, "default hidden false");
+    assert_eq(a11y_state_value(sd), 0, "default value None");
+    var sdesc = a11y_state_description(sd);
+    assert(t_ok(sdesc), "default description is a string, not None");
+    if (sdesc != 0) { assert_eq(strlen(sdesc), 0, "default description is empty"); }
 
     # ------------------------------------------------------------------
     # test_remove_node + test_remove_nonexistent_node
@@ -192,16 +209,136 @@ fn main() {
     # test_announcements + test_announcements_empty
     # ------------------------------------------------------------------
     test_group("a11y — announcements");
+    var etree0 = a11y_tree_new();
+    var none_pending = a11y_tree_pending_announcements(etree0);
+    assert(t_ok(none_pending), "test_announcements_empty: drain of a fresh tree is a vec");
+    assert_eq(vec_len(none_pending), 0, "test_announcements_empty: nothing pending");
     var atree = a11y_tree_new();
     a11y_tree_announce(atree, "Window opened");
     a11y_tree_announce(atree, "Focus moved to OK button");
     assert_eq(a11y_tree_announcement_count(atree), 2, "2 pending announcements");
     var pending = a11y_tree_pending_announcements(atree);
     assert_eq(vec_len(pending), 2, "drained queue has 2 entries");
-    var first_msg = vec_get(pending, 0);
-    var first_ok = a11y_cstr_icontains(first_msg, "Window opened");
-    assert_eq(first_ok, 1, "first announcement text");
+    assert_eq(streq(vec_get(pending, 0), "Window opened"), 1, "pending[0] == \"Window opened\"");
+    assert_eq(streq(vec_get(pending, 1), "Focus moved to OK button"), 1, "pending[1] == \"Focus moved to OK button\"");
     assert_eq(a11y_tree_announcement_count(atree), 0, "queue drained to 0");
+    var again = a11y_tree_pending_announcements(atree);
+    assert_eq(vec_len(again), 0, "a second drain is empty");
+    assert_eq(vec_len(pending), 2, "the first drain's vec is not emptied by the second");
+
+    # ------------------------------------------------------------------
+    # Title sanitisation — Rust `chars().filter(|c| !c.is_control())` (Unicode Cc)
+    # ------------------------------------------------------------------
+    test_group("a11y — control chars are stripped like char::is_control");
+    # A 07 B C2-85(NEL) C 7F 1B D E2-80-99(U+2019) E C2-A9(©) C2-9F(APC) C2-80(PAD) F
+    var raw = alloc(32);
+    var rb = 0;
+    store8(raw + rb, 0x41); rb = rb + 1;
+    store8(raw + rb, 0x07); rb = rb + 1;
+    store8(raw + rb, 0x42); rb = rb + 1;
+    store8(raw + rb, 0xC2); rb = rb + 1;
+    store8(raw + rb, 0x85); rb = rb + 1;
+    store8(raw + rb, 0x43); rb = rb + 1;
+    store8(raw + rb, 0x7F); rb = rb + 1;
+    store8(raw + rb, 0x1B); rb = rb + 1;
+    store8(raw + rb, 0x44); rb = rb + 1;
+    store8(raw + rb, 0xE2); rb = rb + 1;
+    store8(raw + rb, 0x80); rb = rb + 1;
+    store8(raw + rb, 0x99); rb = rb + 1;
+    store8(raw + rb, 0x45); rb = rb + 1;
+    store8(raw + rb, 0xC2); rb = rb + 1;
+    store8(raw + rb, 0xA9); rb = rb + 1;
+    store8(raw + rb, 0xC2); rb = rb + 1;
+    store8(raw + rb, 0x9F); rb = rb + 1;
+    store8(raw + rb, 0xC2); rb = rb + 1;
+    store8(raw + rb, 0x80); rb = rb + 1;
+    store8(raw + rb, 0x46); rb = rb + 1;
+    store8(raw + rb, 0); rb = rb + 1;
+    var clean = a11y_strip_control(raw);
+    assert(t_ok(clean), "strip returns a string");
+    assert_eq(strlen(clean), 11, "11 bytes survive: ABCD + U+2019 (3) + E + (C) (2) + F");
+    assert_eq(load8(clean + 0), 0x41, "A kept");
+    assert_eq(load8(clean + 1), 0x42, "BEL dropped, B kept");
+    assert_eq(load8(clean + 2), 0x43, "C2 85 (NEL, a C1 control) dropped as a pair");
+    assert_eq(load8(clean + 3), 0x44, "DEL and ESC dropped");
+    assert_eq(load8(clean + 4), 0xE2, "U+2019 lead kept");
+    assert_eq(load8(clean + 5), 0x80, "an 80 continuation NOT led by C2 is kept");
+    assert_eq(load8(clean + 6), 0x99, "U+2019 tail kept");
+    assert_eq(load8(clean + 7), 0x45, "E kept");
+    assert_eq(load8(clean + 8), 0xC2, "C2 A9 (copyright, not Cc) kept: lead");
+    assert_eq(load8(clean + 9), 0xA9, "C2 A9 kept: tail");
+    assert_eq(load8(clean + 10), 0x46, "C2 9F and C2 80 (both ends of C1) dropped, F kept");
+    assert_eq(load8(raw + 1), 0x07, "the input is not modified");
+    assert_eq(streq(a11y_strip_control("Plain Title"), "Plain Title"), 1, "a clean title is unchanged");
+    assert_eq(strlen(a11y_strip_control("")), 0, "empty stays empty");
+    var tabnl = alloc(8);
+    store8(tabnl + 0, 0x09);
+    store8(tabnl + 1, 0x0A);
+    store8(tabnl + 2, 0x0D);
+    store8(tabnl + 3, 0x1F);
+    store8(tabnl + 4, 0x20);
+    store8(tabnl + 5, 0);
+    assert_eq(streq(a11y_strip_control(tabnl), " "), 1, "TAB/LF/CR/US dropped (all Cc), SPACE (0x20) kept");
+    var lone = alloc(4);
+    store8(lone + 0, 0x58);
+    store8(lone + 1, 0xC2);
+    store8(lone + 2, 0);
+    assert_eq(strlen(a11y_strip_control(lone)), 2, "a trailing lone C2 is not a C1 pair: kept");
+
+    # ------------------------------------------------------------------
+    # Window mirroring — the tree half of compositor.rs create/close/focus
+    # ------------------------------------------------------------------
+    test_group("a11y — window open/close mirror (compositor.rs:250-273, :337-347)");
+    var mt = a11y_tree_new();
+    var title_buf = a11y_cstr_dup("Term");
+    assert_eq(a11y_tree_window_open(mt, 7, title_buf, 50, 60, 640, 480), 7, "open returns the WINDOW id");
+    var mn = a11y_tree_get_node(mt, 7);
+    assert(t_ok(mn), "the node is keyed by the window id");
+    assert_eq(a11y_node_role(mn), AxRole.AX_ROLE_WINDOW, "role Window");
+    assert_eq(streq(a11y_node_name(mn), "Term"), 1, "name = title");
+    store8(title_buf, 0x58);
+    assert_eq(streq(a11y_node_name(mn), "Term"), 1, "name is a COPY: rewriting the caller's buffer does not reach it");
+    var mb = a11y_node_bounds(mn);
+    assert(t_ok(mb), "bounds set");
+    assert_eq(rect_x(mb), 50, "bounds x");
+    assert_eq(rect_y(mb), 60, "bounds y");
+    assert_eq(rect_w(mb), 640, "bounds w");
+    assert_eq(rect_h(mb), 480, "bounds h");
+    var macts = a11y_node_actions(mn);
+    assert_eq(vec_len(macts), 3, "three actions");
+    assert_eq(vec_get(macts, 0), AxAction.AX_ACT_FOCUS, "actions[0] Focus");
+    assert_eq(vec_get(macts, 1), AxAction.AX_ACT_CLICK, "actions[1] Click");
+    assert_eq(vec_get(macts, 2), AxAction.AX_ACT_DISMISS, "actions[2] Dismiss");
+    assert_eq(a11y_tree_focused_id(mt), 0, "opening does not focus (that is the compositor's call)");
+    var mp = a11y_tree_pending_announcements(mt);
+    assert_eq(vec_len(mp), 1, "one announcement");
+    assert_eq(streq(vec_get(mp, 0), "Window opened: Term"), 1, "\"Window opened: Term\"");
+    a11y_tree_follow_focus(mt, 7);
+    assert_eq(a11y_tree_focused_id(mt), 7, "follow_focus(7) focuses the window node");
+    a11y_tree_follow_focus(mt, 99);
+    assert_eq(a11y_tree_focused_id(mt), 7, "follow_focus of an id with no node leaves focus (Rust `let _ = set_focus`)");
+    a11y_tree_follow_focus(mt, 0);
+    assert_eq(a11y_tree_focused_id(mt), 0, "follow_focus(0) clears focus");
+    assert_eq(a11y_node_is_focused(mn), 0, "  ...and unfocuses the node");
+    a11y_tree_window_close(mt, 7, "Term");
+    assert_eq(a11y_tree_get_node(mt, 7), 0, "close removes the node");
+    var mp2 = a11y_tree_pending_announcements(mt);
+    assert_eq(vec_len(mp2), 1, "one announcement on close");
+    assert_eq(streq(vec_get(mp2, 0), "Window closed: Term"), 1, "\"Window closed: Term\"");
+    var nel = alloc(8);
+    store8(nel + 0, 0x61);
+    store8(nel + 1, 0xC2);
+    store8(nel + 2, 0x85);
+    store8(nel + 3, 0x62);
+    store8(nel + 4, 0x0A);
+    store8(nel + 5, 0);
+    a11y_tree_window_open(mt, 8, nel, 0, 0, 10, 10);
+    var nn = a11y_tree_get_node(mt, 8);
+    assert_eq(strlen(a11y_node_name(nn)), 5, "the NODE name keeps the raw title (Rust: name = title.clone())");
+    a11y_tree_window_close(mt, 8, nel);
+    var mp3 = a11y_tree_pending_announcements(mt);
+    assert_eq(streq(vec_get(mp3, 0), "Window opened: ab"), 1, "open announcement is sanitised (NEL + LF dropped)");
+    assert_eq(streq(vec_get(mp3, 1), "Window closed: ab"), 1, "close announcement is sanitised");
 
     # ------------------------------------------------------------------
     # test_high_contrast_theme_light + dark

@@ -18,7 +18,9 @@ enum PanelK {
     IND_GAP   = 8;
     # ⭐ 0.16.4 — the notification surface. Wide enough for an app name and a title on one line at
     # the 8px system-font pitch; tall enough for a title over a body.
-    NOTE_W    = 300;
+    # ⚠ 330, not 300: the welcome body (34 cells, main.rs:119) fits whole in `panel_note_text_w()`.
+    # Anything longer is cut to the card by `panel_note_caption`, never drawn past it.
+    NOTE_W    = 330;
     NOTE_H    = 44;
     NOTE_GAP  = 6;
     NOTE_MAX  = 4;    # how many stack below the panel before the rest are counted, not drawn
@@ -65,14 +67,16 @@ fn panel_pct_str(dst, pct): i64 {
 }
 
 # Small unsigned int -> decimal cstring in `dst`. -> byte length.
+# ⛔ NO ALLOC: this runs every frame (the badge, the agent label) and the arena never frees — an
+# `alloc(24)` here was 24 B per frame for the life of the desktop.
 fn panel_u2s(dst, n): i64 {
     if (n <= 0) { store8(dst, 48); store8(dst + 1, 0); return 1; }
-    var d = alloc(24);
+    var d[24];                           # function-local => 24 BYTES, enough for any i64
     var k = 0;
     var v = n;
-    while (v > 0) { store8(d + k, 48 + v % 10); v = v / 10; k = k + 1; }
+    while (v > 0) { store8(&d + k, 48 + v % 10); v = v / 10; k = k + 1; }
     var i = 0;
-    while (i < k) { store8(dst + i, load8(d + k - 1 - i)); i = i + 1; }
+    while (i < k) { store8(dst + i, load8(&d + k - 1 - i)); i = i + 1; }
     store8(dst + k, 0);
     return k;
 }
@@ -94,6 +98,14 @@ fn panel_net_color(net): i64 {
     return bhumi_xrgb(210, 80, 80);
 }
 
+# The net dot's fill. ⛔ UNKNOWN IS AN EMPTY DOT, NOT A COLOUR: it takes the gauge TRACK, the way an
+# unmeasured gauge shows "--%" over an empty track. Green would claim a link, red a fault — neither
+# was measured. `track` is the themed widget token the gauges use.
+fn panel_net_dot_color(net, track): i64 {
+    if (net == SH_NetStatus.SH_NET_UNKNOWN) { return track; }
+    return panel_net_color(net);
+}
+
 # Colour for a notification's priority stripe. CRITICAL takes the theme's alert token; the rest are
 # progressively quieter, so a stack of notices reads by urgency without being read.
 fn panel_prio_color(prio, th): i64 {
@@ -101,6 +113,19 @@ fn panel_prio_color(prio, th): i64 {
     if (prio == SH_NotifPriority.SH_PRIO_HIGH)     { return ae_bhumi(rupa_theme_accent(th)); }
     if (prio == SH_NotifPriority.SH_PRIO_NORMAL)   { return ae_bhumi(rupa_theme_line(th)); }
     return ae_bhumi(rupa_theme_mute(th));
+}
+
+# The px a card's text line may use: from its x+10 inset to 10 px short of the right edge, which is
+# where the requires-action marker sits.
+fn panel_note_text_w(): i64 { return NOTE_W - 20; }
+
+# panel_note_caption(dst, s): `s` as one card line, cut to `panel_note_text_w()` with a trailing
+# '…' (one cell), into `dst` (AE_TEXT_CAP_B bytes, UTF-8). -> its length in cells.
+# ⛔ CUT TO THE CARD, NOT TO THE SCREEN. Text was drawn whole, so a long line ran past the card and
+# over whatever lay right of it — or, on a right-aligned card, off the screen mid-word. The same rule
+# and ellipsis as a window title (`rend_title_caption`), so the two surfaces never disagree on it.
+fn panel_note_caption(dst, s): i64 {
+    return rend_title_caption(dst, s, panel_note_text_w());
 }
 
 # ============================================================================================
@@ -117,6 +142,8 @@ fn panel_prio_color(prio, th): i64 {
 #
 # Draws up to NOTE_MAX cards below the panel, newest first. -> the number drawn.
 fn render_notifications(fb, shell): i64 {
+    var line[AE_TEXT_CAP_B];             # function-local => AE_TEXT_CAP_B BYTES; one card line
+    var more[16];
     var v = shell_get_notifications(shell);
     var n = vec_len(v);
     if (n <= 0) { return 0; }
@@ -140,22 +167,30 @@ fn render_notifications(fb, shell): i64 {
             fill_rect(fb, x + NOTE_W - 10, y + 4, 6, 6, ae_bhumi(rupa_theme_alert(th)));
         }
         var app = shell_notif_app_name(note);
-        if (app != 0) { draw_text(fb, app, x + 10, y + 5, ae_bhumi(rupa_theme_mute(th))); }
+        if (app != 0) {
+            panel_note_caption(&line, app);
+            draw_text(fb, &line, x + 10, y + 5, ae_bhumi(rupa_theme_mute(th)));
+        }
         var title = shell_notif_title(note);
-        if (title != 0) { draw_text(fb, title, x + 10, y + 17, ae_bhumi(rupa_theme_ink(th))); }
+        if (title != 0) {
+            panel_note_caption(&line, title);
+            draw_text(fb, &line, x + 10, y + 17, ae_bhumi(rupa_theme_ink(th)));
+        }
         var body = shell_notif_body(note);
-        if (body != 0) { draw_text(fb, body, x + 10, y + 29, ae_bhumi(rupa_theme_mute(th))); }
+        if (body != 0) {
+            panel_note_caption(&line, body);
+            draw_text(fb, &line, x + 10, y + 29, ae_bhumi(rupa_theme_mute(th)));
+        }
         y = y + NOTE_H + NOTE_GAP;
         i = i + 1;
     }
     # ⚠ THE OVERFLOW IS STATED, NOT SWALLOWED. Silently drawing four of nine notices tells the
     # operator there are four. A "+5" is the difference between a full surface and a truncated one.
     if (n > shown) {
-        var more = alloc(16);
-        store8(more, 43);                                   # '+'
-        panel_u2s(more + 1, n - shown);
+        store8(&more, 43);                                  # '+'
+        panel_u2s(&more + 1, n - shown);
         fill_rect(fb, x, y, NOTE_W, 16, ae_bhumi(rupa_theme_panel(th)));
-        draw_text(fb, more, x + 10, y + 4, ae_bhumi(rupa_theme_mute(th)));
+        draw_text(fb, &more, x + 10, y + 4, ae_bhumi(rupa_theme_mute(th)));
     }
     return shown;
 }
@@ -180,6 +215,8 @@ fn panel_slot_w(): i64 { return LABEL_W + IND_W; }
 # functions, and `tests/shell_panel.tcyr` asserts on them directly.
 fn panel_label_x(slot_x): i64 { return slot_x; }
 fn panel_bar_x(slot_x): i64   { return slot_x + LABEL_W; }
+# The net dot: left of the bars, at `slot_x + IND_W - IND_H` of the next free slot, level with them.
+fn panel_net_dot_x(slot_x): i64 { return slot_x + IND_W - IND_H; }
 
 # The slot x of gauge `i`, counting from the right edge (0 = rightmost).
 fn panel_slot_x(fw, i): i64 {
@@ -187,9 +224,9 @@ fn panel_slot_x(fw, i): i64 {
 }
 
 fn panel_gauge(fb, x, y, pct, fill_col, track_col, ink): i64 {
-    var lbl = alloc(8);
-    panel_pct_str(lbl, pct);
-    draw_text(fb, lbl, panel_label_x(x), y + 2, ink);
+    var lbl[8];                          # ⚠ stack, not alloc: per gauge per frame (see panel_u2s)
+    panel_pct_str(&lbl, pct);
+    draw_text(fb, &lbl, panel_label_x(x), y + 2, ink);
     var bx = panel_bar_x(x);
     fill_rect(fb, bx, y, IND_W, IND_H, track_col);
     fill_rect(fb, bx, y, panel_bar_w(pct, IND_W), IND_H, fill_col);
@@ -197,6 +234,10 @@ fn panel_gauge(fb, x, y, pct, fill_col, track_col, ink): i64 {
 }
 
 fn render_shell_panel(fb, shell): i64 {
+    # ⚠ The badge and agent label buffers: stack, never alloc — this runs every frame (see panel_u2s).
+    # `draw_text` copies a GPU-queued run into its pool, so nothing reads them after this returns.
+    var ab[24];
+    var nb[24];
     var fw = bhumi_fb_width(fb);
     # ⛔⛔ THE PANEL WAS THE ONE SURFACE THEME SWITCHING DID NOT REACH. M7-E shipped runtime theme
     # switching and every other painter — the desktop void, window chrome, the launcher — reads
@@ -230,23 +271,21 @@ fn render_shell_panel(fb, shell): i64 {
         gi = gi + 1; x = panel_slot_x(fw, gi);
     }
     # net-status dot to the left of the bars
-    fill_rect(fb, x + IND_W - IND_H, y, IND_H, IND_H, panel_net_color(shell_status_net(st)));
+    fill_rect(fb, panel_net_dot_x(x), y, IND_H, IND_H, panel_net_dot_color(shell_status_net(st), track));
     # ⭐ AGENT COUNT — the other field with no reader. On a desktop whose shell models agents as
     # first-class, "how many are running" was tracked and never shown.
     var na = shell_status_agents(st);
     if (na > 0) {
-        var ab = alloc(24);
-        store8(ab, 65);                                     # 'A'
-        panel_u2s(ab + 1, na);
-        draw_text(fb, ab, PANEL_PAD + IND_H + IND_GAP + 24, y + 2, mute);
+        store8(&ab, 65);                                    # 'A'
+        panel_u2s(&ab + 1, na);
+        draw_text(fb, &ab, PANEL_PAD + IND_H + IND_GAP + 24, y + 2, mute);
     }
     # notification badge on the far left, now with the COUNT rather than a bare square
     var nc = shell_notification_count(shell);
     if (nc > 0) {
         fill_rect(fb, PANEL_PAD, y, IND_H, IND_H, ae_bhumi(rupa_theme_alert(th)));
-        var nb = alloc(24);
-        panel_u2s(nb, nc);
-        draw_text(fb, nb, PANEL_PAD + IND_H + 4, y + 2, ink);
+        panel_u2s(&nb, nc);
+        draw_text(fb, &nb, PANEL_PAD + IND_H + 4, y + 2, ink);
     }
     return 0;
 }

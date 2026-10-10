@@ -1,0 +1,238 @@
+# flags.cyr — the command line, parsed ONCE into a record. Parity: rust-old/src/main.rs:30-60 (clap `Args`).
+#
+# ⛔ WHY THIS EXISTS. `main.cyr` used to rescan argv for each flag it knew (`ae_has_flag`, `ae_flag_str`,
+# `ae_flag_int`) and never looked at the rest, so a typo was not an error, it was a different program:
+# `--frmaes 0` ran the 400-frame default, `--frames 1O` read as `atoi` = 1, `--kiosk` did nothing at all.
+# The binary could not say "I did not understand you", and an operator could not tell a typo from a bug.
+#
+# ⭐ PURE. `flg_parse` reads an argument vector it is GIVEN — an array of `n` cstring pointers, `[0]` the
+# program path — and touches no syscall, so a test can hand it any vector. `main.cyr` builds the vector
+# from `argc()`/`argv()` once, after `args_init`, and reads the record instead of argv.
+#
+# The record answers one of: RUN (the flags below), HELP, VERSION, or ERROR naming the argument.
+#   * Order matters only for the stop cases: the first `--help`/`--version` or the first bad argument
+#     ends the scan, as clap does. Beyond that, order matters only through the two rules below.
+#   * Booleans may repeat. Single-valued flags (`--opacity`, `--frames`, `--wallpaper`) keep the FIRST
+#     occurrence, which is what `ae_flag_int`/`ae_flag_str` did; a later one is still checked.
+#   * `--client` and `--spawn` repeat and keep every value, in order.
+#   * A value must not look like a flag (`-` plus anything): `--client --frames 5` is a missing value,
+#     not a client called `--frames` followed by a stray `5`.
+#
+# ⚠ Needs `src/version_str.cyr` included first (`--version` prints `_VERSION_STR_AETHERSAFHA`).
+# ⚠ Rust's `--backend`, `--kiosk`, `--no-ai`, `--high-contrast` and `--accessibility` are RETIRED (ADR 0004)
+# and are unknown flags here, not silently accepted ones.
+
+enum FlgKind {
+    FLG_RUN     = 0;
+    FLG_HELP    = 1;
+    FLG_VERSION = 2;
+    FLG_ERROR   = 3;
+}
+
+enum FlgErr {
+    FLG_E_NONE       = 0;
+    FLG_E_UNKNOWN    = 1;   # a flag nobody accepts (incl. the retired Rust ones)
+    FLG_E_NEEDS_VAL  = 2;   # a value-taking flag with nothing (or another flag) after it
+    FLG_E_NOT_NUMBER = 3;   # a numeric flag whose value is not a non-negative decimal
+    FLG_E_STRAY      = 4;   # a bare word no flag consumed
+}
+
+enum FlgOff {
+    FLG_O_KIND      = 0;    # FlgKind
+    FLG_O_ERR       = 8;    # FlgErr
+    FLG_O_ERR_ARG   = 16;   # cstr: the offending argument (the flag itself for NEEDS_VAL)
+    FLG_O_ERR_FLAG  = 24;   # cstr: the flag a NOT_NUMBER value belonged to, else 0
+    FLG_O_SELFTEST  = 32;   # 0/1
+    FLG_O_CLIENTS   = 40;   # 0/1  `--clients` probe
+    FLG_O_SECURE    = 48;   # 0/1  `--secure` / `-s`
+    FLG_O_FULLCLEAR = 56;   # 0/1
+    FLG_O_CLEARBG   = 64;   # 0/1
+    FLG_O_BANDBG    = 72;   # 0/1
+    FLG_O_OPACITY   = 80;   # -1 = not given, else the value as typed (window.cyr clamps to 0..255)
+    FLG_O_FRAMES    = 88;   # -1 = not given, else the cap (0 = run until quit)
+    FLG_O_WALLPAPER = 96;   # 0/1  `--wallpaper` given at all
+    FLG_O_WP_FILE   = 104;  # cstr, or 0 for bare `--wallpaper` (the gradient)
+    FLG_O_CLIENT_V  = 112;  # vec of cstr: every `--client PATH`, in order
+    FLG_O_SPAWN_V   = 120;  # vec of cstr: every `--spawn NAME`, in order
+    FLG_SZ          = 128;
+}
+
+fn flg_kind(f): i64      { return load64(f + FLG_O_KIND); }
+fn flg_err(f): i64       { return load64(f + FLG_O_ERR); }
+fn flg_err_arg(f): i64   { return load64(f + FLG_O_ERR_ARG); }
+fn flg_err_flag(f): i64  { return load64(f + FLG_O_ERR_FLAG); }
+fn flg_selftest(f): i64  { return load64(f + FLG_O_SELFTEST); }
+fn flg_clients(f): i64   { return load64(f + FLG_O_CLIENTS); }
+fn flg_secure(f): i64    { return load64(f + FLG_O_SECURE); }
+fn flg_fullclear(f): i64 { return load64(f + FLG_O_FULLCLEAR); }
+fn flg_clearbg(f): i64   { return load64(f + FLG_O_CLEARBG); }
+fn flg_bandbg(f): i64    { return load64(f + FLG_O_BANDBG); }
+fn flg_opacity(f): i64   { return load64(f + FLG_O_OPACITY); }
+fn flg_frames(f): i64    { return load64(f + FLG_O_FRAMES); }
+fn flg_wallpaper(f): i64 { return load64(f + FLG_O_WALLPAPER); }
+fn flg_wp_file(f): i64   { return load64(f + FLG_O_WP_FILE); }
+fn flg_client_n(f): i64  { return vec_len(load64(f + FLG_O_CLIENT_V)); }
+fn flg_client_at(f, i): i64 { return vec_get(load64(f + FLG_O_CLIENT_V), i); }
+fn flg_spawn_n(f): i64   { return vec_len(load64(f + FLG_O_SPAWN_V)); }
+fn flg_spawn_at(f, i): i64 { return vec_get(load64(f + FLG_O_SPAWN_V), i); }
+
+# 1 if `s` reads as a flag: a `-` followed by anything. A lone `-` is a word.
+fn flg_is_flagish(s): i64 {
+    if (s == 0) { return 0; }
+    if (load8(s) != 45) { return 0; }
+    if (load8(s + 1) == 0) { return 0; }
+    return 1;
+}
+
+# The non-negative decimal `s`, or -1. 1..18 digits and nothing else.
+# ⚠ STRICTER THAN `atoi`, ON PURPOSE: `atoi("abc")` is 0 and `--frames 0` means "run until quit", so a
+# typo'd count used to become an unbounded run. 18 digits keeps the value clear of i64 overflow.
+fn flg_uint(s): i64 {
+    if (s == 0) { return 0 - 1; }
+    var len = strlen(s);
+    if (len < 1) { return 0 - 1; }
+    if (len > 18) { return 0 - 1; }
+    var v = 0;
+    var i = 0;
+    while (i < len) {
+        var c = load8(s + i);
+        if (c < 48) { return 0 - 1; }
+        if (c > 57) { return 0 - 1; }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    return v;
+}
+
+fn flg_fail(f, code, arg, flag): i64 {
+    store64(f + FLG_O_KIND, FlgKind.FLG_ERROR);
+    store64(f + FLG_O_ERR, code);
+    store64(f + FLG_O_ERR_ARG, arg);
+    store64(f + FLG_O_ERR_FLAG, flag);
+    return f;
+}
+
+# The value after the flag at `i`, or 0 if there is none or it is itself a flag.
+fn flg_value(n, av, i): i64 {
+    if ((i + 1) >= n) { return 0; }
+    var v = load64(av + (i + 1) * 8);
+    if (flg_is_flagish(v) == 1) { return 0; }
+    return v;
+}
+
+# flg_parse(n, av) -> *Flags, or 0 on OOM. `av` is `n` cstring pointers; `av[0]` (the program) is skipped.
+fn flg_parse(n, av): i64 {
+    var f = alloc(FLG_SZ);
+    if (f == 0) { return 0; }
+    var z = 0;
+    while (z < FLG_SZ) { store64(f + z, 0); z = z + 8; }
+    store64(f + FLG_O_OPACITY, 0 - 1);
+    store64(f + FLG_O_FRAMES, 0 - 1);
+    store64(f + FLG_O_CLIENT_V, vec_new());
+    store64(f + FLG_O_SPAWN_V, vec_new());
+    var i = 1;
+    while (i < n) {
+        var a = load64(av + i * 8);
+        var step = 1;
+        if ((streq(a, "--help") == 1) || (streq(a, "-h") == 1)) {
+            store64(f + FLG_O_KIND, FlgKind.FLG_HELP);
+            return f;
+        } elif ((streq(a, "--version") == 1) || (streq(a, "-V") == 1)) {
+            store64(f + FLG_O_KIND, FlgKind.FLG_VERSION);
+            return f;
+        } elif ((streq(a, "--secure") == 1) || (streq(a, "-s") == 1)) {
+            store64(f + FLG_O_SECURE, 1);
+        } elif (streq(a, "--selftest") == 1) {
+            store64(f + FLG_O_SELFTEST, 1);
+        } elif (streq(a, "--clients") == 1) {
+            store64(f + FLG_O_CLIENTS, 1);
+        } elif (streq(a, "--fullclear") == 1) {
+            store64(f + FLG_O_FULLCLEAR, 1);
+        } elif (streq(a, "--clearbg") == 1) {
+            store64(f + FLG_O_CLEARBG, 1);
+        } elif (streq(a, "--bandbg") == 1) {
+            store64(f + FLG_O_BANDBG, 1);
+        } elif ((streq(a, "--opacity") == 1) || (streq(a, "--frames") == 1)) {
+            var nv = flg_value(n, av, i);
+            if (nv == 0) { return flg_fail(f, FlgErr.FLG_E_NEEDS_VAL, a, 0); }
+            var num = flg_uint(nv);
+            if (num < 0) { return flg_fail(f, FlgErr.FLG_E_NOT_NUMBER, nv, a); }
+            var slot = FLG_O_FRAMES;
+            if (streq(a, "--opacity") == 1) { slot = FLG_O_OPACITY; }
+            if (load64(f + slot) < 0) { store64(f + slot, num); }
+            step = 2;
+        } elif ((streq(a, "--client") == 1) || (streq(a, "--spawn") == 1)) {
+            var sv = flg_value(n, av, i);
+            if (sv == 0) { return flg_fail(f, FlgErr.FLG_E_NEEDS_VAL, a, 0); }
+            var vslot = FLG_O_SPAWN_V;
+            if (streq(a, "--client") == 1) { vslot = FLG_O_CLIENT_V; }
+            vec_push(load64(f + vslot), sv);
+            step = 2;
+        } elif (streq(a, "--wallpaper") == 1) {
+            # ⭐ The file is OPTIONAL: a following word is the file, anything else (end, or a flag) means
+            # the built-in gradient. `ae_flag_str` took the next token whatever it was, so
+            # `--wallpaper --clients` tried to load a file called `--clients`.
+            var wv = flg_value(n, av, i);
+            if (flg_wallpaper(f) == 0) {
+                store64(f + FLG_O_WALLPAPER, 1);
+                store64(f + FLG_O_WP_FILE, wv);
+            }
+            if (wv != 0) { step = 2; }
+        } elif (flg_is_flagish(a) == 1) {
+            return flg_fail(f, FlgErr.FLG_E_UNKNOWN, a, 0);
+        } else {
+            return flg_fail(f, FlgErr.FLG_E_STRAY, a, 0);
+        }
+        i = i + step;
+    }
+    return f;
+}
+
+# ---- output (the only impure part; `main.cyr` calls these and exits) -------------------------------
+
+fn flg_say(fd, s): i64 {
+    sys_write(fd, s, strlen(s));
+    return 0;
+}
+
+# `--help`: every accepted flag, on `fd` (stdout).
+fn flg_usage_print(fd): i64 {
+    flg_say(fd, "usage: aethersafha [flags]\n");
+    flg_say(fd, "  -h, --help          print this list and exit\n");
+    flg_say(fd, "  -V, --version       print the version and exit\n");
+    flg_say(fd, "  -s, --secure        compositor secure mode, security level Elevated\n");
+    flg_say(fd, "  --selftest          GPU compositing self-test; exits with its verdict\n");
+    flg_say(fd, "  --clients           probe: start puka + crab, exit 95..91 with the verdict\n");
+    flg_say(fd, "  --client PATH       (Linux) launch the setu client at PATH; repeatable\n");
+    flg_say(fd, "  --spawn NAME        (agnos) start a registered app at boot; repeatable\n");
+    flg_say(fd, "  --frames N          (Linux) stop after N frames; 0 = run until quit\n");
+    flg_say(fd, "  --opacity N         default window opacity, 0..255\n");
+    flg_say(fd, "  --wallpaper [FILE]  PNG or JPEG backdrop; with no FILE, a gradient\n");
+    flg_say(fd, "  --fullclear         diagnostic: repaint the whole frame every frame\n");
+    flg_say(fd, "  --clearbg           diagnostic: full-screen background clear\n");
+    flg_say(fd, "  --bandbg            diagnostic: banded background clear on the GPU path\n");
+    return 0;
+}
+
+# `--version`: `aethersafha X.Y.Z`, on `fd` (stdout).
+fn flg_version_print(fd): i64 {
+    sys_write(fd, _VERSION_STR_AETHERSAFHA, _VERSION_LEN_AETHERSAFHA);
+    return 0;
+}
+
+# An ERROR record: one line naming the argument, then a usage hint, on `fd` (stderr).
+fn flg_error_print(f, fd): i64 {
+    var e = flg_err(f);
+    if (e == FlgErr.FLG_E_UNKNOWN) { flg_say(fd, "aethersafha: unknown flag: "); }
+    elif (e == FlgErr.FLG_E_NEEDS_VAL) { flg_say(fd, "aethersafha: missing value after: "); }
+    elif (e == FlgErr.FLG_E_NOT_NUMBER) {
+        flg_say(fd, "aethersafha: ");
+        flg_say(fd, flg_err_flag(f));
+        flg_say(fd, " wants a number (0 or more), got: ");
+    }
+    else { flg_say(fd, "aethersafha: unexpected argument: "); }
+    flg_say(fd, flg_err_arg(f));
+    flg_say(fd, "\n");
+    flg_say(fd, "usage: aethersafha [flags]   (aethersafha --help lists them)\n");
+    return 0;
+}

@@ -18,7 +18,9 @@
 #     the default state is NONE, matching Option::None.)
 #   - Rust Option<String> `value` → cstr pointer, 0 == None.
 #   - Rust f32 `font_scale` → integer permille (1250 == 1.25).
-#   - Names / descriptions are cstr pointers (borrowed, not owned copies).
+#   - Names / descriptions are cstr pointers (borrowed, not owned copies) —
+#     except a mirrored window's name and the announcements, which are copied
+#     (see "Window mirroring").
 #   - Case-insensitive search folds ASCII bytes inline (no Str tolower
 #     helper exists for fat-pointer strings).
 
@@ -326,6 +328,21 @@ fn a11y_tree_set_focus(t, id): i64 {
     return 0;
 }
 
+# Drop keyboard focus: unfocus the focused node (if any), focused_id -> 0. Port-only — Rust's tree has
+# no such call because its compositor never focuses nothing; the port's does once every window is
+# minimized (comp_focus_topmost_visible -> -1), and the tree must not keep pointing at a hidden window.
+fn a11y_tree_clear_focus(t): i64 {
+    var prev = load64(t + AX_T_FOCUSED_ID);
+    if (prev != 0) {
+        var pnode = a11y_tree_get_node(t, prev);
+        if (pnode != 0) {
+            a11y_state_set_focused(a11y_node_state(pnode), 0);
+        }
+    }
+    store64(t + AX_T_FOCUSED_ID, 0);
+    return 0;
+}
+
 # Internal: is node index `i` focusable (not hidden, not disabled)?
 fn a11y_tree_is_focusable(t, node): i64 {
     var st = a11y_node_state(node);
@@ -503,6 +520,9 @@ fn a11y_tree_search_by_role(t, role): i64 {
 # ============================================================================
 
 # Queue a screen-reader announcement (cstr, borrowed). Parity: announce.
+# ⚠ UNBOUNDED, AS IN RUST: `announcements` is a plain Vec that only `pending_announcements` empties,
+# and nothing in the Rust binary drained it. Every window open/close queues one, so a consumer that
+# never drains grows this vec for the whole session — a cap would be a new policy, not a port.
 fn a11y_tree_announce(t, message): i64 {
     vec_push(load64(t + AX_T_ANNOUNCEMENTS), message);
     return 0;
@@ -521,6 +541,122 @@ fn a11y_tree_pending_announcements(t): i64 {
     if (fresh == 0) { return old; }
     store64(t + AX_T_ANNOUNCEMENTS, fresh);
     return old;
+}
+
+# ============================================================================
+# Window mirroring (parity: compositor.rs create_window / close_window / focus_window)
+# ============================================================================
+#
+# ⚠ A MIRRORED NODE'S ID IS THE WINDOW ID, as in Rust (`AccessibleNode { id, .. }` with the surface
+# id). Rust never collides because both are Uuids; here window ids and `a11y_tree_next_id` both count
+# from 1, so a tree that mirrors windows must not also mint ids — the desktop tree holds window nodes
+# only.
+# ⚠ Strings are COPIED (Rust clones): the node name and every announcement are fresh cstrs, so nothing
+# here borrows the caller's title buffer. This allocator has no free, so they live for the session.
+
+# Fresh NUL-terminated copy of cstr `s` (0 on OOM).
+fn a11y_cstr_dup(s): i64 {
+    var n = strlen(s);
+    var out = alloc(n + 1);
+    if (out == 0) { return 0; }
+    memcpy(out, s, n);
+    store8(out + n, 0);
+    return out;
+}
+
+# Fresh cstr `a` ++ `b` (0 on OOM). Parity substitute for `format!("{}{}", a, b)`.
+fn a11y_cstr_cat(a, b): i64 {
+    var la = strlen(a);
+    var lb = strlen(b);
+    var out = alloc(la + lb + 1);
+    if (out == 0) { return 0; }
+    memcpy(out, a, la);
+    memcpy(out + la, b, lb);
+    store8(out + la + lb, 0);
+    return out;
+}
+
+# Fresh copy of UTF-8 cstr `s` with every Unicode Cc char removed (0 on OOM). Parity:
+# `title.chars().filter(|c| !c.is_control()).collect()` — Cc is U+0000-001F, U+007F, U+0080-009F.
+# ⭐ The C1 block is the two-byte sequence C2 80..C2 9F, so only a C2-LED pair is dropped: an 80..9F
+# byte elsewhere is a continuation of some other char (E2 80 99 is U+2019) and must survive. Every
+# other byte is kept as is, valid UTF-8 or not — this filters, it does not validate.
+fn a11y_strip_control(s): i64 {
+    var n = strlen(s);
+    var out = alloc(n + 1);
+    if (out == 0) { return 0; }
+    var i = 0;
+    var o = 0;
+    while (i < n) {
+        var b = load8(s + i);
+        var drop = 0;
+        if (b < 0x20) { drop = 1; }
+        if (b == 0x7F) { drop = 1; }
+        if (drop == 1) {
+            i = i + 1;
+        } else {
+            var c1 = 0;
+            if (b == 0xC2) {
+                if (i + 1 < n) {
+                    var nb = load8(s + i + 1);
+                    if (nb >= 0x80) { if (nb <= 0x9F) { c1 = 1; } }
+                }
+            }
+            if (c1 == 1) {
+                i = i + 2;
+            } else {
+                store8(out + o, b);
+                o = o + 1;
+                i = i + 1;
+            }
+        }
+    }
+    store8(out + o, 0);
+    return out;
+}
+
+# Internal: announce `prefix` ++ sanitized `title`.
+fn a11y_announce_titled(t, prefix, title): i64 {
+    var clean = a11y_strip_control(title);
+    if (clean == 0) { return 0 - 1; }
+    var msg = a11y_cstr_cat(prefix, clean);
+    if (msg == 0) { return 0 - 1; }
+    return a11y_tree_announce(t, msg);
+}
+
+# A window opened: add its node and announce it. -> the node id (== `id`), 0 on OOM.
+# Parity: compositor.rs:250-273 — role Window, name = the (unsanitized) title, bounds = the window's
+# geometry, actions [Focus, Click, Dismiss] in that order, then "Window opened: <sanitized title>".
+fn a11y_tree_window_open(t, id, title, x, y, w, h): i64 {
+    var name = a11y_cstr_dup(title);
+    if (name == 0) { return 0; }
+    var node = a11y_node_new(id, AxRole.AX_ROLE_WINDOW, name);
+    if (node == 0) { return 0; }
+    var r = rect_new(x, y, w, h);
+    if (r == 0) { return 0; }
+    a11y_node_set_bounds(node, r);
+    a11y_node_add_action(node, AxAction.AX_ACT_FOCUS);
+    a11y_node_add_action(node, AxAction.AX_ACT_CLICK);
+    a11y_node_add_action(node, AxAction.AX_ACT_DISMISS);
+    a11y_tree_add_node(t, node);
+    a11y_announce_titled(t, "Window opened: ", title);
+    return id;
+}
+
+# A window closed: remove its node (clearing tree focus if it held it) and announce it. Parity:
+# compositor.rs:337-347 — the announcement is made whether or not a node was there.
+fn a11y_tree_window_close(t, id, title): i64 {
+    a11y_tree_remove_node(t, id);
+    return a11y_announce_titled(t, "Window closed: ", title);
+}
+
+# Make tree focus follow the compositor's focused window id (0 = none). Parity: focus_window's
+# `let _ = tree.set_focus(&id)` (compositor.rs:813-820) — an id with no node leaves focus where it was.
+# Port-only: 0 clears it (see a11y_tree_clear_focus).
+fn a11y_tree_follow_focus(t, id): i64 {
+    if (id == 0) { return a11y_tree_clear_focus(t); }
+    a11y_tree_set_focus(t, id);
+    return 0;
 }
 
 # ============================================================================

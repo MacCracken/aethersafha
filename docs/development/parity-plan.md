@@ -20,10 +20,10 @@ wiring it into the running desktop is new work and is not part of the deletion g
 | Rust | Lines / tests | Cyrius home | At runtime | Verdict | Open before CLOSED | Bite |
 |---|---|---|---|---|---|---|
 | `compositor.rs` | 2565 / 99 | `compositor`, `window`, `geom`, `input`, routing in `main` | driven | PORT | routing + drag/resize out of `main.cyr` with its 9 tests; workspaces (4 defaults, queries, context setter); L / BL resize grips; lifecycle and workspace tests. (0.17.1: close updates `WSP_ACTIVE`; close and move drop every entry, as `retain` did) | .4 .5 |
-| `main.rs` | 630 / 26 | `main`, `desktop`, `sysprobe` | driven | PORT the tick and `--secure` | flags as a pure module with `--help` / `--version`; `UserPresent` each tick; welcome notice; Linux cpu / disk + `parse_cpu_line` (7 tests); SIGINT teardown on Linux | .2 |
-| `renderer.rs` | 1656 / 49 | `render`, `window`, `desktop`, `shell_render`, `wallpaper`, `theme`, `cursor` | driven | PORT | CPU premultiplied blend + opacity (CPU frames differ from iron today); border outline; tests for overlap, minimized-not-drawn and text width; the `…` glyph and codepoint measuring with kashi 1.1.0 (ADR 0003, interim). (0.17.1: title truncation; the dead asserts run) | .2 .4 .5 |
-| `shell.rs` | 1396 / 60 | `shell`, `shell_render` | panel + cards painted | PORT | 6 missing + 4 partial tests; the net dot claims Connected with no producer; agent count unfed; `toggle_panel` honoured. (0.17.1: the registry's `terminal` entry; launch and search tests) | .2 .5 |
-| `accessibility.rs` | 729 / 30 | `accessibility` | synced once at boot | PORT, mirroring included | a node and an announcement on create / close, focus sync, an idempotent sync; 3 tests | .2 |
+| `main.rs` | 630 / 26 | `main`, `desktop`, `sysprobe`, `flags`, `sigint` | driven | ✅ **CLOSED 0.17.2** — the strict flag parser with `--secure` / `--help` / `--version`, the welcome notice, the 5 s tick with `UserPresent`, cpu / mem / disk as Rust read them, SIGINT through the Ctrl+Q teardown; divergences in ADR 0003 | — | .2 |
+| `renderer.rs` | 1656 / 49 | `render`, `window`, `desktop`, `shell_render`, `wallpaper`, `theme`, `cursor` | driven | PORT | CPU premultiplied blend + opacity (CPU frames differ from iron today); border outline; tests for overlap and minimized-not-drawn. (0.17.1: title truncation; the dead asserts run. 0.17.2: UTF-8 text, text width in scalars, the `…` glyph) | .4 .5 |
+| `shell.rs` | 1396 / 60 | `shell`, `shell_render` | panel + cards painted | PORT | 6 missing + 4 partial tests; `toggle_panel` honoured. (0.17.1: the registry's `terminal` entry; launch and search tests. 0.17.2: the net dot reads UNKNOWN, the agent count is fed, cards cut to their width) | .5 |
+| `accessibility.rs` | 729 / 30 | `accessibility` | mirrored live | ✅ **CLOSED 0.17.2** — a node and an announcement on create / close, focus sync, an idempotent reconcile, the 3 tests; divergences in ADR 0003 | — | .2 |
 | `ai_features.rs` | 1707 / 86 | `ai_features` | constructed only | PORT | `poll_agents` against daimon 2.4.3; 13 tests. (0.17.1: the `"terminal"` context match; stable suggestion sort; null-checked hour) | .3 |
 | `security_ui.rs` | 1858 / 77 | `security_ui` | constructed only | PORT | audit-log writer; SIGHUP / SIGKILL; Linux-only kill effects; 6 tests incl. 4 eviction. (0.17.1: the dashboard maximum over active alerts; minted ids from 2⁶²+1, ADR 0003) | .3 |
 | `plugin_host.rs` | 848 / 31 | `plugin_host` | constructed only | PORT | `PluginMessage` JSON (both directions `return 0`) and its 8 tests; delete the `plug_ipc_*` stubs (Rust had no transport) | .3 |
@@ -72,14 +72,12 @@ or error text close under ADR 0004 and are not listed.
   focus: `close_updates_focus`, `cascade_placement`, `with_resolution`;
   routing, nine tests: the `route_input_*` set, `drag_workflow`, `end_interactive_clears_state`,
   `mouse_move_no_drag`, `right_click_on_window`.
-- **main.rs** — the two Args tests; the seven `parse_cpu_line_*`; `desktop_environment_new_secure_mode`,
-  `_initialize`, `_update_system_status` (and `_new_no_ai` / `_shutdown` close with their flags).
 - **tests/compositor_integration.rs** — `close_nonexistent_window_fails`,
   `workspace_switching_hides_windows`, `closing_focused_window_moves_focus`, `custom_resolution`,
   `many_windows_cascade`; partly `window_appears_in_active_workspace`, `window_state_transitions`,
   `input_routing_click_on_empty_is_none`.
 - **renderer.rs** — `blend_semi_transparent` (input rule changes with the CPU premultiplied blend),
-  framebuffer `new` / `out_of_bounds`, `draw_rect_outline`, `draw_text`'s returned width, hit-test
+  framebuffer `new` / `out_of_bounds`, `draw_rect_outline`, hit-test
   `fullscreen` (returns with fullscreen, ADR 0002) and `resize_edge_variants`, `overlapping_surfaces`,
   `z_order`. Damage `flush` / `region_count` / `has_damage` close with the region list (ADR 0003).
 - **ai_features.rs** — `update_context_command_executed`, `dismiss_nonexistent_suggestion`,
@@ -97,7 +95,6 @@ or error text close under ADR 0004 and are not listed.
   `notification_eviction_prefers_non_action`; partly `notification_custom`, `multiple_notifications`,
   `lock_unlock_round_trip`, `update_system_status_all_fields`. `initial_system_status` is the UNKNOWN
   seed (ADR 0003).
-- **accessibility.rs** — `announcements_empty`; partly `announcements`, `accessibility_state_default`.
 - **gestures.rs** — `touch_point_fields`.
 - **screen_capture.rs** — partly `full_screen_capture_png` (asserted on 4×4, not 800×600) and
   `grant_and_revoke_permission` (list length after revoke). **screen_recording.rs** — partly

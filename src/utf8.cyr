@@ -1,0 +1,135 @@
+# aethersafha — UTF-8 decoding for the text paths (draw_text, text_width, the glyph queue, captions)
+# Parity: rust-old/src/renderer.rs draw_text / text_width, which walk `text.chars()`: one char, one cell.
+#
+# ⭐ WHY THIS EXISTS. Until kashi 1.1.0 the renderer handed every BYTE to the CP437 glyph table as a cell,
+# so UTF-8 drew as mojibake ("é" is C3 A9: two cells, `├⌐`) and captions were measured and cut in bytes.
+# Text now decodes here into Unicode scalars, and src/render.cyr maps each scalar to ONE glyph cell.
+#
+# ⛔⛔ ILL-FORMED INPUT IS ONE U+FFFD PER MAXIMAL SUBPART. The Unicode Standard, §3.9 "U+FFFD Substitution
+# of Maximal Subparts" (definition D93b; the well-formed forms are Table 3-7), which is also what the WHATWG
+# Encoding Standard's UTF-8 decoder does. A unit is a well-formed sequence or, failing that, the longest
+# PREFIX of one that the input holds — never less than one byte — and an ill-formed unit is one U+FFFD:
+#   - a stray continuation byte (80..BF), a C0 / C1 lead (only ever overlong) or an F5..FF lead: ONE byte;
+#   - a sequence cut short by any byte that cannot continue it, the NUL included: the bytes it got;
+#   - an overlong form (E0 80..9F, F0 80..8F), a surrogate (ED A0..BF) or a value past U+10FFFF
+#     (F4 90..BF) fails on its SECOND byte, so the lead alone is the unit and what follows is judged afresh.
+# ⇒ The byte that breaks a sequence is never swallowed: it starts the next unit.
+# ⚠ PORT-ONLY. A Rust `&str` cannot hold an ill-formed byte, so rust-old/ has no oracle for this half.
+#
+# ⛔ IT NEVER READS PAST THE NUL. Every continuation byte is tested against a range that starts at 0x80, so
+# the terminator always fails the test and is never consumed: a sequence cut short by the NUL is one
+# U+FFFD, and the next call sees the NUL and stops.
+#
+# ⚠ PURE — load8, store8 and arithmetic, no stdlib and no heap — so tests/utf8.tcyr pins every class above
+# on any host.
+
+enum Utf8K {
+    UTF8_REPL = 0xFFFD;   # U+FFFD REPLACEMENT CHARACTER — what every ill-formed unit decodes to
+}
+
+# Decode the unit at `s` -> (byte length << 32) | scalar. The length is 1..4, or 0 at the NUL terminator
+# (scalar 0). Unpack with utf8_next_len / utf8_next_cp.
+# ⭐ ONE RETURN, NOT AN OUT-PARAMETER: every caller needs both halves, and a packed word keeps this
+# allocation-free with no address-taken local at each call site.
+fn utf8_next(s): i64 {
+    var b0 = load8(s);
+    if (b0 == 0) { return 0; }
+    if (b0 < 0x80) { return (1 << 32) | b0; }
+    # Table 3-7: the lead fixes how many continuation bytes follow and the range of the FIRST of them;
+    # every later one is 80..BF. 80..C1 and F5..FF lead nothing, so `need` stays 0.
+    var need = 0;
+    var cp = 0;
+    var lo = 0x80;
+    var hi = 0xBF;
+    if (b0 >= 0xC2) { if (b0 <= 0xDF) { need = 1; cp = b0 & 0x1F; } }
+    if (b0 >= 0xE0) { if (b0 <= 0xEF) { need = 2; cp = b0 & 0x0F; } }
+    if (b0 >= 0xF0) { if (b0 <= 0xF4) { need = 3; cp = b0 & 0x07; } }
+    if (b0 == 0xE0) { lo = 0xA0; }    # E0 80..9F would be an overlong three-byte form
+    if (b0 == 0xED) { hi = 0x9F; }    # ED A0..BF would be a surrogate, U+D800..U+DFFF
+    if (b0 == 0xF0) { lo = 0x90; }    # F0 80..8F would be an overlong four-byte form
+    if (b0 == 0xF4) { hi = 0x8F; }    # F4 90..BF would be past U+10FFFF
+    if (need == 0) { return (1 << 32) | UTF8_REPL; }
+    var i = 1;
+    while (i <= need) {
+        var b = load8(s + i);
+        # ⛔ Out of range ⇒ the unit is the `i` bytes before `b`, and `b` is NOT consumed. The NUL is
+        # always out of range (`lo` is at least 0x80) — that is what keeps this inside the string.
+        if (b < lo) { return (i << 32) | UTF8_REPL; }
+        if (b > hi) { return (i << 32) | UTF8_REPL; }
+        cp = (cp << 6) | (b & 0x3F);
+        lo = 0x80;
+        hi = 0xBF;
+        i = i + 1;
+    }
+    return (i << 32) | cp;
+}
+
+fn utf8_next_len(r): i64 { return r >> 32; }
+fn utf8_next_cp(r): i64 { return r & 0xFFFFFFFF; }
+
+# How many scalars `s` holds before its NUL — one glyph cell each. An ill-formed unit counts as one.
+fn utf8_count(s): i64 {
+    var n = 0;
+    var i = 0;
+    while (1) {
+        var l = utf8_next_len(utf8_next(s + i));
+        if (l == 0) { break; }
+        i = i + l;
+        n = n + 1;
+    }
+    return n;
+}
+
+# Byte offset at which scalar `k` of `s` starts, or of the NUL when `s` holds `k` scalars or fewer.
+# ⚠ A unit boundary by construction, so cutting or starting a string here never splits a sequence.
+fn utf8_offset(s, k): i64 {
+    var i = 0;
+    var c = 0;
+    while (c < k) {
+        var l = utf8_next_len(utf8_next(s + i));
+        if (l == 0) { break; }
+        i = i + l;
+        c = c + 1;
+    }
+    return i;
+}
+
+# Bytes `utf8_encode` writes for `cp`: 1..4, or 3 for a value that is not a scalar (it writes U+FFFD).
+fn utf8_enc_len(cp): i64 {
+    if (cp < 0) { return 3; }
+    if (cp < 0x80) { return 1; }
+    if (cp < 0x800) { return 2; }
+    if (cp < 0x10000) { return 3; }   # a surrogate lands here too, and U+FFFD is also three bytes
+    if (cp <= 0x10FFFF) { return 4; }
+    return 3;
+}
+
+# Write the UTF-8 form of scalar `cp` at `dst` -> the bytes written (utf8_enc_len). No NUL.
+# ⚠ A value that is not a scalar — negative, a surrogate, past U+10FFFF — is written as U+FFFD, so what
+# this writes is always well-formed and decodes back to exactly what it was given.
+fn utf8_encode(dst, cp): i64 {
+    var c = cp;
+    if (c < 0) { c = UTF8_REPL; }
+    if (c > 0x10FFFF) { c = UTF8_REPL; }
+    if (c >= 0xD800) { if (c <= 0xDFFF) { c = UTF8_REPL; } }
+    if (c < 0x80) {
+        store8(dst, c);
+        return 1;
+    }
+    if (c < 0x800) {
+        store8(dst, 0xC0 | (c >> 6));
+        store8(dst + 1, 0x80 | (c & 0x3F));
+        return 2;
+    }
+    if (c < 0x10000) {
+        store8(dst, 0xE0 | (c >> 12));
+        store8(dst + 1, 0x80 | ((c >> 6) & 0x3F));
+        store8(dst + 2, 0x80 | (c & 0x3F));
+        return 3;
+    }
+    store8(dst, 0xF0 | (c >> 18));
+    store8(dst + 1, 0x80 | ((c >> 12) & 0x3F));
+    store8(dst + 2, 0x80 | ((c >> 6) & 0x3F));
+    store8(dst + 3, 0x80 | (c & 0x3F));
+    return 4;
+}

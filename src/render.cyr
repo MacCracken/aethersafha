@@ -5,6 +5,13 @@
 # Minimal skeleton: solid desktop bg + per-window body + titlebar (focus-tinted).
 # Damage tracking / scene graph / bitmap text are follow-on parity work.
 
+# ⚠ THE DECODER IS INCLUDED BY THE MODULE THAT NEEDS IT, NOT BY EVERY UNIT THAT COMPILES THIS ONE. All text
+# below decodes through it, and render.cyr is compiled by main.cyr, the test and bench files that exercise
+# it, and a probe. A unit that missed the include would link `utf8_next` undefined-but-unreachable and trap
+# (SIGILL) on the first string it drew — the failure tests/shell_render.tcyr's include note records.
+# Include-once makes a unit that also names it free.
+include "src/utf8.cyr"
+
 # ⚠ `TITLEBAR_H` USED TO LIVE HERE and now lives in src/window.cyr's `WinGeom`, with the window's
 # vertical convention documented beside it. It moved because `compositor.cyr` is included EARLIER than
 # this file and therefore could not reach it — so `comp_window_at` open-coded the wrong extent instead.
@@ -776,46 +783,53 @@ fn render_cursor(fb): i64 {
 }
 
 # rend_title_caption(dst, title, box_w): the caption a title box `box_w` px wide shows, written to `dst`
-# (AE_TEXT_CAP_B bytes) NUL-terminated. -> its length, which is also its width in glyph cells.
+# (AE_TEXT_CAP_B bytes) as NUL-terminated UTF-8. -> its length in glyph CELLS, which is also its width.
 #
-# Parity: renderer.rs:545-560. A title wider than its box is cut to `box_w / FONT_ADV` cells ending in an
-# ellipsis — unless that budget is 2 cells or fewer, where Rust draws the whole title rather than a stub.
-# ⚠ Measured in BYTES where Rust counts chars: `draw_text` gives every byte its own cell, so a byte is what
-# a cell holds here.
+# Parity: renderer.rs:543-562. A title wider than its box is cut to `max_chars = box_w / FONT_ADV` cells: its
+# first `max_chars - 1` scalars, then U+2026 '…' in ONE cell — unless that budget is 2 cells or fewer, where
+# Rust draws the whole title rather than a stub. Counted in scalars, as Rust counts chars.
+# ⭐ THE ELLIPSIS IS RUST'S OWN '…'. kashi 1.1.0 draws U+2026 in an extension cell (its ADR 0011), so the cut no
+# longer spends the last three cells on an ASCII "...". Rust drew a BLANK there — its 5x7 font has no '…', so
+# its `draw_char` returned false — and the port draws the real glyph.
+# ⚠ RE-ENCODED, NOT COPIED. Each kept scalar is written back through `utf8_encode`, so an ill-formed byte of the
+# title lands as U+FFFD's three bytes and the caption is always well-formed: it decodes to exactly the title's
+# cells. Whole units only, so a cut never splits a sequence.
 #
-# ⛔ THE ELLIPSIS IS "...", NOT "…". `draw_text` reads BYTES and kashi's VGA 8x16 is code page 437, which
-# has no U+2026, so a UTF-8 "…" (E2 80 A6) draws THREE cells: `ΓÇª`. Rust never showed one either — its 5x7
-# font has no '…' glyph, so `draw_char` returned false and that cell was blank. The dots take the LAST three
-# cells of Rust's budget: the caption is as wide as Rust's and keeps two fewer of the title's characters.
-#
-# ⛔⛔ AND NO CAPTION IS LONGER THAN AE_TEXT_CHARS, however wide the window — including when the box cuts it
-# to more cells than that. `ae_text_enqueue` refuses a longer run, `draw_text` falls back to the CPU, and on
-# a GPU frame nothing presents the CPU layer — gpu.cyr skips the `#39` band once chrome is queued — so such a
+# ⛔⛔ AND NO CAPTION IS LONGER THAN AE_TEXT_CHARS CELLS, however wide the window — including when the box cuts it
+# to more cells than that. `ae_text_enqueue` refuses a longer run, `draw_text` falls back to the CPU, and on a
+# GPU frame nothing presents the CPU layer — gpu.cyr skips the `#39` band once chrome is queued — so such a
 # title was never on screen at all. Rust drew it whole; it is cut here like any other title too long for its
-# box, on every frame kind, so a CPU frame (QEMU) and a GPU frame (iron) show the same caption.
+# box, ending in '…' the same way, on every frame kind, so a CPU frame (QEMU) and a GPU frame (iron) show the
+# same caption.
 fn rend_title_caption(dst, title, box_w): i64 {
     store8(dst, 0);
     if (title == 0) { return 0; }
-    var n = 0;
-    while (load8(title + n) != 0) { n = n + 1; }
+    var n = utf8_count(title);
     var lim = AE_TEXT_CHARS;
     if (text_width(title) > box_w) {
         var mc = box_w / FONT_ADV;
         if (mc > 2) { if (mc < lim) { lim = mc; } }
     }
-    if (lim > AE_TEXT_CAP_B - 1) { lim = AE_TEXT_CAP_B - 1; }   # LAST: never past `dst`, whatever came above
-    var len = n;
-    if (len > lim) { len = lim; }
-    var i = 0;
-    while (i < len) { store8(dst + i, load8(title + i)); i = i + 1; }
-    store8(dst + len, 0);
-    # Cut: the last three cells become the ellipsis (`lim` is at least 3 today; the floor keeps it in `dst`).
-    if (len < n) {
-        var d = len - 3;
-        if (d < 0) { d = 0; }
-        while (d < len) { store8(dst + d, '.'); d = d + 1; }
+    var keep = n;
+    if (n > lim) { keep = lim - 1; }                # Rust: `title.chars().take(max_chars - 1)`, then '…'
+    var si = 0;                                     # bytes of `title` consumed
+    var di = 0;                                     # bytes of `dst` written
+    var c = 0;                                      # cells written
+    while (c < keep) {
+        var r = utf8_next(title + si);
+        if (utf8_next_len(r) == 0) { break; }
+        # LAST: never past `dst`, whatever came above — four bytes stay free for the '…' and the NUL.
+        if (di + utf8_enc_len(utf8_next_cp(r)) > AE_TEXT_CAP_B - 4) { break; }
+        di = di + utf8_encode(dst + di, utf8_next_cp(r));
+        si = si + utf8_next_len(r);
+        c = c + 1;
     }
-    return len;
+    if (c < n) {                                    # cut: the ellipsis is the last cell
+        di = di + utf8_encode(dst + di, AE_TEXT_ELLIPSIS);
+        c = c + 1;
+    }
+    store8(dst + di, 0);
+    return c;
 }
 
 # render_title(fb, win, color): draw the window's caption in its titlebar. -> width drawn, px.
@@ -838,8 +852,11 @@ fn render_title(fb, win, color): i64 {
     var e = (bhumi_fb_width(fb) - tx) / FONT_ADV;   # the cells that end by the right edge
     if (e > n) { e = n; }
     if (e <= k) { return 0; }
-    store8(&cap + e, 0);
-    return draw_text(fb, &cap + k, tx + k * FONT_ADV, win_y(win) + (TITLEBAR_H - FONT_H) / 2, color);
+    # ⚠ `k` and `e` are CELL indices, and a cell is 1..4 bytes of the caption: cut and start at their BYTE
+    # offsets. Indexing the caption by cell number starts on the wrong scalar, or splits one into U+FFFD.
+    var kb = utf8_offset(&cap, k);
+    store8(&cap + utf8_offset(&cap, e), 0);
+    return draw_text(fb, &cap + kb, tx + k * FONT_ADV, win_y(win) + (TITLEBAR_H - FONT_H) / 2, color);
 }
 
 fn render_window(fb, win, focused): i64 {
@@ -1259,20 +1276,28 @@ fn ae_rect_enqueue_a(fb, x, y, w, h, color, a): i64 {
 # cyrius VARIABLE forward-reference does not resolve, and `tests/render.tcyr` compiles this module without
 # gpu.cyr. The syscall stays on the far side of that line.
 enum AeText {
-    AE_TEXT_MAX   = 48;    # runs per frame
-    AE_TEXT_CHARS = 64;    # chars per run — every window caption is capped to it; other chrome text is not
-    AE_TEXT_CAP_B = 72;    # bytes in a caption buffer: AE_TEXT_CHARS + NUL, rounded up — keep it > AE_TEXT_CHARS
+    AE_TEXT_MAX      = 48;       # runs per frame
+    AE_TEXT_CHARS    = 64;       # CELLS per run — every window caption is capped to it; other chrome text is not
+    # Bytes in a caption buffer: AE_TEXT_CHARS cells of up to 4 UTF-8 bytes, the 3-byte '…' and the NUL, rounded
+    # up to 8. ⚠ `rend_title_caption` keeps four bytes free while it copies, so 4 * AE_TEXT_CHARS + 4 is the floor.
+    AE_TEXT_CAP_B    = 264;
+    AE_TEXT_ELLIPSIS = 0x2026;   # U+2026 HORIZONTAL ELLIPSIS — a cut caption's last cell
 }
 var ae_text_n = 0;
 var ae_text_x[48];
 var ae_text_y[48];
 var ae_text_col[48];
-var ae_text_off[48];
-var ae_text_len[48];
-# ⛔ MODULE-SCOPE `var X[N]` IS N x u64. The pool must hold AE_TEXT_MAX * AE_TEXT_CHARS = 3072 bytes,
-# so [384] (3072 B). Sizing this by the function-local byte rule would overrun into the next global.
-var ae_text_pool[384];
-var ae_text_used = 0;
+var ae_text_off[48];       # where each run starts in the pool, in CELLS
+var ae_text_len[48];       # each run's length, in CELLS
+# ⛔ MODULE-SCOPE `var X[N]` IS N x u64. The pool holds CELLS of TWO bytes: since kashi 1.1.0 a cell reaches
+# 0x101 ('…' and U+FFFD are extension cells past 0xFF, its ADR 0011), and a one-byte pool would wrap them to
+# 0x00 / 0x01 — blank. AE_TEXT_MAX * AE_TEXT_CHARS = 3072 cells = 6144 bytes, so [768]. Sizing it by the
+# function-local byte rule would overrun into the next global.
+# ⭐ DECODED ONCE, AT ENQUEUE. The pool holds what will be DRAWN, so the packer gpu.cyr runs every frame has no
+# decoder in it, a run's length is one number — cells, which is what its width, the cap and the fit all count
+# — and a cell costs 2 bytes where its UTF-8 can cost 4. A CPU draw maps through the same `ae_text_cell`.
+var ae_text_pool[768];
+var ae_text_used = 0;      # pool CELLS in use
 # ⚠ COUNTED, NOT SILENT. A queue that quietly drops a run renders a window with no title and nothing says
 # why. The caller falls back to the CPU path on a refusal — ⛔ but a GPU frame never presents that CPU layer
 # (`AE-9` skips the `#39` band), so there a drop IS a missing caption. Window captions are made to fit
@@ -1294,7 +1319,8 @@ fn ae_text_run_x(i): i64 { return load64(&ae_text_x + i * 8); }
 fn ae_text_run_y(i): i64 { return load64(&ae_text_y + i * 8); }
 fn ae_text_run_col(i): i64 { return load64(&ae_text_col + i * 8); }
 fn ae_text_run_len(i): i64 { return load64(&ae_text_len + i * 8); }
-fn ae_text_run_ptr(i): i64 { return &ae_text_pool + load64(&ae_text_off + i * 8); }
+# ⚠ -> the run's CELLS, two bytes each (`load16` at + 2 * j) — what `ae_text_pack_1bpp` reads, not the string.
+fn ae_text_run_ptr(i): i64 { return &ae_text_pool + load64(&ae_text_off + i * 8) * 2; }
 fn ae_text_dropped_get(): i64 { return ae_text_dropped; }
 
 # Queue one text run. Returns 1 if queued (the caller must NOT also draw it), 0 if refused.
@@ -1311,8 +1337,7 @@ fn ae_text_dropped_get(): i64 { return ae_text_dropped; }
 fn ae_text_fits(fb, s, x, y): i64 {
     if (x < 0) { return 0; }
     if (y < 0) { return 0; }
-    var n = 0;
-    while (load8(s + n) != 0) { n = n + 1; }
+    var n = utf8_count(s);                          # CELLS: a run is as wide as its scalars, not its bytes
     if (n == 0) { return 1; }
     if (x + ae_text_width(n) > bhumi_fb_width(fb)) { return 0; }
     if (y + FONT_H > bhumi_fb_height(fb)) { return 0; }
@@ -1321,8 +1346,7 @@ fn ae_text_fits(fb, s, x, y): i64 {
 
 fn ae_text_enqueue(s, x, y, color): i64 {
     if (ae_text_n >= AE_TEXT_MAX) { ae_text_dropped = ae_text_dropped + 1; return 0; }
-    var n = 0;
-    while (load8(s + n) != 0) { n = n + 1; }
+    var n = utf8_count(s);                          # CELLS — the cap and the pool both count cells
     if (n == 0) { return 1; }                       # nothing to draw, and nothing to fall back to
     # ⛔⛔ REFUSE A RUN THAT WOULD LEAVE THE BACK BUFFER, LOCALLY, BEFORE THE KERNEL SEES IT.
     #
@@ -1341,8 +1365,7 @@ fn ae_text_enqueue(s, x, y, color): i64 {
     if (y < 0) { ae_text_dropped = ae_text_dropped + 1; return 0; }
     if (n > AE_TEXT_CHARS) { ae_text_dropped = ae_text_dropped + 1; return 0; }
     if (ae_text_used + n > AE_TEXT_MAX * AE_TEXT_CHARS) { ae_text_dropped = ae_text_dropped + 1; return 0; }
-    var i = 0;
-    while (i < n) { store8(&ae_text_pool + ae_text_used + i, load8(s + i)); i = i + 1; }
+    ae_text_cells(&ae_text_pool + ae_text_used * 2, s, n);
     store64(&ae_text_x + ae_text_n * 8, x);
     store64(&ae_text_y + ae_text_n * 8, y);
     store64(&ae_text_col + ae_text_n * 8, color);
@@ -1353,13 +1376,14 @@ fn ae_text_enqueue(s, x, y, color): i64 {
     return 1;
 }
 
-# Row stride in bytes of the 1bpp bitmap a run of `len` characters packs into. `#92` op 0x03 requires
+# Row stride in bytes of the 1bpp bitmap a run of `len` CELLS packs into. `#92` op 0x03 requires
 # byte-aligned rows: `(w + 7) / 8`.
 fn ae_text_stride(len): i64 { return ((len * FONT_ADV) + 7) / 8; }
 fn ae_text_width(len): i64 { return len * FONT_ADV; }
 fn ae_text_bytes(len): i64 { return ae_text_stride(len) * FONT_H; }
 
-# Pack `len` characters into a 1bpp MSB-first bitmap at `dst`. -> the bitmap width in pixels.
+# Pack the `len` CELLS at `cells` — two bytes each, a queued run (`ae_text_run_ptr`) — into a 1bpp MSB-first
+# bitmap at `dst`. -> the bitmap width in pixels.
 #
 # ⛔ MSB-FIRST, AND THIS IS THE ONE DETAIL THAT CANNOT BE GUESSED. The kernel's glyph shader reads bit 7 of
 # a byte as the LEFTMOST pixel, and its own source comment says the mistake it was written to avoid is
@@ -1367,14 +1391,14 @@ fn ae_text_bytes(len): i64 { return ae_text_stride(len) * FONT_H; }
 # (`bit (7 - col)`), so this is a bit-for-bit copy at a horizontal offset, not a format conversion.
 # ⚠ Pure — no syscalls, no framebuffer — so `tests/render.tcyr` can verify the bit layout on any machine
 # instead of on the operator's only box.
-fn ae_text_pack_1bpp(dst, s, len): i64 {
+fn ae_text_pack_1bpp(dst, cells, len): i64 {
     var stride = ae_text_stride(len);
     var total = stride * FONT_H;
     var z = 0;
     while (z < total) { store8(dst + z, 0); z = z + 1; }
     var i = 0;
     while (i < len) {
-        var ch = load8(s + i);
+        var ch = load16(cells + i * 2);
         var row = 0;
         while (row < FONT_H) {
             var bits = kashi_glyph_row(KASHI_FONT_VGA_8X16, ch, row);
@@ -1395,8 +1419,10 @@ fn ae_text_pack_1bpp(dst, s, len): i64 {
     return ae_text_width(len);
 }
 
-# draw_char(fb, ch, x, y, color): blit one kashi VGA 8x16 glyph. Each row is a
+# draw_char(fb, ch, x, y, color): blit one kashi VGA 8x16 glyph CELL. Each row is a
 # byte; bit (7 - col) = leftmost-first pixel. Requires kashi_font_init() first.
+# ⚠ `ch` IS A CELL — not a byte of text, not a codepoint: 0x20..0xFF is the CP437 page and 0x100.. kashi's
+# extension block, and anything else draws blank. Text reaches it through `ae_text_cell`.
 # ⭐ ONE-SHOT FONT GUARD (0.16.4). See `draw_text` for why this exists rather than a bare call.
 var ae_font_ready = 0;
 fn ae_font_ensure(): i64 {
@@ -1404,6 +1430,33 @@ fn ae_font_ensure(): i64 {
     kashi_font_init();
     ae_font_ready = 1;
     return 1;
+}
+
+# The glyph CELL that draws scalar `cp` (kashi ADR 0011): printable ASCII is itself, the CP437 high half its
+# code-page cell (U+00E9 'é' is 0x82), U+2026 and U+FFFD the extension cells — and 0 for a scalar no built-in
+# glyph draws, which every glyph accessor answers with blank rows.
+# ⭐ A BLANK CELL STILL ADVANCES — Rust parity: renderer.rs draw_text moves on 6 px for a char it has no glyph for.
+# ⚠ Ill-formed UTF-8 reaches this as U+FFFD (src/utf8.cyr), so it draws U+FFFD's glyph. Port-only: a Rust
+# `&str` cannot hold an ill-formed byte.
+# ⛔ The map's high half reads tables `kashi_font_init` fills, so `ae_font_ensure` must have run first — before
+# it, U+00E9 answers 0 and draws blank.
+fn ae_text_cell(cp): i64 { return kashi_cp437_from_unicode(cp); }
+
+# Decode the UTF-8 string `s` into glyph CELLS at `dst`, two bytes each, at most `max` of them. -> how many.
+# ⭐ The ONE decode-and-map the glyph queue uses, through the same `ae_text_cell` `draw_text`'s CPU loop draws
+# with — so a queued run and a CPU draw of one string are the same cells by construction.
+fn ae_text_cells(dst, s, max): i64 {
+    ae_font_ensure();
+    var n = 0;
+    var i = 0;
+    while (n < max) {
+        var r = utf8_next(s + i);
+        if (utf8_next_len(r) == 0) { break; }
+        store16(dst + n * 2, ae_text_cell(utf8_next_cp(r)));
+        i = i + utf8_next_len(r);
+        n = n + 1;
+    }
+    return n;
 }
 
 fn draw_char(fb, ch, x, y, color): i64 {
@@ -1422,7 +1475,7 @@ fn draw_char(fb, ch, x, y, color): i64 {
     return 1;
 }
 
-# draw_text(fb, s, x, y, color): render a NUL-terminated cstring. -> width in px.
+# draw_text(fb, s, x, y, color): render a NUL-terminated UTF-8 cstring, one cell per scalar. -> width in px.
 fn draw_text(fb, s, x, y, color): i64 {
     # ⛔⛔ THE FONT MUST BE UP BEFORE ANY GLYPH IS READ, AND THE COST OF FORGETTING IS NOT BLANK TEXT.
     # `kashi_font_init` was called once from `main.cyr` at boot, so every production path was fine and
@@ -1440,52 +1493,53 @@ fn draw_text(fb, s, x, y, color): i64 {
     if (ae_gpu_frame_ok == 1) {
         if (ae_text_gpu_ok == 1) {
             if (ae_text_fits(fb, s, x, y) == 1) {
-                if (ae_text_enqueue(s, x, y, color) == 1) {
-                    var n = 0;
-                    while (load8(s + n) != 0) { n = n + 1; }
-                    return ae_text_width(n);
-                }
+                if (ae_text_enqueue(s, x, y, color) == 1) { return ae_text_width(utf8_count(s)); }
             }
         }
     }
+    # ⭐ ONE SCALAR, ONE CELL OF ADVANCE — Rust's `for ch in text.chars()`, a blank cell included. A byte per cell
+    # was the mojibake: "é" (C3 A9) drew `├⌐` in two cells.
     var cx = x;
     var i = 0;
     while (1) {
-        var ch = load8(s + i);
-        if (ch == 0) { break; }
-        draw_char(fb, ch, cx, y, color);
+        var r = utf8_next(s + i);
+        if (utf8_next_len(r) == 0) { break; }
+        draw_char(fb, ae_text_cell(utf8_next_cp(r)), cx, y, color);
         cx = cx + FONT_ADV;
-        i = i + 1;
+        i = i + utf8_next_len(r);
     }
     return cx - x;
 }
 
-# draw_text_lines(fb, s, x, y, color): like draw_text, but honors '\n' (0x0A) as a
+# draw_text_lines(fb, s, x, y, color): like draw_text, but honors '\n' (U+000A) as a
 # line break — a foreign guest's captured stdout is multi-line. NUL ends. Returns
 # the total pixel height drawn (from y to the last line's baseline).
+# ⚠ Decoded like draw_text. A '\n' is always a unit of its own — 0x0A continues no sequence — so a sequence cut
+# short by a newline is one U+FFFD and the line still breaks.
 fn draw_text_lines(fb, s, x, y, color): i64 {
+    ae_font_ensure();                               # the cell map reads the tables too — see `ae_text_cell`
     var cx = x;
     var cy = y;
     var i = 0;
     while (1) {
-        var ch = load8(s + i);
-        if (ch == 0) { break; }
-        if (ch == 10) {
+        var r = utf8_next(s + i);
+        if (utf8_next_len(r) == 0) { break; }
+        if (utf8_next_cp(r) == 10) {
             cx = x;
             cy = cy + FONT_H + 2;
         } else {
-            draw_char(fb, ch, cx, cy, color);
+            draw_char(fb, ae_text_cell(utf8_next_cp(r)), cx, cy, color);
             cx = cx + FONT_ADV;
         }
-        i = i + 1;
+        i = i + utf8_next_len(r);
     }
     return cy - y;
 }
 
-# text_width(s): pixel width of a cstring in this font (chars*6 - 1; 0 if empty).
+# text_width(s): pixel width of a UTF-8 cstring in this font: cells * FONT_ADV - 1, 0 if empty.
+# Parity: renderer.rs text_width is `chars().count() * 6 - 1` — every scalar is a cell, glyph or not.
 fn text_width(s): i64 {
-    var n = 0;
-    while (load8(s + n) != 0) { n = n + 1; }
+    var n = utf8_count(s);
     if (n == 0) { return 0; }
     return n * FONT_ADV - 1;
 }

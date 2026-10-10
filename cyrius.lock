@@ -1,6 +1,6 @@
 commit	21ca348cd25f5ff847787a17b826d4ac2c7b8661	bhumi	https://github.com/MacCracken/bhumi.git	1.4.5
 commit	ddfc3d811bd234757d5f4e01a54afb80f6ff97a5	rupa	https://github.com/MacCracken/rupa.git	0.1.8
-commit	f8f9c97b3c9b44b2098907ac739142dee03b91c7	kashi	https://github.com/MacCracken/kashi.git	1.0.10
+commit	93909d009fd64d04ee696a2cf2065ae2b615f1ba	kashi	https://github.com/MacCracken/kashi.git	1.1.0
 commit	59bed0c5bfcf271a309898bcc33ca02d9648a9f0	mehman	https://github.com/MacCracken/mehman.git	1.0.4
 commit	472d6ca7be8be40d53be242a311b69245e4a9d7d	kavach	https://github.com/MacCracken/kavach.git	3.13.1
 commit	833919c2bf0ec8943aaf8f04a0cdf5b4c80544e5	chitra	https://github.com/MacCracken/chitra.git	1.0.3
@@ -39,7 +39,7 @@ b34890c61d62738208106abb6d06f483819e2e01a7ac7899274542b05fdee2df  lib/hashmap.cy
 c330214e8dedf8ee79d03647ea280049f12eb63d6a21c31c5c4bfa36af381c3e  lib/hashmap_fast.cyr
 9bebf72eaa4c63aac80710f21d25310b89658bb8cc9f47a8a57ba16261fa0d5b  lib/hashseed.cyr
 5a034c3453855fdced31c6536bdb472a0b7dfcb3307271c9d6caaf07e4115548  lib/io.cyr
-5b5dd5a59b766d642d711e8c884780bfe3ba9efd2dcefb3c76230208556e8d54  lib/kashi_font_data.cyr
+ab0b79cba425a90f76ef47a09d1912a1b823dcca69fb7c82e7f97812408fe382  lib/kashi_font_data.cyr
 a0504d17e4565ca28a7fc2ba42f7ee678ab862aad3b8fce6e029bbc8785a6648  lib/kavach.cyr
 f38092748e5a9197f7a526e54801fd15fab70d2a04d1c23f4f71003f564fb3d6  lib/keccak.cyr
 b54450112445e187ac2e56901ad86e27133199b16534129955d23fd7ceda4bd8  lib/math.cyr

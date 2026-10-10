@@ -225,6 +225,88 @@ fn main() {
     assert_eq(panel_net_color(SH_NetStatus.SH_NET_CONNECTED), c_up, "...and neither moves with the theme");
     ae_theme_select(0);
 
+    test_group("panel — ⛔ AN UNMEASURED NETWORK IS NOT DRAWN AS CONNECTED (pixel proof)");
+    # Rust hardcoded Connected (main.rs:173, shell.rs:183) and nothing measures it; the dot was green on
+    # every boot. A fresh shell must paint the EMPTY track there, and a measured Connected the green.
+    var nsh = shell_new();
+    var nfb = bhumi_fb_new(640, 400);
+    render_shell_panel(nfb, nsh);
+    var ndx = panel_net_dot_x(panel_slot_x(640, 3)) + IND_H / 2;    # no battery: the dot takes slot 3
+    var ndy = (PANEL_H - IND_H) / 2 + IND_H / 2;
+    var ntrack = ae_bhumi(rupa_theme_widget(rupa_theme_active()));
+    assert_eq(bhumi_fb_get(nfb, ndx, ndy), ntrack, "unknown net paints the empty gauge track");
+    assert_eq(bhumi_fb_get(nfb, ndx, ndy) != c_up, 1, "  ...which is not the Connected green");
+    shell_status_set_net(shell_status(nsh), SH_NetStatus.SH_NET_CONNECTED);
+    render_shell_panel(nfb, nsh);
+    assert_eq(bhumi_fb_get(nfb, ndx, ndy), c_up, "a MEASURED Connected still paints green at that pixel");
+
+    test_group("panel — ⛔ A FRAME OF PANEL AND CARDS ALLOCATES NOTHING");
+    # The arena never frees and these run every frame. With a notice up and agents counted, the badge
+    # and the "A<n>" label are drawn on every frame for the whole session — 48 B a frame when they
+    # took `alloc(24)`. The first pass warms anything lazily built (the font); the second must be free.
+    var hsh = shell_new();
+    var hfb = bhumi_fb_new(640, 400);
+    shell_show_notification(hsh, shell_notif_new(1, "AGNOS Desktop", "Welcome to AGNOS", "Your AI-native desktop environment", SH_NotifPriority.SH_PRIO_NORMAL, 0, 0, 0));
+    shell_set_agent_count(hsh, 37);
+    render_shell_panel(hfb, hsh);
+    render_notifications(hfb, hsh);
+    var h0 = alloc_used();
+    render_shell_panel(hfb, hsh);
+    assert_eq(alloc_used() - h0, 0, "render_shell_panel with a badge and an agent label: 0 B");
+    var h1 = alloc_used();
+    render_notifications(hfb, hsh);
+    assert_eq(alloc_used() - h1, 0, "render_notifications with a card: 0 B");
+    k = 0;
+    while (k < 8) { shell_show_notification(hsh, shell_notif_default(2 + k, 0)); k = k + 1; }
+    render_notifications(hfb, hsh);
+    var h2 = alloc_used();
+    render_notifications(hfb, hsh);
+    assert_eq(alloc_used() - h2, 0, "  ...and with the +N overflow row: 0 B");
+
+    test_group("notifications — ⛔ A LINE IS CUT TO ITS CARD, NEVER DRAWN PAST IT");
+    # ⚠ Rust's welcome body (main.rs:119) is 34 cells and must fit whole; anything longer is cut with
+    # '…' (one cell, U+2026) inside `panel_note_text_w()`, clear of the requires-action marker 10 px
+    # from the edge.
+    var cap[AE_TEXT_CAP_B];
+    var wlen = panel_note_caption(&cap, "Your AI-native desktop environment");
+    assert_eq(wlen, 34, "the welcome body is drawn whole");
+    assert_eq(t_streq(&cap, "Your AI-native desktop environment"), 1, "  ...unchanged");
+    var llen = panel_note_caption(&cap, "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW");
+    assert_eq(t_gt(llen * FONT_ADV, panel_note_text_w()), 0, "a long line's cells fit the text width");
+    assert_eq(t_gt(10 + panel_note_text_w(), NOTE_W - 10), 0, "  ...which ends clear of the marker");
+    assert_eq(utf8_next_cp(utf8_next(&cap + utf8_offset(&cap, llen - 1))), 0x2026, "  ...and ends in '…', so the cut is visible");
+    # Pixel proof on a 1280-wide framebuffer: the card's last 10 px and the PANEL_PAD right of it are
+    # readable, so an overrun lands on pixels the test sees before it falls off the screen.
+    var lsh = shell_new();
+    var lfb = bhumi_fb_new(1280, 400);
+    shell_show_notification(lsh, shell_notif_new(1, "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", SH_NotifPriority.SH_PRIO_NORMAL, 0, 1, 0));
+    render_notifications(lfb, lsh);
+    var lcx = 1280 - PANEL_PAD - NOTE_W;
+    var lmute = ae_bhumi(rupa_theme_mute(rupa_theme_active()));
+    var link = ae_bhumi(rupa_theme_ink(rupa_theme_active()));
+    var lin_card = 0;
+    var past = 0;
+    var ly = PANEL_H + NOTE_GAP;
+    while (ly < PANEL_H + NOTE_GAP + NOTE_H) {
+        if (t_row_has(lfb, ly, lcx + 10, lcx + NOTE_W - 10, link) == 1) { lin_card = 1; }
+        if (t_row_has(lfb, ly, lcx + NOTE_W - 10, lcx + NOTE_W, lmute) == 1) { past = 1; }
+        if (t_row_has(lfb, ly, lcx + NOTE_W - 10, lcx + NOTE_W, link) == 1) { past = 1; }
+        ly = ly + 1;
+    }
+    assert_eq(lin_card, 1, "the long title IS drawn inside the card");
+    assert_eq(past, 0, "no app/title/body glyph in the card's last 10 px (the marker's column)");
+    var rx_seen = 0;
+    var rx = lcx + NOTE_W;
+    while (rx < 1280) {
+        ly = PANEL_H + NOTE_GAP;
+        while (ly < PANEL_H + NOTE_GAP + NOTE_H) {
+            if (bhumi_fb_get(lfb, rx, ly) != 0) { rx_seen = 1; }
+            ly = ly + 1;
+        }
+        rx = rx + 1;
+    }
+    assert_eq(rx_seen, 0, "  ...and nothing at all past the card's right edge");
+
     return assert_summary();
 }
 

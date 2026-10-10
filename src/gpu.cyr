@@ -1076,6 +1076,8 @@ fn ae_gpu_emit_text_range(ae_text_lo, ae_text_hi): i64 {
     var emitted = 0;
     var i = ae_text_lo;
     while (i < ae_text_hi) {
+        # ⚠ A run is glyph CELLS, decoded from UTF-8 at enqueue (two bytes each, `len` of them) — not the
+        # string's bytes. The slot holds `ae_text_bytes(AE_TEXT_CHARS)`, the widest run in cells.
         var len = ae_text_run_len(i);
         var w = ae_text_pack_1bpp(ae_gpu_glyph_buf, ae_text_run_ptr(i), len);
         if (sys_shm_write(ae_gpu_glyph_slot, ae_gpu_glyph_buf, ae_text_bytes(len)) == 0) {

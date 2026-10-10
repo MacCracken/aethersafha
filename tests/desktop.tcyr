@@ -2,6 +2,7 @@
 # The Desktop owns the compositor + all 8 leaf subsystems and wires the live
 # compositor→accessibility connection. Stdlib + [deps.*] auto-included.
 include "src/frametime.cyr"   # render_desktop times the background clear through it
+include "src/sysprobe.cyr"    # desktop_status_tick reads the panel producers
 include "src/geom.cyr"
 include "src/window.cyr"
 include "src/compositor.cyr"
@@ -44,6 +45,27 @@ fn zseed(w, h, word): i64 {
 fn t_ok(x): i64 {
     if (x != 0) { return 1; }
     return 0;
+}
+
+fn t_streq(a, b): i64 {
+    var i = 0;
+    while (load8(a + i) != 0) {
+        if (load8(a + i) != load8(b + i)) { return 0; }
+        i = i + 1;
+    }
+    if (load8(b + i) != 0) { return 0; }
+    return 1;
+}
+
+# Does the stored gauge `v` match a fresh read `p` of its producer? Same known-ness, and when both
+# are known, within `tol` permille (the number moved between the two reads).
+fn t_gauge_from(v, p, tol): i64 {
+    if (sysp_is_known(v) != sysp_is_known(p)) { return 0; }
+    if (sysp_is_known(v) == 0) { return 1; }
+    var dlt = v - p;
+    if (dlt < 0) { dlt = 0 - dlt; }
+    if (dlt > tol) { return 0; }
+    return 1;
 }
 
 fn t_le(a, b): i64 { if (a <= b) { return 1; } return 0; }
@@ -179,11 +201,100 @@ fn main() {
 
     test_group("desktop — a11y tree mirrors the compositor window stack");
     var comp = desk_comp(d);
-    assert_eq(desktop_sync_accessibility(d), 0, "no windows -> no a11y nodes");
-    comp_create_window(comp, 0, 0, 100, 100, "A");
-    comp_create_window(comp, 0, 0, 100, 100, "B");
-    assert_eq(desktop_sync_accessibility(d), 2, "sync returns one node per window");
-    assert_eq(a11y_tree_len(desk_a11y(d)), 2, "a11y tree has a node per window");
+    var ax = desk_a11y(d);
+    assert_eq(comp_a11y(comp), ax, "desktop_new hands the compositor the desktop's tree");
+    assert_eq(desktop_sync_accessibility(d), 0, "no windows -> nothing to reconcile");
+    # create -> a node keyed by the WINDOW id, Rust's role/name/bounds/actions, and the announcement
+    var wa = comp_create_window(comp, 10, 20, 300, 200, "A");
+    var na = a11y_tree_get_node(ax, win_id(wa));
+    assert(t_ok(na), "create adds a node keyed by the window id");
+    assert_eq(a11y_tree_len(ax), 1, "  ...exactly one");
+    assert_eq(a11y_node_role(na), AxRole.AX_ROLE_WINDOW, "  ...role Window");
+    assert_eq(streq(a11y_node_name(na), "A"), 1, "  ...name = title");
+    assert_eq(rect_x(a11y_node_bounds(na)), 10, "  ...bounds x");
+    assert_eq(rect_y(a11y_node_bounds(na)), 20, "  ...bounds y");
+    assert_eq(rect_w(a11y_node_bounds(na)), 300, "  ...bounds w");
+    assert_eq(rect_h(a11y_node_bounds(na)), 200, "  ...bounds h");
+    assert_eq(vec_len(a11y_node_actions(na)), 3, "  ...three actions");
+    assert_eq(vec_get(a11y_node_actions(na), 0), AxAction.AX_ACT_FOCUS, "  ...Focus");
+    assert_eq(vec_get(a11y_node_actions(na), 1), AxAction.AX_ACT_CLICK, "  ...Click");
+    assert_eq(vec_get(a11y_node_actions(na), 2), AxAction.AX_ACT_DISMISS, "  ...Dismiss");
+    var an1 = a11y_tree_pending_announcements(ax);
+    assert_eq(vec_len(an1), 1, "create announces once");
+    assert_eq(streq(vec_get(an1, 0), "Window opened: A"), 1, "  ...\"Window opened: A\"");
+    assert_eq(a11y_tree_focused_id(ax), win_id(wa), "the created window has tree focus (compositor focused it)");
+    var wb = comp_create_window(comp, 0, 0, 100, 100, "B");
+    var wc = comp_create_window(comp, 0, 0, 100, 100, "C");
+    assert_eq(a11y_tree_len(ax), 3, "three windows, three nodes");
+    assert_eq(a11y_tree_focused_id(ax), win_id(wc), "tree focus follows creation to C");
+    assert_eq(a11y_node_is_focused(a11y_tree_get_node(ax, win_id(wb))), 0, "  ...B's node is not focused");
+    # focus moves sync tree focus (comp_focus: click / Ctrl+Tab / setu focus all land here)
+    comp_focus(comp, comp_find_by_id(comp, win_id(wa)));
+    assert_eq(a11y_tree_focused_id(ax), win_id(wa), "comp_focus(A) moves tree focus to A");
+    assert_eq(a11y_node_is_focused(a11y_tree_get_node(ax, win_id(wa))), 1, "  ...A's node state.focused");
+    assert_eq(a11y_node_is_focused(a11y_tree_get_node(ax, win_id(wc))), 0, "  ...C's node unfocused");
+    comp_focus(comp, comp_count(comp) - 1);
+    assert_eq(a11y_tree_focused_id(ax), win_id(wa), "re-focusing the top window (the no-op raise) keeps A");
+    # sync twice -> no duplicates, and a count that says nothing changed
+    assert_eq(desktop_sync_accessibility(d), 0, "sync after mirrored windows changes nothing");
+    assert_eq(desktop_sync_accessibility(d), 0, "  ...and again");
+    assert_eq(a11y_tree_len(ax), 3, "  ...no duplicate nodes");
+    assert_eq(a11y_tree_focused_id(ax), win_id(wa), "  ...focus untouched");
+    a11y_tree_pending_announcements(ax);
+    # close the FOCUSED window -> node gone, the exact announcement, focus handed off and synced
+    var wa_id = win_id(wa);
+    comp_close_window(comp, wa_id);
+    assert_eq(a11y_tree_get_node(ax, wa_id), 0, "close removes the window's node");
+    assert_eq(a11y_tree_len(ax), 2, "  ...two nodes left");
+    var an2 = a11y_tree_pending_announcements(ax);
+    assert_eq(vec_len(an2), 1, "close announces once");
+    assert_eq(streq(vec_get(an2, 0), "Window closed: A"), 1, "  ...\"Window closed: A\"");
+    assert_eq(comp_focused_id(comp), win_id(wc), "precondition: the hand-off focused C (topmost)");
+    assert_eq(a11y_tree_focused_id(ax), win_id(wc), "the close hand-off syncs tree focus to C");
+    # close an UNfocused window -> focus stays
+    comp_close_window(comp, win_id(wb));
+    assert_eq(a11y_tree_len(ax), 1, "closing unfocused B removes its node");
+    assert_eq(a11y_tree_focused_id(ax), win_id(wc), "  ...tree focus stays on C");
+    # minimize / unminimize: every window minimized -> nothing focused, in the tree too
+    win_minimize(wc);
+    comp_focus_topmost_visible(comp);
+    assert_eq(comp_focused_id(comp), 0, "precondition: all minimized, compositor focuses nothing");
+    assert_eq(a11y_tree_focused_id(ax), 0, "  ...and the tree focuses nothing");
+    assert_eq(a11y_node_is_focused(a11y_tree_get_node(ax, win_id(wc))), 0, "  ...C's node unfocused");
+    comp_focus(comp, comp_find_by_id(comp, win_id(wc)));
+    assert_eq(a11y_tree_focused_id(ax), win_id(wc), "focusing the minimized C restores it and its tree focus");
+    # reconcile repairs what bypassed the hooks: a window made while the mirror was detached, and a stale node
+    comp_set_a11y(comp, 0);
+    var wd = comp_create_window(comp, 1, 2, 30, 40, "D");
+    comp_set_a11y(comp, ax);
+    assert_eq(a11y_tree_get_node(ax, win_id(wd)), 0, "precondition: D was not mirrored");
+    a11y_tree_window_open(ax, 4242, "Ghost", 0, 0, 1, 1);
+    a11y_tree_pending_announcements(ax);
+    assert_eq(desktop_sync_accessibility(d), 2, "sync adds D and drops the ghost: 2 changes");
+    assert(t_ok(a11y_tree_get_node(ax, win_id(wd))), "  ...D has its node");
+    assert_eq(a11y_tree_get_node(ax, 4242), 0, "  ...the ghost is gone");
+    assert_eq(a11y_tree_focused_id(ax), win_id(wd), "  ...tree focus synced to D");
+    var an3 = a11y_tree_pending_announcements(ax);
+    assert_eq(vec_len(an3), 2, "  ...two announcements");
+    assert_eq(streq(vec_get(an3, 0), "Window closed: Ghost"), 1, "  ...the ghost's close");
+    assert_eq(streq(vec_get(an3, 1), "Window opened: D"), 1, "  ...D's open");
+    assert_eq(desktop_sync_accessibility(d), 0, "a second sync changes nothing");
+    assert_eq(a11y_tree_len(ax), 2, "  ...C and D, no duplicates");
+    # a title with control bytes (incl. a C2 85 NEL) is sanitised in the announcements
+    var ctl = alloc(16);
+    store8(ctl + 0, 0x45);
+    store8(ctl + 1, 0x1B);
+    store8(ctl + 2, 0x5B);
+    store8(ctl + 3, 0xC2);
+    store8(ctl + 4, 0x85);
+    store8(ctl + 5, 0x78);
+    store8(ctl + 6, 0x07);
+    store8(ctl + 7, 0);
+    var we = comp_create_window(comp, 0, 0, 50, 50, ctl);
+    comp_close_window(comp, win_id(we));
+    var an4 = a11y_tree_pending_announcements(ax);
+    assert_eq(streq(vec_get(an4, 0), "Window opened: E[x"), 1, "open: ESC, NEL and BEL stripped");
+    assert_eq(streq(vec_get(an4, 1), "Window closed: E[x"), 1, "close: the same");
 
     test_group("desktop — an open launcher renders without disturbing the frame");
     # ⛔⛔ WHAT THIS DOES **NOT** COVER, STATED SO NOBODY READS IT AS COVERAGE. The 2026-08-18 burn's
@@ -224,6 +335,110 @@ fn main() {
     assert_eq(desk_bg_clear_is_full(0, 0), 0, "no GPU chrome: single buffer, AE-0a's band is kept");
     assert_eq(desk_bg_clear_is_full(0, 1), 1, "--clearbg forces the full clear off the GPU path");
     assert_eq(desk_bg_clear_is_full(1, 1), 1, "both: still full — the flag cannot narrow the clear");
+
+    # -----------------------------------------------------------------------
+    test_group("desktop — initialize (rust test_desktop_environment_initialize, main.rs:112-133)");
+    # ⚠ Rust's test only asserted `is_ok()`. This asserts what initialize DOES: the welcome notice with
+    # its exact fields, and both AI toggles on.
+    var wdk = desktop_new();
+    var wsh = desk_shell(wdk);
+    var wai = desk_ai(wdk);
+    # ⛔ ai_new already defaults both on, so they are switched OFF first — otherwise "initialize turns
+    # them on" passes against an initialize that never touches them.
+    ai_set_proactive_mode(wai, 0);
+    ai_set_ambient_enabled(wai, 0);
+    assert_eq(shell_notification_count(wsh), 0, "precondition: a fresh desktop holds no notification");
+    assert_eq(desktop_initialize(wdk, 1700000000), 0, "initialize returns Ok");
+    assert_eq(shell_notification_count(wsh), 1, "exactly one notification is stored");
+    # ⚠ A blank stand-in when the notice is missing, so the field checks FAIL rather than fault.
+    var wn = shell_notif_default(0, 0);
+    if (shell_notification_count(wsh) == 1) { wn = vec_get(shell_get_notifications(wsh), 0); }
+    assert_eq(t_streq(shell_notif_app_name(wn), "AGNOS Desktop"), 1, "app_name AGNOS Desktop");
+    assert_eq(t_streq(shell_notif_title(wn), "Welcome to AGNOS"), 1, "title Welcome to AGNOS");
+    assert_eq(t_streq(shell_notif_body(wn), "Your AI-native desktop environment"), 1, "body");
+    assert_eq(shell_notif_priority(wn), SH_NotifPriority.SH_PRIO_NORMAL, "priority Normal");
+    assert_eq(shell_notif_timestamp(wn), 1700000000, "timestamp is the caller's now");
+    assert_eq(shell_notif_requires_action(wn), 0, "requires_action false");
+    assert_eq(shell_notif_is_agent(wn), 0, "is_agent_related false");
+    assert_eq(ai_proactive_mode(wai), 1, "proactive mode on");
+    assert_eq(ai_ambient_enabled(wai), 1, "ambient on");
+    var wfb = bhumi_fb_new(640, 400);
+    assert_eq(render_notifications(wfb, wsh), 1, "the welcome notice is drawn as one card");
+    # ⛔ AND IT COSTS NO HEAP PER FRAME. The notice never expires, so the panel's badge is drawn on
+    # every frame of the session; the arena never frees, so a per-frame alloc there is a leak forever.
+    ae_gpu_frame_ok = 0;
+    render_desktop(wdk, wfb);
+    var wh0 = alloc_used();
+    render_desktop(wdk, wfb);
+    assert_eq(alloc_used() - wh0, 0, "a frame of the initialized desktop allocates 0 B");
+
+    # -----------------------------------------------------------------------
+    test_group("desktop — status tick (rust test_desktop_environment_update_system_status, main.rs:163-183)");
+    var kd = desktop_new();
+    var ksh = desk_shell(kd);
+    var kai = desk_ai(kd);
+    # Seed every field with a value no producer can emit, so each write is observable.
+    shell_update_system_status(ksh, shell_status_new(5555, 5555, 5555, 15, SH_NetStatus.SH_NET_CONNECTED, 42));
+    ai_register_agent_hud(kai, 701, str_from("a"));
+    ai_register_agent_hud(kai, 702, str_from("b"));
+    var khist0 = vec_len(ai_history(kai));
+    # ⚠ Each producer is read once first, so one that needs a prior sample (a cpu delta) is already
+    # answering when the tick and the check below read it.
+    sysp_cpu_permille_now();
+    sysp_mem_permille_now();
+    sysp_disk_permille_now();
+    assert_eq(desktop_status_tick(kd, 1700000005), 0, "tick returns Ok");
+    var kst = shell_status(ksh);
+    # ⛔ AGAINST THE PRODUCER, NOT A RANGE: a tick writing -1 (or swapping two gauges) is in range too.
+    # On this host mem is a real permille, so the check tells a wired gauge from a constant.
+    var kmem = sysp_mem_permille_now();
+    assert_eq(sysp_is_known(kmem), 1, "precondition: the host answers mem, so the next check can discriminate");
+    assert_eq(t_gauge_from(shell_status_mem(kst), kmem, 20), 1, "mem is sysp_mem_permille_now (within 20 permille)");
+    assert_eq(t_gauge_from(shell_status_cpu(kst), sysp_cpu_permille_now(), 1000), 1, "cpu is sysp_cpu_permille_now (known iff it is)");
+    assert_eq(t_gauge_from(shell_status_disk(kst), sysp_disk_permille_now(), 20), 1, "disk is sysp_disk_permille_now (within 20 permille)");
+    assert_eq(shell_status_battery_is_none(kst), 1, "battery None, as Rust writes it");
+    # ⛔ NOT Connected — Rust hardcoded that (main.rs:173) with nothing measuring it.
+    assert_eq(shell_status_net(kst), SH_NetStatus.SH_NET_UNKNOWN, "net UNKNOWN, not a claimed Connected");
+    assert_eq(shell_status_agents(kst), 2, "agent count is the live agent registry");
+    assert_eq(vec_len(ai_history(kai)), khist0 + 1, "one context event reached the AI history");
+    var kev = ai_event_new(0, 0, str_from(""), 0, 0);   # stand-in: a missing event fails, not faults
+    if (vec_len(ai_history(kai)) > khist0) { kev = vec_get(ai_history(kai), khist0); }
+    assert_eq(ai_event_type(kev), AI_ContextEventType.AI_CE_USER_PRESENT, "  ...a UserPresent");
+    assert_eq(str_eq(ai_event_source(kev), str_from("desktop")), 1, "  ...from source desktop");
+    assert_eq(ai_event_ts(kev), 1700000005, "  ...stamped with the caller's now");
+    ai_unregister_agent_hud(kai, 701);
+    desktop_status_tick(kd, 1700000010);
+    assert_eq(shell_status_agents(shell_status(ksh)), 1, "the count follows the registry down");
+    var kev2 = kev;
+    if (vec_len(ai_history(kai)) > khist0 + 1) { kev2 = vec_get(ai_history(kai), khist0 + 1); }
+    assert_eq(t_ne_d(ai_event_id(kev2), ai_event_id(kev)), 1, "each event has its own id");
+
+    # -----------------------------------------------------------------------
+    test_group("desktop — the status tick is due every 5 s of the #95 clock");
+    assert_eq(desk_tick_due(0, 0 - 1, 0, 120), 1, "first frame ticks (tokio's first tick is immediate)");
+    assert_eq(desk_tick_due(123456, 0 - 1, 7, 120), 1, "the first tick does not wait for a frame multiple");
+    assert_eq(desk_tick_due(4999999, 0, 1, 120), 0, "4.999999 s after the last: not yet");
+    assert_eq(desk_tick_due(5000000, 0, 2, 120), 1, "5 s after the last: due");
+    assert_eq(desk_tick_due(12000000, 5000000, 3, 120), 1, "7 s after the last: due");
+    # ⛔ THE FRAME COUNT NO LONGER DRIVES IT when the clock answers — 120 frames is 5 s at one rate only.
+    assert_eq(desk_tick_due(5000100, 5000000, 120, 120), 0, "a frame multiple is not due on a live clock");
+    assert_eq(desk_tick_due(100, 5000000, 3, 120), 1, "a clock that ran backwards re-arms");
+    test_group("desktop — ...and on the frame cadence when #95 says -1");
+    assert_eq(desk_tick_due(0 - 1, 0 - 1, 0, 120), 1, "no clock: the first frame still ticks");
+    assert_eq(desk_tick_due(0 - 1, 5000000, 119, 120), 0, "no clock: off-cadence frame waits");
+    assert_eq(desk_tick_due(0 - 1, 5000000, 240, 120), 1, "no clock: every 120th frame ticks, never never");
+
+    test_group("desktop — the frame loop's poll records the tick it ran");
+    var pd = desktop_new();
+    var pai = desk_ai(pd);
+    desk_last_tick_us = 0 - 1;
+    var ph0 = vec_len(ai_history(pai));
+    assert_eq(desktop_status_poll(pd, 1000000, 0, 120), 1, "frame 0 ticks");
+    assert_eq(desktop_status_poll(pd, 2000000, 1, 120), 0, "1 s later does not");
+    assert_eq(desktop_status_poll(pd, 6000000, 2, 120), 1, "5 s after the first does");
+    assert_eq(vec_len(ai_history(pai)), ph0 + 2, "two ticks, two UserPresent events");
+    assert_eq(desktop_status_poll(pd, 0 - 1, 120, 120), 1, "a -1 clock falls back to the frame cadence");
+    assert_eq(desk_last_tick_us, 6000000, "  ...without recording -1 as the last tick");
 
     return assert_summary();
 }

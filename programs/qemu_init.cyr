@@ -56,6 +56,127 @@ fn qi_cat(path): i64 {
     return 0;
 }
 
+# Append `n` (>= 0) in decimal at `dst`. -> the byte count written.
+fn qi_fmt(dst, n): i64 {
+    var t[24];
+    var k = 24;
+    var v = n;
+    if (v == 0) { store8(dst, 48); return 1; }
+    while (v > 0) { k = k - 1; store8(&t + k, 48 + (v % 10)); v = v / 10; }
+    var c = 0;
+    while (k < 24) { store8(dst + c, load8(&t + k)); c = c + 1; k = k + 1; }
+    return c;
+}
+
+# Build "/proc/<pid><tail>" at `dst` as a cstring. -> dst.
+fn qi_proc(dst, pid, tail): i64 {
+    var w = 0;
+    var pre = "/proc/";
+    while (w < 6) { store8(dst + w, load8(pre + w)); w = w + 1; }
+    w = w + qi_fmt(dst + w, pid);
+    var tl = strlen(tail);
+    var k = 0;
+    while (k < tl) { store8(dst + w, load8(tail + k)); w = w + 1; k = k + 1; }
+    store8(dst + w, 0);
+    return dst;
+}
+
+# Print `who`, the pid and its `SigBlk:` line out of /proc/<pid>/status, then name any signalfd it holds
+# among fds 0..31. The harness judges these lines: they are the kernel's own word on the mask.
+fn qi_sigreport(who, pid): i64 {
+    var path = alloc(64);
+    var buf = alloc(2048);
+    qi_proc(path, pid, "/status");
+    var fd = sys_open(path, 0, 0);
+    if (fd < 0) { qi_say("qemu_init: no status for "); qi_num(pid); qi_say("\n"); return 0 - 1; }
+    var n = sys_read(fd, buf, 2047);
+    sys_close(fd);
+    if (n < 0) { n = 0; }
+    store8(buf + n, 0);
+    var i = 0;
+    while (i < n) {
+        if (memeq(buf + i, "SigBlk:", 7) == 1) {
+            var e = i;
+            while (e < n) { if (load8(buf + e) == 10) { break; } e = e + 1; }
+            qi_say("qemu_init: "); qi_say(who); qi_say(" "); qi_num(pid); qi_say(" ");
+            sys_write(1, buf + i, e - i);
+            qi_say("\n");
+            break;
+        }
+        i = i + 1;
+    }
+    var link = alloc(128);
+    var f = 0;
+    while (f < 32) {
+        qi_proc(path, pid, "/fd/");
+        var w = strlen(path);
+        w = w + qi_fmt(path + w, f);
+        store8(path + w, 0);
+        var ln = sys_readlink(path, link, 127);
+        if (ln > 0) {
+            store8(link + ln, 0);
+            var j = 0;
+            while (j + 8 <= ln) {
+                if (memeq(link + j, "signalfd", 8) == 1) {
+                    qi_say("qemu_init: "); qi_say(who); qi_say(" "); qi_num(pid);
+                    qi_say(" HOLDS A SIGNALFD at fd "); qi_num(f); qi_say("\n");
+                    break;
+                }
+                j = j + 1;
+            }
+        }
+        f = f + 1;
+    }
+    return 0;
+}
+
+# ⭐ `--sigint-port`: wait for a line on /dev/ttyS1 (the harness's second serial port), report the masks
+# of the compositor and its children, then send the compositor SIGINT — from OUTSIDE it, as `kill -INT`
+# does (a tty Ctrl+C would also signal the clients). Reaps the compositor itself (WNOHANG) so the port is
+# polled meanwhile.
+fn qi_sigint_wait(pid, st): i64 {
+    var tfd = sys_open("/dev/ttyS1", 2048 | 256, 0);   # O_NONBLOCK | O_NOCTTY
+    if (tfd < 0) { qi_say("qemu_init: --sigint-port but no /dev/ttyS1\n"); }
+    var b = alloc(64);
+    var sent = 0;
+    while (1 == 1) {
+        if (sys_waitpid(pid, st, 1) == pid) { return 0; }   # WNOHANG
+        if (sent == 0) {
+            if (tfd >= 0) {
+                if (sys_read(tfd, b, 64) > 0) {
+                    qi_sigreport("compositor", pid);
+                    var cp = alloc(64);
+                    var cb = alloc(256);
+                    # /proc/<pid>/task/<pid>/children — the compositor's direct children (its clients)
+                    qi_proc(cp, pid, "/task/");
+                    var cw = strlen(cp);
+                    cw = cw + qi_fmt(cp + cw, pid);
+                    var tail = "/children";
+                    var q = 0;
+                    while (q < 10) { store8(cp + cw + q, load8(tail + q)); q = q + 1; }   # incl. the NUL
+                    var cfd = sys_open(cp, 0, 0);
+                    var cn = 0;
+                    if (cfd >= 0) { cn = sys_read(cfd, cb, 255); sys_close(cfd); }
+                    var v = 0;
+                    var p = 0;
+                    while (p < cn) {
+                        var ch = load8(cb + p);
+                        if (ch >= 48 && ch <= 57) { v = v * 10 + (ch - 48); }
+                        else { if (v > 0) { qi_sigreport("child", v); } v = 0; }
+                        p = p + 1;
+                    }
+                    if (v > 0) { qi_sigreport("child", v); }
+                    sys_kill(pid, 2);
+                    qi_say("qemu_init: sent SIGINT to the compositor\n");
+                    sent = 1;
+                }
+            }
+        }
+        sleep_ms(50);
+    }
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     qi_say("qemu_init: PID 1 up\n");
@@ -125,6 +246,7 @@ fn main(): i64 {
     # ⇒ Hold the framebuffer up AFTER the child has exited, so the dump happens in a window whose
     # start is an observable event (`aethersafha exit`) rather than a guess.
     var hold = 0;
+    var sigport = 0;   # `--sigint-port`, consumed here like `--hold` — see qi_sigint_wait
     # ⚠ Up to 14 forwarded args (0.17.0). It was 5, which silently dropped the second client of
     # `--frames 0 --client A --client B` — the input harness needs exactly that.
     var argv = alloc(128);
@@ -133,8 +255,10 @@ fn main(): i64 {
     var w = 1;
     var i = 1;
     while (i < n) {
-        if (streq(argv(i), "--hold") == 1) { hold = 1; }
-        else { if (w < 15) { store64(argv + w * 8, argv(i)); w = w + 1; } }
+        var keep = 1;
+        if (streq(argv(i), "--hold") == 1) { hold = 1; keep = 0; }
+        if (streq(argv(i), "--sigint-port") == 1) { sigport = 1; keep = 0; }
+        if (keep == 1) { if (w < 15) { store64(argv + w * 8, argv(i)); w = w + 1; } }
         i = i + 1;
     }
     store64(argv + w * 8, 0);
@@ -154,7 +278,8 @@ fn main(): i64 {
     }
     var st = alloc(8);
     store64(st, 0);
-    sys_waitpid(pid, st, 0);
+    if (sigport == 1) { qi_sigint_wait(pid, st); }
+    else { sys_waitpid(pid, st, 0); }
     var raw = load64(st);
     # WEXITSTATUS. ⚠ The `--clients` ladder (95/94/93/92/91) is read from exactly this number, so a
     # raw wait status printed here would be that value times 256 and silently unreadable.

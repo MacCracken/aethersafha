@@ -41,9 +41,10 @@ when wanted, through the **mehman** swallow backend (kavach-sandboxed).
 See [`docs/architecture/overview.md`](docs/architecture/overview.md) for the
 full module map. In brief, the Cyrius source (`src/`) is:
 
-- **Core** — `geom`, `window`, `compositor`, `render`, `input`, `main`: the
-  window model, software renderer over the bhumi framebuffer, input routing, and
-  the frame loop.
+- **Core** — `geom`, `window`, `compositor`, `render`, `utf8`, `input`, `main`,
+  `flags`, `sigint`: the window model, software renderer over the bhumi
+  framebuffer, UTF-8 text, input routing, the command line (`aethersafha
+  --help`), and the frame loop.
 - **Shell + leaf** — `desktop`, `shell`, `shell_render`, `launcher`,
   `gestures`, `accessibility`, `ai_features`, `security_ui`, `plugin_host`.
 - **Capture** — `screen_capture`, `screen_recording` (library code, not yet

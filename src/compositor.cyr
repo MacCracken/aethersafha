@@ -7,6 +7,10 @@
 # compositor's own job (does NOT move to bhumi/mehman) — this is where the
 # surface tree + window management live.
 
+# ⭐ The compositor MIRRORS its windows into the a11y tree (compositor.rs owns an AccessibilityTree), so
+# the tree code is pulled in here; include-once makes main.cyr's own include of it a no-op.
+include "src/accessibility.cyr"
+
 # Workspace context (parity: ContextType).
 enum CtxType {
     CTX_DEVELOPMENT   = 0;
@@ -55,7 +59,8 @@ enum CompOff {
     C_WORKSPACES = 32;   # vec of *Workspace
     C_AGENT      = 40;   # agent_aware_mode (0/1)
     C_SECURE     = 48;   # secure_mode (0/1)
-    C_SZ         = 56;
+    C_A11Y       = 56;   # *AxTree the windows are mirrored into, 0 = none (borrowed: the desktop owns it)
+    C_SZ         = 64;
 }
 
 # comp_new() -> *Compositor (0 on OOM). Starts with one default workspace.
@@ -71,7 +76,25 @@ fn comp_new(): i64 {
     store64(c + C_WORKSPACES, wss);
     store64(c + C_AGENT, 0);
     store64(c + C_SECURE, 0);
+    store64(c + C_A11Y, 0);
     return c;
+}
+
+# --- accessibility mirror (parity: compositor.rs accessibility_tree) ------
+# ⭐ HOOKED AT THE SOURCE, NOT RECONCILED PER FRAME. Every window this compositor ever holds enters
+# through `comp_create_window` and leaves through `comp_close_window`, and `C_FOCUSED` is written only in
+# this file — so hooking those covers setu clients, foreign guests, the selftest window, minimize and
+# every focus path at once, in event order, with the title still in hand at close. A per-frame diff
+# could not announce a window that opened and closed within one frame.
+# ⚠ No tree (a bare `comp_new`, as in most suites and the probes) means no mirroring, not an error.
+fn comp_set_a11y(c, t) { store64(c + C_A11Y, t); return 0; }
+fn comp_a11y(c)        { return load64(c + C_A11Y); }
+
+# Tree focus follows the focused window — or none. Called wherever `C_FOCUSED` can change.
+fn comp_a11y_sync_focus(c): i64 {
+    var t = load64(c + C_A11Y);
+    if (t == 0) { return 0; }
+    return a11y_tree_follow_focus(t, comp_focused_id(c));
 }
 
 fn comp_windows(c)  { return load64(c + C_WINDOWS); }
@@ -146,6 +169,11 @@ fn comp_create_window(c, x, y, w, h, title): i64 {
         vec_push(wsp_windows(aw), id);
         store64(aw + WSP_ACTIVE, id);
     }
+    var ax = load64(c + C_A11Y);
+    if (ax != 0) { a11y_tree_window_open(ax, id, title, x, y, w, h); }
+    # ⚠ Rust's create_window focuses the new window but never syncs the tree (compositor.rs:244-247);
+    # the port does, so tree focus is never left on a window that lost it.
+    comp_a11y_sync_focus(c);
     return win;
 }
 
@@ -176,10 +204,11 @@ fn comp_focus(c, i): i64 {
     var v = load64(c + C_WINDOWS);
     var win = vec_get(v, i);
     if (win_unminimize(win) == 1) { comp_retire_add(win_x(win), win_y(win), win_w(win), win_h(win)); }
-    if (i == n - 1) { store64(c + C_FOCUSED, i); return 0; }
+    if (i == n - 1) { store64(c + C_FOCUSED, i); comp_a11y_sync_focus(c); return 0; }
     vec_remove(v, i);
     vec_push(v, win);
     store64(c + C_FOCUSED, comp_count(c) - 1);
+    comp_a11y_sync_focus(c);
     return 0;
 }
 
@@ -205,6 +234,7 @@ fn comp_focus_topmost_visible(c): i64 {
         i = i - 1;
     }
     store64(c + C_FOCUSED, 0 - 1);
+    comp_a11y_sync_focus(c);
     return 0 - 1;
 }
 
@@ -391,6 +421,13 @@ fn comp_close_window(c, id): i64 {
         }
     }
     vec_remove(v, idx);
+    # ⚠ Mirrored BEFORE the focus hand-off below, so the hand-off's `comp_focus` lands tree focus on the
+    # successor last. (Rust never re-set it: remove_node cleared it when the closed window held tree focus,
+    # and otherwise left it wherever it was, since Rust's create_window never synced it either.)
+    var ax = load64(c + C_A11Y);
+    if (ax != 0) {
+        if (dying != 0) { a11y_tree_window_close(ax, id, win_title(dying)); }
+    }
     var aw = comp_get_workspace(c, load64(c + C_ACTIVE_WS));
     if (aw != 0) {
         # ⚠ EVERY entry, not the first (compositor.rs:308 is `retain`): moving one window to the same

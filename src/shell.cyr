@@ -39,11 +39,14 @@ enum SH_NotifPriority {
 }
 
 # rust: NetworkStatus
+# ⛔ SH_NET_UNKNOWN IS THE PORT'S, NOT RUST'S. Rust hardcoded Connected (main.rs:173, shell.rs:183)
+# with nothing measuring it; the port has no network producer either, so it says so. 0.17.2.
 enum SH_NetStatus {
     SH_NET_CONNECTED    = 0;
     SH_NET_DISCONNECTED = 1;
     SH_NET_CONNECTING   = 2;
     SH_NET_ERROR        = 3;
+    SH_NET_UNKNOWN      = 4;   # no producer has answered — never drawn as Connected
 }
 
 # rust: AppCategory
@@ -162,6 +165,8 @@ fn shell_status_set_agents(p, count) { store64(p + S_AGENTS, count); return 0; }
 fn shell_status_set_cpu(p, v)  { store64(p + S_CPU, v);  return 0; }
 fn shell_status_set_mem(p, v)  { store64(p + S_MEM, v);  return 0; }
 fn shell_status_set_disk(p, v) { store64(p + S_DISK, v); return 0; }
+fn shell_status_set_battery(p, v) { store64(p + S_BATTERY, v); return 0; }
+fn shell_status_set_net(p, v)  { store64(p + S_NET, v);  return 0; }
 
 # PURE: permille (0..1000, the stored unit) -> percent (0..100, what a gauge draws).
 # ⛔⛔ THE BOUNDARY THAT WAS MISSING, AND IT WOULD HAVE SHIPPED WRONG NUMBERS THE DAY THE PANEL GOT A
@@ -299,11 +304,13 @@ fn shell_new(): i64 {
     var sh = alloc(SH_SZ);
     if (sh == 0) { return 0; }
     store64(sh + SH_NOTIFS, vec_new());
-    # initial SystemStatus: cpu/mem/disk 0, no battery, Connected, 0 agents
+    # initial SystemStatus: cpu/mem/disk UNKNOWN, no battery, net UNKNOWN, 0 agents
     # ⛔ SEEDED UNKNOWN, NOT ZERO. These were literal zeros since the port and NOTHING ever
     # overwrote them, so the panel asserted "cpu 0%, mem 0%, disk 0%" on every burn. -1 renders as
     # "--%" until a producer answers; a 0 is a claim nobody was entitled to make.
-    var st = shell_status_new(0 - 1, 0 - 1, 0 - 1, shell_battery_none(), SH_NetStatus.SH_NET_CONNECTED, 0);
+    # ⛔ NET TOO: Rust seeds Connected (shell.rs:183) and nothing measures it, so the dot claimed a
+    # link on every boot. UNKNOWN until a network producer exists.
+    var st = shell_status_new(0 - 1, 0 - 1, 0 - 1, shell_battery_none(), SH_NetStatus.SH_NET_UNKNOWN, 0);
     if (st == 0) { return 0; }
     store64(sh + SH_STATUS, st);
     store64(sh + SH_ITEMS, vec_new());

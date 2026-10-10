@@ -1,0 +1,93 @@
+# sigint.tcyr — SIGINT is read from a signalfd, once, and a spawned child gets its mask back.
+# ⛔ LINUX-ONLY by construction: it raises a real SIGINT at itself. Every raise is gated on the mask
+# showing SIGINT blocked, so a broken setup FAILS an assertion instead of killing the suite.
+include "src/sigint.cyr"
+
+# The calling thread's signal mask, as the kernel reports it (set = NULL: query, change nothing).
+fn sigi_t_mask(): i64 {
+    var cur = sigset_new();
+    sys_sigprocmask(SIG_BLOCK, 0, cur);
+    return load64(cur);
+}
+
+# Raise SIGINT at ourselves — only while it is blocked. -> 1 raised, 0 refused (it would have killed us).
+fn sigi_t_raise(): i64 {
+    if ((sigi_t_mask() & 2) != 2) { return 0; }
+    sys_kill(sys_getpid(), SIGINT);
+    return 1;
+}
+
+fn main(): i64 {
+    alloc_init();
+
+    test_group("sigint — setup blocks SIGINT and opens a non-blocking, close-on-exec signalfd");
+    var pre = sigi_t_mask();
+    assert_eq(pre & 2, 0, "precondition: SIGINT (bit 1) is not blocked before setup");
+    var fd = sigi_setup();
+    assert_gte(fd, 0, "setup opens a signalfd");
+    assert_eq(sigi_t_mask() & 2, 2, "setup BLOCKS SIGINT, so the default kill cannot fire");
+    assert_eq(sigi_t_mask() & (0 - 1 - 2), pre & (0 - 1 - 2), "and blocks nothing else");
+    assert_eq(sigi_setup(), fd, "setup is idempotent: a second call answers the same fd");
+    # ⚠ Compared WHOLE, not masked: an EBADF (-9) has every low bit but 3 set, so `& 1` would pass on no fd.
+    assert_eq(sys_fcntl(fd, 1, 0), 1, "the fd is FD_CLOEXEC (F_GETFD), so execve drops it");
+    var flf = sys_fcntl(fd, 3, 0);
+    assert_gte(flf, 0, "F_GETFL answers");
+    assert_eq(flf & O_NONBLOCK, O_NONBLOCK, "the fd is O_NONBLOCK, so a frame never waits on it");
+    assert_eq(sigi_poll(), 0, "nothing is pending at setup");
+    assert_eq(sigi_seen, 0, "and nothing is latched");
+
+    test_group("sigint — one raised SIGINT is consumed exactly once");
+    assert_eq(sigi_t_raise(), 1, "SIGINT raised at ourselves (kill(getpid(), SIGINT))");
+    assert_eq(sigi_poll(), 1, "the poll consumes exactly one pending SIGINT");
+    assert_eq(sigi_seen, 1, "and latches that one was seen");
+    assert_eq(sigi_poll(), 0, "nothing is pending again — the siginfo was CONSUMED, not peeked");
+    sigi_t_raise();
+    sigi_t_raise();
+    assert_eq(sigi_poll(), 1, "two raises between polls read as ONE (standard signals do not queue)");
+    assert_eq(sigi_poll(), 0, "and leave nothing behind");
+
+    test_group("sigint — a forked child gets the pre-setup mask back and no signalfd");
+    var st = alloc(8);
+    store64(st, 0);
+    var pid = sys_fork();
+    if (pid == 0) {
+        var code = 0;
+        if (sigi_child_reset() != 0) { code = code | 1; }
+        if (sigi_t_mask() != pre) { code = code | 2; }
+        if (sys_fcntl(fd, 1, 0) != (0 - 9)) { code = code | 4; }   # EBADF: the fd is gone
+        sys_exit(code);
+    }
+    assert_gt(pid, 0, "fork");
+    sys_waitpid(pid, st, 0);
+    var raw = load64(st);
+    assert_eq(raw & 0x7F, 0, "the child exited (no signal)");
+    var cc = (raw / 256) & 0xFF;
+    assert_eq(cc & 1, 0, "child: sigi_child_reset answered 0");
+    assert_eq(cc & 2, 0, "child: its mask is EXACTLY the pre-setup mask — SIGINT unblocked for execve");
+    assert_eq(cc & 4, 0, "child: the signalfd is closed");
+    assert_eq(sigi_t_mask() & 2, 2, "parent: still blocked — the reset ran in the child only");
+    assert_eq(sigi_t_raise(), 1, "parent: raise again");
+    assert_eq(sigi_poll(), 1, "parent: its signalfd still reports it");
+
+    test_group("sigint — the reset restores the mask in this process too");
+    assert_eq(sigi_child_reset(), 0, "reset answers 0");
+    assert_eq(sigi_t_mask(), pre, "the mask is the pre-setup mask again");
+    assert_eq(sigi_fd, 0 - 1, "the fd is forgotten");
+    assert_eq(sys_fcntl(fd, 1, 0), 0 - 9, "and closed (EBADF)");
+    assert_eq(sigi_poll(), 0, "a poll with no fd answers 0, never reads a stale fd");
+    assert_eq(sigi_child_reset(), 0, "a second reset has nothing to undo");
+    assert_eq(sigi_t_mask(), pre, "and leaves the mask alone");
+
+    test_group("sigint — an interrupted --clients probe does not claim a measured verdict");
+    assert_eq(SIGI_PROBE_EXIT, 130, "128 + SIGINT, distinct from the 91..95 ladder");
+    assert_eq(sigi_probe_truncated(1, 0), 1, "interrupted, nobody presented -> not 93");
+    assert_eq(sigi_probe_truncated(1, 1), 1, "interrupted, one presented -> not 94");
+    assert_eq(sigi_probe_truncated(1, 2), 0, "interrupted AFTER both presented -> 95 stands");
+    assert_eq(sigi_probe_truncated(0, 0), 0, "not interrupted -> the ladder is untouched");
+    assert_eq(sigi_probe_truncated(0, 1), 0, "not interrupted, one -> the ladder is untouched");
+
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);

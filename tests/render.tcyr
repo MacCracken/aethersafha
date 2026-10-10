@@ -58,25 +58,169 @@ fn t_title_q_r(fb, win): i64 {
     return ae_text_count();
 }
 
-# 1 when the first `n` bytes of queued run `i` are the first `n` bytes of `s`.
+# Cell `j` of queued run `i`. ⚠ A run is CELLS, two bytes each, decoded at enqueue — not the string's bytes.
+fn t_run_cell_r(i, j): i64 { return load16(ae_text_run_ptr(i) + j * 2); }
+
+# 1 when the first `n` cells of queued run `i` are the bytes of the ASCII string `s` — a printable ASCII
+# byte IS its own cell (kashi ADR 0011), so for ASCII the cell and the byte are the same number.
 fn t_run_prefix_r(i, s, n): i64 {
     var j = 0;
     while (j < n) {
-        if (load8(ae_text_run_ptr(i) + j) != load8(s + j)) { return 0; }
+        if (t_run_cell_r(i, j) != load8(s + j)) { return 0; }
         j = j + 1;
     }
     return 1;
 }
 
-# 1 when queued run `i` ends in the three-dot ellipsis.
-fn t_run_dots_r(i): i64 {
+# The cells kashi draws U+2026 and U+FFFD with — named by codepoint, as kashi's ADR 0011 asks, never by number.
+fn t_ell_cell_r(): i64 { return kashi_cp437_from_unicode(0x2026); }
+fn t_repl_cell_r(): i64 { return kashi_cp437_from_unicode(0xFFFD); }
+
+# 1 when queued run `i` ends in the ellipsis: its LAST cell is U+2026's — one cell, where the port used to
+# spend three on ASCII dots.
+fn t_run_ell_r(i): i64 {
     var n = ae_text_run_len(i);
-    if (n < 3) { return 0; }
-    var p = ae_text_run_ptr(i) + n - 3;
-    if (load8(p) != '.') { return 0; }
-    if (load8(p + 1) != '.') { return 0; }
-    if (load8(p + 2) != '.') { return 0; }
+    if (n < 1) { return 0; }
+    if (t_run_cell_r(i, n - 1) != t_ell_cell_r()) { return 0; }
     return 1;
+}
+
+# The cells of an ASCII string (each byte its own cell) into `out`, two bytes each. -> how many.
+fn t_ascii_cells_r(out, s): i64 {
+    var j = 0;
+    while (load8(s + j) != 0) {
+        store16(out + j * 2, load8(s + j));
+        j = j + 1;
+    }
+    return j;
+}
+
+# A title of `n` scalars into `tb`, NUL-terminated, cycling through eight kinds — one to four bytes, with a
+# glyph and without, and an ill-formed byte — and its expected CELLS into `tc`. The cells come from the CP437
+# chart and kashi's two named cells, not from the decoder under test. -> the title's length in bytes.
+fn t_mb_title_r(tb, tc, n): i64 {
+    var bi = 0;
+    var u = 0;
+    while (u < n) {
+        var kind = u % 8;
+        var us = "é";                               # U+00E9 -> CP437 0x82
+        var cell = 0x82;
+        if (kind == 1) { us = "A"; cell = 0x41; }
+        if (kind == 2) { us = "─"; cell = 0xC4; }   # U+2500, three bytes
+        if (kind == 3) { us = "中"; cell = 0; }     # U+4E2D: no built-in glyph, a BLANK cell that still advances
+        if (kind == 4) { us = "😀"; cell = 0; }     # U+1F600, four bytes: likewise blank
+        if (kind == 5) { us = "\xFF"; cell = t_repl_cell_r(); }   # ill-formed: U+FFFD's glyph
+        if (kind == 6) { us = "ß"; cell = 0xE1; }   # U+00DF
+        if (kind == 7) { us = "π"; cell = 0xE3; }   # U+03C0
+        var ul = strlen(us);
+        var uj = 0;
+        while (uj < ul) {
+            store8(tb + bi, load8(us + uj));
+            bi = bi + 1;
+            uj = uj + 1;
+        }
+        store16(tc + u * 2, cell);
+        u = u + 1;
+    }
+    store8(tb + bi, 0);
+    return bi;
+}
+
+# 1 when the 9 px cell at (x, y) is EXACTLY kashi's VGA 8x16 glyph for `cell` in colour `c`: `c` on every set
+# bit, anything else on every clear one, and no `c` in the 1 px gap that ends the cell. Cell 0 = a blank cell.
+fn t_cell_is_r(fb, x, y, cell, c): i64 {
+    var row = 0;
+    while (row < FONT_H) {
+        var bits = kashi_glyph_row(KASHI_FONT_VGA_8X16, cell, row);
+        var col = 0;
+        while (col < FONT_ADV) {
+            var want = 0;
+            if (col < FONT_W) { if ((bits & (1 << (7 - col))) != 0) { want = 1; } }
+            var got = 0;
+            if (bhumi_fb_get(fb, x + col, y + row) == c) { got = 1; }
+            if (got != want) { return 0; }
+            col = col + 1;
+        }
+        row = row + 1;
+    }
+    return 1;
+}
+
+# 1 when cell `i` of a packed 1bpp run of `len` cells at `mask` is EXACTLY kashi_glyph_row's bits for `cell`,
+# bit for bit, with its gap column clear.
+fn t_mask_cell_is_r(mask, len, i, cell): i64 {
+    var stride = ae_text_stride(len);
+    var row = 0;
+    while (row < FONT_H) {
+        var bits = kashi_glyph_row(KASHI_FONT_VGA_8X16, cell, row);
+        var col = 0;
+        while (col < FONT_ADV) {
+            var px = i * FONT_ADV + col;
+            var got = 0;
+            if ((load8(mask + row * stride + px / 8) & (1 << (7 - (px % 8)))) != 0) { got = 1; }
+            var want = 0;
+            if (col < FONT_W) { if ((bits & (1 << (7 - col))) != 0) { want = 1; } }
+            if (got != want) { return 0; }
+            col = col + 1;
+        }
+        row = row + 1;
+    }
+    return 1;
+}
+
+# Expand queued run `i` onto `fb` the way the kernel's op 0x03 does — `c` where a mask bit is set, the rest
+# untouched. -> the run's width in pixels.
+fn t_expand_run_r(fb, i, c): i64 {
+    var len = ae_text_run_len(i);
+    var mask = alloc(ae_text_bytes(len));
+    var w = ae_text_pack_1bpp(mask, ae_text_run_ptr(i), len);
+    var stride = ae_text_stride(len);
+    var gy = 0;
+    while (gy < FONT_H) {
+        var gx = 0;
+        while (gx < w) {
+            if ((load8(mask + gy * stride + gx / 8) & (1 << (7 - (gx % 8)))) != 0) {
+                bhumi_fb_set(fb, ae_text_run_x(i) + gx, ae_text_run_y(i) + gy, c);
+            }
+            gx = gx + 1;
+        }
+        gy = gy + 1;
+    }
+    return w;
+}
+
+# ⭐ THE TWO FRAME KINDS, ONE CAPTION. A CPU frame draws `win`'s caption; a GPU frame queues it, and the queue is
+# expanded here exactly as the kernel would. Both start from the same blank framebuffer, so any pixel that
+# differs is a cell the two paths disagree on. -> the differing pixels; *lit gets the CPU frame's ink count.
+fn t_cap_cpu_gpu_diff_r(fbc, fbg, win, lit): i64 {
+    var CAPC = 0x00F0E0D0;
+    bhumi_fb_clear(fbc, 0);
+    bhumi_fb_clear(fbg, 0);
+    ae_gpu_frame_ok = 0;
+    render_title(fbc, win, CAPC);
+    ae_gpu_frame_ok = 1;
+    ae_text_gpu_ok = 1;
+    ae_text_reset();
+    render_title(fbg, win, CAPC);
+    var q = 0;
+    while (q < ae_text_count()) {
+        t_expand_run_r(fbg, q, CAPC);
+        q = q + 1;
+    }
+    var diff = 0;
+    var ink = 0;
+    var yy = 0;
+    while (yy < bhumi_fb_height(fbc)) {
+        var xx = 0;
+        while (xx < bhumi_fb_width(fbc)) {
+            if (bhumi_fb_get(fbc, xx, yy) != bhumi_fb_get(fbg, xx, yy)) { diff = diff + 1; }
+            if (bhumi_fb_get(fbc, xx, yy) == CAPC) { ink = ink + 1; }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    store64(lit, ink);
+    return diff;
 }
 
 # Pixels of colour `c` in columns [x0, x1) of rows [y0, y1).
@@ -94,30 +238,35 @@ fn t_count_px_r(fb, x0, x1, y0, y1, c): i64 {
     return n;
 }
 
-# ⭐ THE ORACLE: how many cells Rust's rule (renderer.rs:544-560) gives an `n`-character title on a window
-# `w` px wide, in this port's units — Rust's own literal `w - 80` box, a FONT_ADV cell, and the run limit.
+# ⭐ THE ORACLE: the caption Rust's rule (renderer.rs:543-562) makes from an `n`-character title whose cells are
+# at `tc`, on a window `w` px wide — written as cells to `out`, the count returned. Rust's own literal `w - 80`
+# box and a FONT_ADV cell, then the port's one addition, ADR 0003's run limit, which cuts the same way.
 # Written from Rust, not from `rend_title_caption`, so the sweep checks one against the other.
-fn t_rust_cap_r(n, w): i64 {
+fn t_rust_cap_r(out, tc, n, w): i64 {
     var bw = w - 80;
     if (bw < 0) { bw = 0; }                         # saturating_sub
-    var cap = n;
+    var take = n;
+    var ell = 0;
     if (n * FONT_ADV - 1 > bw) {                    # text_width(title) > max_title_width
-        var mc = bw / FONT_ADV;
-        if (mc > 2) { cap = mc; }                   # max_chars <= 2: Rust draws it whole
+        var mc = bw / FONT_ADV;                     # max_chars
+        # title.chars().take(max_chars - 1), then '…'; at max_chars <= 2 Rust draws it whole
+        if (mc > 2) { take = mc - 1; ell = 1; }
     }
-    if (cap > AE_TEXT_CHARS) { cap = AE_TEXT_CHARS; }
-    return cap;
+    if (take + ell > AE_TEXT_CHARS) { take = AE_TEXT_CHARS - 1; ell = 1; }
+    var j = 0;
+    while (j < take) {
+        store16(out + j * 2, load16(tc + j * 2));
+        j = j + 1;
+    }
+    if (ell == 1) { store16(out + take * 2, t_ell_cell_r()); }
+    return take + ell;
 }
 
-# 1 when the `len` bytes of queued run `i` are cells [k, k + len) of the `cap`-cell caption Rust's rule
-# makes from `title` (`n` characters): the title's own bytes, and dots in the last three when it was cut.
-fn t_run_is_cap_r(i, len, title, n, cap, k): i64 {
+# 1 when the `len` cells of queued run `i` are cells [k, k + len) of the oracle's caption at `cap`.
+fn t_run_is_cap_r(i, len, cap, k): i64 {
     var j = 0;
     while (j < len) {
-        var c = k + j;
-        var want = load8(title + c);
-        if (cap < n) { if (c >= cap - 3) { want = '.'; } }
-        if (load8(ae_text_run_ptr(i) + j) != want) { return 0; }
+        if (t_run_cell_r(i, j) != load16(cap + (k + j) * 2)) { return 0; }
         j = j + 1;
     }
     return 1;
@@ -620,9 +769,12 @@ fn main() {
     draw_text(fb_cpu, msg, 5, 8, TCOL);
 
     # Under test: pack, then expand exactly as `gpu_glyph_surface` does.
+    # ⚠ The packer takes CELLS (a queued run), so the string goes through the queue's own decode first.
     var stride = ae_text_stride(mlen);
     var mask = alloc(ae_text_bytes(mlen));
-    var pw = ae_text_pack_1bpp(mask, msg, mlen);
+    var mcells = alloc(mlen * 2);
+    assert_eq(ae_text_cells(mcells, msg, mlen), mlen, "an ASCII string is one cell per byte");
+    var pw = ae_text_pack_1bpp(mask, mcells, mlen);
     assert_eq(pw, mlen * FONT_ADV, "the packed width is one advance per character");
     assert_eq(stride, (pw + 7) / 8, "the row stride is the kernel's (w + 7) / 8");
     var gy = 0;
@@ -693,8 +845,9 @@ fn main() {
     assert_eq(ae_text_run_x(0), 10, "x is carried");
     assert_eq(ae_text_run_y(0), 20, "y is carried");
     assert_eq(ae_text_run_col(0), 0x00FF0000, "colour is carried");
-    assert_eq(ae_text_run_len(0), 5, "length is the string length");
-    assert_eq(load8(ae_text_run_ptr(0)), 0x74, "the string is COPIED into the pool, not aliased");
+    assert_eq(ae_text_run_len(0), 5, "length is the string's cell count (ASCII: one per byte)");
+    assert_eq(t_run_cell_r(0, 0), 0x74, "the string is decoded INTO the pool as cells, not aliased");
+    assert_eq(t_run_cell_r(0, 4), 0x65, "  ...all of it: the last cell is 'e'");
     # An empty string is queued as a no-op rather than refused: there is nothing to fall back TO, and
     # returning 0 would make the caller draw nothing on the CPU either — same result, more work.
     assert_eq(ae_text_enqueue("", 0, 0, 0), 1, "an empty run is a no-op, not a refusal");
@@ -714,6 +867,82 @@ fn main() {
     assert_eq(ae_text_enqueue("x", 0, 0, 0), 0, "and then refuses rather than overrunning");
     ae_text_reset();
 
+    # ⭐⭐ THE QUEUE COUNTS CELLS, AND A CELL CAN BE PAST 0xFF. A run's length, the AE_TEXT_CHARS cap and the pool
+    # are all in cells since the text became UTF-8, and kashi 1.1.0's '…' and U+FFFD are cells 0x100 / 0x101 —
+    # which no byte can hold. Each assertion below fails for one of the two ways to get that wrong.
+    test_group("render — the glyph queue holds CELLS, and cells past 0xFF survive it");
+    ae_text_reset();
+    var hs = "Aé─…\xFF中😀";                   # 1 + 2 + 3 + 3 + 1 + 3 + 4 = 17 bytes, 7 scalars
+    assert_eq(ae_text_enqueue(hs, 3, 4, TCOL), 1, "a UTF-8 run is accepted");
+    assert_eq(ae_text_run_len(0), 7, "  its length is 7 CELLS, not 17 bytes");
+    assert_eq(t_run_cell_r(0, 0), 0x41, "  'A' is cell 0x41");
+    assert_eq(t_run_cell_r(0, 1), 0x82, "  'é' is CP437 0x82 — one cell, not the two of C3 A9");
+    assert_eq(t_run_cell_r(0, 2), 0xC4, "  '─' (U+2500) is CP437 0xC4");
+    assert_eq(t_gt_r(t_ell_cell_r(), 0xFF), 1, "  (kashi's '…' cell is past 0xFF — one byte cannot hold it)");
+    assert_eq(t_run_cell_r(0, 3), t_ell_cell_r(), "  '…' survives the pool whole");
+    assert_eq(t_gt_r(t_repl_cell_r(), 0xFF), 1, "  (and so is U+FFFD's)");
+    assert_eq(t_run_cell_r(0, 4), t_repl_cell_r(), "  the ill-formed byte FF is U+FFFD's cell");
+    assert_eq(t_run_cell_r(0, 5), 0, "  '中' has no built-in glyph: cell 0, a blank");
+    assert_eq(t_run_cell_r(0, 6), 0, "  nor has '😀'");
+    # ⭐ AND THE PACKER DRAWS EVERY ONE OF THEM, BIT FOR BIT, from the run gpu.cyr hands it.
+    var hmask = alloc(ae_text_bytes(7));
+    assert_eq(ae_text_pack_1bpp(hmask, ae_text_run_ptr(0), ae_text_run_len(0)), 7 * FONT_ADV,
+      "the packed run is 7 cells wide");
+    assert_eq(t_mask_cell_is_r(hmask, 7, 0, 0x41), 1, "  cell 0 is kashi_glyph_row's 'A', bit for bit");
+    assert_eq(t_mask_cell_is_r(hmask, 7, 1, 0x82), 1, "  cell 1 is 0x82's rows");
+    assert_eq(t_mask_cell_is_r(hmask, 7, 2, 0xC4), 1, "  cell 2 is 0xC4's");
+    assert_eq(t_mask_cell_is_r(hmask, 7, 3, t_ell_cell_r()), 1, "  cell 3 is U+2026's extension glyph");
+    assert_eq(t_mask_cell_is_r(hmask, 7, 4, t_repl_cell_r()), 1, "  cell 4 is U+FFFD's");
+    assert_eq(t_mask_cell_is_r(hmask, 7, 5, 0), 1, "  cells 5 and 6 are blank");
+    assert_eq(t_mask_cell_is_r(hmask, 7, 6, 0), 1, "  ...both");
+    # ⚠ NON-VACUITY: the comparison must be able to fail. The ellipsis cell is not a blank, and the bits of an
+    # 0xFF-masked cell (0x00, what a one-byte pool would store for 0x100) are not U+2026's.
+    assert_eq(t_mask_cell_is_r(hmask, 7, 3, 0), 0, "  (and the ellipsis cell is NOT a blank — the check can fail)");
+    assert_eq(t_mask_cell_is_r(hmask, 7, 4, t_ell_cell_r()), 0, "  (nor is U+FFFD's cell U+2026's)");
+    # The cap is in cells: 64 two-byte scalars (128 bytes) fit one run, and 65 do not.
+    ae_text_reset();
+    var e64 = alloc(AE_TEXT_CHARS * 2 + 8);
+    var ei = 0;
+    while (ei < AE_TEXT_CHARS) {
+        store8(e64 + ei * 2, 0xC3);
+        store8(e64 + ei * 2 + 1, 0xA9);
+        ei = ei + 1;
+    }
+    store8(e64 + AE_TEXT_CHARS * 2, 0);
+    var ed0 = ae_text_dropped_get();
+    assert_eq(ae_text_enqueue(e64, 0, 0, 0), 1, "64 'é' — 128 bytes — are ONE run: the cap counts cells");
+    assert_eq(ae_text_run_len(0), AE_TEXT_CHARS, "  of 64 cells");
+    store8(e64 + AE_TEXT_CHARS * 2, 0xC3);
+    store8(e64 + AE_TEXT_CHARS * 2 + 1, 0xA9);
+    store8(e64 + AE_TEXT_CHARS * 2 + 2, 0);
+    assert_eq(ae_text_enqueue(e64, 0, 0, 0), 0, "  and 65 are refused");
+    assert_eq(ae_text_dropped_get(), ed0 + 1, "  ...and counted");
+    # ⛔ THE POOL IS SIZED FOR TWO-BYTE CELLS: fill every run to the cap and every cell must read back — a pool
+    # sized one byte a cell would be half this and overrun the globals after it.
+    ae_text_reset();
+    store8(e64 + AE_TEXT_CHARS * 2, 0);
+    var fq = 0;
+    var facc = 0;
+    while (fq < AE_TEXT_MAX) {
+        facc = facc + ae_text_enqueue(e64, 0, 0, 0);
+        fq = fq + 1;
+    }
+    assert_eq(facc, AE_TEXT_MAX, "AE_TEXT_MAX full-length runs of two-byte scalars all fit the pool");
+    var fbad = 0;
+    fq = 0;
+    while (fq < AE_TEXT_MAX) {
+        var fj = 0;
+        while (fj < AE_TEXT_CHARS) {
+            if (t_run_cell_r(fq, fj) != 0x82) { fbad = fbad + 1; }
+            fj = fj + 1;
+        }
+        fq = fq + 1;
+    }
+    assert_eq(fbad, 0, "  and all 3072 of their cells read back as 'é'");
+    assert_eq(ae_text_dropped_get(), ed0 + 1, "  with nothing refused");
+    assert_eq(ae_text_gpu_ok_get(), 1, "  and the latch after the pool is intact");
+    ae_text_reset();
+
     # ⛔ THE ONE-FRAME KILL SWITCH. draw_text enqueues BEFORE anyone knows the op will succeed, so a
     # refusing shader would mean captions absent on EVERY frame. gpu.cyr clears this flag on the first
     # refusal and draw_text must then take the CPU path again.
@@ -722,6 +951,14 @@ fn main() {
     ae_text_reset();
     draw_text(fb_cpu, "queued", 0, 0, TCOL);
     assert_eq(ae_text_count(), 1, "on a GPU frame the run is QUEUED, not drawn");
+    # ⚠ AND IT REPORTS THE WIDTH IT WILL DRAW — in cells, as the CPU path does — not its bytes.
+    ae_text_reset();
+    assert_eq(draw_text(fb_cpu, "é—中", 0, 0, TCOL), 3 * FONT_ADV, "a queued UTF-8 run reports 3 cells of width, not 8 bytes");
+    assert_eq(ae_text_count(), 1, "  (it was queued)");
+    ae_gpu_frame_ok = 0;
+    assert_eq(draw_text(fb_cpu, "é—中", 0, 0, TCOL), 3 * FONT_ADV, "  the same as a CPU frame reports for it");
+    ae_gpu_frame_ok = 1;
+    ae_text_reset();
     ae_text_gpu_disable();
     ae_text_reset();
     draw_text(fb_cpu, "drawn", 0, 0, TCOL);
@@ -896,6 +1133,77 @@ fn main() {
     assert(some, "'A' glyph drew pixels");
     var notall = (setpx < 128);
     assert(notall, "'A' glyph is not a solid block");
+
+    # ⭐⭐ TEXT IS UTF-8: ONE SCALAR, ONE CELL. Rust's draw_text walks `text.chars()` and advances a cell for every
+    # char, drawn or not, and its text_width is `chars().count() * advance - 1`. The port did both per BYTE, so
+    # "é" (C3 A9) drew `├⌐` in two cells and measured 17 px.
+    test_group("render — text is UTF-8: one scalar, one cell (Rust's chars())");
+    ae_gpu_frame_ok = 0;
+    assert_eq(text_width("é"), 8, "'é' is ONE cell wide (2 bytes: byte-wise it measured 17 px)");
+    assert_eq(text_width("—"), 8, "'—' is one cell (3 bytes)");
+    assert_eq(text_width("😀"), 8, "'😀' is one cell (4 bytes)");
+    assert_eq(text_width("中文"), 17, "two CJK scalars are two cells — blank ones still count, as in Rust");
+    assert_eq(text_width("\xFF\xFE"), 17, "two ill-formed bytes are two U+FFFD cells");
+    assert_eq(text_width("a\xE2\x80"), 17, "'a' then E2 80 cut short by the NUL: two cells");
+    assert_eq(text_width("Hé—中"), 35, "a mix: 4 scalars, 4 cells");
+    var ufb = bhumi_fb_new(64, 40);
+    var UC = 0x00E0E0E0;
+    bhumi_fb_clear(ufb, 0);
+    assert_eq(draw_text(ufb, "é", 0, 0, UC), FONT_ADV, "draw_text 'é' advances ONE cell");
+    assert_eq(t_cell_is_r(ufb, 0, 0, 0x82, UC), 1, "  and draws CP437 0x82, 'é', exactly");
+    assert_eq(t_count_px_r(ufb, FONT_ADV, 64, 0, 40, UC), 0, "  with nothing in a second cell — not `├⌐`");
+    bhumi_fb_clear(ufb, 0);
+    assert_eq(draw_text(ufb, "—", 0, 0, UC), FONT_ADV, "'—' has no CP437 cell: it still advances one cell");
+    assert_eq(t_count_px_r(ufb, 0, 64, 0, 40, UC), 0, "  and draws NOTHING — a blank cell, like Rust's unknown char");
+    bhumi_fb_clear(ufb, 0);
+    assert_eq(draw_text(ufb, "a中b", 0, 0, UC), 3 * FONT_ADV, "'a中b' is three cells");
+    assert_eq(t_cell_is_r(ufb, 0, 0, 'a', UC), 1, "  'a' in cell 0");
+    assert_eq(t_cell_is_r(ufb, FONT_ADV, 0, 0, UC), 1, "  cell 1 blank — '中' has no built-in glyph");
+    assert_eq(t_cell_is_r(ufb, 2 * FONT_ADV, 0, 'b', UC), 1, "  and 'b' in cell 2: the blank cell kept its advance");
+    bhumi_fb_clear(ufb, 0);
+    assert_eq(draw_text(ufb, "\xFF", 0, 0, UC), FONT_ADV, "an ill-formed byte is one cell");
+    assert_eq(t_cell_is_r(ufb, 0, 0, t_repl_cell_r(), UC), 1, "  drawn as U+FFFD's glyph, exactly");
+    assert_eq(t_gt_r(t_count_px_r(ufb, 0, FONT_ADV, 0, 16, UC), 20), 1, "  (which has ink: the check is not of a blank)");
+    bhumi_fb_clear(ufb, 0);
+    assert_eq(draw_text(ufb, "…", 0, 0, UC), FONT_ADV, "'…' is one cell");
+    assert_eq(t_cell_is_r(ufb, 0, 0, t_ell_cell_r(), UC), 1, "  kashi 1.1.0's own glyph for it — byte-wise, `ΓÇª`");
+
+    test_group("render — draw_text_lines decodes too, and a newline still breaks the line");
+    bhumi_fb_clear(ufb, 0);
+    assert_eq(draw_text_lines(ufb, "é\n—x", 0, 0, UC), FONT_H + 2, "two lines: one break's height");
+    assert_eq(t_cell_is_r(ufb, 0, 0, 0x82, UC), 1, "  line 1: 'é', one cell");
+    assert_eq(t_count_px_r(ufb, FONT_ADV, 64, 0, FONT_H, UC), 0, "  and nothing after it");
+    assert_eq(t_cell_is_r(ufb, 0, FONT_H + 2, 0, UC), 1, "  line 2: '—', a blank cell");
+    assert_eq(t_cell_is_r(ufb, FONT_ADV, FONT_H + 2, 'x', UC), 1, "  then 'x' one cell along");
+    bhumi_fb_clear(ufb, 0);
+    assert_eq(draw_text_lines(ufb, "\xE2\x80\nA", 0, 0, UC), FONT_H + 2, "a sequence cut short by a newline still breaks");
+    assert_eq(t_cell_is_r(ufb, 0, 0, t_repl_cell_r(), UC), 1, "  E2 80 is ONE U+FFFD");
+    assert_eq(t_cell_is_r(ufb, FONT_ADV, 0, 0, UC), 1, "  and only one");
+    assert_eq(t_cell_is_r(ufb, 0, FONT_H + 2, 'A', UC), 1, "  and 'A' starts line 2");
+
+    # ⛔ THE CELL MAP READS kashi's TABLES, SO EVERY TEXT ENTRY POINT BRINGS THEM UP ITSELF. Before
+    # `kashi_font_init` the high half of `kashi_cp437_from_unicode` answers 0 — and a queued run is decoded at
+    # ENQUEUE, so a cell mapped too early would sit in the pool as a blank however soon the font came up. The
+    # pre-init state is put back by hand each time: kashi's count of index entries, and render.cyr's latch.
+    test_group("render — every text entry point brings the font up before it maps a cell");
+    kashi_cp437_n = 0;
+    ae_font_ready = 0;
+    assert_eq(kashi_cp437_from_unicode(0xE9), 0, "precondition: with kashi's index empty, 'é' maps to nothing");
+    ae_text_reset();
+    ae_text_enqueue("é", 0, 0, 0);
+    assert_eq(t_run_cell_r(0, 0), 0x82, "ae_text_enqueue maps 'é' to 0x82 all the same: it brought the font up first");
+    ae_text_reset();
+    kashi_cp437_n = 0;
+    ae_font_ready = 0;
+    bhumi_fb_clear(ufb, 0);
+    draw_text_lines(ufb, "é", 0, 0, UC);
+    assert_eq(t_cell_is_r(ufb, 0, 0, 0x82, UC), 1, "draw_text_lines draws 'é' all the same");
+    kashi_cp437_n = 0;
+    ae_font_ready = 0;
+    bhumi_fb_clear(ufb, 0);
+    draw_text(ufb, "é", 0, 0, UC);
+    assert_eq(t_cell_is_r(ufb, 0, 0, 0x82, UC), 1, "and so does draw_text");
+    assert_eq(kashi_cp437_n, 128, "  (and kashi's index is whole again)");
 
     # ⭐ CLIPPING — fill_rect and blit_rect clamp the rectangle ONCE and then walk rows, rather
     # than testing every pixel against the bounds. That is a 8.7x speedup and it is also where a
@@ -1135,6 +1443,9 @@ fn main() {
     # A multi-character run must account for its whole width, not one glyph.
     assert_eq(ae_text_fits(tfb2, "AAAA", 2524, 700), 1, "a 4-char run ending exactly at the edge fits");
     assert_eq(ae_text_fits(tfb2, "AAAA", 2530, 700), 0, "...and one that overruns it does not (whole RUN width, not one glyph)");
+    # ⚠ The run's width is its CELLS: four 'é' are eight bytes and 36 px, so they fit exactly where four 'A' do.
+    assert_eq(ae_text_fits(tfb2, "éééé", 2524, 700), 1, "four two-byte scalars are 4 cells wide, not 8: they fit at 2524");
+    assert_eq(ae_text_fits(tfb2, "éééé", 2525, 700), 0, "  ...and one pixel further they do not");
     # ⚠ And a refusal must NOT retire the path — that is the difference between one missing frame and a
     # blank desktop for the session.
     assert_eq(ae_text_gpu_ok_get(), 1, "a locally-refused run leaves the GPU text path ENABLED");
@@ -1143,9 +1454,10 @@ fn main() {
     # Window titles: Rust's truncation, and a caption the glyph queue can always carry
     # ================================================================
     # ⭐ Parity: renderer.rs:543-562 cuts a title wider than `width - 80` to `max_chars = (width - 80) / 6`
-    # cells ending in '…', and draws it whole when `max_chars <= 2`. Mapped: the box runs from the title
-    # inset (x + 6) to 6 px short of the minimize button — `w - 80` again with these buttons — a cell is
-    # FONT_ADV (9), and the ellipsis is three ASCII dots (CP437 has no U+2026).
+    # cells — `max_chars - 1` chars, then '…' — and draws it whole when `max_chars <= 2`. Mapped: the box runs
+    # from the title inset (x + 6) to 6 px short of the minimize button — `w - 80` again with these buttons —
+    # a cell is FONT_ADV (9), and the ellipsis is Rust's own '…' in ONE cell, kashi 1.1.0's extension glyph.
+    # (Until kashi had one it was three ASCII dots in the last three cells, two fewer of the title's chars.)
     # ⛔ READ OFF THE GPU QUEUE. On a GPU frame `draw_text` queues the caption instead of drawing it, so the
     # queued run is exactly what reaches the panel — and "not queued" is the invisible-title bug itself.
     test_group("render — a window title truncates like Rust's (renderer.rs:543-562)");
@@ -1156,15 +1468,15 @@ fn main() {
     var tlink = ae_bhumi(rupa_theme_ink(rupa_theme_active()));
     assert_eq(t_title_q_r(tlfb, tlw), 1, "a short title queues ONE run");
     assert_eq(ae_text_run_len(0), 4, "  drawn whole");
-    assert_eq(t_run_prefix_r(0, "puka", 4), 1, "  ...the title's own bytes");
+    assert_eq(t_run_prefix_r(0, "puka", 4), 1, "  ...the title's own characters, a cell each");
     assert_eq(ae_text_run_x(0), 26, "  at the title inset, x + 6");
     assert_eq(ae_text_run_y(0), 17, "  on the titlebar's glyph row, y + (TITLEBAR_H - FONT_H) / 2");
     assert_eq(ae_text_run_col(0), tlink, "  in the focused window's ink");
     win_set_title(tlw, "A window title far too long for its titlebar");
     t_title_q_r(tlfb, tlw);
     assert_eq(ae_text_run_len(0), 13, "a 44-character title is cut to 120 / 9 = 13 cells, Rust's max_chars");
-    assert_eq(t_run_prefix_r(0, "A window t", 10), 1, "  the first 10 are the title's");
-    assert_eq(t_run_dots_r(0), 1, "  ...and the last 3 are the ellipsis, as ASCII dots");
+    assert_eq(t_run_prefix_r(0, "A window tit", 12), 1, "  the first 12 — Rust's max_chars - 1 — are the title's");
+    assert_eq(t_run_ell_r(0), 1, "  ...and the 13th is the ellipsis, ONE cell (it was three ASCII dots)");
     assert_eq(t_gt_r(ae_text_run_x(0) + ae_text_width(ae_text_run_len(0)), deco_min_x(tlw) - 6), 0,
       "  and it stops at least 6 px short of the minimize button, never under it");
     # The boundary, both sides, in a box EXACTLY 13 cells wide: 196 - 80 = 116 = 13 * 9 - 1. Rust's test is
@@ -1173,11 +1485,19 @@ fn main() {
     win_set_title(tlw, "ABCDEFGHIJKLM");
     t_title_q_r(tlfb, tlw);
     assert_eq(ae_text_run_len(0), 13, "a title exactly as wide as its box is drawn whole");
-    assert_eq(t_run_dots_r(0), 0, "  with no ellipsis");
+    assert_eq(t_run_ell_r(0), 0, "  with no ellipsis");
     win_set_title(tlw, "ABCDEFGHIJKLMN");
     t_title_q_r(tlfb, tlw);
     assert_eq(ae_text_run_len(0), 12, "one character more is cut to 12 cells");
-    assert_eq(t_run_prefix_r(0, "ABCDEFGHI...", 12), 1, "  'ABCDEFGHI...'");
+    assert_eq(t_run_prefix_r(0, "ABCDEFGHIJK", 11), 1, "  'ABCDEFGHIJK' — eleven of the title's —");
+    assert_eq(t_run_ell_r(0), 1, "  then '…'");
+    # ⚠ THE SAME BOUNDARY, MEASURED IN SCALARS. 'Ä' is two bytes, so this 13-character title is 14 bytes: wide
+    # enough to cut if the box were compared with its byte width (125 px), and exactly as wide as the box in cells.
+    win_set_title(tlw, "ÄBCDEFGHIJKLM");
+    t_title_q_r(tlfb, tlw);
+    assert_eq(ae_text_run_len(0), 13, "a 13-scalar, 14-byte title exactly as wide as its box is drawn whole");
+    assert_eq(t_run_cell_r(0, 0), 0x8E, "  'Ä' its one cell, CP437 0x8E");
+    assert_eq(t_run_ell_r(0), 0, "  with no ellipsis");
     win_resize(tlw, 200, 60);
     win_set_title(tlw, "A window title far too long for its titlebar");
     # ⭐ AND THE CPU FRAME DRAWS THE SAME CAPTION. A sentinel background makes "no ink" a real observation.
@@ -1186,9 +1506,14 @@ fn main() {
     var tly = 10 + (TITLEBAR_H - FONT_H) / 2;             # the glyph row's top
     bhumi_fb_clear(tlfb, TLBG);
     render_window(tlfb, tlw, 1);
-    # VGA 8x16 '.' is a 2x2 dot, so the last three cells hold exactly 12 lit pixels — 'itl' uncut held more.
-    assert_eq(t_count_px_r(tlfb, 26 + 10 * FONT_ADV, 26 + 13 * FONT_ADV, tly, tly + FONT_H, tlink), 12,
-      "CPU frame: the last three cells are three dots");
+    # ⭐ The last cell is kashi's U+2026: three 2x2 dots packed into ONE cell (0xDB on rows 10-11), the 12 pixels
+    # the ASCII "..." spread over three — and the cell before it is the title's again.
+    assert_eq(t_cell_is_r(tlfb, 26 + 12 * FONT_ADV, tly, t_ell_cell_r(), tlink), 1,
+      "CPU frame: the last cell is U+2026's glyph, exactly");
+    assert_eq(t_count_px_r(tlfb, 26 + 12 * FONT_ADV, 26 + 13 * FONT_ADV, tly, tly + FONT_H, tlink), 12,
+      "  12 pixels, in one cell");
+    assert_eq(t_cell_is_r(tlfb, 26 + 11 * FONT_ADV, tly, 't', tlink), 1,
+      "  and the cell before it is the title's 12th character, 't'");
     assert_eq(t_count_px_r(tlfb, 26 + 13 * FONT_ADV, deco_min_x(tlw), tly, tly + FONT_H, tlink), 0,
       "  no title ink between the caption and the minimize button");
     assert_eq(t_count_px_r(tlfb, 220, 1200, tly, tly + FONT_H, tlink), 0,
@@ -1200,11 +1525,12 @@ fn main() {
     var tln = win_new(71, 20, 10, 106, 60, "Terminal emulator");   # box 26 px = 2 cells
     assert_eq(t_title_q_r(tlfb, tln), 1, "a 2-cell box queues the title");
     assert_eq(ae_text_run_len(0), 17, "  WHOLE: all 17 characters, past the window's own edge");
-    assert_eq(t_run_dots_r(0), 0, "  and no ellipsis");
+    assert_eq(t_run_ell_r(0), 0, "  and no ellipsis");
     win_resize(tln, 107, 60);                                       # box 27 px = 3 cells
     t_title_q_r(tlfb, tln);
-    assert_eq(ae_text_run_len(0), 3, "one pixel wider is 3 cells: cut, and the ellipsis is all that fits");
-    assert_eq(t_run_dots_r(0), 1, "  '...'");
+    assert_eq(ae_text_run_len(0), 3, "one pixel wider is 3 cells: cut, two of the title's and the ellipsis");
+    assert_eq(t_run_prefix_r(0, "Te", 2), 1, "  'Te'");
+    assert_eq(t_run_ell_r(0), 1, "  then '…' — the ASCII dots used to fill all three cells and leave no title");
     # ⛔⛔ AND WHOLE CAN RUN OFF THE SCREEN WHILE THE WINDOW DOES NOT. Flush with the right edge of a 400 px
     # framebuffer, the 17-character title runs to x = 459: `ae_text_fits` dropped it, every GPU frame.
     var tlfbe = bhumi_fb_new(400, 120);
@@ -1228,8 +1554,8 @@ fn main() {
     assert_eq(t_title_q_r(tlfb, tlwide), 1, "a 100-character title on a wide window QUEUES");
     assert_eq(ae_text_dropped_get(), tld0, "  ...and the queue refused nothing");
     assert_eq(ae_text_run_len(0), AE_TEXT_CHARS, "  cut to the queue's run limit");
-    assert_eq(t_run_prefix_r(0, tllong, AE_TEXT_CHARS - 3), 1, "  the title's first 61 characters");
-    assert_eq(t_run_dots_r(0), 1, "  ...then the ellipsis, because it IS cut");
+    assert_eq(t_run_prefix_r(0, tllong, AE_TEXT_CHARS - 1), 1, "  the title's first 63 characters");
+    assert_eq(t_run_ell_r(0), 1, "  ...then the ellipsis, because it IS cut");
     # ⛔⛔ AND WHEN RUST'S BOX CUTS IT TOO. At 800 px the box is 720 px, narrower than the title's 899, so
     # Rust's cut applies — to 720 / 9 = 80 cells, still over the run limit. A caption of `max_chars` there
     # is refused by the queue, and the title is invisible again on every GPU frame.
@@ -1238,19 +1564,20 @@ fn main() {
     assert_eq(t_title_q_r(tlfb, tlwide), 1, "a 100-character title the box cuts to 80 cells QUEUES");
     assert_eq(ae_text_dropped_get(), tld0, "  ...and the queue refused nothing");
     assert_eq(ae_text_run_len(0), AE_TEXT_CHARS, "  capped to 64, not Rust's 80");
-    assert_eq(t_run_prefix_r(0, tllong, AE_TEXT_CHARS - 3), 1, "  the title's first 61 characters");
-    assert_eq(t_run_dots_r(0), 1, "  ...then the ellipsis");
+    assert_eq(t_run_prefix_r(0, tllong, AE_TEXT_CHARS - 1), 1, "  the title's first 63 characters");
+    assert_eq(t_run_ell_r(0), 1, "  ...then the ellipsis");
     win_resize(tlwide, 1000, 60);
     # The limit's boundary: exactly AE_TEXT_CHARS is drawn whole; one more is cut back to it.
     store8(tllong + AE_TEXT_CHARS, 0);
     t_title_q_r(tlfb, tlwide);
     assert_eq(ae_text_run_len(0), AE_TEXT_CHARS, "exactly 64 characters are drawn whole");
-    assert_eq(t_run_dots_r(0), 0, "  with no ellipsis");
+    assert_eq(t_run_ell_r(0), 0, "  with no ellipsis");
     store8(tllong + AE_TEXT_CHARS, 'A' + (AE_TEXT_CHARS % 26));
     store8(tllong + AE_TEXT_CHARS + 1, 0);
     tld0 = ae_text_dropped_get();
     assert_eq(t_title_q_r(tlfb, tlwide), 1, "65 characters QUEUE");
     assert_eq(ae_text_run_len(0), AE_TEXT_CHARS, "  cut back to 64");
+    assert_eq(t_run_ell_r(0), 1, "  ending in '…', the same cut as Rust's box");
     assert_eq(ae_text_dropped_get(), tld0, "  and nothing was refused");
 
     # ⛔⛔ THE SCREEN EDGE. `ae_text_fits` drops a run that leaves the framebuffer (`#92` op 0x03 refuses
@@ -1268,30 +1595,45 @@ fn main() {
     assert_eq(t_title_q_r(tlfbe, tlr), 1, "a window past the LEFT edge still queues its title");
     assert_eq(ae_text_run_x(0), 1, "  from the first cell wholly on screen, on its own grid");
     assert_eq(ae_text_run_len(0), 19, "  the rest of the 24-cell caption");
-    assert_eq(t_run_prefix_r(0, "w past the right...", 19), 1, "  'w past the right...': Rust's cut, then the screen's");
+    assert_eq(t_run_prefix_r(0, "w past the right e", 18), 1, "  'w past the right e'");
+    assert_eq(t_run_ell_r(0), 1, "  then '…': Rust's cut, then the screen's");
 
     # ⭐⭐ THE PROPERTY, SWEPT AGAINST THE ORACLE (`t_rust_cap_r`, written from Rust). Every window must queue
-    # exactly the cells of Rust's caption that are wholly on screen — at their own x, with their own bytes —
-    # and nothing when none is, and the queue must refuse none of it. Three titles, because each reaches
-    # different branches across the 14 widths: 17 characters (whole, cut, and Rust's 2-cell narrow rule),
-    # 65 (the run limit on a box that fits the whole title — a box can never cut it to more than 64) and 100
-    # (the run limit on a box that CUTS it, to 66..99 cells at 680..971 px). 34 positions, from 500 px past
-    # the left edge to beyond the right, put the screen's cut at every offset of the 9 px grid.
+    # exactly the cells of Rust's caption that are wholly on screen — at their own x, with their own cells, the
+    # '…' included — and nothing when none is, and the queue must refuse none of it. Four titles, because each
+    # reaches different branches across the 14 widths: 17 characters (whole, cut, and Rust's 2-cell narrow
+    # rule), 65 (the run limit on a box that fits the whole title — a box can never cut it to more than 64),
+    # 100 (the run limit on a box that CUTS it, to 66..99 cells at 680..971 px), and 70 scalars of one to four
+    # bytes, glyph or none, with an ill-formed byte among them — so every cut, the run limit's and the screen's
+    # included, has to land on a scalar boundary. 34 positions, from 500 px past the left edge to beyond the
+    # right, put the screen's cut at every offset of the 9 px grid.
     test_group("render — every caption is Rust's, cut only by the screen, and the glyph queue carries it");
     var tlmiss = 0;      # cells on screen, and no run queued
     var tlextra = 0;     # no cell on screen, and a run queued anyway
-    var tlwrong = 0;     # a run at the wrong x, of the wrong length, or with the wrong bytes
+    var tlwrong = 0;     # a run at the wrong x, of the wrong length, or with the wrong cells
+    var tlcells = alloc(2 * 128);                          # the title's cells, from the title kind's own oracle
+    var tlcapc = alloc(2 * 128);                           # Rust's caption of it, in cells
+    var tlmbt = alloc(4 * 70 + 8);
+    var tlmbc = alloc(2 * 70);
+    assert_eq(t_mb_title_r(tlmbt, tlmbc, 70), 158, "the fourth title is 70 scalars in 158 bytes");
+    assert_eq(utf8_count(tlmbt), 70, "  ...which decode as 70");
     tld0 = ae_text_dropped_get();
     var tlpass = 0;
-    while (tlpass < 3) {
+    while (tlpass < 4) {
         var tlt = "Terminal emulator";
         if (tlpass > 0) { tlt = tllong; }                  # 65 characters, as the boundary above left it
         if (tlpass == 2) { store8(tllong + AE_TEXT_CHARS + 1, 'A' + ((AE_TEXT_CHARS + 1) % 26)); }   # 100 again
+        if (tlpass == 3) { tlt = tlmbt; }                  # 70 scalars, 158 bytes
         win_set_title(tlwide, tlt);
-        var tltn = strlen(tlt);
+        var tltn = 70;
+        var tltc = tlmbc;
+        if (tlpass < 3) {
+            tltn = t_ascii_cells_r(tlcells, tlt);
+            tltc = tlcells;
+        }
         var tlsw = 1;
         while (tlsw < 1300) {
-            var tlcap = t_rust_cap_r(tltn, tlsw);
+            var tlcap = t_rust_cap_r(tlcapc, tltc, tltn, tlsw);
             var tlsx = 0 - 500;
             while (tlsx < 1250) {
                 win_resize(tlwide, tlsw, 60);
@@ -1313,7 +1655,7 @@ fn main() {
                         if (tlq != 1) { tlok = 0; }
                         if (ae_text_run_x(0) != tltx + tlk * FONT_ADV) { tlok = 0; }
                         if (ae_text_run_len(0) != tle - tlk) { tlok = 0; }
-                        if (tlok == 1) { tlok = t_run_is_cap_r(0, tle - tlk, tlt, tltn, tlcap, tlk); }
+                        if (tlok == 1) { tlok = t_run_is_cap_r(0, tle - tlk, tlcapc, tlk); }
                         if (tlok == 0) { tlwrong = tlwrong + 1; }
                     }
                 }
@@ -1328,6 +1670,135 @@ fn main() {
     assert_eq(tlextra, 0, "  none with no cell on screen queued anything");
     assert_eq(tlwrong, 0, "  every run is the on-screen cells of Rust's caption, at their own x");
     assert_eq(ae_text_dropped_get(), tld0, "  and the queue refused none of them");
+    ae_gpu_frame_ok = 0;
+    ae_text_reset();
+    ae_rect_reset();
+
+    # ⭐⭐ A MULTI-BYTE TITLE IS CUT AT A SCALAR AND ENDS IN U+2026's GLYPH. `rend_title_caption` writes the caption
+    # as UTF-8, so its BYTES are pinned here as well as its cells: the title's whole units, E2 80 A6, the NUL.
+    test_group("render — a multi-byte title is cut at a scalar boundary, ending in U+2026's glyph");
+    var mcap = alloc(AE_TEXT_CAP_B + 16);
+    var mtitle = "Ünïcödé wíndöw títlé";                  # 20 scalars, 28 bytes
+    assert_eq(rend_title_caption(mcap, mtitle, 120), 13, "20 scalars in a 120 px box: 13 cells, Rust's max_chars");
+    assert_eq(utf8_count(mcap), 13, "  the caption decodes to 13 scalars");
+    assert_eq(memeq(mcap, mtitle, 17), 1, "  its first 17 bytes are the title's first 12 scalars, whole");
+    assert_eq(load8(mcap + 17), 0xE2, "  then '…': E2");
+    assert_eq(load8(mcap + 18), 0x80, "    80");
+    assert_eq(load8(mcap + 19), 0xA6, "    A6");
+    assert_eq(load8(mcap + 20), 0, "  and the NUL");
+    var mw = win_new(74, 20, 10, 200, 60, mtitle);
+    ae_gpu_frame_ok = 1;
+    ae_text_gpu_ok = 1;
+    assert_eq(t_title_q_r(tlfb, mw), 1, "the same title on a 200 px window queues one run");
+    assert_eq(ae_text_run_len(0), 13, "  of 13 cells");
+    assert_eq(t_run_cell_r(0, 0), 0x9A, "  'Ü' is CP437 0x9A");
+    assert_eq(t_run_cell_r(0, 2), 0x8B, "  'ï' is 0x8B");
+    assert_eq(t_run_cell_r(0, 4), 0x94, "  'ö' is 0x94");
+    assert_eq(t_run_cell_r(0, 6), 0x82, "  'é' is 0x82");
+    assert_eq(t_run_cell_r(0, 9), 0xA1, "  'í' is 0xA1");
+    assert_eq(t_run_cell_r(0, 11), 'd', "  the 12th scalar, 'd', is the title's last");
+    assert_eq(t_run_ell_r(0), 1, "  and the 13th is '…'");
+    # ⚠ THE SCREEN CUTS BY CELL, THE CAPTION IS BYTES. Past the left edge the run starts at cell 5, 'd', which is
+    # byte 8; the caption indexed by the cell number would start at byte 5, 'c', two scalars early. Past the right
+    # edge it ends after cell 9, 'í', at byte 15; cut at byte 10, it would split 'é' and draw U+FFFD.
+    win_move(mw, 0 - 50, 10);
+    assert_eq(t_title_q_r(tlfbe, mw), 1, "a multi-byte title past the LEFT edge queues");
+    assert_eq(ae_text_run_x(0), 1, "  from cell 5, on its own grid");
+    assert_eq(ae_text_run_len(0), 8, "  the rest of the 13-cell caption");
+    assert_eq(t_run_cell_r(0, 0), 'd', "  starting at 'd' — the scalar, not the byte its cell number names");
+    assert_eq(t_run_cell_r(0, 1), 0x82, "  then 'é'");
+    assert_eq(t_run_ell_r(0), 1, "  and the '…' last");
+    win_move(mw, 300, 10);
+    assert_eq(t_title_q_r(tlfbe, mw), 1, "...and past the RIGHT edge");
+    assert_eq(ae_text_run_len(0), 10, "  the 10 cells that end by x = 400");
+    assert_eq(t_run_cell_r(0, 9), 0xA1, "  the last is 'í', whole");
+    # Four-byte scalars with no glyph: twelve blank cells and the ellipsis.
+    var memo = alloc(4 * 20 + 8);
+    var mj = 0;
+    while (mj < 20) {
+        store8(memo + mj * 4, 0xF0);
+        store8(memo + mj * 4 + 1, 0x9F);
+        store8(memo + mj * 4 + 2, 0x98);
+        store8(memo + mj * 4 + 3, 0x80);
+        mj = mj + 1;
+    }
+    store8(memo + 80, 0);
+    assert_eq(rend_title_caption(mcap, memo, 120), 13, "twenty '😀' (four bytes each) are cut to 13 cells as well");
+    assert_eq(utf8_offset(mcap, 12), 48, "  12 whole scalars, 48 bytes — never a split one");
+    assert_eq(utf8_next_cp(utf8_next(mcap + 48)), 0x2026, "  then '…'");
+    assert_eq(load8(mcap + 51), 0, "  and the NUL at 51");
+    win_set_title(mw, memo);
+    win_move(mw, 20, 10);
+    ae_gpu_frame_ok = 0;
+    bhumi_fb_clear(tlfb, TLBG);
+    render_title(tlfb, mw, tlink);
+    assert_eq(t_count_px_r(tlfb, 26, 26 + 12 * FONT_ADV, tly, tly + FONT_H, tlink), 0,
+      "CPU frame: the twelve '😀' are blank cells — kashi has no glyph — that still advance");
+    assert_eq(t_cell_is_r(tlfb, 26 + 12 * FONT_ADV, tly, t_ell_cell_r(), tlink), 1, "  so '…' lands in cell 12, exactly");
+    # Ill-formed bytes: written back as U+FFFD, so the caption is well-formed whatever the title was.
+    assert_eq(rend_title_caption(mcap, "\xFFok\xE2\x80", 500), 4, "an ill-formed title that fits is drawn whole: 4 cells");
+    assert_eq((load8(mcap) << 16) | (load8(mcap + 1) << 8) | load8(mcap + 2), 0xEFBFBD, "  FF is written back as U+FFFD");
+    assert_eq(load8(mcap + 3), 'o', "  then 'o'");
+    assert_eq(load8(mcap + 4), 'k', "  'k'");
+    assert_eq((load8(mcap + 5) << 16) | (load8(mcap + 6) << 8) | load8(mcap + 7), 0xEFBFBD, "  E2 80 cut short: U+FFFD");
+    assert_eq(load8(mcap + 8), 0, "  and the NUL");
+
+    # ⛔ THE CAPTION BUFFER HOLDS THE WORST CASE, AND NOTHING LANDS PAST IT. 64 four-byte cells are 256 bytes
+    # before the NUL; cut, 63 of them and the '…' are 255. The guard bytes after the buffer must be untouched.
+    test_group("render — the caption buffer holds the worst case, and nothing lands past it");
+    assert_eq(t_gt_r(AE_TEXT_CAP_B, AE_TEXT_CHARS * 4 + 3), 1,
+      "AE_TEXT_CAP_B >= 64 four-byte cells + the 3-byte '…' + NUL (the copy keeps those four bytes free)");
+    var wt = alloc(4 * 100 + 8);
+    var wti = 0;
+    while (wti < 100) {
+        store8(wt + wti * 4, 0xF0);
+        store8(wt + wti * 4 + 1, 0x9F);
+        store8(wt + wti * 4 + 2, 0x98);
+        store8(wt + wti * 4 + 3, 0x80);
+        wti = wti + 1;
+    }
+    store8(wt + 400, 0);
+    var wb = alloc(AE_TEXT_CAP_B + 16);
+    var wbi = 0;
+    while (wbi < AE_TEXT_CAP_B + 16) { store8(wb + wbi, 0x5A); wbi = wbi + 1; }
+    assert_eq(rend_title_caption(wb, wt, 5000), AE_TEXT_CHARS, "100 four-byte scalars on a wide box: capped to 64 cells");
+    assert_eq(utf8_offset(wb, 63), 252, "  63 whole scalars, 252 bytes");
+    assert_eq(utf8_next_cp(utf8_next(wb + 252)), 0x2026, "  then '…'");
+    assert_eq(load8(wb + 255), 0, "  and the NUL at byte 255");
+    var wpast = 0;
+    wbi = 256;
+    while (wbi < AE_TEXT_CAP_B + 16) { if (load8(wb + wbi) != 0x5A) { wpast = wpast + 1; } wbi = wbi + 1; }
+    assert_eq(wpast, 0, "  not one byte written after it");
+    store8(wt + AE_TEXT_CHARS * 4, 0);
+    wbi = 0;
+    while (wbi < AE_TEXT_CAP_B + 16) { store8(wb + wbi, 0x5A); wbi = wbi + 1; }
+    assert_eq(rend_title_caption(wb, wt, 5000), AE_TEXT_CHARS, "exactly 64 four-byte scalars are drawn whole");
+    assert_eq(utf8_next_cp(utf8_next(wb + 252)), 0x1F600, "  the 64th is the title's, not '…'");
+    assert_eq(load8(wb + 256), 0, "  256 bytes, then the NUL — the worst case there is");
+    wpast = 0;
+    wbi = 257;
+    while (wbi < AE_TEXT_CAP_B + 16) { if (load8(wb + wbi) != 0x5A) { wpast = wpast + 1; } wbi = wbi + 1; }
+    assert_eq(wpast, 0, "  and nothing after it");
+
+    # ⭐⭐ A CPU FRAME AND A GPU FRAME DRAW THE SAME CELLS FOR THE SAME STRING. The CPU path decodes in `draw_text`;
+    # the GPU path decoded at enqueue and packs from the pool. One window, drawn both ways, compared per pixel.
+    test_group("render — a CPU frame and a GPU frame draw the same caption, pixel for pixel");
+    var cgc = bhumi_fb_new(400, 60);
+    var cgg = bhumi_fb_new(400, 60);
+    var cglit = alloc(8);
+    var cgw = win_new(75, 20, 10, 200, 40, mtitle);
+    assert_eq(t_cap_cpu_gpu_diff_r(cgc, cgg, cgw, cglit), 0, "a cut multi-byte caption: no pixel differs");
+    assert_eq(ae_text_count(), 1, "  (the GPU frame queued it, so this is not CPU against CPU)");
+    assert_eq(t_gt_r(load64(cglit), 100), 1, "  (and the CPU frame drew ink, so not two blank buffers)");
+    win_set_title(cgw, tlmbt);
+    assert_eq(t_cap_cpu_gpu_diff_r(cgc, cgg, cgw, cglit), 0, "every kind of scalar, the ill-formed byte included");
+    assert_eq(t_gt_r(load64(cglit), 100), 1, "  (ink drawn)");
+    win_move(cgw, 0 - 50, 10);
+    assert_eq(t_cap_cpu_gpu_diff_r(cgc, cgg, cgw, cglit), 0, "  and cut by the left edge");
+    win_resize(cgw, 2000, 40);
+    win_move(cgw, 0, 10);
+    assert_eq(t_cap_cpu_gpu_diff_r(cgc, cgg, cgw, cglit), 0, "  and by the right edge of a window wider than the screen");
+    assert_eq(t_gt_r(load64(cglit), 100), 1, "  (ink drawn)");
     ae_gpu_frame_ok = 0;
     ae_text_reset();
     ae_rect_reset();

@@ -143,6 +143,28 @@ fn main() {
     assert_eq(wsp_count(c8ws1), 0, "moving away removes EVERY entry for the id");
     assert_eq(wsp_count(comp_get_workspace(c8, 2)), 1, "  ...and the target lists it once");
 
+    # Parity: compositor.rs create_window / close_window / focus_window keep the a11y tree in step
+    # (:250-273, :337-347, :813-820). The full mirror is gated in tests/desktop.tcyr; this pins the
+    # compositor-level contract: no tree, no mirror; a tree, every create/close/focus reaches it.
+    test_group("compositor — a11y mirror hook");
+    var c9 = comp_new();
+    assert_eq(comp_a11y(c9), 0, "a bare compositor mirrors into nothing");
+    var cf1 = comp_create_window(c9, 0, 0, 100, 100, "Q1");
+    assert_eq(comp_close_window(c9, win_id(cf1)), 0, "  ...and create/close still work without a tree");
+    var t9 = a11y_tree_new();
+    comp_set_a11y(c9, t9);
+    var cf2 = comp_create_window(c9, 5, 6, 70, 80, "Q2");
+    var cf3 = comp_create_window(c9, 0, 0, 100, 100, "Q3");
+    assert_eq(a11y_tree_len(t9), 2, "with a tree: one node per created window");
+    assert_eq(a11y_node_id(vec_get(a11y_tree_nodes(t9), 0)), win_id(cf2), "  ...keyed by window id, in creation order");
+    assert_eq(a11y_tree_focused_id(t9), win_id(cf3), "  ...tree focus on the newest");
+    comp_focus(c9, comp_find_by_id(c9, win_id(cf2)));
+    assert_eq(a11y_tree_focused_id(t9), win_id(cf2), "comp_focus syncs tree focus");
+    comp_close_window(c9, win_id(cf2));
+    assert_eq(a11y_tree_len(t9), 1, "close removes the node");
+    assert_eq(a11y_tree_focused_id(t9), win_id(cf3), "  ...and the hand-off syncs tree focus");
+    assert_eq(a11y_tree_announcement_count(t9), 3, "two opens + one close announced");
+
     # ----- wallpaper.cyr — the backdrop source (M6-C1a, pure) -----
     test_group("wallpaper.cyr — row source");
     wp_set_solid(0x123456);

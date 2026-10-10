@@ -13,28 +13,49 @@
 # --- Fonts carried ---
 #
 # Font 0 — IBM VGA BIOS 8x16 ROM font (public domain, IBM 1981; the same
-#   byte table Linux's lib/fonts/font_8x16.c carries). 96 glyphs covering
-#   printable ASCII 0x20..0x7F. Each glyph is 16 rows top-to-bottom; bit 7
-#   = leftmost pixel of that row. Legible at 2K+ native HDMI (cell 8x16 is
-#   ~1.5% of screen height at 1080p). This is the table agnos's
-#   kernel/arch/x86_64/fb_console.cyr currently uses.
+#   byte table Linux's lib/fonts/font_8x16.c carries). Full CP437
+#   0x20..0xFF (the ASCII half since 0.1.0, the high half since 0.4.0).
+#   Each glyph is 16 rows top-to-bottom; bit 7 = leftmost pixel of that
+#   row. Legible at 2K+ native HDMI (cell 8x16 is ~1.5% of screen height
+#   at 1080p). This is the table agnos's kernel/arch/x86_64/fb_console.cyr
+#   renders.
 #
-# Font 1 — hand-drawn 8x8 CGA-style bitmap (public domain, AGNOS original).
-#   96 glyphs, ASCII 0x20..0x7F, 8 rows per glyph. Smaller; the original
-#   agnos console font before the 8x16 replacement. Retained here so the
-#   8x8 source survives the kernel-side migration and stays available for
-#   low-resolution / dense-grid uses (BBS-style art, tiny status lines).
+# Font 1 — 8x8 CGA-style bitmap, 8 rows per glyph. 0x20..0x7F is the
+#   hand-drawn AGNOS original (public domain; the agnos console font before
+#   the 8x16 replacement), 0x80..0xFF the IBM CGA high half from Linux's PD
+#   font_8x8.c (ADR 0007). For low-resolution / dense-grid uses (BBS-style
+#   art, tiny status lines).
+#
+# Font 2 — VGA 9x16, derived at init from font 0 + the VGA col-9 rule
+#   (ADR 0006); no table of its own.
+#
+# --- Cells, and how Unicode reaches them (1.1.0, ADR 0011) ---
+#
+# Every glyph accessor below (kashi_glyph_ptr / _row / _row_byte /
+# _encoded) takes a CELL, not a Unicode codepoint:
+#   0x20..0xFF   the CP437 code page (KASHI_GLYPH_FIRST..KASHI_GLYPH_LAST),
+#                exactly the bytes agnos and every byte-indexed consumer
+#                render — this range never changes meaning;
+#   0x100..      the EXTENSION block (KASHI_EXT_FIRST..KASHI_EXT_LAST):
+#                glyphs CP437 has no cell for (U+2026 HORIZONTAL ELLIPSIS,
+#                U+FFFD REPLACEMENT CHARACTER). No byte can name them.
+# A Unicode codepoint becomes a cell through kashi_cp437_from_unicode(cp),
+# which answers 0 (no glyph) for anything the built-ins cannot draw. Cells
+# 0x80..0xFF are NOT Latin-1: cell 0xE7 is 'τ', and U+00E7 'ç' is cell 0x87.
 #
 # --- Storage model ---
 #
-# Two module-scope BSS buffers, BYTE-addressed via store8/load8. NOTE the
+# Module-scope BSS buffers, BYTE-addressed via store8/load8. NOTE the
 # Cyrius var-array unit rule: at MODULE scope `var X[N]` allocates N*u64
-# (8N bytes), so `var kashi_font16[3584]` reserves 28 KiB of BSS but we use
-# only the first 3584 BYTES (one byte per glyph row). `var kashi_font8[1792]`
-# reserves 14 KiB and uses the first 1792 bytes. See architecture note 001
-# for the rationale of using bytes as the var-array N. As of 0.4.0 the
-# range covers all of CP437 (224 glyphs); agnos's `fb_font` will widen to
-# match when it integrates kashi.
+# (8N bytes), so `var kashi_font16[3616]` reserves 28.25 KiB of BSS but we
+# use only the first 3616 BYTES (one byte per glyph row).
+# `var kashi_font8[1808]` reserves 14.1 KiB and uses the first 1808 bytes.
+# See architecture note 001 for the rationale of using bytes as the
+# var-array N. Each glyph buffer holds the 224 CP437 cells followed
+# directly by the KASHI_EXT_COUNT extension cells — the two ranges are
+# contiguous, so one `(ch - KASHI_GLYPH_FIRST) * size` offset reaches both.
+# The Unicode reverse table (kashi_cp437_rev) is the one exception to
+# "N = bytes": one u64 slot per entry, see its declaration.
 #
 # Glyph rows are packed top-to-bottom by `kashi_font_init()` from u64 literals
 # that read in scan order: for the 8x16 font, fset16(ch, hi, lo) where
@@ -72,31 +93,65 @@ enum KashiFontId {
 # hand-drawn AGNOS-original ASCII low half (0x20..0x7F) + Linux PD
 # font_8x8.c high half (ADR 0007). VGA 9x16 is derived from VGA 8x16 +
 # the VGA col-9 replication rule at init (ADR 0006); no separate byte
-# table on disk.
+# table on disk. These constants describe the CP437 range ONLY, and
+# kashi_font_first / kashi_font_count report it; the extension block has
+# its own constants (below).
 enum KashiGlyphRange {
     KASHI_GLYPH_FIRST = 0x20;  # first encoded codepoint (space)
     KASHI_GLYPH_LAST = 0xFF;   # last encoded codepoint (last CP437 cell)
     KASHI_GLYPH_COUNT = 224;   # 0xFF - 0x20 + 1
 }
 
+# The EXTENSION block (1.1.0, ADR 0011): glyphs CP437 has no cell for,
+# stored in every built-in font directly after cell 0xFF. Reachable only
+# by codepoint — kashi_cp437_from_unicode hands out these cells; no byte
+# value names them, so a byte-indexed consumer can never land on one.
+# Cell order: KASHI_EXT_FIRST + 0 = U+2026 HORIZONTAL ELLIPSIS,
+#             KASHI_EXT_FIRST + 1 = U+FFFD REPLACEMENT CHARACTER.
+# Treat the cell numbers as kashi-internal: obtain them from
+# kashi_cp437_from_unicode, or enumerate KASHI_EXT_FIRST..KASHI_EXT_LAST.
+# KASHI_EXT_FIRST == KASHI_GLYPH_LAST + 1 is load-bearing (contiguous
+# storage); tests/kashi.tcyr asserts it.
+enum KashiExtRange {
+    KASHI_EXT_FIRST = 0x100;   # first extension cell (== KASHI_GLYPH_LAST + 1)
+    KASHI_EXT_LAST = 0x101;    # last extension cell
+    KASHI_EXT_COUNT = 2;       # 0x101 - 0x100 + 1
+}
+
 # Module-scope BSS. See the "Storage model" note above for the u64-unit
 # rule: these reserve 8x their byte footprint but we address them per-byte.
-var kashi_font16[3584];    # 224 glyphs x 16 rows (VGA 8x16)        — bytes 0..3583
-var kashi_font8[1792];     # 224 glyphs x  8 rows (CGA 8x8)         — bytes 0..1791
-var kashi_font9_16[7168];  # 224 glyphs x 16 rows x 2 bytes (VGA 9x16, derived)
+# Each holds (224 CP437 + 2 extension) = 226 glyphs.
+var kashi_font16[3616];    # 226 glyphs x 16 rows (VGA 8x16)        — bytes 0..3615
+var kashi_font8[1808];     # 226 glyphs x  8 rows (CGA 8x8)         — bytes 0..1807
+var kashi_font9_16[7232];  # 226 glyphs x 16 rows x 2 bytes (VGA 9x16, derived)
 var kashi_font_ready = 0;  # 1 after kashi_font_init() has run
+
+# Unicode reverse index of the CP437 high half (1.1.0, ADR 0011): 128
+# {codepoint, cell} entries in codepoint order, so kashi_cp437_from_unicode
+# can binary-search them. kashi_font_init writes each entry straight into
+# its own fixed slot (its source lists them already sorted) and then sets
+# kashi_cp437_n; empty (kashi_cp437_n == 0) before the first init.
+# ⚠ The one buffer in this file NOT sized in bytes: module-scope
+# `var X[128]` is 128 u64 slots (1 KiB) and each entry takes one whole
+# slot — byte 0 = codepoint >> 8, byte 1 = codepoint & 0xFF, byte 2 =
+# cell, bytes 3-7 unused. Every CP437 codepoint is <= U+25A0, so two
+# bytes hold it. Do not "fix" it to [1024]: that is 8 KiB.
+var kashi_cp437_rev[128];
+var kashi_cp437_n = 0;     # entries filled: 0 before kashi_font_init, then 128 (never reset)
 
 # Pack one 8x16 glyph's 16 row-bytes into kashi_font16[(ch-0x20)*16 .. +15].
 # hi = rows 0-7 (top first), lo = rows 8-15. Byte (hi>>56) is the top row.
 # Internal — callers use kashi_font_init(). ch is trusted (table-internal).
 fn kashi_fset16(ch, hi, lo) {
     # Defensive bound (audit 2026-05-27, F1): a table-authoring typo with
-    # ch outside [FIRST, LAST] would compute a negative or overrun offset
-    # and silently corrupt BSS before/after the buffer. init runs once, so
-    # this guard is free. All current calls are in-range; this protects
-    # any future built-in font added past the current three.
+    # ch outside [FIRST, EXT_LAST] would compute a negative or overrun
+    # offset and silently corrupt BSS before/after the buffer. init runs
+    # once, so this guard is free. All current calls are in-range; this
+    # protects any future built-in font added past the current three. The
+    # upper bound is the last EXTENSION cell (1.1.0): the buffer is sized
+    # for CP437 + the extension block, nothing past it.
     if (ch < KASHI_GLYPH_FIRST) { return 0; }
-    if (ch > KASHI_GLYPH_LAST) { return 0; }
+    if (ch > KASHI_EXT_LAST) { return 0; }
     var g = &kashi_font16 + (ch - KASHI_GLYPH_FIRST) * 16;
     store8(g + 0, (hi >> 56) & 0xFF);
     store8(g + 1, (hi >> 48) & 0xFF);
@@ -122,7 +177,7 @@ fn kashi_fset16(ch, hi, lo) {
 fn kashi_fset8(ch, val) {
     # Defensive bound — see kashi_fset16 (audit 2026-05-27, F1).
     if (ch < KASHI_GLYPH_FIRST) { return 0; }
-    if (ch > KASHI_GLYPH_LAST) { return 0; }
+    if (ch > KASHI_EXT_LAST) { return 0; }
     var g = &kashi_font8 + (ch - KASHI_GLYPH_FIRST) * 8;
     store8(g + 0, (val >> 56) & 0xFF);
     store8(g + 1, (val >> 48) & 0xFF);
@@ -135,9 +190,52 @@ fn kashi_fset8(ch, val) {
     return 0;
 }
 
-# Populate both glyph buffers. Idempotent — safe to call more than once.
-# Call ONCE before the first glyph access (a freestanding consumer has no
-# constructor mechanism, so this is explicit). Returns 0.
+# Write reverse-index entry `slot` from `packed` = codepoint << 8 | cell
+# (0xCCCCLL: the codepoint's four hex digits, then the cell's two) in
+# place: three straight stores, no shifting. Internal — callers use
+# kashi_font_init(). Bounded like the fset packers: a slot outside 0..127,
+# a codepoint outside 1..0xFFFF (it must fit the entry's two bytes) or a
+# cell below 0x80 is ignored, never written past the buffer.
+fn _kashi_cp437_ent(slot, packed) {
+    if (slot < 0) { return 0; }
+    if (slot > 127) { return 0; }
+    var cp = packed >> 8;
+    var cell = packed & 0xFF;
+    if (cp < 1) { return 0; }
+    if (cp > 0xFFFF) { return 0; }
+    if (cell < 0x80) { return 0; }
+    var e = &kashi_cp437_rev + slot * 8;
+    store8(e, (cp >> 8) & 0xFF);
+    store8(e + 1, cp & 0xFF);
+    store8(e + 2, cell);
+    return 0;
+}
+
+# Eight consecutive reverse-index slots `slot`..`slot + 7`, each a packed
+# 0xCCCCLL entry (see _kashi_cp437_ent). kashi_font_init lists the 128
+# entries already sorted by codepoint, eight to a line, so building the
+# index is 16 of these and nothing else. Internal.
+fn _kashi_cp437_rev8(slot, a, b, c, d, e, f, g, h) {
+    _kashi_cp437_ent(slot, a);
+    _kashi_cp437_ent(slot + 1, b);
+    _kashi_cp437_ent(slot + 2, c);
+    _kashi_cp437_ent(slot + 3, d);
+    _kashi_cp437_ent(slot + 4, e);
+    _kashi_cp437_ent(slot + 5, f);
+    _kashi_cp437_ent(slot + 6, g);
+    _kashi_cp437_ent(slot + 7, h);
+    return 0;
+}
+
+# Populate the glyph buffers and the Unicode reverse index. Idempotent —
+# safe to call more than once. Call ONCE before the first glyph access (a
+# freestanding consumer has no constructor mechanism, so this is explicit).
+# Every store writes a final value to a fixed address — no search, no sort,
+# no counter reset — so it stays a straight-line fill for a consumer that
+# calls it on every draw, and a re-init rewrites each byte with the value
+# already there: a reader racing a RE-init never sees a wrong value. kashi
+# has no synchronisation of its own, so the FIRST call must complete before
+# any other CPU reads. Returns 0.
 fn kashi_font_init() {
     # --- Font 0: IBM VGA BIOS 8x16 ROM font (public domain). ---
     # Byte-for-byte the table agnos's fb_console.cyr carries; hi = rows 0-7,
@@ -372,6 +470,16 @@ fn kashi_font_init() {
     kashi_fset16(0xFD, 0x003C660C18327E00, 0x0000000000000000);  # CP437 0xFD
     kashi_fset16(0xFE, 0x000000007E7E7E7E, 0x7E7E7E0000000000);  # CP437 0xFE
     kashi_fset16(0xFF, 0x0000000000000000, 0x0000000000000000);  # CP437 0xFF (blank)
+
+    # --- VGA 8x16 extension block (cells 0x100.., 1.1.0, ADR 0011) ---
+    # Not CP437 and not from the IBM ROM: kashi-drawn, in the ROM's weight.
+    # U+2026 '…' = three copies of the period's 2x2 dot (0x18 on rows
+    # 10-11) packed into one cell: ##.##.## (0xDB) on rows 10-11.
+    # U+FFFD '�' = a pointed lozenge, cols 0-6 / rows 1-13, with a 5x7
+    # '?' knocked out of its body (rows 4-10); col 7 stays blank, like the
+    # ROM's letters. ASCII art of both in ADR 0011.
+    kashi_fset16(0x100, 0x0000000000000000, 0x0000DBDB00000000);  # ext: U+2026 HORIZONTAL ELLIPSIS
+    kashi_fset16(0x101, 0x0010387CC6BAFAF6, 0xEEFEEE7C38100000);  # ext: U+FFFD REPLACEMENT CHARACTER
 
     # --- Font 1: hand-drawn 8x8 CGA-style bitmap (public domain). ---
     # val = rows 0-7, byte (val>>56) is the top row. Byte-for-byte the
@@ -610,6 +718,15 @@ fn kashi_font_init() {
     kashi_fset8(0xFE, 0x00003C3C3C3C0000);  # CP437 0xFE
     kashi_fset8(0xFF, 0x0000000000000000);  # CP437 0xFF — blank
 
+    # --- CGA 8x8 extension block (cells 0x100.., 1.1.0, ADR 0011) ---
+    # U+2026 '…' = the period's 2x2 dot (0x18 on rows 5-6) three times:
+    # ##.##.## (0xDB) on rows 5-6.
+    # U+FFFD '�' = an octagon in the CGA letter box (cols 0-6, rows 0-6;
+    # row 7 left blank like the letters) with a 3x5 '?' knocked out. 8x8
+    # has no room for a pointed diamond AND a readable '?'; see ADR 0011.
+    kashi_fset8(0x100, 0x0000000000DBDB00);  # ext: U+2026 HORIZONTAL ELLIPSIS
+    kashi_fset8(0x101, 0x3844F6EEFE6C3800);  # ext: U+FFFD REPLACEMENT CHARACTER
+
     # --- Derive VGA 9x16 from VGA 8x16 + the VGA 9-bit-mode col-9 rule.
     # In VGA text mode the 9th column is generated by the hardware: for
     # codepoints in the CP437 box-drawing range 0xC0..0xDF, col 8 (the
@@ -617,9 +734,11 @@ fn kashi_font_init() {
     # byte) so box-drawing lines connect across cells; for all other
     # codepoints col 8 is 0. We bake this rule at init time so the new
     # 9x16 built-in is just `font16 + computed col-9`, no second table
-    # to ship or transcribe. See ADR 0006.
+    # to ship or transcribe. See ADR 0006. The walk runs through the
+    # extension block too (1.1.0, ADR 0011); those cells sit outside
+    # 0xC0..0xDF, so their 9th column is blank.
     var dch = KASHI_GLYPH_FIRST;
-    while (dch <= KASHI_GLYPH_LAST) {
+    while (dch <= KASHI_EXT_LAST) {
         var src_base = &kashi_font16 + (dch - KASHI_GLYPH_FIRST) * 16;
         var dst_base = &kashi_font9_16 + (dch - KASHI_GLYPH_FIRST) * 32;
         var dr = 0;
@@ -635,6 +754,57 @@ fn kashi_font_init() {
         }
         dch = dch + 1;
     }
+
+    # --- Unicode reverse index of the CP437 high half (1.1.0, ADR 0011) ---
+    # The 128 codepoints of cells 0x80..0xFF, each with its cell, per the
+    # standard CP437 -> Unicode mapping: Python's 'cp437' codec, which is
+    # generated from the Unicode Consortium's VENDORS/MICSFT/PC/CP437.TXT
+    # (dhancha's independently typed table agrees entry for entry).
+    # Generated mechanically from the codec and listed SORTED BY CODEPOINT,
+    # eight fixed slots per line, so the table is in kashi_cp437_from_unicode's
+    # binary-search order as written and init runs no sort: sorting a
+    # cell-ordered source at init (by insertion) costs about as much again
+    # as all of the glyph packing above, in a function some consumers call
+    # on every draw. Each entry is packed 0xCCCCLL — the codepoint's four
+    # hex digits, then its cell's two (0x00E787 = U+00E7 'ç' -> cell 0x87);
+    # the comment above each line names its eight characters. A re-init
+    # rewrites every slot with the bytes already in it, and the count is set
+    # once the slots are full, never reset. tests/kashi.tcyr checks the
+    # order and every entry against its own cell-ordered copy of the code
+    # page.
+    # NBSP ¡ ¢ £ ¥ ª « ¬
+    _kashi_cp437_rev8(0, 0x00A0FF, 0x00A1AD, 0x00A29B, 0x00A39C, 0x00A59D, 0x00AAA6, 0x00ABAE, 0x00ACAA);
+    # ° ± ² µ · º » ¼
+    _kashi_cp437_rev8(8, 0x00B0F8, 0x00B1F1, 0x00B2FD, 0x00B5E6, 0x00B7FA, 0x00BAA7, 0x00BBAF, 0x00BCAC);
+    # ½ ¿ Ä Å Æ Ç É Ñ
+    _kashi_cp437_rev8(16, 0x00BDAB, 0x00BFA8, 0x00C48E, 0x00C58F, 0x00C692, 0x00C780, 0x00C990, 0x00D1A5);
+    # Ö Ü ß à á â ä å
+    _kashi_cp437_rev8(24, 0x00D699, 0x00DC9A, 0x00DFE1, 0x00E085, 0x00E1A0, 0x00E283, 0x00E484, 0x00E586);
+    # æ ç è é ê ë ì í
+    _kashi_cp437_rev8(32, 0x00E691, 0x00E787, 0x00E88A, 0x00E982, 0x00EA88, 0x00EB89, 0x00EC8D, 0x00EDA1);
+    # î ï ñ ò ó ô ö ÷
+    _kashi_cp437_rev8(40, 0x00EE8C, 0x00EF8B, 0x00F1A4, 0x00F295, 0x00F3A2, 0x00F493, 0x00F694, 0x00F7F6);
+    # ù ú û ü ÿ ƒ Γ Θ
+    _kashi_cp437_rev8(48, 0x00F997, 0x00FAA3, 0x00FB96, 0x00FC81, 0x00FF98, 0x01929F, 0x0393E2, 0x0398E9);
+    # Σ Φ Ω α δ ε π σ
+    _kashi_cp437_rev8(56, 0x03A3E4, 0x03A6E8, 0x03A9EA, 0x03B1E0, 0x03B4EB, 0x03B5EE, 0x03C0E3, 0x03C3E5);
+    # τ φ ⁿ ₧ ∙ √ ∞ ∩
+    _kashi_cp437_rev8(64, 0x03C4E7, 0x03C6ED, 0x207FFC, 0x20A79E, 0x2219F9, 0x221AFB, 0x221EEC, 0x2229EF);
+    # ≈ ≡ ≤ ≥ ⌐ ⌠ ⌡ ─
+    _kashi_cp437_rev8(72, 0x2248F7, 0x2261F0, 0x2264F3, 0x2265F2, 0x2310A9, 0x2320F4, 0x2321F5, 0x2500C4);
+    # │ ┌ ┐ └ ┘ ├ ┤ ┬
+    _kashi_cp437_rev8(80, 0x2502B3, 0x250CDA, 0x2510BF, 0x2514C0, 0x2518D9, 0x251CC3, 0x2524B4, 0x252CC2);
+    # ┴ ┼ ═ ║ ╒ ╓ ╔ ╕
+    _kashi_cp437_rev8(88, 0x2534C1, 0x253CC5, 0x2550CD, 0x2551BA, 0x2552D5, 0x2553D6, 0x2554C9, 0x2555B8);
+    # ╖ ╗ ╘ ╙ ╚ ╛ ╜ ╝
+    _kashi_cp437_rev8(96, 0x2556B7, 0x2557BB, 0x2558D4, 0x2559D3, 0x255AC8, 0x255BBE, 0x255CBD, 0x255DBC);
+    # ╞ ╟ ╠ ╡ ╢ ╣ ╤ ╥
+    _kashi_cp437_rev8(104, 0x255EC6, 0x255FC7, 0x2560CC, 0x2561B5, 0x2562B6, 0x2563B9, 0x2564D1, 0x2565D2);
+    # ╦ ╧ ╨ ╩ ╪ ╫ ╬ ▀
+    _kashi_cp437_rev8(112, 0x2566CB, 0x2567CF, 0x2568D0, 0x2569CA, 0x256AD8, 0x256BD7, 0x256CCE, 0x2580DF);
+    # ▄ █ ▌ ▐ ░ ▒ ▓ ■
+    _kashi_cp437_rev8(120, 0x2584DC, 0x2588DB, 0x258CDD, 0x2590DE, 0x2591B0, 0x2592B1, 0x2593B2, 0x25A0FE);
+    kashi_cp437_n = 128;
 
     kashi_font_ready = 1;
     return 0;
@@ -674,7 +844,10 @@ fn kashi_font_first(font_id) {
     return 0;
 }
 
-# Number of encoded glyphs (224) for any valid font. Unknown -> 0.
+# Number of CP437 glyphs (224) for any valid font. Unknown -> 0. With
+# kashi_font_first this enumerates the CP437 range only; the extension
+# block (KASHI_EXT_COUNT cells from KASHI_EXT_FIRST, 1.1.0) is not counted
+# — enumerate it separately.
 fn kashi_font_count(font_id) {
     if (font_id == KASHI_FONT_VGA_8X16) { return KASHI_GLYPH_COUNT; }
     if (font_id == KASHI_FONT_CGA_8X8) { return KASHI_GLYPH_COUNT; }
@@ -692,18 +865,26 @@ fn kashi_font_stride(font_id) {
     return 0;
 }
 
-# 1 if `ch` is in the encoded range [0x20, 0x7F], else 0. Caller-facing
-# bounds gate so consumers can decide their own fallback for control chars.
+# 1 if cell `ch` has a built-in glyph, else 0: the CP437 range
+# [KASHI_GLYPH_FIRST, KASHI_GLYPH_LAST] (0x20..0xFF) or, since 1.1.0, the
+# extension block [KASHI_EXT_FIRST, KASHI_EXT_LAST] (ADR 0011). Every
+# per-glyph accessor gates on this. The two ranges are contiguous
+# (KASHI_EXT_FIRST == KASHI_GLYPH_LAST + 1), so one upper bound covers both.
+# Caller-facing bounds gate so consumers can decide their own fallback for
+# control chars. `ch` is a CELL — for Unicode text use
+# kashi_cp437_from_unicode, whose 0 result this gate also rejects.
 fn kashi_glyph_encoded(ch) {
     if (ch < KASHI_GLYPH_FIRST) { return 0; }
-    if (ch > KASHI_GLYPH_LAST) { return 0; }
+    if (ch > KASHI_EXT_LAST) { return 0; }
     return 1;
 }
 
 # Base pointer to a glyph's contiguous row bytes within the BSS buffer.
 # Returns the address of row 0; the consumer reads `height` bytes from it.
-# Returns 0 (null) for an out-of-range char or unknown font — the caller
-# must null-check (a freestanding kernel cannot afford a wild deref).
+# Returns 0 (null) for an out-of-range cell (see kashi_glyph_encoded) or
+# unknown font — the caller must null-check (a freestanding kernel cannot
+# afford a wild deref). The extension cells (1.1.0) sit right after 0xFF
+# in each buffer, so the same offset arithmetic reaches them.
 fn kashi_glyph_ptr(font_id, ch) {
     if (kashi_glyph_encoded(ch) == 0) { return 0; }
     if (font_id == KASHI_FONT_VGA_8X16) {
@@ -760,4 +941,52 @@ fn kashi_glyph_row_byte(font_id, ch, row, byte_idx) {
     var base = kashi_glyph_ptr(font_id, ch);
     if (base == 0) { return 0; }
     return load8(base + row * stride + byte_idx);
+}
+
+# --- Unicode -> cell (1.1.0, ADR 0011) ---
+
+# The cell that draws Unicode codepoint `cp` in the built-in fonts — pass it
+# to kashi_glyph_ptr / kashi_glyph_row / kashi_glyph_row_byte — or 0 when no
+# built-in glyph exists. Font-independent: it names a cell, and every
+# built-in font has every cell.
+#   U+0020..U+007E   -> itself (printable ASCII).
+#   U+2302 HOUSE     -> 0x7F. kashi's cell 0x7F is IBM's house symbol in
+#                       the VGA fonts (the CGA 8x8 draws that cell blank).
+#   U+007F DELETE    -> 0. A control character, like U+0000..U+001F and
+#                       U+0080..U+009F: none has a glyph. Cell 0x7F is
+#                       reached by the codepoint of what it draws, U+2302.
+#   the CP437 high half's 128 codepoints -> 0x80..0xFF, per the standard
+#                       CP437 mapping: U+00E7 'ç' -> 0x87 (NOT 0xE7, which
+#                       is 'τ'), U+2500 '─' -> 0xC4, U+00A0 NBSP -> 0xFF.
+#   U+2026 HORIZONTAL ELLIPSIS   -> KASHI_EXT_FIRST     (0x100)
+#   U+FFFD REPLACEMENT CHARACTER -> KASHI_EXT_FIRST + 1 (0x101)
+#   anything else, negatives included -> 0.
+# 0 is below KASHI_GLYPH_FIRST, so every accessor already answers it with
+# the blank / null sentinel; a consumer that wants a visible fallback can
+# substitute kashi_cp437_from_unicode(0xFFFD) for a 0 result.
+# Allocation-free, one call per glyph: an ASCII fast path, then a binary
+# search (at most 8 probes) of the 128-entry table kashi_font_init builds.
+# Call kashi_font_init first — before it only ASCII, U+2302 and the
+# extension resolve, and the high half answers 0 (renders blank).
+fn kashi_cp437_from_unicode(cp) {
+    if (cp < 0x20) { return 0; }
+    if (cp < 0x7F) { return cp; }
+    if (cp == 0x2026) { return KASHI_EXT_FIRST; }
+    if (cp == 0xFFFD) { return KASHI_EXT_FIRST + 1; }
+    if (cp == 0x2302) { return 0x7F; }
+    # The high half's codepoints span U+00A0 (NBSP) .. U+25A0 (BLACK
+    # SQUARE); outside that only the cases above can match.
+    if (cp < 0xA0) { return 0; }
+    if (cp > 0x25A0) { return 0; }
+    var lo = 0;
+    var hi = kashi_cp437_n - 1;
+    while (lo <= hi) {
+        var mid = (lo + hi) / 2;
+        var e = &kashi_cp437_rev + mid * 8;
+        var ecp = (load8(e) << 8) | load8(e + 1);
+        if (ecp == cp) { return load8(e + 2); }
+        if (ecp < cp) { lo = mid + 1; }
+        if (ecp > cp) { hi = mid - 1; }
+    }
+    return 0;
 }

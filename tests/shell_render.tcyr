@@ -20,6 +20,26 @@ include "src/wallpaper.cyr"
 include "src/input.cyr"
 include "src/shell_render.cyr"
 
+# 1 when the 9 px cell at (x, y) is exactly kashi's VGA 8x16 glyph `cell` in colour `c` — `c` on every set bit
+# and nowhere else in the cell, its 1 px gap included. Cell 0 is a blank cell.
+fn sr_cell_is(fb, x, y, cell, c): i64 {
+    var row = 0;
+    while (row < FONT_H) {
+        var bits = kashi_glyph_row(KASHI_FONT_VGA_8X16, cell, row);
+        var col = 0;
+        while (col < FONT_ADV) {
+            var want = 0;
+            if (col < FONT_W) { if ((bits & (1 << (7 - col))) != 0) { want = 1; } }
+            var got = 0;
+            if (bhumi_fb_get(fb, x + col, y + row) == c) { got = 1; }
+            if (got != want) { return 0; }
+            col = col + 1;
+        }
+        row = row + 1;
+    }
+    return 1;
+}
+
 fn main() {
     alloc_init();
 
@@ -35,6 +55,11 @@ fn main() {
     assert_eq(panel_net_color(SH_NetStatus.SH_NET_CONNECTING), bhumi_xrgb(210, 190, 90), "connecting → amber");
     assert_eq(panel_net_color(SH_NetStatus.SH_NET_DISCONNECTED), bhumi_xrgb(210, 80, 80), "disconnected → red");
     assert_eq(panel_net_color(SH_NetStatus.SH_NET_ERROR), bhumi_xrgb(210, 80, 80), "error → red");
+    # ⛔ UNKNOWN takes the gauge track — an empty dot — and every MEASURED state keeps its colour.
+    var trk = bhumi_xrgb(1, 2, 3);
+    assert_eq(panel_net_dot_color(SH_NetStatus.SH_NET_UNKNOWN, trk), trk, "unknown → the empty track");
+    assert_eq(panel_net_dot_color(SH_NetStatus.SH_NET_CONNECTED, trk), bhumi_xrgb(90, 200, 90), "connected dot → green");
+    assert_eq(panel_net_dot_color(SH_NetStatus.SH_NET_ERROR, trk), bhumi_xrgb(210, 80, 80), "error dot → red");
 
     test_group("shell_render — render_shell_panel smoke (shell → framebuffer)");
     var shell = shell_new();
@@ -52,6 +77,30 @@ fn main() {
     assert_eq(bhumi_fb_get(fb, 0, 0), bg, "top-left is the panel background");
     assert_eq(bhumi_fb_get(fb, 0, 25), bg, "panel bottom row filled (y < PANEL_H)");
     assert_eq(bhumi_fb_get(fb, 5, 30), 0, "below the panel is untouched (y >= PANEL_H)");
+
+    # ⭐ A NOTIFICATION'S TEXT IS UTF-8 — its producers are apps, and an app name or title is whatever they wrote.
+    # Byte-wise, "é" drew two CP437 cells (`├⌐`) and pushed everything after it a cell right.
+    # ⚠ This suite never calls kashi_font_init: draw_text's own guard (first reached by the panel smoke above)
+    # is what brings up the map's high half, and render.tcyr pins that guard on every text entry point.
+    test_group("shell_render — a notification card draws UTF-8, one cell per scalar");
+    var nfb = bhumi_fb_new(400, 120);
+    bhumi_fb_clear(nfb, 0);
+    var nsh = shell_new();
+    vec_push(shell_get_notifications(nsh),
+      shell_notif_new(1, "é—x", "Café", "中b", SH_NotifPriority.SH_PRIO_NORMAL, 0, 0, 0));
+    assert_eq(render_notifications(nfb, nsh), 1, "one card is drawn");
+    var nx = 400 - PANEL_PAD - NOTE_W + 10;                 # the card's text inset
+    var nmute = ae_bhumi(rupa_theme_mute(rupa_theme_active()));
+    var nink = ae_bhumi(rupa_theme_ink(rupa_theme_active()));
+    var nay = PANEL_H + NOTE_GAP + 5;                       # app-name row
+    assert_eq(sr_cell_is(nfb, nx, nay, 0x82, nmute), 1, "the app name's 'é' is ONE cell, CP437 0x82");
+    assert_eq(sr_cell_is(nfb, nx + FONT_ADV, nay, 0, nmute), 1, "  '—' is a blank cell: CP437 has none");
+    assert_eq(sr_cell_is(nfb, nx + 2 * FONT_ADV, nay, 'x', nmute), 1, "  and 'x' is the THIRD cell (byte-wise, the sixth)");
+    var nty = PANEL_H + NOTE_GAP + 17;                      # title row
+    assert_eq(sr_cell_is(nfb, nx + 3 * FONT_ADV, nty, 0x82, nink), 1, "the title 'Café' ends in one 'é' cell");
+    var nby = PANEL_H + NOTE_GAP + 29;                      # body row
+    assert_eq(sr_cell_is(nfb, nx, nby, 0, nmute), 1, "the body's '中' is a blank cell");
+    assert_eq(sr_cell_is(nfb, nx + FONT_ADV, nby, 'b', nmute), 1, "  and 'b' follows it one cell on");
 
     return assert_summary();
 }

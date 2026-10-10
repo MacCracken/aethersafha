@@ -44,6 +44,73 @@ enum Sentinel {
     SENT_B = 0x00BADA55;
 }
 
+# ⭐ `ae_gpu_emit_text_range`'s loop, replayed on the host — it is agnos-only, so this is the only place its use
+# of the queue can run here. For every queued run: pack it from `ae_text_run_ptr` / `ae_text_run_len` into a
+# buffer the size of the glyph slot (`ae_text_bytes(AE_TEXT_CHARS)`, what `ae_gpu_glyph_ensure_slot` asks for),
+# then do what the kernel's op 0x03 does with it — paint `c` where a mask bit is set, at the run's x/y.
+# -> how many runs would NOT have fit the slot (0 when every one does; those are not painted).
+fn gf_emit_text(fb, c): i64 {
+    var cap = ae_text_bytes(AE_TEXT_CHARS);
+    var slot = alloc(cap);
+    var over = 0;
+    var i = 0;
+    while (i < ae_text_count()) {
+        var len = ae_text_run_len(i);
+        if (ae_text_bytes(len) > cap) { over = over + 1; }
+        if (ae_text_bytes(len) <= cap) {
+            var w = ae_text_pack_1bpp(slot, ae_text_run_ptr(i), len);
+            var stride = ae_text_stride(len);
+            var gy = 0;
+            while (gy < FONT_H) {
+                var gx = 0;
+                while (gx < w) {
+                    if ((load8(slot + gy * stride + gx / 8) & (1 << (7 - (gx % 8)))) != 0) {
+                        bhumi_fb_set(fb, ae_text_run_x(i) + gx, ae_text_run_y(i) + gy, c);
+                    }
+                    gx = gx + 1;
+                }
+                gy = gy + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return over;
+}
+
+# Draw `win`'s caption on a CPU frame into `fbc` and on a GPU frame into `fbg` (queued, then `gf_emit_text`),
+# both from black. -> the pixels that differ; *ink gets the CPU frame's count of `c`.
+fn gf_caption_diff(fbc, fbg, win, c, ink): i64 {
+    bhumi_fb_clear(fbc, 0);
+    bhumi_fb_clear(fbg, 0);
+    ae_gpu_frame_ok = 0;
+    render_title(fbc, win, c);
+    ae_gpu_frame_ok = 1;
+    ae_text_gpu_ok = 1;
+    ae_text_reset();
+    render_title(fbg, win, c);
+    var over = gf_emit_text(fbg, c);
+    ae_gpu_frame_ok = 0;
+    var diff = over * 1000000;
+    var n = 0;
+    var y = 0;
+    while (y < bhumi_fb_height(fbc)) {
+        var x = 0;
+        while (x < bhumi_fb_width(fbc)) {
+            if (bhumi_fb_get(fbc, x, y) != bhumi_fb_get(fbg, x, y)) { diff = diff + 1; }
+            if (bhumi_fb_get(fbc, x, y) == c) { n = n + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    store64(ink, n);
+    return diff;
+}
+
+fn gf_gt(a, b): i64 {
+    if (a > b) { return 1; }
+    return 0;
+}
+
 # Fill a w*h XRGB8888 client surface with one word, the way a setu client would.
 fn seed_surface(w, h, word): i64 {
     var px = alloc(w * h * 4);
@@ -325,6 +392,42 @@ fn main() {
     assert_eq(ae_gpu_wp_fits(800, 0, 2097152), 0, "zero height is not a fit");
     # A larger cap in a later kernel should light this up with no code edit.
     assert_eq(ae_gpu_wp_fits(1280, 800, 8388608), 1, "an 8 MB slot would fit 1280x800");
+
+    # ⭐⭐ THE GLYPH QUEUE AS gpu.cyr CONSUMES IT. Text is UTF-8 and a queued run is CELLS — decoded once at
+    # enqueue, two bytes each, and some past 0xFF ('…', U+FFFD). What gpu.cyr packs out of the pool must be
+    # exactly the caption a CPU frame draws, and every run must fit the one glyph slot it is staged through.
+    test_group("gpu — the runs gpu.cyr packs are a UTF-8 caption's cells, and fit its glyph slot");
+    var gtc = bhumi_fb_new(720, 60);
+    var gtg = bhumi_fb_new(720, 60);
+    var GTI = 0x00C8B4A0;
+    var gtink = alloc(8);
+    var gtw = win_new(80, 20, 10, 200, 40, "Ü—\xFF中é wíndöw títlé");   # 18 scalars: cut to 12 and '…'
+    assert_eq(gf_caption_diff(gtc, gtg, gtw, GTI, gtink), 0,
+      "gpu.cyr's pack of the queued caption paints exactly what the CPU frame draws");
+    assert_eq(gf_gt(load64(gtink), 100), 1, "  (and the CPU frame drew ink to compare)");
+    assert_eq(ae_text_count(), 1, "  the GPU frame queued the caption as one run");
+    assert_eq(ae_text_run_len(0), 13, "  of 13 CELLS — 12 scalars and '…' — not the 25 bytes of its UTF-8");
+    assert_eq(load16(ae_text_run_ptr(0)), 0x9A, "  'Ü' is CP437 0x9A");
+    assert_eq(load16(ae_text_run_ptr(0) + 2), 0, "  '—' is a blank cell");
+    assert_eq(load16(ae_text_run_ptr(0) + 4), kashi_cp437_from_unicode(0xFFFD), "  the ill-formed byte is U+FFFD's cell");
+    assert_eq(load16(ae_text_run_ptr(0) + 24), kashi_cp437_from_unicode(0x2026), "  and the cut is '…''s");
+    assert_eq(gf_gt(load16(ae_text_run_ptr(0) + 24), 0xFF), 1, "  ...a cell past 0xFF, intact in the pool");
+    # The widest run there is: 63 two-byte scalars and '…', 64 cells — and the slot is sized for exactly that.
+    var gtl = alloc(2 * 100 + 8);
+    var gti = 0;
+    while (gti < 100) {
+        store8(gtl + gti * 2, 0xC3);
+        store8(gtl + gti * 2 + 1, 0xA9);
+        gti = gti + 1;
+    }
+    store8(gtl + 200, 0);
+    win_set_title(gtw, gtl);
+    win_resize(gtw, 1000, 40);
+    assert_eq(gf_caption_diff(gtc, gtg, gtw, GTI, gtink), 0, "a 100-scalar title: the GPU pack is the CPU frame's caption");
+    assert_eq(ae_text_run_len(0), AE_TEXT_CHARS, "  one run of AE_TEXT_CHARS cells (200 bytes of title)");
+    assert_eq(ae_text_bytes(ae_text_run_len(0)), ae_text_bytes(AE_TEXT_CHARS), "  which fills the glyph slot exactly");
+    assert_eq(gf_gt(load64(gtink), 1000), 1, "  (63 'é' of ink)");
+    ae_text_reset();
 
     # ⛔⛔ THIS FILE HAD NO `assert_summary()` AND WAS THEREFORE NOT A GATE AT ALL.
     # It was the only suite in tests/ missing it. Every assertion above ran, a failure printed its

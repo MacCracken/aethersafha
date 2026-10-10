@@ -85,7 +85,9 @@ fn main() {
     assert_eq(shell_status_mem(st0), 0 - 1, "initial mem UNKNOWN");
     assert_eq(shell_status_disk(st0), 0 - 1, "initial disk UNKNOWN");
     assert_eq(shell_status_battery_is_none(st0), 1, "initial battery None");
-    assert_eq(shell_status_net(st0), SH_NetStatus.SH_NET_CONNECTED, "initial net Connected");
+    # ⛔ AND NET IS UNKNOWN, not Rust's Connected (shell.rs:183): nothing measures it, so a seeded
+    # Connected was the dot claiming a link on every boot (0.17.2).
+    assert_eq(shell_status_net(st0), SH_NetStatus.SH_NET_UNKNOWN, "initial net UNKNOWN, not a claimed Connected");
     assert_eq(shell_status_agents(st0), 0, "initial agents 0");
 
     # ============================================================
@@ -280,6 +282,12 @@ fn main() {
     assert_eq(shell_status_battery_is_none(cur), 0, "battery Some(15) not None");
     assert_eq(shell_status_net(cur), SH_NetStatus.SH_NET_ERROR, "net updated to Error");
     assert_eq(shell_status_agents(cur), 42, "agent_count updated to 42");
+
+    shell_status_set_net(cur, SH_NetStatus.SH_NET_CONNECTING);
+    assert_eq(shell_status_net(cur), SH_NetStatus.SH_NET_CONNECTING, "set_net writes the net field");
+    shell_status_set_battery(cur, shell_battery_none());
+    assert_eq(shell_status_battery_is_none(cur), 1, "set_battery(None) reads back as None");
+    assert_eq(shell_status_agents(cur), 42, "  ...and neither setter touched agent_count");
 
     shell_set_agent_count(sh, 100);
     assert_eq(shell_status_agents(shell_get_system_status(sh)), 100, "set_agent_count 100");

@@ -1,36 +1,287 @@
-# sysprobe.tcyr — the panel's producers, and the unit boundary that would have shipped wrong numbers.
+# sysprobe.tcyr — the panel's producers: Rust's readers (rust-old/src/main.rs:213-290) rule by rule,
+# then the producers live on this host, as Rust's own tests ran them (main.rs:451-550).
 include "src/sysprobe.cyr"
 include "src/shell.cyr"
+
+var tsp_out[2];   # a parse result: {total, idle}
+
+# parse_cpu_line over a NUL-terminated fixture. The result slots are poisoned first, so a value read
+# back after a 1 is one this call wrote.
+fn tsp_line(s): i64 {
+    store64(&tsp_out, 0 - 7);
+    store64(&tsp_out + 8, 0 - 7);
+    return sysp_parse_cpu_line(s, strlen(s), &tsp_out);
+}
+fn tsp_stat(s): i64 {
+    store64(&tsp_out, 0 - 7);
+    store64(&tsp_out + 8, 0 - 7);
+    return sysp_stat_cpu_sample(s, strlen(s), &tsp_out);
+}
+fn tsp_total(): i64 { return load64(&tsp_out); }
+fn tsp_idle(): i64 { return load64(&tsp_out + 8); }
+fn tsp_u64(s): i64 { return sysp_parse_u64(s, 0, strlen(s)); }
+fn tsp_mem(s): i64 { return sysp_meminfo_permille(s, strlen(s)); }
+fn tsp_abs(v): i64 {
+    if (v < 0) { return 0 - v; }
+    return v;
+}
+
+fn tsp_rust_parse_cpu_line(): i64 {
+    test_group("sysprobe — parse_cpu_line: Rust's seven tests (main.rs:453-519)");
+    # test_parse_cpu_line_valid
+    assert_eq(tsp_line("cpu  1234 567 890 12345 678 90 12 34"), 1, "valid: Some");
+    assert_eq(tsp_idle(), 12345 + 678, "valid: idle = fields[3] + fields[4] = 13023");
+    assert_eq(tsp_total(), 1234 + 567 + 890 + 12345 + 678 + 90 + 12 + 34, "valid: total = the sum, 15850");
+    # test_parse_cpu_line_too_few_fields
+    assert_eq(tsp_line("cpu  100 200 300"), 0, "too_few_fields: None");
+    # test_parse_cpu_line_empty
+    assert_eq(tsp_line(""), 0, "empty: None");
+    # test_parse_cpu_line_zeros
+    assert_eq(tsp_line("cpu  0 0 0 0"), 1, "zeros: Some");
+    assert_eq(tsp_total(), 0, "zeros: total 0");
+    assert_eq(tsp_idle(), 0, "zeros: idle 0");
+    # test_parse_cpu_line_exactly_four_fields
+    assert_eq(tsp_line("cpu  100 200 300 5000"), 1, "exactly_four_fields: Some");
+    assert_eq(tsp_idle(), 5000, "exactly_four_fields: idle = fields[3] + 0 (no iowait)");
+    assert_eq(tsp_total(), 100 + 200 + 300 + 5000, "exactly_four_fields: total 5600");
+    # test_parse_cpu_line_non_numeric_fields
+    assert_eq(tsp_line("cpu  abc def ghi jkl"), 0, "non_numeric_fields: None");
+    # test_parse_cpu_line_mixed_fields
+    assert_eq(tsp_line("cpu  100 abc 200 300 400"), 1, "mixed_fields: Some");
+    assert_eq(tsp_idle(), 400, "mixed_fields: kept [100 200 300 400], fields[3] = 400 and no fields[4]");
+    assert_eq(tsp_total(), 100 + 200 + 300 + 400, "mixed_fields: total 1000");
+    return 0;
+}
+
+fn tsp_u64_rules(): i64 {
+    test_group("sysprobe — a field is whatever u64::from_str accepts");
+    assert_eq(tsp_u64("42"), 42, "digits");
+    assert_eq(tsp_u64("+42"), 42, "one leading '+' is accepted, as u64::from_str does");
+    assert_eq(tsp_u64("007"), 7, "leading zeros are accepted");
+    assert_eq(tsp_u64("0"), 0, "zero is a value, not a refusal");
+    assert_eq(tsp_u64("-1"), SYSP_TOK_BAD, "a '-' is an error for an unsigned type");
+    assert_eq(tsp_u64("-0"), SYSP_TOK_BAD, "even in front of a zero");
+    assert_eq(tsp_u64("+"), SYSP_TOK_BAD, "a '+' alone is an error");
+    assert_eq(tsp_u64("++1"), SYSP_TOK_BAD, "only one '+'");
+    assert_eq(tsp_u64("1a"), SYSP_TOK_BAD, "a trailing non-digit fails the token, it is not a prefix parse");
+    assert_eq(tsp_u64("9223372036854775807"), SYSP_I64_MAX, "2^63 - 1 is held");
+    assert_eq(tsp_u64("9223372036854775808"), SYSP_TOK_WIDE, "2^63 is a u64 an i64 cannot hold");
+    assert_eq(tsp_u64("18446744073709551615"), SYSP_TOK_WIDE, "u64::MAX parses in Rust: WIDE, not BAD");
+    assert_eq(tsp_u64("18446744073709551616"), SYSP_TOK_BAD, "u64::MAX + 1 overflows: Err in Rust");
+    assert_eq(tsp_u64("123456789012345678901"), SYSP_TOK_BAD, "21 significant digits overflow");
+    assert_eq(tsp_u64("000000000000000000000000001"), 1, "leading zeros do not count toward overflow");
+
+    test_group("sysprobe — fields in a line, by the same rule");
+    assert_eq(tsp_line("cpu +1 2 3 4"), 1, "a '+' field is kept");
+    assert_eq(tsp_total(), 10, "and summed");
+    assert_eq(tsp_line("cpu -1 2 3 4 5"), 1, "a '-' field is dropped, leaving four");
+    assert_eq(tsp_idle(), 5, "so fields[3] is the 5");
+    assert_eq(tsp_total(), 14, "and the -1 is not summed");
+    assert_eq(tsp_line("cpu 18446744073709551616 1 2 3 4"), 1, "an overflowing field is dropped like any non-u64");
+    assert_eq(tsp_total(), 10, "and the four after it are the fields");
+    # ⚠ The port's i64 ceiling: Rust's u64 holds these, an i64 cannot, so the reading is UNKNOWN rather
+    # than a wrapped, negative or truncated total.
+    assert_eq(tsp_line("cpu 1 2 3 4 18446744073709551615"), 0, "a field above 2^63 - 1 is UNKNOWN, not wrapped");
+    assert_eq(tsp_line("cpu 9223372036854775807 1 0 0"), 0, "a sum above 2^63 - 1 is UNKNOWN, not negative");
+    assert_eq(tsp_line("cpu 9223372036854775807 0 0 0"), 1, "a sum of exactly 2^63 - 1 is held");
+    assert_eq(tsp_total(), SYSP_I64_MAX, "to the last unit");
+    return 0;
+}
+
+fn tsp_whitespace(): i64 {
+    test_group("sysprobe — tokens split where Rust's split_whitespace splits");
+    assert_eq(tsp_line("1 2 3 4 5"), 1, "skip(1) skips the first token even when it is a number");
+    assert_eq(tsp_total(), 2 + 3 + 4 + 5, "the 1 is the label");
+    assert_eq(tsp_line("  cpu 1 2 3 4"), 1, "leading whitespace is not a token");
+    assert_eq(tsp_total(), 10, "the label is still skipped, not the 1");
+    assert_eq(tsp_line("cpu\t1\v2\f3\r4\n"), 1, "tab, VT, FF, CR and LF all separate");
+    assert_eq(tsp_idle(), 4, "four fields, fields[3] = 4");
+    assert_eq(tsp_line("cpu 1\u{85}2\u{a0}3\u{1680}4\u{2000}5\u{200a}6\u{2028}7\u{2029}8\u{202f}9\u{205f}10\u{3000}11"),
+      1, "non-ASCII White_Space separates too: each kind, and both ends of U+2000-U+200A");
+    assert_eq(tsp_total(), 66, "eleven fields, 1..11");
+    assert_eq(tsp_idle(), 4 + 5, "fields[3] + fields[4]");
+    assert_eq(tsp_line("cpu 1\u{200b}2 3\u{feff}4 5 6 7 8"), 1, "U+200B, one past U+200A, and U+FEFF are not White_Space");
+    assert_eq(tsp_total(), 5 + 6 + 7 + 8, "so 1<ZWSP>2 and 3<BOM>4 are single tokens, and not u64s");
+    return 0;
+}
+
+fn tsp_proc_stat(): i64 {
+    test_group("sysprobe — the aggregate line of /proc/stat (read_cpu_usage)");
+    # The first lines of the dev host's /proc/stat. guest (561442) and guest_nice (41345) are summed
+    # although user and nice already contain them: that is Rust's total, so it is the port's.
+    assert_eq(tsp_stat("cpu  96455069 23393507 13437783 858127324 807108 6 63337 0 561442 41345\ncpu0 10015175 2378746 1214464 48338106 62272 0 24559 0 45468 3545\nintr 1 2 3\n"),
+      1, "a real /proc/stat head");
+    assert_eq(tsp_total(), 96455069 + 23393507 + 13437783 + 858127324 + 807108 + 6 + 63337 + 0 + 561442 + 41345,
+      "total sums all ten fields");
+    assert_eq(tsp_idle(), 858127324 + 807108, "idle = idle + iowait");
+    assert_eq(tsp_stat("cpu0 1 1 1 1\ncpu  10 0 10 80\ncpu1 2 2 2 2\n"), 1, "the \"cpu \" line, wherever it is");
+    assert_eq(tsp_total(), 100, "not cpu0's 4");
+    assert_eq(tsp_idle(), 80, "nor cpu0's idle");
+    assert_eq(tsp_stat("cpu0 1 2 3 4\nintr 1 2 3 4\n"), 0, "no aggregate line: None");
+    assert_eq(tsp_stat("cpu\t1 2 3 4\n"), 0, "starts_with(\"cpu \") wants the space");
+    assert_eq(tsp_stat("cpu  1 2 3\ncpu  1 2 3 4\n"), 0, "only the FIRST \"cpu \" line is tried, as Rust's find");
+    assert_eq(tsp_stat("cpu  1 2 3 4\r\n"), 1, "a CRLF line");
+    assert_eq(tsp_total(), 10, "parses whole");
+    assert_eq(tsp_stat("cpu0 9\ncpu  1 2 3 4"), 1, "a last line with no newline");
+    assert_eq(tsp_total(), 10, "is a line");
+    assert_eq(tsp_stat(""), 0, "an empty file: None");
+    return 0;
+}
+
+fn tsp_cpu_rule(): i64 {
+    test_group("sysprobe — cpu permille from two samples (read_cpu_usage, main.rs:242-248)");
+    assert_eq(sysp_cpu_permille(1000, 800, 2000, 1550), 250, "1000 ticks, 750 of them idle: 25.0% -> 250");
+    assert_eq(sysp_cpu_permille(1000, 800, 1000, 800), 0, "a window with no ticks is 0, as Rust, and no division");
+    assert_eq(sysp_cpu_permille(1000, 800, 2000, 1800), 0, "all idle is 0");
+    assert_eq(sysp_cpu_permille(1000, 800, 2000, 800), 1000, "no idle is 1000");
+    assert_eq(sysp_cpu_permille(0, 0, 3, 2), 333, "truncated: 33.3% -> 333");
+    # Rust's saturating_sub, both ways.
+    assert_eq(sysp_cpu_permille(2000, 800, 1000, 800), 0, "total running backwards saturates to an empty window");
+    assert_eq(sysp_cpu_permille(1000, 900, 2000, 800), 1000, "idle running backwards saturates to no idle");
+    assert_eq(sysp_cpu_permille(1000, 0, 1100, 500), 0 - 1, "idle outgrowing total is UNKNOWN (Rust: a negative %)");
+    assert_eq(sysp_cpu_permille(0 - 1, 0, 100, 50), 0 - 1, "a poisoned sample cannot yield a number");
+    assert_eq(sysp_cpu_permille(0, 0, 4000000000000000000, 3000000000000000000), 250,
+      "a window whose busy * 1000 overflows still divides right");
+
+    test_group("sysprobe — the cpu producer's window is the previous call");
+    var st[24];
+    store64(&st, 0);
+    assert_eq(sysp_cpu_step(&st, 1, 1000, 800), 0 - 1, "the first sample has nothing to difference: UNKNOWN");
+    assert_eq(sysp_cpu_step(&st, 1, 2000, 1550), 250, "the second differences against the first");
+    assert_eq(sysp_cpu_step(&st, 1, 3000, 2550), 0, "the third against the second (against the first: 125)");
+    assert_eq(sysp_cpu_step(&st, 0, 0, 0), 0 - 1, "a failed read is UNKNOWN");
+    assert_eq(sysp_cpu_step(&st, 1, 4000, 2800), 0 - 1, "and forgets the sample before it: no window spans it");
+    assert_eq(sysp_cpu_step(&st, 1, 5000, 3550), 250, "the chain restarts from the read after the failure");
+    return 0;
+}
+
+fn tsp_meminfo(): i64 {
+    test_group("sysprobe — /proc/meminfo (read_memory_usage, main.rs:252-274)");
+    # ⛔ The dev host's head of /proc/meminfo. MemFree is 4.4 GB of 57.5 GB, so sysinfo's freeram would
+    # read 923 permille used; MemAvailable, as Rust read it, says 208.
+    assert_eq(tsp_mem("MemTotal:       57500252 kB\nMemFree:         4418732 kB\nMemAvailable:   45512796 kB\nBuffers:         2643704 kB\nCached:         40840012 kB\n"),
+      208, "MemAvailable, not MemFree: 208 permille used, not 923");
+    assert_eq(tsp_mem("MemTotal: 1000 kB\nMemAvailable: 250 kB\n"), 750, "750 permille used");
+    assert_eq(tsp_mem("MemAvailable: 250 kB\nMemTotal: 1000 kB\n"), 750, "in either order");
+    assert_eq(tsp_mem("MemTotal: 1000 kB\nMemFree: 250 kB\n"), 0 - 1, "no MemAvailable: UNKNOWN, never MemFree instead");
+    assert_eq(tsp_mem("MemFree: 250 kB\nMemAvailable: 250 kB\n"), 0 - 1, "no MemTotal: UNKNOWN");
+    assert_eq(tsp_mem(""), 0 - 1, "an empty file: UNKNOWN");
+    assert_eq(tsp_mem("MemTotal: 0 kB\nMemAvailable: 0 kB\n"), 0, "a zero total is 0, as Rust");
+    assert_eq(tsp_mem("MemTotal: 1000 kB\nMemAvailable: 2000 kB\n"), 0 - 1, "available above total: UNKNOWN (Rust: negative)");
+    assert_eq(tsp_mem("MemTotal: abc kB\nMemAvailable: 250 kB\n"), 0 - 1, "a value that does not parse is missing");
+    assert_eq(tsp_mem("MemTotal:1000 kB\nMemAvailable: 250 kB\n"), 0 - 1, "the SECOND token is the value: here it is 'kB'");
+    assert_eq(tsp_mem("MemTotal: +1000 kB\nMemAvailable: 250 kB\n"), 750, "a '+' value parses, as u64::from_str");
+    assert_eq(tsp_mem(" MemTotal: 1000 kB\nMemAvailable: 250 kB\n"), 0 - 1, "starts_with is literal: indented is not MemTotal");
+    assert_eq(tsp_mem("MemTotal: 1000 kB\nMemTotal: x kB\nMemAvailable: 250 kB\n"), 0 - 1,
+      "a later MemTotal overwrites the earlier one, even with None, as Rust's loop does");
+    assert_eq(tsp_mem("MemTotal: 1000 kB\nMemAvailable: 250 kB\nMemTotal: x kB\n"), 750,
+      "but the scan stops once both are set");
+    assert_eq(tsp_mem("MemTotal: 9223372036854775808 kB\nMemAvailable: 1 kB\n"), 0 - 1, "a total an i64 cannot hold: UNKNOWN");
+    assert_eq(tsp_mem("MemTotal: 1000 kB\r\nMemAvailable: 250 kB\r\n"), 750, "CRLF lines");
+    assert_eq(tsp_mem("MemTotal: 1000 kB\nMemAvailable: 250"), 750, "a last line with no newline");
+    return 0;
+}
+
+fn tsp_used(): i64 {
+    test_group("sysprobe — used permille, shared by memory and disk");
+    assert_eq(sysp_used_permille(1000, 500), 500, "half available = 500 permille (50.0%)");
+    assert_eq(sysp_used_permille(1000, 0), 1000, "nothing available = 1000 permille (100%)");
+    assert_eq(sysp_used_permille(1000, 1000), 0, "all available = 0");
+    # ⛔ PERMILLE, NOT PERCENT. 16 GiB with 9.4 GiB available is 41.5% used — 415 permille. A percent-
+    # emitting producer would store 41 and the panel would draw 4%.
+    assert_eq(sysp_used_permille(17179869184, 10050000000), 415, "16 GiB box reads 415 permille");
+    # ⚠ Multiply-before-divide: a percent computed as (used/total)*1000 is 0 on any real machine.
+    assert_eq(sysp_used_permille(17179869184, 17179869183), 0, "one byte used is 0, not a fault");
+    assert_eq(sysp_used_permille(0, 0), 0, "a zero total is 0, as Rust (main.rs:270, :286), and no division");
+    assert_eq(sysp_used_permille(0 - 1, 100), 0 - 1, "negative total -> unknown");
+    assert_eq(sysp_used_permille(1000, 0 - 1), 0 - 1, "negative available -> unknown");
+    assert_eq(sysp_used_permille(1000, 2000), 0 - 1, "more available than total -> unknown, not negative");
+    assert_eq(sysp_used_permille(4000000000000000000, 3000000000000000000), 250, "a total whose used * 1000 overflows");
+
+    test_group("sysprobe — the statfs record (read_disk_usage, main.rs:277-290)");
+    var sfs[STATFS_BUFSZ];
+    store64(&sfs + STATFS_BLOCKS, 1000);
+    store64(&sfs + STATFS_BFREE, 300);
+    store64(&sfs + STATFS_BAVAIL, 250);
+    assert_eq(sysp_statfs_permille(&sfs), 750, "f_bavail, as statvfs's: 750 (f_bfree would read 700)");
+    store64(&sfs + STATFS_BLOCKS, 0);
+    store64(&sfs + STATFS_BFREE, 0);
+    store64(&sfs + STATFS_BAVAIL, 0);
+    assert_eq(sysp_statfs_permille(&sfs), 0, "a filesystem with no blocks is 0, as Rust");
+    return 0;
+}
+
+fn tsp_reader(): i64 {
+    test_group("sysprobe — the parsers only see whole lines");
+    var fx = "cpu  1 2 3 4\ncpu0 5 6 7 8\n";
+    assert_eq(sysp_whole_lines(fx, 26, 4096), 26, "a file that ended inside the buffer is whole");
+    assert_eq(sysp_whole_lines(fx, 0, 4096), 0, "an empty file is whole and empty");
+    assert_eq(sysp_whole_lines(fx, 20, 20), 13, "a full buffer is cut back to its last newline");
+    assert_eq(sysp_whole_lines(fx, 26, 26), 26, "a full buffer that ends on a newline loses nothing");
+    assert_eq(sysp_whole_lines(fx, 5, 5), 0 - 1, "a full buffer with no newline has no whole line");
+    assert_eq(sysp_whole_lines(fx, 0 - 2, 4096), 0 - 1, "a failed read (-ENOENT) is -1");
+    # Live, through the reader: /proc/meminfo into 64 bytes ends on a newline, not mid-line.
+    var small[64];
+    var k = sysp_read_lines("/proc/meminfo", &small, 64);
+    assert_eq(k > 0, 1, "a short read still yields a whole line");
+    assert_eq(k <= 64, 1, "within the buffer");
+    var klast = 0;
+    if (k > 0) { klast = load8(&small + k - 1); }
+    assert_eq(klast, 10, "and stops on its newline");
+    assert_eq(sysp_read_lines("/proc/sysprobe-no-such-file", &small, 64), 0 - 1, "a missing file is -1");
+    return 0;
+}
+
+fn tsp_live(): i64 {
+    test_group("sysprobe — the producers, live on this Linux host (main.rs:523-550)");
+    # test_read_memory_usage_returns_some_on_linux
+    var mem = sysp_mem_permille_now();
+    assert_eq(sysp_is_known(mem), 1, "memory: Some on Linux");
+    assert_eq(mem <= 1000, 1, "memory: within 0..1000");
+    # ⛔ And it is MemAvailable's reading: a second read of /proc/meminfo must agree with it. sysinfo's
+    # freeram (MemFree) is far from it on any host with a warm page cache.
+    var mtext[4096];
+    var mref = sysp_meminfo_permille(&mtext, sysp_read_lines("/proc/meminfo", &mtext, 4096));
+    assert_eq(tsp_abs(mem - mref) <= 20, 1, "memory: agrees with /proc/meminfo MemAvailable");
+    # test_read_disk_usage_returns_some
+    var disk = sysp_disk_permille_now();
+    assert_eq(sysp_is_known(disk), 1, "disk: Some");
+    assert_eq(disk <= 1000, 1, "disk: within 0..1000");
+    var sfs[STATFS_BUFSZ];
+    assert_eq(sys_statfs("/", &sfs), 0, "statfs(\"/\") answers on this host");
+    var blocks = load64(&sfs + STATFS_BLOCKS);
+    var dref = 0;
+    if (blocks > 0) { dref = (blocks - load64(&sfs + STATFS_BAVAIL)) * 1000 / blocks; }
+    assert_eq(tsp_abs(disk - dref) <= 2, 1, "disk: (f_blocks - f_bavail) / f_blocks of \"/\"");
+    # test_read_cpu_usage_returns_some_on_linux. ⚠ The window is the time since the previous call, so
+    # the first call has none, and the second one answers for the work in between.
+    assert_eq(sysp_cpu_permille_now(), 0 - 1, "cpu: the first call has no window yet: UNKNOWN");
+    var t0 = clock_now_ns();
+    var spins = 0;
+    while (clock_now_ns() - t0 < 50000000) { spins = spins + 1; }
+    var cpu = sysp_cpu_permille_now();
+    assert_eq(sysp_is_known(cpu), 1, "cpu: Some on the second call, after 50 ms of work");
+    assert_eq(cpu <= 1000, 1, "cpu: within 0..1000");
+    return 0;
+}
 
 fn main(): i64 {
     alloc_init();
 
-    test_group("sysprobe — memory permille from real byte counts");
-    assert_eq(sysp_mem_permille(1000, 500), 500, "half free = 500 permille (50.0%)");
-    assert_eq(sysp_mem_permille(1000, 0), 1000, "nothing free = 1000 permille (100%)");
-    assert_eq(sysp_mem_permille(1000, 1000), 0, "all free = 0");
-    # ⛔ PERMILLE, NOT PERCENT. 16 GiB with 9.4 GiB free is 41.5% used — 415 permille. A percent-
-    # emitting producer would store 41 and the panel would draw 4%.
-    assert_eq(sysp_mem_permille(17179869184, 10050000000), 415, "16 GiB box reads 415 permille");
-    # ⚠ Multiply-before-divide: a percent computed as (used/total)*1000 is 0 on any real machine.
-    assert_eq(sysp_mem_permille(17179869184, 17179869183), 0, "one byte used is 0, not a fault");
-
-    test_group("sysprobe — unbelievable inputs are UNKNOWN, never a number");
-    assert_eq(sysp_mem_permille(0, 0), 0 - 1, "no total -> unknown, and no division");
-    assert_eq(sysp_mem_permille(0 - 1, 100), 0 - 1, "negative total -> unknown");
-    assert_eq(sysp_mem_permille(1000, 0 - 1), 0 - 1, "negative free -> unknown");
-    assert_eq(sysp_mem_permille(1000, 2000), 0 - 1, "more free than total -> unknown, not negative");
+    tsp_rust_parse_cpu_line();
+    tsp_u64_rules();
+    tsp_whitespace();
+    tsp_proc_stat();
+    tsp_cpu_rule();
+    tsp_meminfo();
+    tsp_used();
+    tsp_reader();
+    tsp_live();
 
     test_group("sysprobe — known vs unknown is a decision, not a guess");
     assert_eq(sysp_is_known(0), 1, "a genuine 0 IS known");
     assert_eq(sysp_is_known(415), 1, "a real reading is known");
     assert_eq(sysp_is_known(0 - 1), 0, "the sentinel is not known");
-
-    test_group("sysprobe — cpu and disk have NO source and must say so");
-    # ⛔ These assert ABSENCE deliberately. agnos exposes no loadavg and no statfs; if either ever
-    # gains a producer this test fails and forces the panel's contract to be revisited on purpose.
-    assert_eq(sysp_cpu_permille_now(), 0 - 1, "no CPU source on either target — UNKNOWN, not 0");
-    assert_eq(sysp_disk_permille_now(), 0 - 1, "no statfs on agnos — UNKNOWN, not 0");
 
     test_group("sysprobe — sampling cadence");
     assert_eq(sysp_should_sample(0, 120), 1, "frame 0 samples, so the panel is live immediately");

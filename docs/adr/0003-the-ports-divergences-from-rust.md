@@ -46,8 +46,43 @@ fix.
 
 **Accepted behaviour**
 
-- **System status gauges are seeded UNKNOWN (−1) and render `--%`, not 0.** A 0 is a claim nobody made. cpu
-  and disk stay UNKNOWN on agnos, which has no source; Linux reads real values again from 0.17.2.
+- **System status gauges are seeded UNKNOWN (−1) and render `--%`, not 0.** A 0 is a claim nobody made, and
+  Rust's `unwrap_or(0.0)` made it whenever a read failed. A computed negative (a counter that ran backwards,
+  `MemAvailable > MemTotal`) also reads UNKNOWN, since negatives are the sentinel range. Sources (0.17.2):
+  - **Linux** reads what Rust read: cpu from `/proc/stat` through `parse_cpu_line`, memory from
+    `/proc/meminfo` `MemAvailable`, disk from `statfs("/")`.
+  - **agnos** reads memory from `sysinfo` `#35` and disk from `statfs` `#103`. Its cpu stays UNKNOWN: the
+    per-core tick counters in `#35` include halted ticks and the kernel keeps no idle count, so Rust's
+    non-idle ÷ total cannot be computed.
+  - **The cpu window is the tick interval** (5 s), not Rust's two reads 100 ms apart, because the frame
+    loop cannot sleep. The first reading, and the first after a failed read, is UNKNOWN.
+- **The status tick runs on a monotonic 5 s clock and never bursts** (tokio's interval did). Where that clock
+  is unavailable it falls back to every 120 frames.
+- **The panel claims nothing the port does not measure.** Rust hardcoded `NetworkStatus::Connected` and
+  `agent_count: 0` in its tick. The port seeds and ticks the network as UNKNOWN (an empty dot, never green),
+  and the agent count comes from the AI layer's live agent registry.
+- **The command line is strict** (0.17.2, `src/flags.cyr`). An unknown flag, a retired Rust flag (ADR 0004),
+  a missing value or a non-numeric count prints an error naming it and exits 2, like clap. The port takes
+  the *first* of a repeated single-value flag and accepts a repeated boolean; clap refuses both. There is no
+  `--flag=value`, no combined short flags and no `--` terminator. `--version` prints `aethersafha <VERSION>`.
+- **Accessibility mirroring** (0.17.2). As in Rust, a node per window keyed by the window id, with
+  "Window opened / closed" announcements. Differences:
+  - Tree focus follows compositor focus on *every* change, including window creation and the close
+    hand-off. Rust synced it only in `focus()`, so its tree focus lagged a create, and a close left it
+    empty or on a window that no longer had focus. A compositor that focuses nothing (every window
+    minimized) clears tree focus.
+  - Node ids are window ids, and both count from 1 (Rust's `Uuid`s could not collide). The desktop tree
+    therefore holds window nodes only; minting a tree id into it would collide.
+  - `desktop_sync_accessibility` is a port-only reconcile; with the hooks in place it changes nothing.
+- **SIGINT** (0.17.2, Linux). Rust's `ctrl_c` ended the run loop; the port blocks SIGINT and reads it from
+  a signalfd once per frame, then takes the Ctrl+Q teardown. Only SIGINT is handled, as in Rust.
+  - A `--clients` probe that is interrupted exits 130, not 93/94, which would claim the whole budget was
+    spent. A 91/92 verdict or a completed 95 still stands.
+  - ⚠ A compositor wedged inside a blocking client read never reaches its next frame, so it does not see
+    Ctrl+C; Ctrl+\ or `kill` (SIGTERM) still end it. Before 0.17.2 Ctrl+C killed it outright, without the
+    teardown.
+  - agnos compiles the module to no-ops: SIGINT has no default action there and the keyboard delivers
+    Ctrl+C as byte 3.
 - **Screen capture reads a framebuffer the caller passes in**; it does not call the renderer. This is the
   shape a compositor-side screenshot needs.
 - **New client windows cascade from spawn coordinates in the frame loop**, not from a fixed placement rule
@@ -74,9 +109,18 @@ fix.
     presented there. Rust drew such a title whole.
   - At the left and right screen edges the caption loses whole 9 px cells; Rust clipped per pixel. Clipping
     by cell keeps the GPU run from being refused, which would drop the whole title.
-  - *Interim, until `kashi` 1.1.0:* the caption is measured in bytes, not chars, and a cut ends in ASCII
-    `...` in its last three cells. Rust appended `…`, which its 5×7 font drew as a blank cell. These close
-    when `draw_text` decodes UTF-8 through kashi's CP437 map, after which the ellipsis is the real `…` glyph.
+  - The cut is Rust's own: `max_chars − 1` scalars, then `…` in one cell (0.17.2, kashi 1.1.0). Rust's 5×7
+    font had no `…` glyph and drew a blank cell there; the port draws the glyph. The 64-cell cap cuts the
+    same way. (0.17.1 measured captions in bytes and cut with ASCII `...` until kashi had the glyph.)
+- **Text is UTF-8, one cell per scalar** (0.17.2, `src/utf8.cyr`, kashi 1.1.0's Unicode→CP437 map). As in
+  Rust, every char takes one cell and a char with no glyph is a blank cell that still advances. Differences:
+  - The glyph set is kashi's, not Rust's 5×7 subset: printable ASCII, the CP437 high half (`é`, `ß`, box
+    drawing…), `⌂`, `…` and `�`. So `é` draws a glyph where Rust drew a blank, and every other scalar is
+    blank in both.
+  - Ill-formed UTF-8, which a Rust `&str` cannot hold, decodes per Unicode §3.9: each maximal ill-formed
+    subpart is one `�`. That includes a foreign guest's raw non-UTF-8 output bytes, which 0.17.1 drew as
+    their CP437 glyphs.
+  - U+007F draws blank (kashi ADR 0011's rule, and Rust's); a raw 0x7F used to draw `⌂`.
 
 ## Consequences
 

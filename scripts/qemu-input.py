@@ -7,6 +7,8 @@ usage: qemu-input.py <bindir> <outdir> <scenario>
   builds them.
   scenario `focus`   — two focus_clients; screendumps after: start, Ctrl+Tab, Ctrl+F6, Ctrl+Tab, Ctrl+Tab
   scenario `hostile` — a hostile_client (stride 4) and one focus_client; one screendump
+  scenario `sigint`  — two focus_clients, then SIGINT from PID 1 instead of Ctrl+Q: the teardown must run
+    (0.17.1 fails it: KILLED by signal 2; with the child's mask reset removed, the clients read SigBlk 2)
 Exit: 0 PASS · 1 FAIL · 2 could not run.
 
 ⭐ THE ORACLES ARE OUTSIDE THE COMPOSITOR. QEMU's `screendump` reads the emulated VGA device, and each
@@ -168,6 +170,11 @@ def main():
         gargs = "--frames 0 --client /focus_client --client /focus_client"
     elif scenario == "hostile":
         gargs = "--frames 0 --client /hostile_client --client /focus_client"
+    elif scenario == "sigint":
+        # ⭐ `--sigint-port` is qemu_init's: a line on the guest's ttyS1 makes PID 1 report the masks and
+        # kill(compositor, SIGINT) — from OUTSIDE the compositor, like `kill -INT <pid>`. (A tty Ctrl+C
+        # would signal the whole foreground group, clients included; this models the compositor's half.)
+        gargs = "--sigint-port --frames 0 --client /focus_client --client /focus_client"
     else:
         print("unknown scenario", scenario)
         return 2
@@ -176,12 +183,14 @@ def main():
         return open(serial, errors="replace").read() if os.path.exists(serial) else ""
 
     qmp_path = tempfile.mktemp(prefix="ae-input-qmp.")
+    sig_path = tempfile.mktemp(prefix="ae-input-sig.")
+    extra = ["-serial", "unix:%s,server,nowait" % sig_path] if scenario == "sigint" else []
     q = subprocess.Popen([
         "qemu-system-x86_64", "-enable-kvm", "-m", "512", "-smp", "2", "-bios", OVMF,
         "-kernel", KERNEL, "-initrd", ird,
         "-append", "console=tty0 console=ttyS0 rdinit=/init -- " + gargs,
         "-vga", "std", "-display", "none", "-serial", "file:" + serial,
-        "-qmp", "unix:%s,server,nowait" % qmp_path, "-no-reboot"],
+        "-qmp", "unix:%s,server,nowait" % qmp_path, "-no-reboot"] + extra,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     shots, marks, failures = [], [], []
     try:
@@ -217,12 +226,25 @@ def main():
                     pass
                 time.sleep(1.5)
             shot(name)
-        try:
-            qmp.chord("ctrl", "q")
-            time.sleep(2.0)
-            qmp.cmd("quit")                          # usually already powered off by Ctrl+Q
-        except OSError:
-            pass
+        if scenario == "sigint":
+            try:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.connect(sig_path)
+                s.sendall(b"INT\n")
+                t1 = time.time()
+                while time.time() - t1 < 20 and "qemu_init: powering off" not in log():
+                    time.sleep(0.1)
+                s.close()
+                qmp.cmd("quit")
+            except OSError:
+                pass
+        else:
+            try:
+                qmp.chord("ctrl", "q")
+                time.sleep(2.0)
+                qmp.cmd("quit")                      # usually already powered off by Ctrl+Q
+            except OSError:
+                pass
     except RuntimeError as e:
         print("  ⚠ ", e)
         return 2
@@ -231,8 +253,9 @@ def main():
             q.wait(timeout=20)
         except subprocess.TimeoutExpired:
             q.kill()
-        if os.path.exists(qmp_path):
-            os.remove(qmp_path)
+        for p in (qmp_path, sig_path):
+            if os.path.exists(p):
+                os.remove(p)
 
     full = log()
     deltas, prev = [], 0
@@ -268,6 +291,33 @@ def main():
             check(back >= 0.90, "Ctrl+Tab x2: the minimized window is BACK where it was (%.0f%% of its "
                   "pixels match the shot before it was minimized)" % (100 * back))
         montage([p for p in shots if p], os.path.join(outdir, "montage.png"))
+    elif scenario == "sigint":
+        sent = full.find("qemu_init: sent SIGINT")
+        quit_at = full.find("aethersafha: quit on SIGINT")
+        check("SIGINT is read per frame" in full, "the compositor set up its SIGINT signalfd")
+        check(sent >= 0 and quit_at > sent, "PID 1 sent SIGINT, and the compositor quit on it (a log line names SIGINT)")
+        tail = full[quit_at:] if quit_at >= 0 else ""
+        for line in ("at exit — clients told to close", "frame cost us AT EXIT", "frame loop ok"):
+            check(line in tail, "the Ctrl+Q teardown ran after it: %r" % line)
+        # ⚠ `exit 0` alone is not enough: a signal death prints it too (WEXITSTATUS is 0), then KILLED.
+        check("qemu_init: aethersafha exit 0" in full and not killed, "a clean exit 0, not a signal death")
+        blk = {}
+        for line in full.splitlines():
+            if line.startswith("qemu_init: ") and " SigBlk:" in line:
+                who, pid, _, mask = line[len("qemu_init: "):].split()[:4]
+                blk.setdefault(who, []).append(int(mask, 16))
+        check(len(blk.get("compositor", [])) == 1 and blk["compositor"][0] & 2 == 2,
+              "the compositor itself has SIGINT blocked (read from /proc, not from its log)")
+        kids = blk.get("child", [])
+        check(len(kids) >= 2 and all(m & 2 == 0 for m in kids),
+              "every spawned client has SIGINT UNBLOCKED, so Ctrl+C can still stop it (%s)"
+              % ", ".join("%x" % m for m in kids))
+        # ⚠ The compositor's own signalfd is the detector's positive control: a scan that finds nothing
+        # anywhere proves nothing about the clients.
+        holds = [l.split()[1] for l in full.splitlines()
+                 if l.startswith("qemu_init: ") and "HOLDS A SIGNALFD" in l]
+        check("compositor" in holds, "the fd scan sees the compositor's own signalfd (the detector works)")
+        check("child" not in holds, "no client inherited the compositor's signalfd")
     else:
         check("HOSTILE attach" in full, "the hostile client ran (stride 4 on a 240-wide surface)")
         check("surface refused" in full, "the compositor refused its surface")
@@ -276,7 +326,7 @@ def main():
     print("  --- serial (clients and verdict lines) ---")
     for line in full.splitlines():
         if any(k in line for k in ("focus_client", "presented surface", "surface refused",
-                                   "qemu_init: aethersafha", "KILLED")):
+                                   "qemu_init: aethersafha", "KILLED", "SIGINT", "SigBlk", "SIGNALFD")):
             print("    " + line.rstrip())
     print("  %s %s (screendumps and montage in %s)" % (
         "PASS" if not failures else "FAIL", scenario, outdir))

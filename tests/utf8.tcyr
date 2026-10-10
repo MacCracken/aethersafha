@@ -1,0 +1,299 @@
+# aethersafha UTF-8 decoder test — src/utf8.cyr, the one place text becomes scalars.
+#
+# ⭐ THE RULE UNDER TEST is the Unicode Standard's §3.9 "U+FFFD Substitution of Maximal Subparts": a unit is
+# a well-formed sequence (Table 3-7) or the longest prefix of one, never less than a byte, and an ill-formed
+# unit decodes to ONE U+FFFD. The vectors below are its own examples plus one per class of ill-formed input.
+# ⚠ AND IT WAS CHECKED AGAINST AN ORACLE OUTSIDE THIS REPO before any of them were written: CPython's
+# `bytes.decode('utf-8', 'replace')`, which implements the same practice, agreed scalar for scalar on every
+# string of 1-4 bytes over a 24-byte alphabet of class boundaries and every 5-byte string over 12 of them
+# (595,032 strings), and on the encoding of every scalar. A planted bug (E0 accepting 80..9F) diverged.
+# Stdlib + [deps.*] auto-included via cyrius.cyml.
+include "src/utf8.cyr"
+
+# The units of the last `t_dec_all`: scalar and byte length each. MODULE scope => 32 x u64 apiece.
+var t_cp[32];
+var t_ln[32];
+var t_n = 0;
+
+# Decode all of `s` into t_cp / t_ln -> the unit count (at most 32).
+fn t_dec_all(s): i64 {
+    t_n = 0;
+    var i = 0;
+    while (t_n < 32) {
+        var r = utf8_next(s + i);
+        if (utf8_next_len(r) == 0) { break; }
+        store64(&t_cp + t_n * 8, utf8_next_cp(r));
+        store64(&t_ln + t_n * 8, utf8_next_len(r));
+        i = i + utf8_next_len(r);
+        t_n = t_n + 1;
+    }
+    return t_n;
+}
+
+# 1 when unit `k` of the last decode is scalar `cp` taking `len` bytes.
+fn t_u_r(k, cp, len): i64 {
+    if (k >= t_n) { return 0; }
+    if (load64(&t_cp + k * 8) != cp) { return 0; }
+    if (load64(&t_ln + k * 8) != len) { return 0; }
+    return 1;
+}
+
+# 1 when every unit of the last decode is a one-byte U+FFFD — what a run of bytes that each fail alone gives.
+fn t_all_repl1_r(): i64 {
+    var k = 0;
+    while (k < t_n) {
+        if (t_u_r(k, UTF8_REPL, 1) == 0) { return 0; }
+        k = k + 1;
+    }
+    return 1;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("utf8 — ASCII, and the terminator");
+    assert_eq(utf8_next(""), 0, "the NUL is length 0, scalar 0");
+    assert_eq(t_dec_all("A"), 1, "one ASCII byte is one unit");
+    assert_eq(t_u_r(0, 0x41, 1), 1, "  'A', one byte");
+    assert_eq(t_dec_all("\x7F"), 1, "U+007F is ASCII too — a control, but a scalar");
+    assert_eq(t_u_r(0, 0x7F, 1), 1, "  DEL decodes as itself");
+    assert_eq(t_dec_all("\x0A"), 1, "and so is a newline");
+    assert_eq(t_u_r(0, 0x0A, 1), 1, "  U+000A, one byte");
+
+    test_group("utf8 — two-, three- and four-byte scalars, at the edges of each form");
+    assert_eq(t_dec_all("é"), 1, "'é' (C3 A9) is ONE unit — the byte-per-cell renderer drew two");
+    assert_eq(t_u_r(0, 0xE9, 2), 1, "  U+00E9, two bytes");
+    assert_eq(t_dec_all("\xC2\x80"), 1, "C2 80, the lowest two-byte form");
+    assert_eq(t_u_r(0, 0x80, 2), 1, "  U+0080");
+    assert_eq(t_dec_all("\xDF\xBF"), 1, "DF BF, the highest");
+    assert_eq(t_u_r(0, 0x7FF, 2), 1, "  U+07FF");
+    assert_eq(t_dec_all("—"), 1, "'—' (E2 80 94) is one unit");
+    assert_eq(t_u_r(0, 0x2014, 3), 1, "  U+2014, three bytes");
+    assert_eq(t_dec_all("\xE0\xA0\x80"), 1, "E0 A0 80, the lowest three-byte form");
+    assert_eq(t_u_r(0, 0x800, 3), 1, "  U+0800");
+    assert_eq(t_dec_all("\xED\x9F\xBF"), 1, "ED 9F BF, the last scalar below the surrogates");
+    assert_eq(t_u_r(0, 0xD7FF, 3), 1, "  U+D7FF");
+    assert_eq(t_dec_all("\xEE\x80\x80"), 1, "EE 80 80, the first above them");
+    assert_eq(t_u_r(0, 0xE000, 3), 1, "  U+E000");
+    assert_eq(t_dec_all("\xEF\xBF\xBF"), 1, "EF BF BF");
+    assert_eq(t_u_r(0, 0xFFFF, 3), 1, "  U+FFFF");
+    assert_eq(t_dec_all("…"), 1, "'…' (E2 80 A6), the caption's cut mark");
+    assert_eq(t_u_r(0, 0x2026, 3), 1, "  U+2026");
+    assert_eq(t_dec_all("\xEF\xBF\xBD"), 1, "a LITERAL U+FFFD is well-formed");
+    assert_eq(t_u_r(0, 0xFFFD, 3), 1, "  three bytes — not three replacements");
+    assert_eq(t_dec_all("中"), 1, "'中' (E4 B8 AD) is one unit");
+    assert_eq(t_u_r(0, 0x4E2D, 3), 1, "  U+4E2D");
+    assert_eq(t_dec_all("😀"), 1, "'😀' (F0 9F 98 80) is one unit");
+    assert_eq(t_u_r(0, 0x1F600, 4), 1, "  U+1F600, four bytes");
+    assert_eq(t_dec_all("\xF0\x90\x80\x80"), 1, "F0 90 80 80, the lowest four-byte form");
+    assert_eq(t_u_r(0, 0x10000, 4), 1, "  U+10000");
+    assert_eq(t_dec_all("\xF4\x8F\xBF\xBF"), 1, "F4 8F BF BF, the last scalar there is");
+    assert_eq(t_u_r(0, 0x10FFFF, 4), 1, "  U+10FFFF");
+    assert_eq(t_dec_all("aé—中😀z"), 6, "a mix is one unit per scalar, whatever each one's length");
+    assert_eq(t_u_r(1, 0xE9, 2), 1, "  é");
+    assert_eq(t_u_r(4, 0x1F600, 4), 1, "  😀");
+    assert_eq(t_u_r(5, 0x7A, 1), 1, "  and the 'z' after them lands on its own byte");
+
+    # ⛔ Each class below is a different way to be ill-formed, and each must cost exactly one U+FFFD per
+    # maximal subpart — not one per byte, and not one for the whole run.
+    test_group("utf8 — a stray continuation byte is one U+FFFD");
+    assert_eq(t_dec_all("\x80"), 1, "80 alone");
+    assert_eq(t_u_r(0, UTF8_REPL, 1), 1, "  is one U+FFFD, one byte");
+    assert_eq(t_dec_all("\xBFA"), 2, "BF then 'A'");
+    assert_eq(t_u_r(0, UTF8_REPL, 1), 1, "  BF is one U+FFFD");
+    assert_eq(t_u_r(1, 0x41, 1), 1, "  and 'A' is NOT swallowed");
+    assert_eq(t_dec_all("\x80\x80\x80"), 3, "three strays are THREE units — each starts afresh");
+    assert_eq(t_all_repl1_r(), 1, "  each a one-byte U+FFFD");
+    assert_eq(t_dec_all("é\xA9"), 2, "a continuation one past a complete sequence");
+    assert_eq(t_u_r(1, UTF8_REPL, 1), 1, "  is a stray of its own");
+
+    test_group("utf8 — C0 / C1 / F5..FF lead nothing: one byte each");
+    assert_eq(t_dec_all("\xC0\x80"), 2, "C0 80 (an overlong U+0000)");
+    assert_eq(t_all_repl1_r(), 1, "  is TWO one-byte U+FFFDs: C0 leads nothing, so 80 is a stray");
+    assert_eq(t_dec_all("\xC1\xBF"), 2, "C1 BF (an overlong U+007F)");
+    assert_eq(t_all_repl1_r(), 1, "  likewise two");
+    assert_eq(t_dec_all("\xF5\x80\x80\x80"), 4, "F5 80 80 80 (would be past U+10FFFF)");
+    assert_eq(t_all_repl1_r(), 1, "  four: F5 leads nothing");
+    assert_eq(t_dec_all("\xF8\x88\x80\x80\x80"), 5, "F8 + four continuations (the retired five-byte form)");
+    assert_eq(t_all_repl1_r(), 1, "  five");
+    assert_eq(t_dec_all("\xFE\xFF"), 2, "FE FF");
+    assert_eq(t_all_repl1_r(), 1, "  two");
+
+    test_group("utf8 — a sequence cut short is ONE U+FFFD of the bytes it got");
+    assert_eq(t_dec_all("\xC3A"), 2, "C3 then 'A'");
+    assert_eq(t_u_r(0, UTF8_REPL, 1), 1, "  C3 is one U+FFFD, one byte");
+    assert_eq(t_u_r(1, 0x41, 1), 1, "  and the byte that broke it starts the next unit");
+    assert_eq(t_dec_all("\xE2\x80A"), 2, "E2 80 then 'A'");
+    assert_eq(t_u_r(0, UTF8_REPL, 2), 1, "  E2 80 is ONE U+FFFD, two bytes");
+    assert_eq(t_dec_all("\xF0\x9F\x98A"), 2, "F0 9F 98 then 'A'");
+    assert_eq(t_u_r(0, UTF8_REPL, 3), 1, "  F0 9F 98 is ONE U+FFFD, three bytes");
+    assert_eq(t_dec_all("\xE2\x80\xE2\x80\xA6"), 2, "a cut sequence, then a whole one");
+    assert_eq(t_u_r(0, UTF8_REPL, 2), 1, "  the cut one: two bytes");
+    assert_eq(t_u_r(1, 0x2026, 3), 1, "  then '…' intact — a lead byte breaks the sequence before it");
+
+    test_group("utf8 — an overlong form fails on its second byte");
+    assert_eq(t_dec_all("\xE0\x80\x80"), 3, "E0 80 80 (an overlong U+0000)");
+    assert_eq(t_all_repl1_r(), 1, "  is three one-byte U+FFFDs: E0 needs A0..BF next");
+    assert_eq(t_dec_all("\xE0\x9F\xBF"), 3, "E0 9F BF (an overlong U+07FF)");
+    assert_eq(t_all_repl1_r(), 1, "  three");
+    assert_eq(t_dec_all("\xF0\x80\x80\x80"), 4, "F0 80 80 80 (an overlong U+0000)");
+    assert_eq(t_all_repl1_r(), 1, "  four: F0 needs 90..BF next");
+    assert_eq(t_dec_all("\xF0\x8F\xBF\xBF"), 4, "F0 8F BF BF (an overlong U+FFFF)");
+    assert_eq(t_all_repl1_r(), 1, "  four");
+
+    test_group("utf8 — a surrogate fails on its second byte");
+    assert_eq(t_dec_all("\xED\xA0\x80"), 3, "ED A0 80 (U+D800)");
+    assert_eq(t_all_repl1_r(), 1, "  is three one-byte U+FFFDs: ED needs 80..9F next");
+    assert_eq(t_dec_all("\xED\xBF\xBF"), 3, "ED BF BF (U+DFFF)");
+    assert_eq(t_all_repl1_r(), 1, "  three");
+
+    test_group("utf8 — past U+10FFFF fails on its second byte");
+    assert_eq(t_dec_all("\xF4\x90\x80\x80"), 4, "F4 90 80 80 (U+110000)");
+    assert_eq(t_all_repl1_r(), 1, "  is four one-byte U+FFFDs: F4 needs 80..8F next");
+    assert_eq(t_dec_all("\xF7\xBF\xBF\xBF"), 4, "F7 BF BF BF (U+1FFFFF)");
+    assert_eq(t_all_repl1_r(), 1, "  four: F7 leads nothing");
+
+    # ⭐ THE STANDARD'S OWN EXAMPLES, so the rule is checked against its source and not only against this file's
+    # reading of it. Table 3-8 first: 13 bytes, 10 units.
+    test_group("utf8 — the Unicode Standard's worked examples (§3.9)");
+    assert_eq(t_dec_all("\x61\xF1\x80\x80\xE1\x80\xC2\x62\x80\x63\x80\xBF\x64"), 10,
+      "61 F1 80 80 E1 80 C2 62 80 63 80 BF 64 is 10 units");
+    assert_eq(t_u_r(0, 0x61, 1), 1, "  a");
+    assert_eq(t_u_r(1, UTF8_REPL, 3), 1, "  F1 80 80 — a four-byte sequence cut short — is ONE U+FFFD");
+    assert_eq(t_u_r(2, UTF8_REPL, 2), 1, "  E1 80 is one");
+    assert_eq(t_u_r(3, UTF8_REPL, 1), 1, "  C2 is one");
+    assert_eq(t_u_r(4, 0x62, 1), 1, "  b");
+    assert_eq(t_u_r(5, UTF8_REPL, 1), 1, "  80 is one");
+    assert_eq(t_u_r(6, 0x63, 1), 1, "  c");
+    assert_eq(t_u_r(7, UTF8_REPL, 1), 1, "  80 is one");
+    assert_eq(t_u_r(8, UTF8_REPL, 1), 1, "  BF is one more — strays are never merged");
+    assert_eq(t_u_r(9, 0x64, 1), 1, "  d");
+    # The four sequences of the "maximal subparts" tables: non-shortest forms, surrogates, other ill-formed
+    # sequences, truncated sequences. Each is all U+FFFD before its final ASCII letter.
+    assert_eq(t_dec_all("\xC0\xAF\xE0\x80\xBF\xF0\x81\x82\x41"), 9, "C0 AF E0 80 BF F0 81 82 41: 8 U+FFFD + 'A'");
+    assert_eq(t_u_r(8, 0x41, 1), 1, "  ending in 'A'");
+    assert_eq(t_dec_all("\xED\xA0\x80\xED\xBF\xBF\xED\xAF\x41"), 9, "ED A0 80 ED BF BF ED AF 41: 8 U+FFFD + 'A'");
+    assert_eq(t_u_r(8, 0x41, 1), 1, "  ending in 'A'");
+    assert_eq(t_dec_all("\xF4\x91\x92\x93\xFF\x41\x80\xBF\x42"), 9, "F4 91 92 93 FF 41 80 BF 42: 5 + 'A' + 2 + 'B'");
+    assert_eq(t_u_r(5, 0x41, 1), 1, "  'A' sixth");
+    assert_eq(t_u_r(8, 0x42, 1), 1, "  'B' last");
+    assert_eq(t_dec_all("\xE1\x80\xE2\xF0\x91\x92\xF1\xBF\x41"), 5, "E1 80 E2 F0 91 92 F1 BF 41: 4 U+FFFD + 'A'");
+    assert_eq(t_u_r(0, UTF8_REPL, 2), 1, "  E1 80");
+    assert_eq(t_u_r(1, UTF8_REPL, 1), 1, "  E2");
+    assert_eq(t_u_r(2, UTF8_REPL, 3), 1, "  F0 91 92");
+    assert_eq(t_u_r(3, UTF8_REPL, 2), 1, "  F1 BF");
+    assert_eq(t_u_r(4, 0x41, 1), 1, "  A");
+
+    test_group("utf8 — a NUL ends the string, even mid-sequence");
+    assert_eq(t_dec_all("\xE2\x80\x00\x41"), 1, "E2 80 NUL 'A' is ONE unit: the NUL is the end");
+    assert_eq(t_u_r(0, UTF8_REPL, 2), 1, "  E2 80 cut short by the NUL is one U+FFFD, two bytes");
+    assert_eq(t_dec_all("\xF0\x9F\x00\x98\x80"), 1, "F0 9F NUL 98 80: the bytes after the NUL are not reached");
+    assert_eq(t_u_r(0, UTF8_REPL, 2), 1, "  F0 9F, two bytes");
+    assert_eq(t_dec_all("\xC3\x00\xA9"), 1, "C3 NUL A9");
+    assert_eq(t_u_r(0, UTF8_REPL, 1), 1, "  C3, one byte — the A9 after the NUL is not consumed");
+    assert_eq(utf8_count("\xE2\x80\x00\x41"), 1, "utf8_count stops there too");
+
+    # ⛔⛔ "NEVER READS PAST THE NUL" IS A CLAIM ABOUT MEMORY, SO TEST IT AGAINST MEMORY. Each string is laid down
+    # so that its NUL is the LAST byte of a mapped page, with a PROT_NONE page after it: one load past the
+    # terminator faults and kills the suite. A decoder that fetched all of a sequence's bytes before checking
+    # them — a load32 — reads exactly there on every sequence cut short by the NUL.
+    test_group("utf8 — not one byte is read past the NUL (a guard page proves it)");
+    var gp = syscall(9, 0, 8192, 3, 0x22, 0 - 1, 0);    # mmap: two RW pages, private + anonymous
+    assert_eq(t_gt_r(gp, 0), 1, "two pages mapped");
+    assert_eq(syscall(10, gp + 4096, 4096, 0), 0, "  and the second made PROT_NONE");
+    var gend = gp + 4095;                                # the NUL goes here, the last readable byte
+    var gl = 0;
+    var gpass = 0;
+    while (gpass < 7) {
+        var gs = "\xE2\x80";                             # each a sequence the NUL cuts short, or none
+        if (gpass == 1) { gs = "\xF0\x9F\x98"; }
+        if (gpass == 2) { gs = "\xC3"; }
+        if (gpass == 3) { gs = "\xED"; }
+        if (gpass == 4) { gs = "\xF4\x8F\xBF"; }
+        if (gpass == 5) { gs = "é"; }
+        if (gpass == 6) { gs = "A\xE0"; }
+        var gn = strlen(gs);
+        var gq = gend - gn;
+        var gj = 0;
+        while (gj < gn) { store8(gq + gj, load8(gs + gj)); gj = gj + 1; }
+        store8(gend, 0);
+        gl = gl + utf8_count(gq) + utf8_offset(gq, 9) + utf8_next_len(utf8_next(gq));
+        gpass = gpass + 1;
+    }
+    # 1 + 1 + 1 + 1 + 1 + 1 + 2 units; offsets are the full lengths 2 + 3 + 1 + 1 + 3 + 2 + 2; first units
+    # 2 + 3 + 1 + 1 + 3 + 2 + 1 bytes.
+    assert_eq(gl, 8 + 14 + 13, "seven strings ending on the page edge decoded with no fault, and to the right units");
+
+    test_group("utf8 — utf8_count is one per scalar, utf8_offset lands on unit boundaries");
+    assert_eq(utf8_count(""), 0, "empty");
+    assert_eq(utf8_count("abc"), 3, "ASCII: one per byte");
+    assert_eq(utf8_count("é—中😀"), 4, "2 + 3 + 3 + 4 bytes are 4 scalars");
+    assert_eq(utf8_count("\xFF\xFE\xE2\x80"), 3, "FF, FE, then E2 80 cut short: 3 units");
+    var mix = "é—中😀";
+    assert_eq(utf8_offset(mix, 0), 0, "scalar 0 starts at byte 0");
+    assert_eq(utf8_offset(mix, 1), 2, "scalar 1 after é's two bytes");
+    assert_eq(utf8_offset(mix, 2), 5, "scalar 2 after —'s three");
+    assert_eq(utf8_offset(mix, 3), 8, "scalar 3 after 中's three");
+    assert_eq(utf8_offset(mix, 4), 12, "scalar 4 is the NUL, after 😀's four");
+    assert_eq(utf8_offset(mix, 9), 12, "and past the end it stays on the NUL");
+    assert_eq(utf8_offset("\xE2\x80\x41", 1), 2, "an ill-formed unit is skipped whole");
+
+    test_group("utf8 — the encoder writes each form, and U+FFFD for a non-scalar");
+    var eb = alloc(16);
+    assert_eq(utf8_encode(eb, 0x41), 1, "U+0041: one byte");
+    assert_eq(load8(eb), 0x41, "  41");
+    assert_eq(utf8_encode(eb, 0xE9), 2, "U+00E9: two bytes");
+    assert_eq(load8(eb) * 256 + load8(eb + 1), 0xC3A9, "  C3 A9");
+    assert_eq(utf8_encode(eb, 0x2026), 3, "U+2026: three bytes");
+    assert_eq((load8(eb) << 16) | (load8(eb + 1) << 8) | load8(eb + 2), 0xE280A6, "  E2 80 A6");
+    assert_eq(utf8_encode(eb, 0x1F600), 4, "U+1F600: four bytes");
+    assert_eq((load8(eb) << 24) | (load8(eb + 1) << 16) | (load8(eb + 2) << 8) | load8(eb + 3), 0xF09F9880,
+      "  F0 9F 98 80");
+    assert_eq(utf8_encode(eb, 0xD800), 3, "a surrogate is written as U+FFFD");
+    assert_eq((load8(eb) << 16) | (load8(eb + 1) << 8) | load8(eb + 2), 0xEFBFBD, "  EF BF BD");
+    assert_eq(utf8_encode(eb, 0x110000), 3, "past U+10FFFF: U+FFFD");
+    assert_eq((load8(eb) << 16) | (load8(eb + 1) << 8) | load8(eb + 2), 0xEFBFBD, "  EF BF BD");
+    assert_eq(utf8_encode(eb, 0 - 1), 3, "a negative value: U+FFFD");
+    assert_eq(utf8_enc_len(0x7F), 1, "utf8_enc_len: 1 to U+007F");
+    assert_eq(utf8_enc_len(0x80), 2, "  2 from U+0080");
+    assert_eq(utf8_enc_len(0x7FF), 2, "  2 to U+07FF");
+    assert_eq(utf8_enc_len(0x800), 3, "  3 from U+0800");
+    assert_eq(utf8_enc_len(0xDFFF), 3, "  3 for a surrogate (it is written as U+FFFD)");
+    assert_eq(utf8_enc_len(0xFFFF), 3, "  3 to U+FFFF");
+    assert_eq(utf8_enc_len(0x10000), 4, "  4 from U+10000");
+    assert_eq(utf8_enc_len(0x10FFFF), 4, "  4 to U+10FFFF");
+    assert_eq(utf8_enc_len(0x110000), 3, "  3 past it (U+FFFD again)");
+    assert_eq(utf8_enc_len(0 - 1), 3, "  3 for a negative value");
+
+    # ⭐ EVERY SCALAR ROUND-TRIPS: encode, NUL-terminate, decode — the same scalar, in exactly the bytes the
+    # encoder said. Counted rather than asserted 1.1 million times.
+    test_group("utf8 — every scalar U+0001..U+10FFFF round-trips");
+    var rt = alloc(8);
+    var rtbad = 0;
+    var rtn = 0;
+    var rcp = 1;
+    while (rcp <= 0x10FFFF) {
+        if (rcp == 0xD800) { rcp = 0xE000; }
+        var rl = utf8_encode(rt, rcp);
+        store8(rt + rl, 0);
+        var rr = utf8_next(rt);
+        if (utf8_next_cp(rr) != rcp) { rtbad = rtbad + 1; }
+        if (utf8_next_len(rr) != rl) { rtbad = rtbad + 1; }
+        if (utf8_enc_len(rcp) != rl) { rtbad = rtbad + 1; }
+        if (utf8_count(rt) != 1) { rtbad = rtbad + 1; }
+        rtn = rtn + 1;
+        rcp = rcp + 1;
+    }
+    assert_eq(rtn, 0x10FFFF - 2048, "all 1,112,063 non-NUL scalars were tried");
+    assert_eq(rtbad, 0, "  and every one came back whole");
+
+    return assert_summary();
+}
+
+fn t_gt_r(a, b): i64 {
+    if (a > b) { return 1; }
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

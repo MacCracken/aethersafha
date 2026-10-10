@@ -5,6 +5,132 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.17.2] — 2026-10-09 — what the Rust binary did, and UTF-8 text
+
+> The arc's third bite (roadmap § 0.17.x). The Rust binary built the desktop, ran a 5 s status tick,
+> honoured `--secure` and exited on Ctrl+C; the port now does each of those as Rust did, with the
+> differences recorded in ADR 0003. With kashi 1.1.0, text is UTF-8 and a cut title ends in the real `…`.
+> `main.rs` and `accessibility.rs` close in the parity plan. Each change has tests that fail when it is
+> reverted. The commit, the tag and the push are the operator's.
+
+### Added — UTF-8 text, through kashi 1.1.0
+
+- **[deps.kashi] 1.0.10 → 1.1.0.** kashi gains a Unicode → CP437 map and glyphs for `…` and `�`.
+  `lib/kashi_font_data.cyr` is byte-identical to the tag, and the lock pins `93909d0`.
+- **`src/utf8.cyr`**, a small decoder. Ill-formed input follows Unicode §3.9: each maximal ill-formed
+  subpart becomes one `�`, and decoding never reads past the terminator. It was checked against CPython's
+  decoder on 595,032 strings.
+- **Every text path counts scalars, not bytes**: `draw_text`, `draw_text_lines`, `text_width` and the GPU
+  glyph queue. As in Rust, each char is one cell, and a char with no glyph is a blank cell that still
+  advances. Before this, `é` drew two cells of mojibake.
+- **The GPU queue decodes once, at enqueue,** into 16-bit cells, because `…` and `�` live at cells 0x100 and
+  0x101. CPU and GPU frames share one scalar → cell rule, so they draw the same cells.
+- **Titles cut exactly as Rust's did**: `max_chars − 1` scalars and then `…` in one cell. That replaces
+  0.17.1's interim ASCII `...`, which took three cells. The 64-cell cap cuts the same way, and a cut never
+  splits a UTF-8 sequence.
+- Behaviour changes beyond Rust are in ADR 0003. A foreign guest's raw non-UTF-8 bytes now draw `�`, not
+  CP437 glyphs, and U+007F draws blank instead of `⌂`.
+
+### Added — a strict command line: `--secure`, `--help`, `--version`
+
+`src/flags.cyr` parses the arguments once, into a record a test can build. main.cyr used to rescan argv
+for each flag and ignore everything else, so a typo ran a different program: `--frmaes 0` ran the 400-frame
+default, and `--frames 1O` ran 1 frame.
+- **Errors exit 2** with a line naming the argument. That covers an unknown flag, Rust's retired flags (ADR
+  0004), a missing value, a non-numeric count and a stray word. The exit happens before the banner or the
+  backend.
+- **`--help` and `--version`** print and exit 0. The version comes from `src/version_str.cyr`, which
+  `scripts/version-bump.sh` now regenerates.
+- **`--secure`** returns, as in Rust: compositor secure mode plus security level Elevated.
+- Every invocation in this repo's harnesses and in agnos was checked against the parser and still runs.
+- Ported: `test_args_default_values`, `test_args_custom_values` and
+  `test_desktop_environment_new_secure_mode` (`tests/flags.tcyr`, 132 assertions).
+
+### Added — Rust's initialize and its 5 s status tick
+
+- **`desktop_initialize`** runs at start. It shows the welcome notification ("Welcome to AGNOS") and turns
+  on proactive and ambient AI, as `DesktopEnvironment::initialize` did.
+- **`desktop_status_tick`** runs every 5 s on a monotonic clock, with the first tick at start. It writes
+  cpu / mem / disk, the network and the agent count, then sends the AI context a `UserPresent` event from
+  `"desktop"`.
+- Ported as real tests: `test_desktop_environment_initialize` and
+  `test_desktop_environment_update_system_status`.
+- Notification cards are 330 px wide, so the welcome body fits whole. Longer lines are cut to the card with
+  `…`; before, they ran past it.
+
+### Changed — the gauges read what Rust read
+
+- **Linux** reads cpu from `/proc/stat` through a port of `parse_cpu_line` (its seven tests ported), memory
+  from `/proc/meminfo` `MemAvailable`, and disk from `statfs("/")`. Before, cpu and disk were always `--%`,
+  and memory used `MemFree`, which over-reports used memory.
+- **agnos** gains a real disk gauge through `statfs` `#103`; sysprobe's comment saying agnos had no such
+  call was dated. Its cpu stays `--%`: the kernel's per-core ticks include halted time, and it keeps no idle
+  count.
+- The cpu reading spans the tick interval, not Rust's 100 ms, and the first reading is `--%` (ADR 0003).
+
+### Changed — the panel stops claiming what nobody measured
+
+- The network dot is seeded and ticked as **UNKNOWN**, an empty dot that is never green. Rust hardcoded
+  Connected, and so did the port.
+- The agent count comes from the AI layer's live agent registry, which 0.17.3 fills from daimon. Rust
+  hardcoded 0, and nothing in the port fed the count.
+
+### Added — the accessibility tree mirrors the windows
+
+As in Rust's compositor:
+- Every window gets a node keyed by its id, and its open and close are announced, with control characters
+  removed from the title.
+- Tree focus follows every compositor focus change.
+
+Before, the tree was filled once at boot, before any client connected, and a second sync duplicated every
+node. `desktop_sync_accessibility` is now an idempotent reconcile.
+
+Ported: `test_announcements`, `test_announcements_empty`, `test_accessibility_state_default`, plus
+mirroring tests.
+
+### Added — Ctrl+C ends the Linux desktop through the Ctrl+Q teardown
+
+`src/sigint.cyr` blocks SIGINT and reads it from a signalfd once per frame. Ctrl+C therefore takes the
+same exit path as Ctrl+Q: the listener closes, clients are told, and the timing summary prints. Before,
+Ctrl+C killed the process outright.
+- Spawned clients get SIGINT unblocked before `execve`.
+- An interrupted `--clients` probe exits 130.
+- `qemu-linux-input.sh` gains a `sigint` scenario.
+- ⚠ A compositor wedged in a blocking client read no longer sees Ctrl+C; Ctrl+\ and SIGTERM still end it.
+  The wedge itself is pre-existing and is now roadmap D12.
+
+### Changed
+
+- CI's coverage floor rises to 66% (725 of 1,097 functions; it was 63%), checked to fail at `--min 67`.
+
+### Docs
+
+- ADR 0003:
+  - gauge sources and the tick;
+  - the strict command line;
+  - the panel's UNKNOWN network dot and fed agent count;
+  - accessibility mirroring;
+  - SIGINT;
+  - UTF-8 text;
+  - the interim caption entry closed.
+- ADR 0004: `--secure` has returned.
+- `parity-plan.md`: `main.rs` and `accessibility.rs` are CLOSED, and their tests leave *still to
+  re-express*.
+- `roadmap.md`: 0.17.2 is shipped. D3 notes that its refused-but-focused window makes the hostile QEMU
+  scenario order-dependent, and the new D12 records the silent-client wedge.
+
+### Verified
+
+- **Host 4,172,920 B** (sha256 `1e5aaa76…`) · **`--agnos` 4,127,416 B** (sha256 `1b7c3cdf…`).
+- **28 / 28 suites, 2,821 assertions, 0 failed** (0.17.1: 25 / 2,029). No compiler warning points at `src/`.
+- `scripts/qemu-linux-input.sh` → PASS for focus, hostile and sigint, on this binary (same hash). The sigint
+  run logs `quit on SIGINT`, the at-exit lines and `exit 0`. The focus screendumps show the welcome card at
+  the panel's right, mem 16% and disk 8% from the first tick, and cpu 59% once a second tick has a sample to
+  diff. `qemu-linux-desktop.sh` → PASS (non-black 0.303).
+- `check-dep-tags.sh` → 7 deps clean · `cyrius deps --verify` → 83 verified · CI's format check clean ·
+  `cyrius coverage --min 66` passes.
+- ⚠ Not run on iron. The agnos disk gauge (`statfs` `#103`) is compile-verified only.
+
 ## [0.17.1] — 2026-10-09 — the port's silent divergences from Rust, restored
 
 > The arc's correctness bite (roadmap § 0.17.x). Where the port did something other than what Rust did,
