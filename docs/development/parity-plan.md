@@ -19,13 +19,13 @@ wiring it into the running desktop is new work and is not part of the deletion g
 
 | Rust | Lines / tests | Cyrius home | At runtime | Verdict | Open before CLOSED | Bite |
 |---|---|---|---|---|---|---|
-| `compositor.rs` | 2565 / 99 | `compositor`, `window`, `geom`, `input`, routing in `main` | driven | PORT | close updates `WSP_ACTIVE` (2 Rust tests fail today); routing + drag/resize out of `main.cyr` with its 9 tests; workspaces (4 defaults, queries, context setter); L / BL resize grips; lifecycle and workspace tests | .1 .4 .5 |
+| `compositor.rs` | 2565 / 99 | `compositor`, `window`, `geom`, `input`, routing in `main` | driven | PORT | routing + drag/resize out of `main.cyr` with its 9 tests; workspaces (4 defaults, queries, context setter); L / BL resize grips; lifecycle and workspace tests. (0.17.1: close updates `WSP_ACTIVE`; close and move drop every entry, as `retain` did) | .4 .5 |
 | `main.rs` | 630 / 26 | `main`, `desktop`, `sysprobe` | driven | PORT the tick and `--secure` | flags as a pure module with `--help` / `--version`; `UserPresent` each tick; welcome notice; Linux cpu / disk + `parse_cpu_line` (7 tests); SIGINT teardown on Linux | .2 |
-| `renderer.rs` | 1656 / 49 | `render`, `window`, `desktop`, `shell_render`, `wallpaper`, `theme`, `cursor` | driven | PORT | title truncation; CPU premultiplied blend + opacity (CPU frames differ from iron today); border outline; tests for overlap, minimized-not-drawn, text width, and the dead asserts | .1 .4 .5 |
-| `shell.rs` | 1396 / 60 | `shell`, `shell_render` | panel + cards painted | PORT | 7 missing + 7 partial tests; the app registry says `cmdpalette` where Rust said `terminal`; the net dot claims Connected with no producer; agent count unfed; `toggle_panel` honoured | .1 .2 .5 |
+| `renderer.rs` | 1656 / 49 | `render`, `window`, `desktop`, `shell_render`, `wallpaper`, `theme`, `cursor` | driven | PORT | CPU premultiplied blend + opacity (CPU frames differ from iron today); border outline; tests for overlap, minimized-not-drawn and text width; the `…` glyph and codepoint measuring with kashi 1.1.0 (ADR 0003, interim). (0.17.1: title truncation; the dead asserts run) | .2 .4 .5 |
+| `shell.rs` | 1396 / 60 | `shell`, `shell_render` | panel + cards painted | PORT | 6 missing + 4 partial tests; the net dot claims Connected with no producer; agent count unfed; `toggle_panel` honoured. (0.17.1: the registry's `terminal` entry; launch and search tests) | .2 .5 |
 | `accessibility.rs` | 729 / 30 | `accessibility` | synced once at boot | PORT, mirroring included | a node and an announcement on create / close, focus sync, an idempotent sync; 3 tests | .2 |
-| `ai_features.rs` | 1707 / 86 | `ai_features` | constructed only | PORT | `"terminal"` context match (silently `"cmdpalette"`); stable suggestion sort; null-checked date; `poll_agents` against daimon 2.4.3; 21 tests | .1 .3 |
-| `security_ui.rs` | 1858 / 77 | `security_ui` | constructed only | PORT | dashboard maximum starts at Low (Rust: Info); audit-log writer; SIGHUP / SIGKILL; Linux-only kill effects; 9 tests incl. 4 eviction | .1 .3 |
+| `ai_features.rs` | 1707 / 86 | `ai_features` | constructed only | PORT | `poll_agents` against daimon 2.4.3; 13 tests. (0.17.1: the `"terminal"` context match; stable suggestion sort; null-checked hour) | .3 |
+| `security_ui.rs` | 1858 / 77 | `security_ui` | constructed only | PORT | audit-log writer; SIGHUP / SIGKILL; Linux-only kill effects; 6 tests incl. 4 eviction. (0.17.1: the dashboard maximum over active alerts; minted ids from 2⁶²+1, ADR 0003) | .3 |
 | `plugin_host.rs` | 848 / 31 | `plugin_host` | constructed only | PORT | `PluginMessage` JSON (both directions `return 0`) and its 8 tests; delete the `plug_ipc_*` stubs (Rust had no transport) | .3 |
 | `screen_capture.rs` | 1299 / 31 | `screen_capture` (not linked) | library | PORT as library | alpha 0xFF; refuse w / h ≤ 0 (a null write today); decode round-trip over 64 KB; per-capture memory | .3 |
 | `screen_recording.rs` | 938 / 22 | `screen_recording` (not linked) | library | PORT as library | the ring frees what it evicts | .3 |
@@ -37,7 +37,7 @@ wiring it into the running desktop is new work and is not part of the deletion g
 | `hud/*` | 1987 / 67 | — | never ported | ✅ **CLOSED 0.17.0** — retired by ADR 0004, which keeps the widget specs | the agent-list poll is ported under `ai_features.rs` | .0 .3 |
 | `wayland/*` | 4763 / 181 | setu | — | ✅ **CLOSED 0.17.0** — ADR 0001 + ADR 0002 (what is dropped, what is owed a native design) | — | .0 |
 | `xwayland.rs` | 823 / 34 | mehman, `foreign` | — | ✅ **CLOSED 0.17.0** — ADR 0001 + ADR 0002 (what mehman owes) | — | .0 |
-| `system_tests.rs` | 1477 / 40 | — | tests | re-express | 22 covered · 13 partly · 5 not (two of them are the 0.17.1 divergences) | .5 |
+| `system_tests.rs` | 1477 / 40 | — | tests | re-express | 24 covered · 13 partly · 3 not | .5 |
 | `tests/*.rs` | 422 / 29 | — | tests | re-express | compositor 7 / 13 covered, renderer 6 / 12, security 4 / 4 | .5 |
 | benches, `bench-history.csv`, `benchmarks.md` | 378 / — | `tests/aethersafha.bcyr` | — | PRESERVE the CSV | the CSV moves to `docs/benchmarks.md` ("machine unknown, not a target"); Cyrius benches for the same series | .5 |
 | `lib.rs`, `examples/`, Cargo / Makefile / deny / codecov / toolchain | — | — | — | OBSOLETE | map every `pub use` in `lib.rs:21-88` to its Cyrius home or its ADR, then drop | .6 |
@@ -68,8 +68,7 @@ or error text close under ADR 0004 and are not listed.
   state: `set_window_state_nonexistent`, `set_all_window_states`, `window_state_transitions_full_cycle`;
   workspaces: `has_4_default_workspaces`, `move_nonexistent_window`, `move_window_to_same_workspace`,
   `move_window_to_last_workspace`, the four `get_active_windows*`, `windows_across_workspaces`,
-  `workspace_active_window_after_multiple_creates`, `close_updates_active_window` and
-  `close_last_window_clears_active` (both fail today), and the four workspace-context tests;
+  `workspace_active_window_after_multiple_creates`, and the four workspace-context tests;
   focus: `close_updates_focus`, `cascade_placement`, `with_resolution`;
   routing, nine tests: the `route_input_*` set, `drag_workflow`, `end_interactive_clears_state`,
   `mouse_move_no_drag`, `right_click_on_window`.
@@ -83,23 +82,19 @@ or error text close under ADR 0004 and are not listed.
   framebuffer `new` / `out_of_bounds`, `draw_rect_outline`, `draw_text`'s returned width, hit-test
   `fullscreen` (returns with fullscreen, ADR 0002) and `resize_edge_variants`, `overlapping_surfaces`,
   `z_order`. Damage `flush` / `region_count` / `has_damage` close with the region list (ADR 0003).
-- **ai_features.rs** — `detect_context_type_development_terminal` (fails today),
-  `_development_editor`, `_design_gimp`, `_design_blender`, `_communication_discord`,
-  `_communication_mail`, `update_context_command_executed`, `dismiss_nonexistent_suggestion`,
+- **ai_features.rs** — `update_context_command_executed`, `dismiss_nonexistent_suggestion`,
   `unregister_nonexistent_agent_no_panic`, `desktop_context_equality`; partly
   `ai_suggestion_custom`, `resource_metrics`, the three `analyze_context*`,
   `update_context_file_opened`, `_file_opened_cap_at_10`, `multiple_file_open_events_ordering`,
   `update_agent_hud_updates_last_activity`.
 - **security_ui.rs** — `alert_eviction_at_max_capacity`, `alert_eviction_resolved_first`,
-  `permission_request_eviction`, `override_request_eviction`, `critical_alert_shows`,
-  `get_dashboard_with_info_level_alert` (fails today); partly `grant_permission_lockdown`,
+  `permission_request_eviction`, `override_request_eviction`; partly `grant_permission_lockdown`,
   `permission_definitions_initialized`.
 - **plugin_host.rs** — the seven `message_*_roundtrip` and `message_from_invalid_json` (vacuous until
   the JSON stub is real: a parse failure and the stub both return 0).
 - **shell.rs** — `notification_default`, `launcher_item`, `launcher_action`,
-  `dismiss_multiple_notifications`, `search_launcher_by_description`, `notification_with_all_priorities`,
-  `notification_eviction_prefers_non_action`; partly `notification_custom`,
-  `launch_all_registered_apps` / `launch_each_registered_app` (3 of 14 ids), `multiple_notifications`,
+  `dismiss_multiple_notifications`, `notification_with_all_priorities`,
+  `notification_eviction_prefers_non_action`; partly `notification_custom`, `multiple_notifications`,
   `lock_unlock_round_trip`, `update_system_status_all_fields`. `initial_system_status` is the UNKNOWN
   seed (ADR 0003).
 - **accessibility.rs** — `announcements_empty`; partly `announcements`, `accessibility_state_default`.
@@ -107,8 +102,7 @@ or error text close under ADR 0004 and are not listed.
 - **screen_capture.rs** — partly `full_screen_capture_png` (asserted on 4×4, not 800×600) and
   `grant_and_revoke_permission` (list length after revoke). **screen_recording.rs** — partly
   `one_recording_per_agent` (the existing recording's id is not returned).
-- **system_tests.rs** (all `test_e2e_*` except the first) — `security_alert_escalation_flow` and
-  `smart_window_placement` (both fail today), `workspace_context_management`,
+- **system_tests.rs** (all `test_e2e_*` except the first) — `workspace_context_management`,
   `screen_lock_blocks_interactions`; partly `workspace_switch`, `multi_window_workspace_management`,
   `full_desktop_startup_sequence`, `full_teardown_sequence`, `security_and_ai_combined`,
   `notification_flood_and_dismiss`, `ai_context_with_multiple_agents`, `compositor_window_operations`,

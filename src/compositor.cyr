@@ -110,8 +110,12 @@ fn comp_move_window_to_workspace(c, win_id, ws_id): i64 {
     if (comp_find_by_id(c, win_id) < 0) { return 0 - 1; }
     var old = comp_get_workspace(c, load64(c + C_ACTIVE_WS));
     if (old != 0) {
+        # ⚠ EVERY entry (compositor.rs:426 is `retain`): two moves to one workspace list the id twice there.
         var idx = vec_find(wsp_windows(old), win_id);
-        if (idx >= 0) { vec_remove(wsp_windows(old), idx); }
+        while (idx >= 0) {
+            vec_remove(wsp_windows(old), idx);
+            idx = vec_find(wsp_windows(old), win_id);
+        }
     }
     var target = comp_get_workspace(c, ws_id);
     if (target != 0) {
@@ -389,8 +393,22 @@ fn comp_close_window(c, id): i64 {
     vec_remove(v, idx);
     var aw = comp_get_workspace(c, load64(c + C_ACTIVE_WS));
     if (aw != 0) {
+        # ⚠ EVERY entry, not the first (compositor.rs:308 is `retain`): moving one window to the same
+        # workspace twice lists it twice, and a single remove would leave the dead id to become active.
         var wi = vec_find(wsp_windows(aw), id);
-        if (wi >= 0) { vec_remove(wsp_windows(aw), wi); }
+        while (wi >= 0) {
+            vec_remove(wsp_windows(aw), wi);
+            wi = vec_find(wsp_windows(aw), id);
+        }
+        # ⚠ Parity (compositor.rs:309-311): closing the workspace's ACTIVE window hands "active" to the
+        # last window left in that workspace, or -1 when none is. Closing any OTHER window leaves it
+        # alone, even when it is stale (a move away keeps it, as in Rust). Separate from FOCUS below.
+        if (wsp_active(aw) == id) {
+            var wn = wsp_count(aw);
+            var next_active = 0 - 1;
+            if (wn > 0) { next_active = vec_get(wsp_windows(aw), wn - 1); }
+            store64(aw + WSP_ACTIVE, next_active);
+        }
     }
     # ⛔ 0.16.30 — HAND FOCUS TO A WINDOW SOMEONE CAN SEE. This clamped the focused index to the new top,
     # and the new top can be minimized: closing the last visible window focused an invisible one.

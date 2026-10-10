@@ -35,7 +35,7 @@ fix.
 
 | Rust | The port |
 |---|---|
-| `Uuid` ids | `i64` ids, sequential from 1 per registry |
+| `Uuid` ids | `i64` ids, sequential from 1 per registry (security UI: see below) |
 | `DateTime<Utc>` | `i64` epoch seconds; the caller passes `now` |
 | `f32` percentages, scales and scores | integer permille (1.0 = 1000) |
 | `f32` gesture distances and angles | integer pixels and milliradians |
@@ -57,6 +57,26 @@ fix.
 - **Gestures:** the rotate angle is wrapped to (−π, π], so crossing atan2's branch cut does not emit a
   spurious ~2π rotation as Rust did. The swipe distance uses an integer floor square root, so a move of
   50–51 px is a swipe only in Rust.
+- **Closing the focused window focuses the topmost window that is not minimized** (0.16.30). Rust focused
+  the last id in the active workspace's list, which can be minimized, so closing the last visible window
+  focused one nobody could see. The workspace's *active* window still follows Rust exactly: the last id left
+  in its list, or none.
+- **The security UI mints its own ids from 2⁶²+1** (`SEC_ID_MINTED_BASE`, 0.17.1). One alert list holds ids
+  the caller supplies and ids the UI mints. Rust's random `Uuid`s never met, but two counters both starting
+  at 1 do, and `dismiss_alert` then resolves the wrong alert. Callers keep their own ids below the base. This
+  is a contract on callers and is not checked.
+- **Window captions** (0.17.1, `render_title`):
+  - The title box is derived from the decoration geometry: it starts `TITLE_PAD` inside the left edge and
+    ends `TITLE_PAD` short of the minimize button. That comes to Rust's `width − 80` today, and it moves
+    with the buttons if they change.
+  - No caption is longer than 64 cells (`AE_TEXT_CHARS`), however wide the window, and this holds on every
+    frame kind. A longer run never reached the screen on a GPU frame, because the CPU fallback is not
+    presented there. Rust drew such a title whole.
+  - At the left and right screen edges the caption loses whole 9 px cells; Rust clipped per pixel. Clipping
+    by cell keeps the GPU run from being refused, which would drop the whole title.
+  - *Interim, until `kashi` 1.1.0:* the caption is measured in bytes, not chars, and a cut ends in ASCII
+    `...` in its last three cells. Rust appended `…`, which its 5×7 font drew as a blank cell. These close
+    when `draw_text` decodes UTF-8 through kashi's CP437 map, after which the ellipsis is the real `…` glyph.
 
 ## Consequences
 

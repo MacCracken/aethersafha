@@ -43,6 +43,86 @@ fn t_layer_count_r(layer): i64 {
     return n;
 }
 
+# Render `win` focused on a GPU frame into fresh queues -> how many text runs it queued. The caption is the
+# only text `render_window` draws, so run 0 IS the caption — and a caption that is not queued falls back to a
+# CPU draw that a GPU frame never presents.
+fn t_title_q_r(fb, win): i64 {
+    ae_rect_reset();
+    ae_text_reset();
+    # ⚠ POISON SLOT 0 FIRST. A reset zeroes only the COUNT, so a caption that is NOT queued would read back
+    # as whatever the previous call left in slot 0 — and two assertions passed against the unfixed renderer
+    # on exactly that coincidence. A missing caption now reads as "~" at x = 0.
+    ae_text_enqueue("~", 0, 0, 0);
+    ae_text_reset();
+    render_window(fb, win, 1);
+    return ae_text_count();
+}
+
+# 1 when the first `n` bytes of queued run `i` are the first `n` bytes of `s`.
+fn t_run_prefix_r(i, s, n): i64 {
+    var j = 0;
+    while (j < n) {
+        if (load8(ae_text_run_ptr(i) + j) != load8(s + j)) { return 0; }
+        j = j + 1;
+    }
+    return 1;
+}
+
+# 1 when queued run `i` ends in the three-dot ellipsis.
+fn t_run_dots_r(i): i64 {
+    var n = ae_text_run_len(i);
+    if (n < 3) { return 0; }
+    var p = ae_text_run_ptr(i) + n - 3;
+    if (load8(p) != '.') { return 0; }
+    if (load8(p + 1) != '.') { return 0; }
+    if (load8(p + 2) != '.') { return 0; }
+    return 1;
+}
+
+# Pixels of colour `c` in columns [x0, x1) of rows [y0, y1).
+fn t_count_px_r(fb, x0, x1, y0, y1, c): i64 {
+    var n = 0;
+    var yy = y0;
+    while (yy < y1) {
+        var xx = x0;
+        while (xx < x1) {
+            if (bhumi_fb_get(fb, xx, yy) == c) { n = n + 1; }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    return n;
+}
+
+# ⭐ THE ORACLE: how many cells Rust's rule (renderer.rs:544-560) gives an `n`-character title on a window
+# `w` px wide, in this port's units — Rust's own literal `w - 80` box, a FONT_ADV cell, and the run limit.
+# Written from Rust, not from `rend_title_caption`, so the sweep checks one against the other.
+fn t_rust_cap_r(n, w): i64 {
+    var bw = w - 80;
+    if (bw < 0) { bw = 0; }                         # saturating_sub
+    var cap = n;
+    if (n * FONT_ADV - 1 > bw) {                    # text_width(title) > max_title_width
+        var mc = bw / FONT_ADV;
+        if (mc > 2) { cap = mc; }                   # max_chars <= 2: Rust draws it whole
+    }
+    if (cap > AE_TEXT_CHARS) { cap = AE_TEXT_CHARS; }
+    return cap;
+}
+
+# 1 when the `len` bytes of queued run `i` are cells [k, k + len) of the `cap`-cell caption Rust's rule
+# makes from `title` (`n` characters): the title's own bytes, and dots in the last three when it was cut.
+fn t_run_is_cap_r(i, len, title, n, cap, k): i64 {
+    var j = 0;
+    while (j < len) {
+        var c = k + j;
+        var want = load8(title + c);
+        if (cap < n) { if (c >= cap - 3) { want = '.'; } }
+        if (load8(ae_text_run_ptr(i) + j) != want) { return 0; }
+        j = j + 1;
+    }
+    return 1;
+}
+
 fn ghost_frame(comp, fb, win, bg): i64 {
     rend_frame_damage(comp, fb, bg);
     if (rend_band_valid() == 1) {
@@ -1058,6 +1138,199 @@ fn main() {
     # ⚠ And a refusal must NOT retire the path — that is the difference between one missing frame and a
     # blank desktop for the session.
     assert_eq(ae_text_gpu_ok_get(), 1, "a locally-refused run leaves the GPU text path ENABLED");
+
+    # ================================================================
+    # Window titles: Rust's truncation, and a caption the glyph queue can always carry
+    # ================================================================
+    # ⭐ Parity: renderer.rs:543-562 cuts a title wider than `width - 80` to `max_chars = (width - 80) / 6`
+    # cells ending in '…', and draws it whole when `max_chars <= 2`. Mapped: the box runs from the title
+    # inset (x + 6) to 6 px short of the minimize button — `w - 80` again with these buttons — a cell is
+    # FONT_ADV (9), and the ellipsis is three ASCII dots (CP437 has no U+2026).
+    # ⛔ READ OFF THE GPU QUEUE. On a GPU frame `draw_text` queues the caption instead of drawing it, so the
+    # queued run is exactly what reaches the panel — and "not queued" is the invisible-title bug itself.
+    test_group("render — a window title truncates like Rust's (renderer.rs:543-562)");
+    var tlfb = bhumi_fb_new(1200, 120);
+    ae_gpu_frame_ok = 1;
+    ae_text_gpu_ok = 1;
+    var tlw = win_new(70, 20, 10, 200, 60, "puka");       # box: 200 - 80 = 120 px = 13 cells
+    var tlink = ae_bhumi(rupa_theme_ink(rupa_theme_active()));
+    assert_eq(t_title_q_r(tlfb, tlw), 1, "a short title queues ONE run");
+    assert_eq(ae_text_run_len(0), 4, "  drawn whole");
+    assert_eq(t_run_prefix_r(0, "puka", 4), 1, "  ...the title's own bytes");
+    assert_eq(ae_text_run_x(0), 26, "  at the title inset, x + 6");
+    assert_eq(ae_text_run_y(0), 17, "  on the titlebar's glyph row, y + (TITLEBAR_H - FONT_H) / 2");
+    assert_eq(ae_text_run_col(0), tlink, "  in the focused window's ink");
+    win_set_title(tlw, "A window title far too long for its titlebar");
+    t_title_q_r(tlfb, tlw);
+    assert_eq(ae_text_run_len(0), 13, "a 44-character title is cut to 120 / 9 = 13 cells, Rust's max_chars");
+    assert_eq(t_run_prefix_r(0, "A window t", 10), 1, "  the first 10 are the title's");
+    assert_eq(t_run_dots_r(0), 1, "  ...and the last 3 are the ellipsis, as ASCII dots");
+    assert_eq(t_gt_r(ae_text_run_x(0) + ae_text_width(ae_text_run_len(0)), deco_min_x(tlw) - 6), 0,
+      "  and it stops at least 6 px short of the minimize button, never under it");
+    # The boundary, both sides, in a box EXACTLY 13 cells wide: 196 - 80 = 116 = 13 * 9 - 1. Rust's test is
+    # `text_width > max`, strict, so 13 characters fit and 14 are cut to 116 / 9 = 12 cells.
+    win_resize(tlw, 196, 60);
+    win_set_title(tlw, "ABCDEFGHIJKLM");
+    t_title_q_r(tlfb, tlw);
+    assert_eq(ae_text_run_len(0), 13, "a title exactly as wide as its box is drawn whole");
+    assert_eq(t_run_dots_r(0), 0, "  with no ellipsis");
+    win_set_title(tlw, "ABCDEFGHIJKLMN");
+    t_title_q_r(tlfb, tlw);
+    assert_eq(ae_text_run_len(0), 12, "one character more is cut to 12 cells");
+    assert_eq(t_run_prefix_r(0, "ABCDEFGHI...", 12), 1, "  'ABCDEFGHI...'");
+    win_resize(tlw, 200, 60);
+    win_set_title(tlw, "A window title far too long for its titlebar");
+    # ⭐ AND THE CPU FRAME DRAWS THE SAME CAPTION. A sentinel background makes "no ink" a real observation.
+    ae_gpu_frame_ok = 0;
+    var TLBG = 0x00ABCDEF;
+    var tly = 10 + (TITLEBAR_H - FONT_H) / 2;             # the glyph row's top
+    bhumi_fb_clear(tlfb, TLBG);
+    render_window(tlfb, tlw, 1);
+    # VGA 8x16 '.' is a 2x2 dot, so the last three cells hold exactly 12 lit pixels — 'itl' uncut held more.
+    assert_eq(t_count_px_r(tlfb, 26 + 10 * FONT_ADV, 26 + 13 * FONT_ADV, tly, tly + FONT_H, tlink), 12,
+      "CPU frame: the last three cells are three dots");
+    assert_eq(t_count_px_r(tlfb, 26 + 13 * FONT_ADV, deco_min_x(tlw), tly, tly + FONT_H, tlink), 0,
+      "  no title ink between the caption and the minimize button");
+    assert_eq(t_count_px_r(tlfb, 220, 1200, tly, tly + FONT_H, tlink), 0,
+      "  and none right of the window (uncut, it ran to x = 422)");
+    ae_gpu_frame_ok = 1;
+
+    # ⭐ RUST'S NARROW-WINDOW RULE: a box of 2 cells or fewer draws the title WHOLE, not as a stub.
+    test_group("render — a very narrow window draws its whole title (Rust's max_chars <= 2)");
+    var tln = win_new(71, 20, 10, 106, 60, "Terminal emulator");   # box 26 px = 2 cells
+    assert_eq(t_title_q_r(tlfb, tln), 1, "a 2-cell box queues the title");
+    assert_eq(ae_text_run_len(0), 17, "  WHOLE: all 17 characters, past the window's own edge");
+    assert_eq(t_run_dots_r(0), 0, "  and no ellipsis");
+    win_resize(tln, 107, 60);                                       # box 27 px = 3 cells
+    t_title_q_r(tlfb, tln);
+    assert_eq(ae_text_run_len(0), 3, "one pixel wider is 3 cells: cut, and the ellipsis is all that fits");
+    assert_eq(t_run_dots_r(0), 1, "  '...'");
+    # ⛔⛔ AND WHOLE CAN RUN OFF THE SCREEN WHILE THE WINDOW DOES NOT. Flush with the right edge of a 400 px
+    # framebuffer, the 17-character title runs to x = 459: `ae_text_fits` dropped it, every GPU frame.
+    var tlfbe = bhumi_fb_new(400, 120);
+    win_resize(tln, 100, 60);
+    win_move(tln, 300, 10);
+    assert_eq(t_title_q_r(tlfbe, tln), 1, "a narrow window flush with the right edge still queues its title");
+    assert_eq(ae_text_run_x(0), 306, "  at the title inset");
+    assert_eq(ae_text_run_len(0), 10, "  the 10 cells that end by x = 400");
+    assert_eq(t_run_prefix_r(0, "Terminal e", 10), 1, "  'Terminal e' — the screen cuts it, not an ellipsis");
+
+    # ⛔⛔ THE RUN LIMIT. A 100-character title on a 1000 px window fits Rust's box (920 px = 102 cells), but
+    # `ae_text_enqueue` refuses a run over AE_TEXT_CHARS and its CPU fallback is never presented on a GPU
+    # frame — the title was invisible there, and only there.
+    test_group("render — a title longer than AE_TEXT_CHARS still reaches a GPU frame");
+    var tllong = alloc(AE_TEXT_CHARS + 40);
+    var tli = 0;
+    while (tli < 100) { store8(tllong + tli, 'A' + (tli % 26)); tli = tli + 1; }
+    store8(tllong + 100, 0);
+    var tlwide = win_new(72, 0, 10, 1000, 60, tllong);
+    var tld0 = ae_text_dropped_get();
+    assert_eq(t_title_q_r(tlfb, tlwide), 1, "a 100-character title on a wide window QUEUES");
+    assert_eq(ae_text_dropped_get(), tld0, "  ...and the queue refused nothing");
+    assert_eq(ae_text_run_len(0), AE_TEXT_CHARS, "  cut to the queue's run limit");
+    assert_eq(t_run_prefix_r(0, tllong, AE_TEXT_CHARS - 3), 1, "  the title's first 61 characters");
+    assert_eq(t_run_dots_r(0), 1, "  ...then the ellipsis, because it IS cut");
+    # ⛔⛔ AND WHEN RUST'S BOX CUTS IT TOO. At 800 px the box is 720 px, narrower than the title's 899, so
+    # Rust's cut applies — to 720 / 9 = 80 cells, still over the run limit. A caption of `max_chars` there
+    # is refused by the queue, and the title is invisible again on every GPU frame.
+    win_resize(tlwide, 800, 60);
+    tld0 = ae_text_dropped_get();
+    assert_eq(t_title_q_r(tlfb, tlwide), 1, "a 100-character title the box cuts to 80 cells QUEUES");
+    assert_eq(ae_text_dropped_get(), tld0, "  ...and the queue refused nothing");
+    assert_eq(ae_text_run_len(0), AE_TEXT_CHARS, "  capped to 64, not Rust's 80");
+    assert_eq(t_run_prefix_r(0, tllong, AE_TEXT_CHARS - 3), 1, "  the title's first 61 characters");
+    assert_eq(t_run_dots_r(0), 1, "  ...then the ellipsis");
+    win_resize(tlwide, 1000, 60);
+    # The limit's boundary: exactly AE_TEXT_CHARS is drawn whole; one more is cut back to it.
+    store8(tllong + AE_TEXT_CHARS, 0);
+    t_title_q_r(tlfb, tlwide);
+    assert_eq(ae_text_run_len(0), AE_TEXT_CHARS, "exactly 64 characters are drawn whole");
+    assert_eq(t_run_dots_r(0), 0, "  with no ellipsis");
+    store8(tllong + AE_TEXT_CHARS, 'A' + (AE_TEXT_CHARS % 26));
+    store8(tllong + AE_TEXT_CHARS + 1, 0);
+    tld0 = ae_text_dropped_get();
+    assert_eq(t_title_q_r(tlfb, tlwide), 1, "65 characters QUEUE");
+    assert_eq(ae_text_run_len(0), AE_TEXT_CHARS, "  cut back to 64");
+    assert_eq(ae_text_dropped_get(), tld0, "  and nothing was refused");
+
+    # ⛔⛔ THE SCREEN EDGE. `ae_text_fits` drops a run that leaves the framebuffer (`#92` op 0x03 refuses
+    # rather than clips), so a window partly off screen lost its whole title on every GPU frame while its
+    # rects, clipped by `ae_rect_enqueue`, still drew.
+    test_group("render — a window past the screen edge keeps the part of its title that is on screen");
+    var tlr = win_new(73, 300, 10, 300, 60, "Window past the right edge");   # runs to x = 600 of 400
+    assert_eq(t_title_q_r(tlfbe, tlr), 1, "a window past the RIGHT edge still queues its title");
+    assert_eq(ae_text_run_x(0), 306, "  at the title inset");
+    assert_eq(ae_text_run_len(0), 10, "  the 10 cells that end by x = 400 (306 + 10 * 9 = 396)");
+    assert_eq(t_run_prefix_r(0, "Window pas", 10), 1, "  'Window pas'");
+    # The LEFT edge: the title starts at x = -44, so cells 0..4 are cut by x = 0 and the run starts at
+    # cell 5 on the same 9 px grid, -44 + 5 * 9 = 1.
+    win_move(tlr, 0 - 50, 10);
+    assert_eq(t_title_q_r(tlfbe, tlr), 1, "a window past the LEFT edge still queues its title");
+    assert_eq(ae_text_run_x(0), 1, "  from the first cell wholly on screen, on its own grid");
+    assert_eq(ae_text_run_len(0), 19, "  the rest of the 24-cell caption");
+    assert_eq(t_run_prefix_r(0, "w past the right...", 19), 1, "  'w past the right...': Rust's cut, then the screen's");
+
+    # ⭐⭐ THE PROPERTY, SWEPT AGAINST THE ORACLE (`t_rust_cap_r`, written from Rust). Every window must queue
+    # exactly the cells of Rust's caption that are wholly on screen — at their own x, with their own bytes —
+    # and nothing when none is, and the queue must refuse none of it. Three titles, because each reaches
+    # different branches across the 14 widths: 17 characters (whole, cut, and Rust's 2-cell narrow rule),
+    # 65 (the run limit on a box that fits the whole title — a box can never cut it to more than 64) and 100
+    # (the run limit on a box that CUTS it, to 66..99 cells at 680..971 px). 34 positions, from 500 px past
+    # the left edge to beyond the right, put the screen's cut at every offset of the 9 px grid.
+    test_group("render — every caption is Rust's, cut only by the screen, and the glyph queue carries it");
+    var tlmiss = 0;      # cells on screen, and no run queued
+    var tlextra = 0;     # no cell on screen, and a run queued anyway
+    var tlwrong = 0;     # a run at the wrong x, of the wrong length, or with the wrong bytes
+    tld0 = ae_text_dropped_get();
+    var tlpass = 0;
+    while (tlpass < 3) {
+        var tlt = "Terminal emulator";
+        if (tlpass > 0) { tlt = tllong; }                  # 65 characters, as the boundary above left it
+        if (tlpass == 2) { store8(tllong + AE_TEXT_CHARS + 1, 'A' + ((AE_TEXT_CHARS + 1) % 26)); }   # 100 again
+        win_set_title(tlwide, tlt);
+        var tltn = strlen(tlt);
+        var tlsw = 1;
+        while (tlsw < 1300) {
+            var tlcap = t_rust_cap_r(tltn, tlsw);
+            var tlsx = 0 - 500;
+            while (tlsx < 1250) {
+                win_resize(tlwide, tlsw, 60);
+                win_move(tlwide, tlsx, 10);
+                var tlq = t_title_q_r(tlfb, tlwide);
+                # The caption starts at this port's title inset, x + 6; the screen keeps its cells [tlk, tle).
+                var tltx = tlsx + 6;
+                var tlk = 0;
+                while (tltx + tlk * FONT_ADV < 0) { tlk = tlk + 1; }
+                var tle = tlk;
+                while (tle < tlcap) {
+                    if (tltx + (tle + 1) * FONT_ADV > 1200) { break; }
+                    tle = tle + 1;
+                }
+                if (tle > tlk) {
+                    if (tlq == 0) { tlmiss = tlmiss + 1; }
+                    if (tlq > 0) {
+                        var tlok = 1;
+                        if (tlq != 1) { tlok = 0; }
+                        if (ae_text_run_x(0) != tltx + tlk * FONT_ADV) { tlok = 0; }
+                        if (ae_text_run_len(0) != tle - tlk) { tlok = 0; }
+                        if (tlok == 1) { tlok = t_run_is_cap_r(0, tle - tlk, tlt, tltn, tlcap, tlk); }
+                        if (tlok == 0) { tlwrong = tlwrong + 1; }
+                    }
+                }
+                if (tle <= tlk) { if (tlq > 0) { tlextra = tlextra + 1; } }
+                tlsx = tlsx + 53;
+            }
+            tlsw = tlsw + 97;
+        }
+        tlpass = tlpass + 1;
+    }
+    assert_eq(tlmiss, 0, "no caption with a cell wholly on screen went unqueued");
+    assert_eq(tlextra, 0, "  none with no cell on screen queued anything");
+    assert_eq(tlwrong, 0, "  every run is the on-screen cells of Rust's caption, at their own x");
+    assert_eq(ae_text_dropped_get(), tld0, "  and the queue refused none of them");
+    ae_gpu_frame_ok = 0;
+    ae_text_reset();
+    ae_rect_reset();
 
     # ⛔⛔ AND IF TEXT DOES RETIRE, CHROME MUST RETIRE WITH IT. `AE-8`'s fallback comment promised the
     # desktop keeps its titles; `AE-9` then deleted the `#39` blit, so CPU-drawn glyphs land in a

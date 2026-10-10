@@ -97,17 +97,50 @@ fn main() {
     var has_vscode = ai_context_apps_contains(cdev, str_from("vscode"));
     assert_eq(has_vscode, 1, "active_apps contains vscode");
 
+    # --- detect_context_type: the other development keywords
+    #     (test_detect_context_type_development_terminal / _editor) ---
+    test_group("ai_features — detect_context Development terminal/editor");
+    var fterm = ai_new();
+    ai_update_context(fterm, make_window_event(22, "terminal"));
+    assert_eq(ai_context_type(ai_get_context(fterm)), AI_ContextType.AI_CT_DEVELOPMENT, "terminal -> Development");
+    var fedit = ai_new();
+    ai_update_context(fedit, make_window_event(23, "text-editor"));
+    assert_eq(ai_context_type(ai_get_context(fedit)), AI_ContextType.AI_CT_DEVELOPMENT, "text-editor -> Development");
+    # ⛔ "cmdpalette" is NOT a development keyword (ai_features.rs:269 is code/terminal/editor). The port
+    # once matched it in place of "terminal"; a fix that kept both keywords would pass every test above.
+    var fpal = ai_new();
+    ai_update_context(fpal, make_window_event(30, "cmdpalette"));
+    assert_eq(ai_context_type(ai_get_context(fpal)), AI_ContextType.AI_CT_IDLE, "cmdpalette -> Idle, not Development");
+
     # --- detect_context_type: design (test_detect_context_type_design_figma) ---
     test_group("ai_features — detect_context Design");
     var fdes = ai_new();
     ai_update_context(fdes, make_window_event(11, "figma"));
     assert_eq(ai_context_type(ai_get_context(fdes)), AI_ContextType.AI_CT_DESIGN, "figma -> Design");
 
+    # --- detect_context_type: the other design keywords
+    #     (test_detect_context_type_design_gimp / _blender) ---
+    var fgimp = ai_new();
+    ai_update_context(fgimp, make_window_event(24, "gimp"));
+    assert_eq(ai_context_type(ai_get_context(fgimp)), AI_ContextType.AI_CT_DESIGN, "gimp -> Design");
+    var fblend = ai_new();
+    ai_update_context(fblend, make_window_event(25, "blender"));
+    assert_eq(ai_context_type(ai_get_context(fblend)), AI_ContextType.AI_CT_DESIGN, "blender -> Design");
+
     # --- detect_context_type: communication (test_detect_context_type_communication_slack) ---
     test_group("ai_features — detect_context Communication");
     var fcom = ai_new();
     ai_update_context(fcom, make_window_event(12, "slack"));
     assert_eq(ai_context_type(ai_get_context(fcom)), AI_ContextType.AI_CT_COMMUNICATION, "slack -> Communication");
+
+    # --- detect_context_type: the other communication keywords
+    #     (test_detect_context_type_communication_discord / _mail) ---
+    var fdisc = ai_new();
+    ai_update_context(fdisc, make_window_event(26, "discord"));
+    assert_eq(ai_context_type(ai_get_context(fdisc)), AI_ContextType.AI_CT_COMMUNICATION, "discord -> Communication");
+    var fmail = ai_new();
+    ai_update_context(fmail, make_window_event(27, "mail"));
+    assert_eq(ai_context_type(ai_get_context(fmail)), AI_ContextType.AI_CT_COMMUNICATION, "mail -> Communication");
 
     # --- detect_context_type: browsing (test_detect_context_type_browsing) ---
     test_group("ai_features — detect_context Browsing");
@@ -120,6 +153,25 @@ fn main() {
     var fidle = ai_new();
     ai_update_context(fidle, make_window_event(14, "calculator"));
     assert_eq(ai_context_type(ai_get_context(fidle)), AI_ContextType.AI_CT_IDLE, "calculator -> Idle");
+
+    # --- detect_context_type precedence: dev > design > comm > browsing
+    #     (the if/else-if chain at rust-old/src/ai_features.rs:279-289) ---
+    test_group("ai_features — detect_context precedence");
+    var fpre1 = ai_new();
+    ai_update_context(fpre1, make_window_event(28, "gimp"));
+    ai_update_context(fpre1, make_window_event(29, "terminal"));
+    assert_eq(ai_context_type(ai_get_context(fpre1)), AI_ContextType.AI_CT_DEVELOPMENT, "gimp+terminal -> Development");
+    var fpre2 = ai_new();
+    ai_update_context(fpre2, make_window_event(30, "slack"));
+    ai_update_context(fpre2, make_window_event(31, "figma"));
+    assert_eq(ai_context_type(ai_get_context(fpre2)), AI_ContextType.AI_CT_DESIGN, "slack+figma -> Design");
+    var fpre3 = ai_new();
+    ai_update_context(fpre3, make_window_event(32, "browser"));
+    ai_update_context(fpre3, make_window_event(33, "mail"));
+    assert_eq(ai_context_type(ai_get_context(fpre3)), AI_ContextType.AI_CT_COMMUNICATION, "browser+mail -> Communication");
+    var fpre4 = ai_new();
+    ai_update_context(fpre4, make_window_event(34, "Terminal"));
+    assert_eq(ai_context_type(ai_get_context(fpre4)), AI_ContextType.AI_CT_IDLE, "Terminal -> Idle (case-sensitive like str::contains)");
 
     # --- update_context: duplicate app not added twice
     #     (test_update_context_window_opened_duplicate_app) ---
@@ -207,6 +259,31 @@ fn main() {
     assert_eq(ai_suggestion_conf(vec_get(sv, 0)), 950, "sorted[0] = 950");
     assert_eq(ai_suggestion_conf(vec_get(sv, 1)), 800, "sorted[1] = 800");
     assert_eq(ai_suggestion_conf(vec_get(sv, 2)), 600, "sorted[2] = 600");
+
+    # --- add_suggestion sort is STABLE like Rust's sort_by
+    #     (rust-old/src/ai_features.rs:319-323): equal confidences keep
+    #     insertion order when a higher one arrives after them ---
+    test_group("ai_features — add_suggestion sort stable");
+    var fstab = ai_new();
+    ai_add_suggestion(fstab, ai_generate_suggestion(43, AI_SuggestionType.AI_ST_PRODUCTIVITY,
+        str_from("TieA"), str_from("D"), 700));
+    ai_add_suggestion(fstab, ai_generate_suggestion(44, AI_SuggestionType.AI_ST_PRODUCTIVITY,
+        str_from("TieB"), str_from("D"), 700));
+    ai_add_suggestion(fstab, ai_generate_suggestion(45, AI_SuggestionType.AI_ST_PRODUCTIVITY,
+        str_from("TieC"), str_from("D"), 700));
+    ai_add_suggestion(fstab, ai_generate_suggestion(46, AI_SuggestionType.AI_ST_PRODUCTIVITY,
+        str_from("Top"), str_from("D"), 900));
+    var stv = ai_suggestions(fstab);
+    assert_eq(vec_len(stv), 4, "four suggestions");
+    assert_eq(ai_suggestion_id(vec_get(stv, 0)), 46, "stable[0] = Top (900)");
+    assert_eq(ai_suggestion_id(vec_get(stv, 1)), 43, "stable[1] = TieA (first 700)");
+    assert_eq(ai_suggestion_id(vec_get(stv, 2)), 44, "stable[2] = TieB (second 700)");
+    assert_eq(ai_suggestion_id(vec_get(stv, 3)), 45, "stable[3] = TieC (third 700)");
+    # a tie arriving last stays behind its equals
+    ai_add_suggestion(fstab, ai_generate_suggestion(47, AI_SuggestionType.AI_ST_PRODUCTIVITY,
+        str_from("TieD"), str_from("D"), 700));
+    assert_eq(ai_suggestion_id(vec_get(stv, 1)), 43, "after TieD: [1] still TieA");
+    assert_eq(ai_suggestion_id(vec_get(stv, 4)), 47, "after TieD: [4] = TieD (last 700)");
 
     # --- dedup keeps different types with same title
     #     (test_suggestion_dedup_different_types_same_title_kept) ---
@@ -298,6 +375,27 @@ fn main() {
     var rcom = ai_smart_window_placement(fcomp);
     assert_eq(ai_place_x(rcom), 200, "communication place x=200");
     assert_eq(ai_place_w(rcom), 600, "communication place w=600");
+
+    # --- end-to-end (rust-old/src/system_tests.rs:1177-1199,
+    #     test_e2e_smart_window_placement): Idle placement, then a "terminal"
+    #     WindowOpened from the compositor switches to Development placement.
+    #     Rust's `_app_id` argument is unused, so the port takes none. ---
+    test_group("ai_features — e2e smart window placement");
+    var fe2e = ai_new();
+    var re0 = ai_smart_window_placement(fe2e);
+    assert_eq(ai_place_x(re0), 100, "e2e idle x=100");
+    assert_eq(ai_place_y(re0), 100, "e2e idle y=100");
+    assert_eq(ai_place_w(re0), 1200, "e2e idle w=1200");
+    assert_eq(ai_place_h(re0), 800, "e2e idle h=800");
+    var e2e_meta = map_new();
+    map_set(e2e_meta, "app", str_from("terminal"));
+    ai_update_context(fe2e, ai_event_new(303, AI_ContextEventType.AI_CE_WINDOW_OPENED,
+        str_from("compositor"), clock_epoch_secs(), e2e_meta));
+    var re1 = ai_smart_window_placement(fe2e);
+    assert_eq(ai_place_x(re1), 100, "e2e development x=100");
+    assert_eq(ai_place_y(re1), 100, "e2e development y=100");
+    assert_eq(ai_place_w(re1), 1400, "e2e development w=1400");
+    assert_eq(ai_place_h(re1), 900, "e2e development h=900");
 
     # --- register / initial state / count (test_register_agent_hud_initial_state) ---
     test_group("ai_features — register agent HUD");
@@ -394,6 +492,19 @@ fn main() {
     assert_eq(ai_time_of_day_for_hour(5), AI_TimeOfDay.AI_TOD_MORNING, "05h boundary -> Morning");
     assert_eq(ai_time_of_day_for_hour(11), AI_TimeOfDay.AI_TOD_MORNING, "11h boundary -> Morning");
     assert_eq(ai_time_of_day_for_hour(23), AI_TimeOfDay.AI_TOD_NIGHT, "23h -> Night");
+
+    # --- current hour: epoch_to_date record, and its null fallback
+    #     (Rust's Utc::now().hour() at ai_features.rs:197 cannot fail) ---
+    test_group("ai_features — hour from date record");
+    var e13 = 5 * 86400 + 13 * 3600 + 59;
+    assert_eq(ai_hour_from_date(epoch_to_date(e13), e13), 13, "record hour = 13");
+    assert_eq(ai_hour_from_date(0, e13), 13, "null record falls back to hour 13");
+    assert_eq(ai_hour_from_date(0, 86400 - 1), 23, "null record 23:59:59 -> 23");
+    # Pre-1970: `%` keeps the dividend's sign, so -1 s must normalise to 23:59:59, not hour 0.
+    assert_eq(ai_hour_from_date(0, 0 - 1), 23, "null record, epoch -1 -> 23");
+    assert_eq(ai_hour_from_date(0, 0 - 86400 + 3600), 1, "null record, epoch -23h -> 01");
+    var hnow = ai_current_hour();
+    assert_eq((hnow >= 0) && (hnow <= 23), 1, "current hour in 0..23");
 
     # --- status_from_str mapping (poll_agents status mapping) ---
     test_group("ai_features — status_from_str mapping");

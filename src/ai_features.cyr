@@ -369,10 +369,21 @@ fn ai_time_of_day_for_hour(hour): i64 {
     return AI_TimeOfDay.AI_TOD_NIGHT;
 }
 
+# UTC hour (0..23) of `epoch`, read from its epoch_to_date record `d`.
+# ⚠ epoch_to_date returns 0 when it cannot allocate. Rust's
+# `chrono::Utc::now().hour()` (ai_features.rs:197) cannot fail, so a null
+# record falls back to the same hour by arithmetic rather than reading 0+24.
+fn ai_hour_from_date(d, epoch): i64 {
+    if (d != 0) { return load64(d + 24); }   # hour (chrono.epoch_to_date layout)
+    var rem = epoch % 86400;
+    if (rem < 0) { rem = rem + 86400; }
+    return rem / 3600;
+}
+
 # Current UTC hour from epoch seconds (0..23) via lib/chrono epoch_to_date.
 fn ai_current_hour(): i64 {
-    var d = epoch_to_date(clock_epoch_secs());
-    return load64(d + 24);   # hour component (see chrono.epoch_to_date layout)
+    var now = clock_epoch_secs();
+    return ai_hour_from_date(epoch_to_date(now), now);
 }
 
 # ai_analyze_context — parity: `analyze_context`. Updates current context's
@@ -386,8 +397,9 @@ fn ai_analyze_context(f): i64 {
 }
 
 # ---------------------------------------------------------------------------
-# Context detection — parity: `detect_context_type`.
-# Substring match over active_apps app names (Str contains cstr).
+# Context detection — parity: `detect_context_type` (ai_features.rs:260-290).
+# Substring match over active_apps app names (Str contains cstr), case-sensitive
+# like Rust's `str::contains`. ⛔ The keyword sets are Rust's, verbatim.
 # ---------------------------------------------------------------------------
 
 # Helper: does any active app's name contain the given cstr needle?
@@ -408,7 +420,7 @@ fn ai_detect_context_type(f): i64 {
 
     var has_dev = 0;
     if (ai_apps_any_contains(apps, "code") == 1) { has_dev = 1; }
-    if (ai_apps_any_contains(apps, "cmdpalette") == 1) { has_dev = 1; }
+    if (ai_apps_any_contains(apps, "terminal") == 1) { has_dev = 1; }
     if (ai_apps_any_contains(apps, "editor") == 1) { has_dev = 1; }
 
     var has_design = 0;
@@ -503,19 +515,10 @@ fn ai_generate_suggestion(id, styp, title, desc, conf): i64 {
     return ai_suggestion_new(id, styp, title, desc, conf, 0, 0, clock_epoch_secs());
 }
 
-# _ai_sug_swap — swap two entries of the suggestions vec (sort helper).
-fn _ai_sug_swap(v, i, j): i64 {
-    var a = vec_get(v, i);
-    var b = vec_get(v, j);
-    vec_set(v, i, b);
-    vec_set(v, j, a);
-    return 0;
-}
-
 # ai_add_suggestion — parity: `add_suggestion`.
 # 1. retain: drop existing entries with same (type AND title).
 # 2. push new.
-# 3. sort by confidence DESCENDING (stable-ish insertion via bubble; N small).
+# 3. sort by confidence DESCENDING, stable (insertion sort; N small).
 fn ai_add_suggestion(f, suggestion): i64 {
     var v = load64(f + AI_FEAT_SUGGESTIONS);
     var styp = ai_suggestion_type(suggestion);
@@ -538,18 +541,23 @@ fn ai_add_suggestion(f, suggestion): i64 {
 
     vec_push(v, suggestion);
 
-    # sort_by confidence descending — insertion/bubble sort (vec is tiny).
+    # sort_by confidence descending (ai_features.rs:319-323). ⚠ Rust's sort_by
+    # is stable: equal confidences keep insertion order. Shift only past a
+    # STRICTLY lower confidence, never an equal one, or ties reorder.
     var n = vec_len(v);
-    var a = 0;
-    while (a < n) {
-        var b = a + 1;
-        while (b < n) {
-            var ca = ai_suggestion_conf(vec_get(v, a));
-            var cb = ai_suggestion_conf(vec_get(v, b));
-            if (cb > ca) { _ai_sug_swap(v, a, b); }
-            b = b + 1;
+    var k = 1;
+    while (k < n) {
+        var key = vec_get(v, k);
+        var kconf = ai_suggestion_conf(key);
+        var j = k;
+        while (j > 0) {
+            var prev = vec_get(v, j - 1);
+            if (ai_suggestion_conf(prev) >= kconf) { break; }
+            vec_set(v, j, prev);
+            j = j - 1;
         }
-        a = a + 1;
+        vec_set(v, j, key);
+        k = k + 1;
     }
     return 0;
 }

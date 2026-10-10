@@ -5,6 +5,100 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.17.1] — 2026-10-09 — the port's silent divergences from Rust, restored
+
+> The arc's correctness bite (roadmap § 0.17.x). Where the port did something other than what Rust did,
+> and no ADR said so, it now does what Rust did. Each fix has a ported or new test, and the test fails when
+> the fix is reverted. The divergences that stay are recorded in ADR 0003. The commit, the tag and the push
+> are the operator's.
+
+### Fixed — AI context detection matched `"cmdpalette"` where Rust matched `"terminal"`
+
+`ai_detect_context_type`'s development keywords are Rust's again: `code`, `terminal`, `editor`
+(`ai_features.rs:269`). Before this, a terminal window read as Idle. The other keyword sets, their order of
+precedence and the case-sensitive match were checked against Rust, and they already agreed. Ported: the six
+`detect_context_type_*` tests and `test_e2e_smart_window_placement`. A new test pins that `cmdpalette` on
+its own reads Idle, so a fix that kept both keywords fails.
+
+### Fixed — the shell app registry listed a command palette where Rust listed a terminal
+
+Entry 0 of `shell_init_app_registry` is `terminal` / "Terminal" again (`shell.rs:261-268`). The palette was
+a renamed `apps.rs` window, retired in 0.17.0. The other 13 entries and the launcher items built from them
+were checked field by field. Ported: `launch_app`; `launch_all_registered_apps` and
+`launch_each_registered_app` over all 14 ids (the old tests covered 3); `search_launcher` with its
+`_partial_match` and `_by_description` variants; `app_registry_count`.
+
+### Fixed — the security dashboard could not report Info
+
+The maximum threat started at Low, so a dashboard with only Info alerts read Low. It is now the maximum over
+the active alerts, and Low only when there are none (Rust's `.max().unwrap_or(Low)`,
+`security_ui.rs:441-446`). Ported: `get_dashboard_with_info_level_alert`, `critical_alert_shows` and
+`test_e2e_security_alert_escalation_flow`.
+
+### Fixed — dismissing an alert could resolve a different one
+
+The alert list holds ids the caller supplies and ids `emergency_kill_agent` mints. Both counted from 1, and
+`dismiss_alert` takes the first match, so it could resolve the wrong alert. Rust's random `Uuid`s never met.
+Minted ids now start at 2⁶²+1 (`SEC_ID_MINTED_BASE`), which ADR 0003 records. A new test mints four ids,
+then dismisses 16 caller alerts, and checks that each dismiss resolves the caller's own alert.
+
+### Fixed — closing a window left its workspace's active window pointing at it
+
+`comp_close_window` never updated `WSP_ACTIVE`. When the closed window is the active one, active now passes
+to the last window left in the workspace, or to none (`compositor.rs:309-311`). Close and
+`comp_move_window_to_workspace` both drop every entry for the id, as Rust's `retain` did. This matters
+because a window moved to the same workspace twice is listed there twice. Ported:
+`close_updates_active_window` and `close_last_window_clears_active`. New cases break the "active is always
+the last window" shortcut, so a fix without the guard fails.
+
+### Fixed — window titles: truncation, and titles a GPU frame never showed
+
+- Rust cut a title wider than its box (`width − 80`) and ended it in an ellipsis. The port drew every title
+  whole. `render_title` now cuts to the box, whose size comes from the decoration geometry.
+- The GPU text queue refuses a title over 64 bytes. Its CPU fallback is not presented on a GPU frame
+  (`gpu.cyr:1343`), so on iron that window showed no title at all. Every caption is now capped at 64 cells,
+  on every frame kind.
+- The GPU queue refuses a run that crosses the screen edge rather than clipping it, so a window partly past
+  the left or right edge lost its whole title on a GPU frame. The caption now drops only the cells the edge
+  cuts.
+- *Interim:* the ellipsis is ASCII `...`, and captions are measured in bytes, until kashi 1.1.0 (0.17.2). A
+  UTF-8 `…` drew as three CP437 cells (`ΓÇª`); Rust's 5×7 font drew it as a blank.
+- The caption buffer is sized by a new `AE_TEXT_CAP_B` constant. Under mutation, the first version's literal
+  size overflowed the stack.
+- Tested against an oracle written from Rust's `w − 80` rule: 3 titles × 14 widths × 34 positions.
+
+### Fixed — smaller
+
+- The suggestion sort was not stable, so equal confidences could swap order. Rust's `sort_by` is stable
+  (`ai_features.rs:319-323`); the port now uses an insertion sort.
+- `ai_current_hour` read an `epoch_to_date` record without checking it for null. `ai_hour_from_date` now
+  works out the same hour by arithmetic when the record is null, including for a negative epoch.
+- `tests/aethersafha.tcyr` returned before 18 wallpaper assertions. They now run, and pass.
+- `tests/shell.tcyr`'s prefix-boost check indexed into an empty search result, which ends the suite without
+  a report. It is now guarded.
+
+### Changed
+
+- CI's coverage floor rises to 63% (647 of 1,020 functions); checked to fail at `--min 64`.
+
+### Docs
+
+- ADR 0003 now also records:
+  - closing the focused window focuses the topmost visible one (since 0.16.30);
+  - minted security ids start at 2⁶²+1;
+  - the window-caption rules, with the two interim entries kashi 1.1.0 closes.
+- `parity-plan.md`: the compositor, renderer, shell, AI and security rows lose their 0.17.1 items, and the
+  ported tests leave *Rust tests still to re-express*.
+- `roadmap.md`: 0.17.1 is shipped; 0.17.2 opens with the kashi 1.1.0 integration.
+
+### Verified
+
+- **Host 4,136,960 B** (sha256 `05e8a9b7…`) · **`--agnos` 4,095,728 B** (sha256 `74c68319…`).
+- **25 / 25 suites, 2,029 assertions, 0 failed.** No compiler warning points at `src/`.
+- `scripts/qemu-linux-input.sh` → PASS on this binary (same hash) · `check-dep-tags.sh` → 7 deps clean ·
+  `cyrius deps --verify` → 83 verified · CI's format check clean · `cyrius coverage --min 63` passes.
+- ⚠ Not run on iron.
+
 ## [0.17.0] — 2026-10-09 — the parity arc opens: the record written, the retired surface deleted
 
 > The first release of the 0.17.x arc, which closes Rust parity and then deletes `rust-old/` (roadmap

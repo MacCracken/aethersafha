@@ -15,6 +15,7 @@ enum RenderK {
     BTN_GAP    = 4;    # gap between buttons
     BTN_MARGIN = 6;    # gap from the window's right edge to the close button
     RESIZE_M   = 6;    # resize-edge grab margin
+    TITLE_PAD  = 6;    # title inset from the left edge, and its clearance before the minimize button
 }
 
 # Which part of a window's decoration a point hits (parity: renderer.rs DecorationHit).
@@ -577,6 +578,17 @@ fn deco_max_x(win)   { return deco_close_x(win) - BTN_GAP - BTN_W; }
 fn deco_min_x(win)   { return deco_max_x(win) - BTN_GAP - BTN_W; }
 fn deco_btn_y(win)   { return win_y(win) + (TITLEBAR_H - BTN_H) / 2; }
 
+# The title's box (parity: renderer.rs:544, `rect.width.saturating_sub(80) // Leave room for buttons`).
+# ⚠ Rust's 80 is ITS geometry — the title at x+8, a 50 px cluster of 12 px buttons, 22 px of slack — so the
+# box is derived, not copied: it runs from TITLE_PAD inside the left edge to TITLE_PAD short of the minimize
+# button. Today that comes to `w - 80`, Rust's own number; it moves with the buttons if they ever change.
+fn deco_title_x(win) { return win_x(win) + TITLE_PAD; }
+fn deco_title_w(win): i64 {
+    var tw = deco_min_x(win) - TITLE_PAD - deco_title_x(win);
+    if (tw < 0) { return 0; }                     # Rust: saturating_sub
+    return tw;
+}
+
 # Is (px,py) inside the BTN_W x BTN_H button at (bx,by)?
 fn deco_in_btn(px, py, bx, by): i64 {
     if (px < bx) { return 0; }
@@ -763,6 +775,73 @@ fn render_cursor(fb): i64 {
     return 0;
 }
 
+# rend_title_caption(dst, title, box_w): the caption a title box `box_w` px wide shows, written to `dst`
+# (AE_TEXT_CAP_B bytes) NUL-terminated. -> its length, which is also its width in glyph cells.
+#
+# Parity: renderer.rs:545-560. A title wider than its box is cut to `box_w / FONT_ADV` cells ending in an
+# ellipsis — unless that budget is 2 cells or fewer, where Rust draws the whole title rather than a stub.
+# ⚠ Measured in BYTES where Rust counts chars: `draw_text` gives every byte its own cell, so a byte is what
+# a cell holds here.
+#
+# ⛔ THE ELLIPSIS IS "...", NOT "…". `draw_text` reads BYTES and kashi's VGA 8x16 is code page 437, which
+# has no U+2026, so a UTF-8 "…" (E2 80 A6) draws THREE cells: `ΓÇª`. Rust never showed one either — its 5x7
+# font has no '…' glyph, so `draw_char` returned false and that cell was blank. The dots take the LAST three
+# cells of Rust's budget: the caption is as wide as Rust's and keeps two fewer of the title's characters.
+#
+# ⛔⛔ AND NO CAPTION IS LONGER THAN AE_TEXT_CHARS, however wide the window — including when the box cuts it
+# to more cells than that. `ae_text_enqueue` refuses a longer run, `draw_text` falls back to the CPU, and on
+# a GPU frame nothing presents the CPU layer — gpu.cyr skips the `#39` band once chrome is queued — so such a
+# title was never on screen at all. Rust drew it whole; it is cut here like any other title too long for its
+# box, on every frame kind, so a CPU frame (QEMU) and a GPU frame (iron) show the same caption.
+fn rend_title_caption(dst, title, box_w): i64 {
+    store8(dst, 0);
+    if (title == 0) { return 0; }
+    var n = 0;
+    while (load8(title + n) != 0) { n = n + 1; }
+    var lim = AE_TEXT_CHARS;
+    if (text_width(title) > box_w) {
+        var mc = box_w / FONT_ADV;
+        if (mc > 2) { if (mc < lim) { lim = mc; } }
+    }
+    if (lim > AE_TEXT_CAP_B - 1) { lim = AE_TEXT_CAP_B - 1; }   # LAST: never past `dst`, whatever came above
+    var len = n;
+    if (len > lim) { len = lim; }
+    var i = 0;
+    while (i < len) { store8(dst + i, load8(title + i)); i = i + 1; }
+    store8(dst + len, 0);
+    # Cut: the last three cells become the ellipsis (`lim` is at least 3 today; the floor keeps it in `dst`).
+    if (len < n) {
+        var d = len - 3;
+        if (d < 0) { d = 0; }
+        while (d < len) { store8(dst + d, '.'); d = d + 1; }
+    }
+    return len;
+}
+
+# render_title(fb, win, color): draw the window's caption in its titlebar. -> width drawn, px.
+#
+# ⛔⛔ ONLY THE CELLS WHOLLY ON THE FRAMEBUFFER — a cell being the 9 px glyph-plus-gap, the same extent
+# `ae_text_fits` measures. That check drops a run that leaves the framebuffer — `#92` op 0x03 refuses rather
+# than clips — and a dropped run's CPU fallback is invisible on a GPU frame for the reason above. So a window
+# partly past an edge lost its ENTIRE title on every GPU frame, while its rects, clipped by
+# `ae_rect_enqueue`, still drew. The cells an edge cuts are skipped and the rest keep their grid, so both
+# frame kinds draw the same caption. ⚠ A CPU frame pays for that: it loses the glyph at each edge that a
+# per-pixel clip drew in part — or whole, when only its gap column is off the right edge.
+# ⚠ Horizontal only. A glyph row crossing the TOP or BOTTOM edge still drops its run — a 1bpp run cannot
+# lose rows without per-run stride surgery — and neither the mover nor the spawn cascade puts one there.
+fn render_title(fb, win, color): i64 {
+    var cap[AE_TEXT_CAP_B];                         # function-local => AE_TEXT_CAP_B BYTES
+    var n = rend_title_caption(&cap, win_title(win), deco_title_w(win));
+    var tx = deco_title_x(win);
+    var k = 0;                                      # the first cell wholly right of x = 0
+    if (tx < 0) { k = (FONT_ADV - 1 - tx) / FONT_ADV; }
+    var e = (bhumi_fb_width(fb) - tx) / FONT_ADV;   # the cells that end by the right edge
+    if (e > n) { e = n; }
+    if (e <= k) { return 0; }
+    store8(&cap + e, 0);
+    return draw_text(fb, &cap + k, tx + k * FONT_ADV, win_y(win) + (TITLEBAR_H - FONT_H) / 2, color);
+}
+
 fn render_window(fb, win, focused): i64 {
     var x = win_x(win);
     var y = win_y(win);
@@ -788,7 +867,7 @@ fn render_window(fb, win, focused): i64 {
     # title text — primary ink when focused, muted otherwise
     var tc = ae_bhumi(rupa_theme_mute(th));
     if (focused == 1) { tc = ae_bhumi(rupa_theme_ink(th)); }
-    draw_text(fb, win_title(win), x + 6, y + (TITLEBAR_H - FONT_H) / 2, tc);
+    render_title(fb, win, tc);
     # decoration buttons: close = alert, maximize = held, minimize = faint
     var by = deco_btn_y(win);
     fill_rect(fb, deco_close_x(win), by, BTN_W, BTN_H, ae_bhumi(rupa_theme_alert(th)));
@@ -1181,7 +1260,8 @@ fn ae_rect_enqueue_a(fb, x, y, w, h, color, a): i64 {
 # gpu.cyr. The syscall stays on the far side of that line.
 enum AeText {
     AE_TEXT_MAX   = 48;    # runs per frame
-    AE_TEXT_CHARS = 64;    # chars per run — the widest titlebar/panel string the chrome produces
+    AE_TEXT_CHARS = 64;    # chars per run — every window caption is capped to it; other chrome text is not
+    AE_TEXT_CAP_B = 72;    # bytes in a caption buffer: AE_TEXT_CHARS + NUL, rounded up — keep it > AE_TEXT_CHARS
 }
 var ae_text_n = 0;
 var ae_text_x[48];
@@ -1194,8 +1274,10 @@ var ae_text_len[48];
 var ae_text_pool[384];
 var ae_text_used = 0;
 # ⚠ COUNTED, NOT SILENT. A queue that quietly drops a run renders a window with no title and nothing says
-# why. The caller falls back to the CPU path on a refusal, so a drop is a performance fact, not a visual
-# one — but an uncounted one would be invisible if that ever stopped being true.
+# why. The caller falls back to the CPU path on a refusal — ⛔ but a GPU frame never presents that CPU layer
+# (`AE-9` skips the `#39` band), so there a drop IS a missing caption. Window captions are made to fit
+# HORIZONTALLY before they get here (`render_title`); a run `ae_text_fits` refuses — a caption row past the
+# top or bottom edge among them — is not counted at all.
 var ae_text_dropped = 0;
 # ⛔ 1 = the GPU glyph path is still trusted. THIS IS THE ONE-FRAME KILL SWITCH, and it exists because the
 # enqueue happens BEFORE anyone knows the op will succeed: `draw_text` hands a run to the queue and does not

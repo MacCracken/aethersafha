@@ -280,8 +280,8 @@ fn main() {
 
     # -----------------------------------------------------------------------
     # Dashboard aggregation (test_..get_dashboard, _with_alerts_and_perms,
-    #  _no_active_alerts_returns_low, _critical_alert_shows, _info_level).
-    # Use a fresh UI to control counts precisely.
+    #  _no_active_alerts_returns_low). Critical / Info / escalation follow in
+    #  their own groups below. Use a fresh UI to control counts precisely.
     # -----------------------------------------------------------------------
     test_group("security_ui — dashboard aggregation");
     var ui2 = sec_ui_new();
@@ -306,6 +306,57 @@ fn main() {
     assert_eq(sec_dash_running_agents(d1), 1, "dash: 1 running agent");
     assert_eq(sec_dash_threat_level(d1), SecThreatLevel.SEC_TL_HIGH, "dash: max threat High");
 
+    # test_security_ui_critical_alert_shows — a lone Critical alert.
+    var uic = sec_ui_new();
+    var crit = sec_alert_new(1, "CRITICAL", "", SecThreatLevel.SEC_TL_CRITICAL, "", 2000, 0, 0);
+    sec_ui_show_security_alert(uic, crit);
+    var dc = sec_ui_get_security_dashboard(uic, 2000);
+    assert_eq(sec_dash_threat_level(dc), SecThreatLevel.SEC_TL_CRITICAL, "dash: lone Critical -> Critical");
+
+    # test_get_dashboard_with_info_level_alert — Low is the no-alert fallback,
+    # not a floor: an Info-only dashboard reports Info.
+    var uii = sec_ui_new();
+    var info = sec_alert_new(1, "Info", "", SecThreatLevel.SEC_TL_INFO, "", 2000, 0, 0);
+    sec_ui_show_security_alert(uii, info);
+    var di = sec_ui_get_security_dashboard(uii, 2000);
+    assert_eq(sec_dash_threat_level(di), SecThreatLevel.SEC_TL_INFO, "dash: Info-only -> Info");
+    # Resolving the only alert drops back to the Low fallback.
+    sec_ui_dismiss_alert(uii, 1);
+    var di2 = sec_ui_get_security_dashboard(uii, 2000);
+    assert_eq(sec_dash_threat_level(di2), SecThreatLevel.SEC_TL_LOW, "dash: Info resolved -> Low");
+    # Resolved alerts are outside the max: Info + resolved Critical -> Info.
+    var uir = sec_ui_new();
+    sec_ui_show_security_alert(uir, sec_alert_new(1, "Info", "", SecThreatLevel.SEC_TL_INFO, "", 2000, 0, 0));
+    sec_ui_show_security_alert(uir, sec_alert_new(2, "Old", "", SecThreatLevel.SEC_TL_CRITICAL, "", 2000, 0, 1));
+    var dir = sec_ui_get_security_dashboard(uir, 2000);
+    assert_eq(sec_dash_active_alerts(dir), 1, "dash: Info + resolved Critical -> 1 active");
+    assert_eq(sec_dash_threat_level(dir), SecThreatLevel.SEC_TL_INFO, "dash: Info + resolved Critical -> Info");
+
+    # -----------------------------------------------------------------------
+    # system_tests.rs test_e2e_security_alert_escalation_flow:
+    # none -> Low, + Info -> Info, + Medium -> Medium, + Critical -> Critical.
+    # -----------------------------------------------------------------------
+    test_group("security_ui — alert escalation flow");
+    var ues = sec_ui_new();
+    var de0 = sec_ui_get_security_dashboard(ues, 4000);
+    assert_eq(sec_dash_active_alerts(de0), 0, "escalation: start 0 active");
+    assert_eq(sec_dash_threat_level(de0), SecThreatLevel.SEC_TL_LOW, "escalation: start Low");
+    sec_ui_show_security_alert(ues, sec_alert_new(1, "Info event", "Informational",
+        SecThreatLevel.SEC_TL_INFO, "system", 4000, 0, 0));
+    var de1 = sec_ui_get_security_dashboard(ues, 4000);
+    assert_eq(sec_dash_active_alerts(de1), 1, "escalation: Info -> 1 active");
+    assert_eq(sec_dash_threat_level(de1), SecThreatLevel.SEC_TL_INFO, "escalation: Info -> Info");
+    sec_ui_show_security_alert(ues, sec_alert_new(2, "Suspicious activity",
+        "Unusual network traffic", SecThreatLevel.SEC_TL_MEDIUM, "network", 4000, 0, 0));
+    var de2 = sec_ui_get_security_dashboard(ues, 4000);
+    assert_eq(sec_dash_active_alerts(de2), 2, "escalation: Medium -> 2 active");
+    assert_eq(sec_dash_threat_level(de2), SecThreatLevel.SEC_TL_MEDIUM, "escalation: Medium -> Medium");
+    sec_ui_show_security_alert(ues, sec_alert_new(3, "Breach detected", "Unauthorized access",
+        SecThreatLevel.SEC_TL_CRITICAL, "ids", 4000, 1, 0));
+    var de3 = sec_ui_get_security_dashboard(ues, 4000);
+    assert_eq(sec_dash_active_alerts(de3), 3, "escalation: Critical -> 3 active");
+    assert_eq(sec_dash_threat_level(de3), SecThreatLevel.SEC_TL_CRITICAL, "escalation: Critical -> Critical");
+
     # -----------------------------------------------------------------------
     # emergency_kill_agent — records a RESOLVED critical alert (test_..no_pid).
     # Resolved -> does NOT count as active, but is recorded in the alert vec.
@@ -321,6 +372,42 @@ fn main() {
     var killed_alert = vec_get(sec_ui_alerts(ui3), 0);
     assert_eq(sec_alert_threat(killed_alert), SecThreatLevel.SEC_TL_CRITICAL, "kill alert Critical");
     assert_eq(sec_alert_is_resolved(killed_alert), 1, "kill alert resolved");
+
+    # -----------------------------------------------------------------------
+    # Minted vs caller-supplied alert ids. The kill path mints its alert id; a
+    # caller counting its own ids from 1 must not land on it, or dismiss_alert's
+    # first match resolves the (already resolved) kill alert instead. The
+    # contract is "every minted id > SEC_ID_MINTED_BASE"; the sweep then shows
+    # no caller id 1..16 is shadowed by a minted one.
+    # -----------------------------------------------------------------------
+    test_group("security_ui — minted ids never meet caller ids");
+    var uid = sec_ui_new();
+    sec_ui_emergency_kill_agent(uid, 7, 0, 5000);
+    var oid_m = sec_ui_request_human_override(uid, "agent", "rm", "why", 5000);
+    sec_ui_emergency_kill_agent(uid, 8, 0, 5000);
+    sec_ui_emergency_kill_agent(uid, 9, 0, 5000);
+    var minted = sec_alert_id(vec_get(sec_ui_alerts(uid), 0));
+    var minted3 = sec_alert_id(vec_get(sec_ui_alerts(uid), 2));
+    assert_eq(minted > SecIdSpace.SEC_ID_MINTED_BASE, 1, "kill alert id > SEC_ID_MINTED_BASE");
+    assert_eq(oid_m > SecIdSpace.SEC_ID_MINTED_BASE, 1, "override id > SEC_ID_MINTED_BASE");
+    assert_eq(minted3 > SecIdSpace.SEC_ID_MINTED_BASE, 1, "third kill alert id > SEC_ID_MINTED_BASE");
+    var mine_v = vec_new();
+    var ci = 1;
+    while (ci <= 16) {
+        var mine = sec_alert_new(ci, "caller", "", SecThreatLevel.SEC_TL_HIGH, "agent", 5000, 1, 0);
+        sec_ui_show_security_alert(uid, mine);
+        vec_push(mine_v, mine);
+        ci = ci + 1;
+    }
+    var own_hits = 0;
+    ci = 1;
+    while (ci <= 16) {
+        sec_ui_dismiss_alert(uid, ci);
+        own_hits = own_hits + sec_alert_is_resolved(vec_get(mine_v, ci - 1));
+        ci = ci + 1;
+    }
+    assert_eq(own_hits, 16, "dismiss(1..16) each resolves the caller's own alert");
+    assert_eq(vec_len(sec_ui_get_active_alerts(uid)), 0, "after dismiss(1..16): 0 active");
 
     # -----------------------------------------------------------------------
     # WindowBadgeManager (badge_tests: new_empty, assign_and_get, get_missing,

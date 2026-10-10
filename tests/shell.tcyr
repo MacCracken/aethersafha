@@ -8,6 +8,57 @@ include "src/shell.cyr"
 # Non-null pointer check helper (assert() is strict cond==1).
 fn t_ok(x) { if (x != 0) { return 1; } return 0; }
 
+# t_find_item: the live launcher item whose id Str equals lid, or 0.
+fn t_find_item(sh, lid) {
+    var items = shell_items(sh);
+    var n = vec_len(items);
+    var i = 0;
+    while (i < n) {
+        var it = vec_get(items, i);
+        if (str_eq(shell_item_id(it), lid) == 1) { return it; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# t_app_matches: 1 iff the registry entry for `id` AND the launcher item derived from it carry
+# exactly rust's fields (shell.rs initialize_app_registry + populate_launcher_items).
+fn t_app_matches(sh, id, name, icon, cat, is_ai) {
+    var app = shell_registry_get(sh, id);
+    if (app == 0) { return 0; }
+    if (streq(shell_app_id(app), id) != 1) { return 0; }
+    if (streq(shell_app_name(app), name) != 1) { return 0; }
+    if (streq(shell_app_icon(app), icon) != 1) { return 0; }
+    if (shell_app_category(app) != cat) { return 0; }
+    if (shell_app_is_ai(app) != is_ai) { return 0; }
+    # launcher item: id "app-<id>", desc "Launch <name>", app Some, OpenApp(id), 1.0 -> 1000
+    var it = t_find_item(sh, str_cat(str_from("app-"), str_from(id)));
+    if (it == 0) { return 0; }
+    if (str_eq(shell_item_name(it), str_from(name)) != 1) { return 0; }
+    if (str_eq(shell_item_desc(it), str_cat(str_from("Launch "), str_from(name))) != 1) { return 0; }
+    if (str_eq(shell_item_icon(it), str_from(icon)) != 1) { return 0; }
+    if (shell_item_app(it) != app) { return 0; }
+    var act = shell_item_action(it);
+    if (act == 0) { return 0; }
+    if (shell_action_kind(act) != SH_LauncherActionKind.SH_ACT_OPEN_APP) { return 0; }
+    if (streq(shell_action_arg(act), id) != 1) { return 0; }
+    if (shell_item_suggested(it) != 0) { return 0; }
+    if (shell_item_relevance(it) != 1000) { return 0; }
+    return 1;
+}
+
+# t_any_name_contains: 1 iff some result's lowercased name contains needle (a lowercase cstr).
+fn t_any_name_contains(results, needle) {
+    var n = vec_len(results);
+    var i = 0;
+    while (i < n) {
+        var lc = shell_str_lower_str(shell_item_name(vec_get(results, i)));
+        if (str_contains(lc, str_from(needle)) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn main() {
     alloc_init();
 
@@ -39,17 +90,62 @@ fn main() {
 
     # ============================================================
     # App launch + registry
-    # (rust: test_desktop_shell_launch_app, test_desktop_shell_launch_all_registered_apps)
+    # (rust: test_desktop_shell_launch_app, test_desktop_shell_launch_all_registered_apps,
+    #  test_desktop_shell_launch_each_registered_app — the two loops are identical in rust)
     # ============================================================
     test_group("shell — launch app");
-    assert_eq(shell_launch_app(sh, "cmdpalette"), SH_Err.SH_OK, "launch cmdpalette OK");
-    assert_eq(shell_launch_app(sh, "midori"), SH_Err.SH_OK, "launch midori OK");
-    assert_eq(shell_launch_app(sh, "agent-manager"), SH_Err.SH_OK, "launch agent-manager OK");
+    assert_eq(shell_launch_app(sh, "terminal"), SH_Err.SH_OK, "launch terminal OK");
+    assert_eq(shell_launch_app(sh, "nonexistent"), SH_Err.SH_ERR_APP_NOT_FOUND, "launch nonexistent errors");
     assert_eq(shell_launch_app(sh, "nonexistent-app-xyz"), SH_Err.SH_ERR_APP_NOT_FOUND, "launch unknown app errors");
-    var term_entry = shell_registry_get(sh, "cmdpalette");
-    assert(t_ok(term_entry), "command palette registry entry present");
-    assert_eq(shell_app_category(term_entry), SH_AppCategory.SH_CAT_SYSTEM, "command palette is System category");
-    assert_eq(shell_app_is_ai(term_entry), 1, "command palette flagged is_ai");
+    assert_eq(shell_launch_app(sh, "filemanager"), SH_Err.SH_OK, "launch filemanager OK");
+    assert_eq(shell_launch_app(sh, "settings"), SH_Err.SH_OK, "launch settings OK");
+    assert_eq(shell_launch_app(sh, "agent-manager"), SH_Err.SH_OK, "launch agent-manager OK");
+    assert_eq(shell_launch_app(sh, "audit-viewer"), SH_Err.SH_OK, "launch audit-viewer OK");
+    assert_eq(shell_launch_app(sh, "model-manager"), SH_Err.SH_OK, "launch model-manager OK");
+    assert_eq(shell_launch_app(sh, "firefox"), SH_Err.SH_OK, "launch firefox OK");
+    assert_eq(shell_launch_app(sh, "chromium"), SH_Err.SH_OK, "launch chromium OK");
+    assert_eq(shell_launch_app(sh, "zen-browser"), SH_Err.SH_OK, "launch zen-browser OK");
+    assert_eq(shell_launch_app(sh, "brave"), SH_Err.SH_OK, "launch brave OK");
+    assert_eq(shell_launch_app(sh, "librewolf"), SH_Err.SH_OK, "launch librewolf OK");
+    assert_eq(shell_launch_app(sh, "vivaldi"), SH_Err.SH_OK, "launch vivaldi OK");
+    assert_eq(shell_launch_app(sh, "falkon"), SH_Err.SH_OK, "launch falkon OK");
+    assert_eq(shell_launch_app(sh, "midori"), SH_Err.SH_OK, "launch midori OK");
+    assert_eq(shell_launch_app(sh, "cmdpalette"), SH_Err.SH_ERR_APP_NOT_FOUND, "no cmdpalette entry — rust never registered one");
+
+    # ============================================================
+    # Registry + derived launcher items, field by field
+    # (rust: initialize_app_registry, populate_launcher_items, test_desktop_shell_app_registry_count)
+    # 14 matches + a count of 14 pins the exact set; 15 items == 14 app items + "search-files".
+    # ============================================================
+    test_group("shell — registry + launcher items vs rust");
+    var C_SYS = SH_AppCategory.SH_CAT_SYSTEM;
+    var C_AI = SH_AppCategory.SH_CAT_AI;
+    var C_NET = SH_AppCategory.SH_CAT_INTERNET;
+    assert_eq(t_app_matches(sh, "terminal", "Terminal", "terminal", C_SYS, 1), 1, "terminal entry + item match rust");
+    assert_eq(t_app_matches(sh, "filemanager", "File Manager", "folder", C_SYS, 0), 1, "filemanager entry + item match rust");
+    assert_eq(t_app_matches(sh, "settings", "Settings", "settings", C_SYS, 0), 1, "settings entry + item match rust");
+    assert_eq(t_app_matches(sh, "agent-manager", "Agent Manager", "bot", C_AI, 1), 1, "agent-manager entry + item match rust");
+    assert_eq(t_app_matches(sh, "audit-viewer", "Audit Viewer", "shield", C_SYS, 1), 1, "audit-viewer entry + item match rust");
+    assert_eq(t_app_matches(sh, "model-manager", "Model Manager", "cpu", C_AI, 1), 1, "model-manager entry + item match rust");
+    assert_eq(t_app_matches(sh, "firefox", "Firefox", "firefox", C_NET, 0), 1, "firefox entry + item match rust");
+    assert_eq(t_app_matches(sh, "chromium", "Chromium", "chromium", C_NET, 0), 1, "chromium entry + item match rust");
+    assert_eq(t_app_matches(sh, "zen-browser", "Zen Browser", "zen-browser", C_NET, 0), 1, "zen-browser entry + item match rust");
+    assert_eq(t_app_matches(sh, "brave", "Brave", "brave", C_NET, 0), 1, "brave entry + item match rust");
+    assert_eq(t_app_matches(sh, "librewolf", "LibreWolf", "librewolf", C_NET, 0), 1, "librewolf entry + item match rust");
+    assert_eq(t_app_matches(sh, "vivaldi", "Vivaldi", "vivaldi", C_NET, 0), 1, "vivaldi entry + item match rust");
+    assert_eq(t_app_matches(sh, "falkon", "Falkon", "falkon", C_NET, 0), 1, "falkon entry + item match rust");
+    assert_eq(t_app_matches(sh, "midori", "Midori", "midori", C_NET, 0), 1, "midori entry + item match rust");
+    assert_eq(vec_len(shell_items(sh)), 15, "15 launcher items (14 apps + search-files)");
+    var sf_item = t_find_item(sh, str_from("search-files"));
+    assert(t_ok(sf_item), "search-files item present");
+    assert_eq(str_eq(shell_item_name(sf_item), str_from("Search Files")), 1, "search-files name");
+    assert_eq(str_eq(shell_item_desc(sf_item), str_from("Search for files on the system")), 1, "search-files desc");
+    assert_eq(str_eq(shell_item_icon(sf_item), str_from("search")), 1, "search-files icon");
+    assert_eq(shell_item_has_app(sf_item), 0, "search-files app None");
+    assert_eq(shell_action_kind(shell_item_action(sf_item)), SH_LauncherActionKind.SH_ACT_SEARCH_FILES, "search-files action SearchFiles");
+    assert_eq(strlen(shell_action_arg(shell_item_action(sf_item))), 0, "search-files action arg empty (String::new())");
+    assert_eq(shell_item_suggested(sf_item), 0, "search-files not suggested");
+    assert_eq(shell_item_relevance(sf_item), 800, "search-files relevance 0.8 -> 800");
 
     # ============================================================
     # Notification lifecycle
@@ -108,13 +204,21 @@ fn main() {
     # ============================================================
     # Launcher search: match / empty / no-result / case-insensitive / boost
     # (rust: test_desktop_shell_search_launcher[_empty_query/_no_results/
-    #  _case_insensitive], boost logic in search_launcher)
+    #  _case_insensitive/_partial_match/_by_description], boost logic in search_launcher)
     # ============================================================
     test_group("shell — launcher search");
-    var r_term = shell_search_launcher(sh, "command");
+    var r_term = shell_search_launcher(sh, "terminal");
     var n_term = vec_len(r_term);
     var term_found = (n_term > 0);
-    assert_eq(term_found, 1, "search 'command' yields results");
+    assert_eq(term_found, 1, "search 'terminal' yields results");
+    assert_eq(t_any_name_contains(r_term, "terminal"), 1, "a 'terminal' result's name contains 'terminal'");
+
+    var r_part = shell_search_launcher(sh, "term");
+    assert_eq(t_any_name_contains(r_part, "terminal"), 1, "partial 'term' finds Terminal");
+
+    # every app item's description is "Launch <name>"; search-files' is not
+    var r_desc = shell_search_launcher(sh, "Launch");
+    assert_eq(vec_len(r_desc), 14, "search 'Launch' matches the 14 app descriptions");
 
     var r_empty = shell_search_launcher(sh, "");
     var n_empty = vec_len(r_empty);
@@ -124,15 +228,20 @@ fn main() {
     var r_none = shell_search_launcher(sh, "zzz_nonexistent_12345");
     assert_eq(vec_len(r_none), 0, "gibberish query yields no results");
 
-    var r_lower = shell_search_launcher(sh, "command");
-    var r_upper = shell_search_launcher(sh, "COMMAND");
+    var r_lower = shell_search_launcher(sh, "terminal");
+    var r_upper = shell_search_launcher(sh, "TERMINAL");
     assert_eq(vec_len(r_lower), vec_len(r_upper), "search is case-insensitive (equal counts)");
 
-    # prefix boost: top result for "command" has boosted relevance 1000*3/2 == 1500,
+    # prefix boost: top result for "terminal" has boosted relevance 1000*3/2 == 1500,
     # and results are relevance-sorted descending so index 0 is the boosted match.
-    var top = vec_get(r_term, 0);
+    # ⚠ vec_get dies on an empty vec, which would end the suite here unreported — the "yields
+    # results" assert above already records that failure, so only index a non-empty result.
+    var top = 0;
+    if (n_term > 0) { top = vec_get(r_term, 0); }
     assert(t_ok(top), "top search result non-null");
-    assert_eq(shell_item_relevance(top), 1500, "prefix match boosted to 1500 permille");
+    if (top != 0) {
+        assert_eq(shell_item_relevance(top), 1500, "prefix match boosted to 1500 permille");
+    }
 
     # boost applied to a CLONE — the live launcher item keeps base 1000.
     var live_items = shell_items(sh);

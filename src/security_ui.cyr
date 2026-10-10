@@ -13,7 +13,8 @@
 #
 # Substitutions (see stubbed[] in the port summary):
 #   - Uuid              -> i64 id (monotonic counter in the SecurityUI, or a
-#                          caller-supplied i64). Uuid::nil() == 0.
+#                          caller-supplied i64). Uuid::nil() == 0. Minted ids
+#                          live above SEC_ID_MINTED_BASE (see sec_ui_next_id).
 #   - chrono DateTime   -> i64 epoch (seconds). Caller passes `now`; stored raw.
 #                          expires_at Option<DateTime> -> i64, 0 == None.
 #   - f32               -> not used by this module.
@@ -32,6 +33,17 @@ enum SecCap {
     SEC_MAX_ALERTS              = 500;
     SEC_MAX_PERMISSION_REQUESTS = 200;
     SEC_MAX_OVERRIDE_REQUESTS   = 100;
+}
+
+# ---------------------------------------------------------------------------
+# Id space. ⚠ The alerts vec mixes caller-supplied ids (show_security_alert)
+# with ids the UI mints itself (emergency_kill_agent); Rust's random Uuids never
+# met, but two counters both starting at 1 do, and dismiss_alert's first-match
+# then resolves the wrong alert. Minted ids therefore start at 2^62: a caller
+# either counts its own ids below this base or mints through sec_ui_next_id.
+# ---------------------------------------------------------------------------
+enum SecIdSpace {
+    SEC_ID_MINTED_BASE = 0x4000000000000000;
 }
 
 # ---------------------------------------------------------------------------
@@ -384,7 +396,7 @@ enum SecUIOff {
     SEC_U_SEC_LEVEL     = 40;   # SecLevel
     SEC_U_EMERGENCY     = 48;   # bool (0/1)
     SEC_U_HUMAN_OVER    = 56;   # bool (0/1) human_override_enabled
-    SEC_U_NEXT_ID       = 64;   # i64 monotonic id counter (Uuid substitute)
+    SEC_U_NEXT_ID       = 64;   # i64 next minted id (from SEC_ID_MINTED_BASE + 1)
     SEC_U_SZ            = 72;
 }
 
@@ -401,12 +413,13 @@ fn sec_ui_new(): i64 {
     store64(u + SEC_U_SEC_LEVEL, SecLevel.SEC_LVL_STANDARD);
     store64(u + SEC_U_EMERGENCY, 0);
     store64(u + SEC_U_HUMAN_OVER, 1);
-    store64(u + SEC_U_NEXT_ID, 1);
+    store64(u + SEC_U_NEXT_ID, SecIdSpace.SEC_ID_MINTED_BASE + 1);
     sec_ui_initialize_permission_definitions(u);
     return u;
 }
 
 # sec_ui_next_id(u): allocate a fresh monotonic id (Uuid::new_v4 substitute).
+# Always > SEC_ID_MINTED_BASE, so it never equals a caller's own (lower) id.
 fn sec_ui_next_id(u): i64 {
     var id = load64(u + SEC_U_NEXT_ID);
     store64(u + SEC_U_NEXT_ID, id + 1);
@@ -462,6 +475,9 @@ fn sec_ui_evict_alerts(v): i64 {
 }
 
 # sec_ui_show_security_alert(u, alert): evict, log-if-critical, push_back.
+# ⚠ The alert's id is the caller's and is NOT checked against SEC_ID_MINTED_BASE:
+# an id at or above the base can still collide with a minted one. The id-space
+# split is a contract on callers, not an invariant this function enforces.
 fn sec_ui_show_security_alert(u, alert): i64 {
     var v = load64(u + SEC_U_ALERTS);
     sec_ui_evict_alerts(v);
@@ -689,14 +705,16 @@ fn sec_ui_get_security_level(u): i64 { return load64(u + SEC_U_SEC_LEVEL); }
 # ---------------------------------------------------------------------------
 
 # sec_ui_get_security_dashboard(u, now): aggregate active alerts, pending
-# permissions, running agents, and max active threat (default Low). -> *Dashboard.
+# permissions, running agents, and max active threat. -> *Dashboard.
+# ⚠ Low is the fallback for NO active alerts only (Rust .max().unwrap_or(Low));
+# it is not a floor — an Info-only dashboard reports Info.
 fn sec_ui_get_security_dashboard(u, now): i64 {
     var alerts = load64(u + SEC_U_ALERTS);
     var reqs = load64(u + SEC_U_PERM_REQUESTS);
     var agents = load64(u + SEC_U_AGENT_PERMS);
 
     var active_alerts = 0;
-    var max_threat = SecThreatLevel.SEC_TL_LOW;
+    var max_threat = SecThreatLevel.SEC_TL_INFO;
     var na = vec_len(alerts);
     var i = 0;
     while (i < na) {
@@ -709,6 +727,7 @@ fn sec_ui_get_security_dashboard(u, now): i64 {
         }
         i = i + 1;
     }
+    if (active_alerts == 0) { max_threat = SecThreatLevel.SEC_TL_LOW; }
 
     var pending = 0;
     var nr = vec_len(reqs);

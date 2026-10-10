@@ -88,7 +88,60 @@ fn main() {
     assert_eq(win_id(comp_window_at(c3, 150, 150)), win_id(hw), "point inside finds window");
     assert_eq(comp_window_at(c3, 5, 5), 0, "point outside returns 0");
 
-    return assert_summary();
+    # Parity: compositor.rs test_compositor_close_updates_active_window /
+    # test_compositor_close_last_window_clears_active (rust-old/src/compositor.rs:1589-1613).
+    test_group("compositor — close updates the workspace's active window");
+    var c4 = comp_new();
+    var ca1 = comp_create_window(c4, 0, 0, 100, 100, "W1");
+    var ca2 = comp_create_window(c4, 0, 0, 100, 100, "W2");
+    var c4ws = comp_get_workspace(c4, 0);
+    assert_eq(wsp_active(c4ws), win_id(ca2), "the newest window is the workspace's active one");
+    assert_eq(comp_close_window(c4, win_id(ca2)), 0, "close the active window");
+    assert_eq(wsp_active(c4ws), win_id(ca1), "active falls back to the last remaining window");
+    assert_eq(comp_close_window(c4, win_id(ca1)), 0, "close the last window");
+    assert_eq(wsp_active(c4ws), 0 - 1, "closing the last window clears active to -1");
+    # ⚠ NON-VACUITY: a create always makes the newest window active, so "active == last" holds and a
+    # missing guard or a first-not-last pick would still pass the two cases above. These break it.
+    var c5 = comp_new();
+    var cb1 = comp_create_window(c5, 0, 0, 100, 100, "X1");
+    var cb2 = comp_create_window(c5, 0, 0, 100, 100, "X2");
+    comp_create_workspace(c5, "Two", CtxType.CTX_GENERAL);
+    comp_move_window_to_workspace(c5, win_id(cb2), 1);   # ws0 = [X1], its active still X2 (as in Rust)
+    var c5ws = comp_get_workspace(c5, 0);
+    assert_eq(wsp_active(c5ws), win_id(cb2), "a move away leaves the old workspace's active stale");
+    comp_close_window(c5, win_id(cb1));
+    assert_eq(wsp_active(c5ws), win_id(cb2), "closing a NON-active window leaves active alone");
+    var c6 = comp_new();
+    comp_create_window(c6, 0, 0, 100, 100, "Y1");
+    var cc2 = comp_create_window(c6, 0, 0, 100, 100, "Y2");
+    var cc3 = comp_create_window(c6, 0, 0, 100, 100, "Y3");
+    comp_close_window(c6, win_id(cc3));
+    assert_eq(wsp_active(comp_get_workspace(c6, 0)), win_id(cc2), "active goes to the LAST remaining, not the first");
+    # ⚠ `retain` (compositor.rs:308) drops every entry: moving one window to ws1 twice lists it twice.
+    var c7 = comp_new();
+    var cd1 = comp_create_window(c7, 0, 0, 100, 100, "Z1");
+    comp_create_workspace(c7, "Two", CtxType.CTX_GENERAL);
+    comp_move_window_to_workspace(c7, win_id(cd1), 1);
+    comp_move_window_to_workspace(c7, win_id(cd1), 1);
+    var c7ws = comp_get_workspace(c7, 1);
+    assert_eq(wsp_count(c7ws), 2, "a double move lists the window twice");
+    comp_switch_workspace(c7, 1);
+    comp_close_window(c7, win_id(cd1));
+    assert_eq(wsp_count(c7ws), 0, "close removes EVERY entry for the id");
+    assert_eq(wsp_active(c7ws), 0 - 1, "  ...so active is -1, not the closed window");
+    # ⚠ The move's own removal is `retain` too (compositor.rs:426): moving the doubled id ON leaves none.
+    var c8 = comp_new();
+    var ce1 = comp_create_window(c8, 0, 0, 100, 100, "W1");
+    comp_create_workspace(c8, "Two", CtxType.CTX_GENERAL);
+    comp_create_workspace(c8, "Three", CtxType.CTX_GENERAL);
+    comp_move_window_to_workspace(c8, win_id(ce1), 1);
+    comp_move_window_to_workspace(c8, win_id(ce1), 1);
+    var c8ws1 = comp_get_workspace(c8, 1);
+    assert_eq(wsp_count(c8ws1), 2, "a double move lists the window twice (move path)");
+    comp_switch_workspace(c8, 1);
+    comp_move_window_to_workspace(c8, win_id(ce1), 2);
+    assert_eq(wsp_count(c8ws1), 0, "moving away removes EVERY entry for the id");
+    assert_eq(wsp_count(comp_get_workspace(c8, 2)), 1, "  ...and the target lists it once");
 
     # ----- wallpaper.cyr — the backdrop source (M6-C1a, pure) -----
     test_group("wallpaper.cyr — row source");
@@ -131,6 +184,8 @@ fn main() {
     wp_set_vgrad(0x010203, 0x040506);
     assert_eq(wp_gpu_expressible(), 0, "a gradient is NOT — the frame must demote");
     wp_set_solid(0x0E1621);   # leave the suite in a sane state
+
+    return assert_summary();
 }
 
 var exit_code = main();
