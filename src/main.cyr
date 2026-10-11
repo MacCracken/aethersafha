@@ -1331,8 +1331,8 @@ fn main(): i64 {
         # loop's job, as every client's is, over as many frames as it needs.
         # ⛔⛔ THIS BLOCK USED TO SERVE THE CLIENT TO COMPLETION (`setu_srv_serve_accepted_at`), whose reads
         # have no deadline on Linux. A local process that connected and never sent stopped the frame loop,
-        # and Ctrl+C with it (roadmap D12, through 0.17.5). See setu_clients.cyr, which also says what else
-        # could hold it (a client's buffer opened through setu) and how that is closed.
+        # and Ctrl+C with it (roadmap D12, through 0.17.5). See setu_clients.cyr, which also says why a
+        # client's buffer cannot hold it.
         # ⚠ On agnos `setu_sfd` is -1: there is no listener there, clients are placed.
         if (setu_sfd >= 0) {
             var cfd = setu_srv_accept(setu_sfd);   # non-blocking; -5 = none pending
@@ -1344,13 +1344,10 @@ fn main(): i64 {
             }
         }
         # ⭐ SERVE EVERY HOSTED CLIENT: placed channels (agnos) and accepted connections (Linux). Its
-        # reads do not wait — records are polled, and a client's buffer is opened non-blocking and read
-        # only if it is a regular file (`win_client_buf_read`) — so a client that has not spoken yet
-        # returns 0, which is NOT an error: "has not spoken yet" and "never will" differ by time, not
-        # state. What ends a row is its kind's rule, applied in `ae_client_serve`.
-        # ⛔ setu's own `setu_buf_read` is NOT that reader on Linux: it opens the client-named
-        # /dev/shm/setu-buf-<id> without O_NONBLOCK, so a FIFO planted there held this loop in `open`
-        # (setu's defect, reported; see window.cyr). Nothing here may call it on Linux.
+        # reads do not wait — records are polled, and a client's buffer is read with `setu_buf_read`,
+        # which (setu 0.8.13) opens it non-blocking and copies only from a regular file — so a client that
+        # has not spoken yet returns 0, which is NOT an error: "has not spoken yet" and "never will" differ
+        # by time, not state. What ends a row is its kind's rule, applied in `ae_client_serve`.
         # ⛔ The blocking `setu_srv_serve_accepted_at` must NOT be used here — a minted channel is
         # ready the instant it exists, so its 5000 x 2 ms handshake budget would stall the frame
         # loop up to TEN SECONDS per client that has not run yet, and on Linux its reads never give up.

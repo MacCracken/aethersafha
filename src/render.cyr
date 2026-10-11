@@ -1226,10 +1226,10 @@ fn render_window(fb, win, focused): i64 {
         # LIVE surface: pull the client's LATEST frame out of the shared buffer into the cache each
         # frame. A client that keeps writing its buffer (setu_buf_write, no re-present) animates the
         # window. bid == 0 (a one-shot static present) skips this and just blits the cached frame.
-        # ⚠ Through `win_client_buf_read`, not setu's reader: a FIFO at the buffer's name would hold the frame
-        # here (window.cyr).
+        # ⚠ setu's reader (0.8.13) cannot wait on the client-named path: a FIFO, a symlink or a short file at
+        # the buffer's name is refused at once and the cache keeps the last frame (setu_dispatch.cyr).
         if (bid != 0) {
-            if (spix != 0) { win_client_buf_read(bid, spix, w * h * 4); }
+            if (spix != 0) { setu_buf_read(bid, spix, w * h * 4); }
         }
         # Row-walking copy (blit_rect) rather than the per-pixel bhumi_fb_set loop this used to be.
         # Same pixels, same clipping; measured 23.974 ms -> see blit_rect's header for the numbers.

@@ -10,13 +10,10 @@
 # ⚠ THE PRICE: SIGINT is seen only when the loop reaches its next frame, so anything that holds a frame
 # holds Ctrl+C. Through 0.17.5 a client could: the Linux accept path read its handshake with setu's
 # waiting read, which has no deadline there, so a client that connected and never sent stopped the loop
-# and Ctrl+C with it (roadmap D12). 0.17.6 polls every client's records instead — and found a second way:
-# setu's `setu_buf_read` (lib/setu.cyr ~743, setu's code) opens the client-named /dev/shm/setu-buf-<id>
-# without O_NONBLOCK, so a FIFO planted at that name — or a file whose owner holds a write lease on it —
-# would hold the loop in `open` at the ATTACH or at any frame's live re-read. That is setu's defect, reported, not patched here; the compositor reads client
-# buffers through `win_client_buf_read` (window.cyr) instead, which cannot wait (setu_clients.cyr has the
-# whole account). Ctrl+\ (SIGQUIT) and `kill` (SIGTERM) keep their default disposition and end the
-# process wherever it is.
+# and Ctrl+C with it (roadmap D12). 0.17.6 polls every client's records instead. A client's buffer is
+# read with `setu_buf_read`, which on Linux cannot wait on the client-named /dev/shm path (a FIFO, a
+# leased file) as of setu 0.8.13 (setu_clients.cyr has the whole account). Ctrl+\ (SIGQUIT) and `kill`
+# (SIGTERM) keep their default disposition and end the process wherever it is.
 #
 # ⚠ agnos: compiled to no-ops. The mechanism exists there (kill#16, sigprocmask#17, signalfd#18), but
 # SIGINT has NO default action on agnos (kill only sets a pending bit) and the console delivers Ctrl+C

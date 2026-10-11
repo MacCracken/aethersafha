@@ -914,8 +914,9 @@ fn main(): i64 {
 
     # -----------------------------------------------------------------------
     # ⛔⛔ EACH LIVE CLIENT COST 336 B A FRAME, READ OR NOT: setu_poll_input's 256-byte buffer and the
-    # step's 80-byte message, every poll, never freed. ⭐ The oracle is the allocator's own count.
-    test_group("setu clients — an idle client costs nothing per frame; a record costs setu's 256 B");
+    # step's 80-byte message, every poll, never freed. Since setu 0.8.13 neither a poll nor a record
+    # allocates, so a regression in setu fails here too. ⭐ The oracle is the allocator's own count.
+    test_group("setu clients — an idle client costs nothing per frame, and a record costs nothing");
     var ac = comp_new();
     assert_eq(sc_pair(), 0, "socketpair");
     var accli = sc_cli;
@@ -938,6 +939,13 @@ fn main(): i64 {
         ak = ak + 1;
     }
     assert_eq(alloc_used() - au0, 0, "and so do 10,000 serves with no frame poll: each asks its own fd");
+    au0 = alloc_used();
+    ak = 0;
+    while (ak < 10000) {
+        setu_poll_input(load64(&chan_fd + acrow * 8), sc_m);
+        ak = ak + 1;
+    }
+    assert_eq(alloc_used() - au0, 0, "and 10,000 of setu's own polls of the idle fd (agnos polls each row a frame)");
     var arec = 0;
     var aused = 0;
     ak = 0;
@@ -951,28 +959,42 @@ fn main(): i64 {
         aused = aused + (alloc_used() - au1);
         ak = ak + 1;
     }
-    println("setu_clients: records served, and the bytes their serves allocated (setu's 256 B per record):");
+    println("setu_clients: records served, and the bytes their serves allocated:");
     println_int(arec);
     println_int(aused);
-    assert_lte(aused, arec * 256, "at most setu's 256 B per record: no message per poll, no empty poll at the end");
+    assert_eq(aused, 0, "0 B per record: setu's poll reads into the stack, the take into one message");
+    # ⚠ Non-vacuous only if the records WERE served: nothing may be left queued on the server's side.
+    assert_eq(setu_poll_input(load64(&chan_fd + acrow * 8), sc_m), 0, "  ...and every record was drained (none left pending)");
     sys_close(accli);
     assert_lte(sc_serve_until_dead(ac, acrow, 1004, 3), 3, "it hangs up and is retired");
     setu_buf_close(acbuf);
 
     # -----------------------------------------------------------------------
-    # ⛔⛔ setu's `setu_buf_read` opens /dev/shm/setu-buf-<id> with a plain O_RDONLY, so a FIFO planted
-    # at a name a client attaches would hold the frame loop in `open` (setu's defect, reported). The
-    # compositor reads through `win_client_buf_read`. ⭐ The oracle is the clock and the watchdog: through
-    # setu's reader this group never returns.
-    test_group("setu clients — a FIFO or a symlink at a buffer's name is refused at once; nothing waits on it");
+    # ⛔⛔ A client names its buffer, and on Linux the name is a path in world-writable /dev/shm, so a FIFO, a
+    # symlink or a short file can be put there. The compositor reads it with setu's `setu_buf_read` (setu
+    # 0.8.13), which must refuse each at once and leave `dst` as it was; this group guards that, and that
+    # the handshake's classifier (`setu__hs_buf_irregular`) opens nothing. ⭐ The oracles are the clock and
+    # the watchdog (a reader that waits never returns), inotify IN_OPEN (what was opened), and `dst`'s bytes.
+    test_group("setu clients — a FIFO, a symlink or a short file at a buffer's name is refused at once; nothing waits on it");
+    var QSEN = 0x5A5A5A5A5A5A5A5A;
+    var qdst = alloc(72);
     var qbase = sc_fifo_id(sys_getpid());
     var qfifo = alloc(48);
     setu_buf_path(qbase, qfifo);
     sys_unlink(qfifo);
     assert_eq(sys_mknodat(0 - 100, qfifo, 4096 | 384, 0), 0, "a FIFO at /dev/shm/setu-buf-<id>");
+    store64(qdst, QSEN);
     var qt0 = ae_now_us();
-    assert_eq(win_client_buf_read(qbase, alloc(64), 64), 0 - 2, "the compositor's reader refuses it: not a regular file");
+    assert_eq(setu_buf_read(qbase, qdst, 64), 0 - 1, "setu's reader refuses it: not a regular file");
     assert_lt(ae_now_us() - qt0, SC_PROMPT_US, "at once");
+    assert_eq(load64(qdst), QSEN, "and leaves dst as it was");
+    var qw = sc_watch_new();
+    assert_gte(sc_watch_buf(qw, qbase), 0, "inotify on the FIFO");
+    setu_buf_read(qbase, qdst, 64);
+    assert_eq(sc_opens(qw), 1, "the watch sees the reader's own (non-blocking) open of it");
+    assert_eq(setu__hs_buf_irregular(qbase), 1, "the classifier names it: not a regular file");
+    assert_eq(sc_opens(qw), 0, "  without opening it");
+    sys_close(qw);
     var qreal = sc_buf(4, 16);
     var qlink = alloc(48);
     setu_buf_path(qbase + 1, qlink);
@@ -980,9 +1002,23 @@ fn main(): i64 {
     var qrealp = alloc(48);
     setu_buf_path(qreal, qrealp);
     assert_eq(sys_symlink(qrealp, qlink), 0, "a symlink at another buffer name, to a real buffer");
-    assert_eq(win_client_buf_read(qbase + 1, alloc(64), 64), 0 - 2, "refused too: O_NOFOLLOW");
-    assert_eq(win_client_buf_read(qreal, alloc(64), 64), 0, "the real buffer itself reads");
-    assert_eq(win_client_buf_read(qbase + 2, alloc(64), 64), 0 - 1, "and a name with nothing there is -1, not -2");
+    qw = sc_watch_new();
+    assert_gte(sc_watch_buf(qw, qreal), 0, "inotify on the real buffer");
+    store64(qdst, QSEN);
+    assert_eq(setu_buf_read(qbase + 1, qdst, 64), 0 - 1, "refused too: O_NOFOLLOW");
+    assert_eq(load64(qdst), QSEN, "  dst as it was: the linked buffer's bytes were not copied");
+    assert_eq(setu__hs_buf_irregular(qbase + 1), 1, "the classifier names it: not a regular file");
+    assert_eq(sc_opens(qw), 0, "  and neither the reader nor the classifier opened what it names");
+    assert_eq(setu_buf_read(qreal, qdst, 64), 0, "the real buffer itself reads");
+    assert_eq(load64(qdst), 0, "  its bytes");
+    assert_eq(sc_opens(qw), 1, "  and the watch saw that open");
+    sys_close(qw);
+    store64(qdst, QSEN);
+    assert_eq(setu_buf_read(qreal, qdst, 65), 0 - 1, "a regular file one byte shorter than asked is refused");
+    assert_eq(load64(qdst), QSEN, "  before a byte is copied");
+    assert_eq(setu__hs_buf_irregular(qreal), 0, "  and it is a regular file: the plain refusal, not the irregular one");
+    assert_eq(setu_buf_read(qbase + 2, qdst, 64), 0 - 1, "a name with nothing there is refused");
+    assert_eq(setu__hs_buf_irregular(qbase + 2), 0, "  and is not called irregular");
     var qc = comp_new();
     assert_eq(sc_pair(), 0, "socketpair");
     var qcli = sc_cli;
@@ -1000,6 +1036,38 @@ fn main(): i64 {
     assert_eq(comp_count(qc), 0, "nothing reached the desktop");
     assert_eq(sc_read_kind(qcli, 1000), SETU_CLOSE, "the client is told its surface is withdrawn");
     sys_close(qcli);
+    # The symlink: refused at once and named the same way. ⛔ A reader that followed it would show the buffer
+    # it names, and a classifier that followed it would call the refusal plain.
+    assert_eq(sc_pair(), 0, "socketpair");
+    var ycli = sc_cli;
+    var yrow = ae_client_accept(sc_srv, 1000, 10000);
+    var yid = sc_created(qc, ycli, yrow, 4, 4, 1001);
+    setu_send(ycli, setu_attach_buf(yid, 4, 4, 16, 1, qbase + 1));
+    setu_send(ycli, setu_commit(yid));
+    sc_max_us = 0;
+    sc_capture_begin();
+    sc_serve(qc, yrow, 1002);
+    var ysaid = sc_capture_end();
+    assert_lt(sc_max_us, SC_PROMPT_US, "a client attaching the symlink: the serve returns at once");
+    assert_eq(row_dead(yrow), 1, "the client is disconnected");
+    assert_eq(sc_has(ysaid, "its buffer is not a regular file"), 1, "and the line names why");
+    assert_eq(comp_count(qc), 0, "nothing reached the desktop");
+    sys_close(ycli);
+    # A regular file shorter than the attach claims (4 x 8 rows of 16 B from a 64 B buffer): the plain refusal.
+    assert_eq(sc_pair(), 0, "socketpair");
+    var zcli = sc_cli;
+    var zrow = ae_client_accept(sc_srv, 1000, 10000);
+    var zid = sc_created(qc, zcli, zrow, 4, 8, 1001);
+    setu_send(zcli, setu_attach_buf(zid, 4, 8, 16, 1, qreal));
+    setu_send(zcli, setu_commit(zid));
+    sc_capture_begin();
+    sc_serve(qc, zrow, 1002);
+    var zsaid = sc_capture_end();
+    assert_eq(row_dead(zrow), 1, "a client attaching a buffer shorter than it claims is disconnected");
+    assert_eq(sc_has(zsaid, "buffer read or alloc failed"), 1, "  with the plain refusal's line");
+    assert_eq(sc_has(zsaid, "not a regular file"), 0, "  not the irregular one");
+    assert_eq(comp_count(qc), 0, "nothing reached the desktop");
+    sys_close(zcli);
     # A LIVE window whose buffer's name becomes a FIFO: the next present is refused, the window keeps its cache.
     assert_eq(sc_pair(), 0, "socketpair");
     var lcli = sc_cli;

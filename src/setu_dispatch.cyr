@@ -487,10 +487,9 @@ fn setu_hs_action(state, kind): i64 {
 var setu_hs_consumed = 0;      # 1 = the last take consumed a record off the channel (drives the drain)
 var setu_hs_stale = 0;         # one-shot: a resync happened, i.e. the ring really did drop a pair
 
-# ⭐ ONE MESSAGE FOR EVERY TAKE (0.17.6). Each step took a fresh 80-byte `setu_msg_new()`, and the frame loop
-# polls every live client every frame: with `setu_poll_input`'s own 256-byte buffer that was 336 B per client
-# per frame that nothing frees (measured: 33,600,000 B over 100,000 idle serves). A take decodes into this
-# and is done with it before the next take.
+# ⭐ ONE MESSAGE FOR EVERY TAKE (0.17.6). Each step took a fresh 80-byte `setu_msg_new()` that nothing frees.
+# A take decodes into this and is done with it before the next take; with setu 0.8.13's `setu_poll_input`
+# (a stack buffer) a take allocates nothing.
 var setu_hs_msg = 0;
 
 # Take ONE record off `cfd` and advance `st`. Reads no buffer and maps nothing: an ATTACH becomes the
@@ -589,10 +588,35 @@ fn setu__hs_take(st, cfd, comp, title): i64 {
     return 0;
 }
 
+# ⛔ THE CLIENT NAMES THE FILE THE COMPOSITOR OPENS: on Linux an ATTACH's buffer id is the world-writable
+# "/dev/shm/setu-buf-<id>", where any local process can put a FIFO, a symlink or a leased file. setu 0.8.13's
+# `setu_buf_read` opens it O_NONBLOCK | O_NOFOLLOW and copies only from a regular file of at least `size`
+# bytes (fstat on the descriptor it opened); anything else is -1 at once, with `dst` untouched. It is the
+# compositor's one reader of a client buffer, on both targets (agnos: a kernel shm slot, `shm_read` #73).
+# WHY a read was refused is asked only afterwards, to name it to the operator (-15 versus -14): an lstat of
+# the name, which never opens it and never follows a link, so it cannot wait. ⚠ It decides nothing: a rename
+# between the refusal and the lstat can only change which line is printed.
+# -> 1 when the name holds something that is not a regular file (a FIFO, a symlink, a directory); 0 when it
+# holds a regular file (short, or leased) or nothing, and always on agnos.
+fn setu__hs_buf_irregular(buf_id): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var path[48];
+    setu_buf_path(buf_id, &path);
+    var stb[144];                                  # struct stat (STAT_BUFSZ)
+    if (sys_lstat(&path, &stb) != 0) { return 0; }
+    if ((load32(&stb + STAT_MODE) & 0xF000) != 0x8000) { return 1; }   # S_IFMT != S_IFREG
+    return 0;
+    #endif
+}
+
 # Apply the committed attach, if a COMMIT left one due: at most ONE buffer read, into the window's own cache,
 # then the client buffer the window shows. The first one also places the window at (dstx, dsty) and maps it.
 # -> the window id (> 0) when one was applied, 0 when none was due, -14 when the cache could not be
-# allocated or the buffer not read, -15 when the buffer id names something that is not a regular file.
+# allocated or the buffer not read, -15 when the buffer was refused and its name holds something that is
+# not a regular file.
 # On a negative the window keeps the client buffer it showed.
 fn setu__hs_apply(st, cfd, comp, dstx, dsty): i64 {
     if (load64(st + HS_ST_DUE) == 0) { return 0; }
@@ -641,12 +665,11 @@ fn setu__hs_apply(st, cfd, comp, dstx, dsty): i64 {
             if (w2 != win_buf_w(win)) { setu__resized_say(w2, ah); }
             if (w2 == win_buf_w(win)) { if (ah != win_buf_h(win)) { setu__resized_say(w2, ah); } }
         }
-        # ⚠ Not `setu_buf_read`: on Linux it opens the client-named path in a way a FIFO holds forever
-        # (window.cyr, `win_client_buf_read`).
-        var rd = win_client_buf_read(buf_id, pix, nbytes);
-        if (rd < 0) {
+        # ⭐ setu's reader cannot wait on the client-named path, and refusing it leaves `pix` as it was
+        # (setu 0.8.13; `setu__hs_buf_irregular` above).
+        if (setu_buf_read(buf_id, pix, nbytes) < 0) {
             if (fresh == 1) { fl_free(pix); }
-            if (rd == 0 - 2) { return 0 - 15; }
+            if (setu__hs_buf_irregular(buf_id) == 1) { return 0 - 15; }
             return 0 - 14;
         }
     }
@@ -694,9 +717,9 @@ fn setu_srv_handshake_step(st, cfd, comp, dstx, dsty, title): i64 {
 # ⛔ AN ERROR DISCARDS THE COMMIT IT FOLLOWED in the same drain: nothing is applied, and the window keeps the
 # client buffer it showed. An ACCEPTED client is disconnected for it; a PLACED one presents again.
 # ⚠ Linux: after the first record, each next take waits on nothing to find out whether there is another —
-# a poll(2) with a ZERO timeout (it never waits) on this one fd — so `setu_poll_input`, whose 256-byte
-# buffer setu never frees, runs only for a record that is there (or an end of file / error). agnos has no such poll: the drain asks
-# the channel until it answers WOULDBLOCK, as it always has.
+# a poll(2) with a ZERO timeout (it never waits) on this one fd — so `setu_poll_input` runs only for a record
+# that is there (or an end of file / error). agnos has no such poll: the drain asks the channel until it
+# answers WOULDBLOCK, as it always has.
 # Returns what the apply returns — the window id (> 0) when a commit was applied — or 0, or the take's error.
 enum SetuHsK { DRAIN_MAX = 64; }   # = CHAN_SLOTS, the agnos channel ring depth
 

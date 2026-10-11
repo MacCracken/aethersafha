@@ -6,6 +6,6 @@
 # `_VERSION_LEN_AETHERSAFHA` is the BYTE length of `_VERSION_STR_AETHERSAFHA` including its
 # trailing `\n`, so `--version` is one `sys_write` with no `strlen`.
 
-var _VERSION_STR_AETHERSAFHA = "aethersafha 0.17.6\n";
+var _VERSION_STR_AETHERSAFHA = "aethersafha 0.17.7\n";
 var _VERSION_LEN_AETHERSAFHA = 19;
-var _VERSION_AETHERSAFHA = "0.17.6";
+var _VERSION_AETHERSAFHA = "0.17.7";

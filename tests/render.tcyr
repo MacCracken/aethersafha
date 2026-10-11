@@ -946,11 +946,11 @@ fn t_grp_minimized_r(): i64 {
 
 # ---- a setu client's cache (0.17.6): the CPU composite never reads past it, and its live re-read cannot wait ----
 # ⭐ A client's cache is a `fl_alloc` block its window owns (`win_pix_adopt`); over 4 KB it is its own mapping, so
-# reading past it can fault where the bump heap read a neighbour. And the live re-read goes through
-# `win_client_buf_read` (window.cyr), which refuses what is not a regular file, because setu's reader opens the
-# buffer's /dev/shm name in a way a FIFO holds forever.
+# reading past it can fault where the bump heap read a neighbour. And the live re-read is setu's `setu_buf_read`,
+# which (setu 0.8.13) refuses a FIFO, a symlink or a short file at the buffer's /dev/shm name at once and leaves
+# the cache as it was; these checks guard that.
 fn t_grp_cache_r(): i64 {
-    test_group("render — a client's cache bounds the CPU composite, and its live re-read cannot wait (0.17.6)");
+    test_group("render — a client's cache bounds the CPU composite, and its live re-read cannot wait or be redirected");
     ae_gpu_frame_ok = 0;
     var CBG = 0x00050607;
     var fb = bhumi_fb_new(200, 200);
@@ -975,8 +975,8 @@ fn t_grp_cache_r(): i64 {
     assert_eq(bhumi_fb_get(fb, 25, by + 124), 0x00ABCDEF, "row 124, the last the cache holds: the client's");
     assert_eq(bhumi_fb_get(fb, 25, by + 125), widget, "row 125, past the cache: not read, not composited — the body shows");
     assert_eq(bhumi_fb_get(fb, 25, by + 149), widget, "row 149 likewise");
-    # The live re-read of a FIFO at the buffer's name. ⛔ Through setu's reader this render never returns (its
-    # `open` waits for a writer), so it runs in a child the suite can give up on after 2 s.
+    # The live re-read of a FIFO at the buffer's name. ⛔ A reader whose `open` waits for a writer never returns
+    # from this render (setu through 0.8.12), so it runs in a child the suite can give up on after 2 s.
     var fid = sys_getpid() * 100000 + 99101;
     var fpath = alloc(48);
     setu_buf_path(fid, fpath);
@@ -1007,6 +1007,41 @@ fn t_grp_cache_r(): i64 {
     assert_eq(done, 1, "a frame that re-reads it returns: nothing waited on the FIFO");
     assert_eq(load32(wst) & 0xFFFF, 0, "  and the frame ended normally (exit 0, no signal)");
     sys_unlink(fpath);
+    # A symlink at the name, to another client's buffer of 0x00112233: refused, so the window shows its own last
+    # frame, never the linked buffer. And a regular file shorter than the read (10 rows of 125): refused before
+    # a byte is copied, so the cache is not torn.
+    var onb = 10 * 150 * 4;
+    var osrc = alloc(onb);
+    i = 0;
+    while (i < 10 * 150) { store32(osrc + i * 4, 0x00112233); i = i + 1; }
+    var obid = setu_buf_create(onb);
+    setu_buf_write(obid, osrc, onb);
+    var opath = alloc(48);
+    setu_buf_path(obid, opath);
+    var lid = sys_getpid() * 100000 + 99102;
+    var lpath = alloc(48);
+    setu_buf_path(lid, lpath);
+    sys_unlink(lpath);
+    assert_eq(sys_symlink(opath, lpath), 0, "a symlink at a buffer's name, to another buffer");
+    win_set_client_buf(win, lid, 10, 125);
+    bhumi_fb_clear(fb, CBG);
+    render_window(fb, win, 0);
+    assert_eq(bhumi_fb_get(fb, 25, by), 0x00ABCDEF, "  re-read through it: refused, the window shows its own last frame");
+    assert_eq(bhumi_fb_get(fb, 25, by + 124), 0x00ABCDEF, "  to its last cached row");
+    sys_unlink(lpath);
+    var sbid = setu_buf_create(10 * 10 * 4);
+    setu_buf_write(sbid, osrc, 10 * 10 * 4);
+    win_set_client_buf(win, sbid, 10, 125);
+    bhumi_fb_clear(fb, CBG);
+    render_window(fb, win, 0);
+    assert_eq(bhumi_fb_get(fb, 25, by), 0x00ABCDEF, "a buffer of 10 rows re-read for 125: refused before a byte is copied");
+    assert_eq(bhumi_fb_get(fb, 25, by + 9), 0x00ABCDEF, "  row 9 likewise: no torn frame");
+    win_set_client_buf(win, obid, 10, 125);
+    bhumi_fb_clear(fb, CBG);
+    render_window(fb, win, 0);
+    assert_eq(bhumi_fb_get(fb, 25, by), 0x00112233, "the other buffer, named directly, re-reads live");
+    setu_buf_close(sbid);
+    setu_buf_close(obid);
     setu_buf_close(bid);
     win_pix_release(win);
     return 0;

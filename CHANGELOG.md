@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.17.7] — 2026-10-10 — setu 0.8.13: one buffer reader, and nothing leaked per message
+
+> A follow-up to 0.17.6. setu 0.8.13 fixes the two setu defects 0.17.6 found and worked around, so the
+> workaround goes. The commit, the tag and the push are the operator's.
+
+### Changed — setu 0.8.12 → 0.8.13
+
+- `lib/setu.cyr` is byte-identical to the tag, and the lock pins `f5a6da8`.
+- **`setu_buf_read`** now opens the client-named `/dev/shm/setu-buf-<id>` non-blocking, never follows a
+  symlink, and copies only from a regular file at least as long as the read. It refuses anything else
+  before copying.
+- **No per-message allocation.** `setu_send`, `setu_recv`, `setu_poll_input`, `setu_read_msg_ms` and
+  `setu_client_present` allocate nothing per call.
+- **Client side.** setu's buffer create is exclusive and refuses links, so a planted symlink can no
+  longer make a client truncate another file.
+
+### Changed — one buffer reader again
+
+- **Client buffers are read with `setu_buf_read` on both targets**, at the handshake and at each frame's
+  live re-read. aethersafha's own `win_client_buf_read`, written in 0.17.6 because setu's reader could
+  block, is removed.
+- **The "its buffer is not a regular file" line stays.** After a refusal, `setu__hs_buf_irregular` lstats
+  the name, which never opens it or follows a link, only to choose which line to print.
+- **A short buffer file no longer tears a frame:** the window keeps its last frame. 0.17.6's reader
+  copied what existed and then failed.
+- **The allocation tests are exact now.** They assert 0 B per received record and per idle poll, where
+  0.17.6 allowed setu's 256 B a record, so a setu regression fails here. The check also confirms that
+  every record was drained, so it cannot pass vacuously.
+- Comments that said setu's reader could block are corrected.
+- ADR 0003's client-buffer entry and roadmap D12's setu note are closed.
+
+### Verified
+
+- **Host 4,288,584 B** (sha256 `06a764a8…`) · **`--agnos` 4,238,280 B** (sha256 `1e5bbb4f…`).
+- **33 / 33 suites, 4,707 assertions, 0 failed** (0.17.6: 33 / 4,674). No compiler warning points at `src/`.
+- `scripts/qemu-linux-input.sh` → PASS for focus, hostile, sigint, drag and silent, on this binary (same
+  hash).
+- `check-dep-tags.sh` → 7 deps clean · `cyrius deps --verify` → 83 verified · CI's format check clean ·
+  `cyrius coverage --min 69` passes (879 of 1,259 functions).
+- 11 mutants killed in review. Among them are a setu reader that follows links, one without the size
+  gate, and one that allocates per record (built from a mutated setu in a scratch copy).
+- ⚠ Not run on iron.
+
 ## [0.17.6] — 2026-10-10 — `rust-old/` deleted, and no client can hold the frame loop
 
 > The arc's last bite (roadmap § 0.17.x). Every gate item passed, so the Rust original leaves the tree:

@@ -238,10 +238,11 @@ fix.
   applies only the last committed ATTACH: one read into a cache the window owns, reused while it fits and
   freed when replaced or when the window goes. Before, every geometry change leaked a buffer, and every
   queued ATTACH was read.
-- **Client buffers are read by the compositor's own reader on Linux** (`win_client_buf_read`), not setu's
-  `setu_buf_read`. It opens `/dev/shm/setu-buf-<id>` non-blocking, refuses a symlink, and reads only a
-  regular file. setu's reader opens it blocking, so a FIFO or a write-leased file planted at that
-  client-chosen name could hold the caller; that is reported to setu.
+- **Client buffers are read only in ways that cannot wait** (0.17.6, setu's reader since 0.8.13 / 0.17.7).
+  `setu_buf_read` opens the client-chosen `/dev/shm/setu-buf-<id>` non-blocking, never follows a symlink,
+  and copies only from a regular file at least as long as the read, refusing anything else before
+  copying. A FIFO or a write-leased file there can no longer hold the frame loop, and a short file no
+  longer tears a frame. (0.17.6 used its own reader while setu's still opened the path blocking.)
 
 ## Consequences
 

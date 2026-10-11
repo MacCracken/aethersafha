@@ -17,24 +17,20 @@
 # sent CREATE_SURFACE and stopped, held the frame loop forever. Since 0.17.2 SIGINT is read once per
 # frame, so Ctrl+C could not end it either. Moving the setu pin does not change that default; the fix
 # is that the frame loop does not read a client's RECORDS in any way that can wait.
-# ⛔ AND RECORDS WERE NOT THE ONLY WAIT. An ATTACH names a buffer by id, and on Linux setu's `setu_buf_read`
-# (lib/setu.cyr ~743, setu's code) opens "/dev/shm/setu-buf-<id>" without O_NONBLOCK or O_NOFOLLOW: a FIFO
-# planted at that name holds the frame loop in `open` at the ATTACH, or at any frame's live re-read of a
-# window showing that id; so does a regular file whose owner holds a write lease (F_SETLEASE) on it, for
-# the kernel's whole lease-break time (measured: 45 s). That is setu's defect, reported, not patched here; the compositor reads client
-# buffers through `win_client_buf_read` (window.cyr), which opens non-blocking, refuses a symlink and reads
-# only a regular file. Sends cannot wait either (below). What a client can still cost a frame is bounded
-# work, not a wait: at most DRAIN_MAX records and ONE buffer copy of at most 16 MB (setu_dispatch.cyr; one
-# such serve measured 6.6 ms on Linux 7.2.8).
+# ⛔ AND RECORDS ARE NOT THE ONLY THING A CLIENT NAMES. An ATTACH names a buffer by id, which on Linux is
+# the world-writable "/dev/shm/setu-buf-<id>": a FIFO, a symlink or a write-leased file can be put there.
+# The compositor reads it with setu's `setu_buf_read`, which as of setu 0.8.13 opens it non-blocking,
+# never follows a symlink and copies only from a regular file at least as long as the read, refusing
+# anything else at once (setu_dispatch.cyr, `setu__hs_buf_irregular`). Sends cannot wait either (below).
+# What a client can cost a frame is bounded work, not a wait: at most DRAIN_MAX records and ONE buffer
+# copy of at most 16 MB (setu_dispatch.cyr; one such serve measured 6.6 ms on Linux 7.2.8).
 #
 # ⭐ AN IDLE CLIENT COSTS NOTHING (Linux, 0.17.6). Once per frame `ae_clients_poll` asks poll(2), with no
 # timeout, which rows' connections have something to read, and only those are drained; the drain asks
 # again before each further record (`setu_srv_fd_readable`). So `setu_poll_input` runs only for a record
-# that is there, an end of file or an error. ⛔ It ran for every live row every frame, and each call takes
-# 256 bytes that setu never frees (its receive buffer, lib/setu.cyr `setu_poll_input`), plus 80 for the
-# step's message: 336 B per client per frame (measured, 100,000 idle serves). The 256 B per RECORD remain:
-# that buffer is setu's. ⚠ agnos channels have no poll: there every live row is drained every frame, as
-# before, and pays setu's 256 B per call.
+# that is there, an end of file or an error. Neither it nor the take allocates (setu 0.8.13 reads into a
+# stack buffer; the take decodes into one message, setu_dispatch.cyr), so a record costs 0 B as well.
+# ⚠ agnos channels have no poll: there every live row is drained every frame, as before.
 #
 # ⭐ WHAT ENDS A ROW, PER KIND, AND WHY THE KINDS DIFFER.
 #   PLACED   — unchanged from the agnos loop this was lifted out of. A handshake error is retried until
@@ -283,7 +279,7 @@ fn ae_client_serve(comp, i, dstx, dsty, now_ms): i64 {
     if (load64(&chan_dead + i * 8) != 0) { return 0; }
     var st = load64(&chan_st + i * 8);
     var kind = load64(&chan_kind + i * 8);
-    # ⭐ NOTHING TO READ, NOTHING READ: no `setu_poll_input`, so none of its 256 bytes. The budget still runs.
+    # ⭐ NOTHING TO READ, NOTHING READ: no `setu_poll_input` at all. The budget still runs.
     if (ae_client_readable(i) == 0) {
         if (ae_client_overdue(i, now_ms) == 1) { ae_client_retire(comp, i, AeRetire.AE_RET_BUDGET, now_ms); }
         return 0;
@@ -466,7 +462,7 @@ fn ae_client_accepted_say(why, state, ms, served, shown): i64 {
     if (why == 0 - 11) { println("aethersafha: accepted client: expected attach, got neither attach nor commit -- disconnected"); named = 1; }
     if (why == 0 - 13) { println("aethersafha: accepted client: attached, then got neither commit nor a re-attach -- disconnected"); named = 1; }
     if (why == 0 - 14) { println("aethersafha: accepted client: buffer read or alloc failed -- disconnected"); named = 1; }
-    if (why == 0 - 15) { println("aethersafha: accepted client: surface refused -- its buffer is not a regular file (a FIFO or a symlink) -- disconnected"); named = 1; }
+    if (why == 0 - 15) { println("aethersafha: accepted client: surface refused -- its buffer is not a regular file (a FIFO, a symlink or a directory) -- disconnected"); named = 1; }
     if (named == 0) { println("aethersafha: accepted client: retired on a handshake error with NO name -- add a line for this code"); }
     return 0;
 }
