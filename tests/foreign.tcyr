@@ -18,8 +18,43 @@ fn t_ok(x): i64 {
     return 0;
 }
 
+# ⛔ EVERY GUEST THIS SUITE RUNS IS THIS BINARY, RE-EXECUTED, NOT THE HOST'S COREUTILS. They were `/bin/true`
+# and `/bin/echo`, which made the suite a test of the runner's coreutils. Ubuntu's are uutils since 25.10:
+# one multicall binary that takes the utility's name from the path it was executed by. kavach 3.13.x execs
+# an absolute program through the fd it pinned, so that path is `/dev/fd/N`, and uutils refuses to start:
+# exit 1, no stdout. `foreign_run` still returned OK, because the sandbox ran and reaped it, so the only
+# asserts that failed were the ones reading the captured bytes. agnosai 2.1.8 met the same failure on the
+# same kavach, and this is its fix.
+#
+# `/proc/self/exe` pins this very file, so a guest takes the real path (the sandbox, the pinned exec, the
+# capture, the reap) and is the same program on every host. It answers only to its own argv shape, so the
+# suite under `cyrius test` (argc 1) never takes it.
+#
+# ⚠ THE LIMIT STAYS IN PRODUCTION. On a uutils host a coreutils guest exits 1 until kavach is at least
+# 3.14.0, and that includes the boot greeter's `/bin/echo`. See the roadmap's Known cleanup.
+#
+#   guest-echo WORD   prints WORD and a newline, exits 0
+#   guest-exit N      exits N (one digit)
+var T_GUEST_ECHO_HI = "/proc/self/exe guest-echo hi";
+
+# The guest's entry: its exit code, or -1 when this run is the suite.
+fn t_guest(): i64 {
+    if (args_init() <= 0) { return 0 - 1; }
+    if (argc() != 3) { return 0 - 1; }
+    var verb = argv(1);
+    var arg = argv(2);
+    if (streq(verb, "guest-echo") == 1) {
+        println(arg);
+        return 0;
+    }
+    if (streq(verb, "guest-exit") == 1) { return load8(arg) - 48; }
+    return 0 - 1;
+}
+
 fn main() {
     alloc_init();
+    var guest_code = t_guest();
+    if (guest_code >= 0) { return guest_code; }
 
     test_group("mehman — foreign guest spec + surface descriptor");
     var f = foreign_new("xterm", 800, 600);
@@ -37,16 +72,19 @@ fn main() {
     assert_eq(win_is_agent(foreign_window(fw)), 0, "foreign window is not agent-owned");
 
     test_group("mehman — run a sandboxed guest (kavach PROCESS backend)");
-    var rf = foreign_new("/bin/true", 100, 100);
-    assert(t_ok(rf), "foreign_new for /bin/true");
+    var rf = foreign_new("/proc/self/exe guest-exit 3", 100, 100);
+    assert(t_ok(rf), "foreign_new for a guest that exits 3");
     assert_eq(foreign_has_run(rf), 0, "not run yet");
     assert_eq(foreign_run(rf), 0, "run returns MehmanError.OK (clean fork+exec+reap)");
     assert_eq(foreign_has_run(rf), 1, "marked as run after foreign_run");
+    # The exact code, not "non-zero" and not foreign_run's OK: a refused exec exits 1 and still returns OK.
+    assert_eq(foreign_exit_status(rf), 3, "the guest really started: its own exit code comes back");
 
     test_group("mehman — capture the guest surface into its buffer (M2 handoff)");
-    var cf = foreign_new("/bin/echo hi", 64, 8);
-    assert(t_ok(cf), "foreign_new for /bin/echo");
+    var cf = foreign_new(T_GUEST_ECHO_HI, 64, 8);
+    assert(t_ok(cf), "foreign_new for the echoing guest");
     assert_eq(foreign_run(cf), 0, "capture run returns MehmanError.OK");
+    assert_eq(foreign_exit_status(cf), 0, "the echoing guest exited 0");
     # the guest's stdout ("hi\n") is captured into the foreign surface's pixel buffer
     var sbuf = MehmanSurface_buffer(foreign_surface(cf));
     assert_eq(load8(sbuf + 0), 104, "surface byte 0 = 'h' (captured guest output)");
@@ -57,7 +95,7 @@ fn main() {
     kashi_font_init();   # the glyph tables must be live before draw_text_lines
     var pd = desktop_new();
     assert_eq(desk_foreign_count(pd), 0, "no foreign apps hosted yet");
-    var pf = desktop_host_foreign(pd, "/bin/echo hi", 0, 0, 200, 100, "echo");
+    var pf = desktop_host_foreign(pd, T_GUEST_ECHO_HI, 0, 0, 200, 100, "echo");
     assert(t_ok(pf), "hosted the echo guest");
     assert_eq(desk_foreign_count(pd), 1, "desktop tracks the hosted foreign app");
     var pfb = bhumi_fb_new(200, 100);

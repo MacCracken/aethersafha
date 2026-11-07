@@ -7,9 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [0.17.8] — 2026-11-06 — Cyrius 6.6.20, and every dep on its 6.6.20 tag
 
-> A toolchain move at the operator's request. Each declared dep moves to its release pinned to 6.6.20, and nothing
-> in `src/`, `tests/` or `programs/` changes except the generated version string. **The next CI run will fail** on a
-> defect 0.17.7 already has; see the known issue below. The commit, the tag and the push are the operator's.
+> A toolchain move at the operator's request. Each declared dep moves to its release pinned to 6.6.20, and `src/`
+> changes only in the generated version string. CI's first run on Ubuntu 26.04 failed `foreign`, so that suite's guests
+> are rewritten. The commit, the tag and the push are the operator's.
 
 ### Changed — Cyrius 6.6.11 → 6.6.20
 
@@ -50,27 +50,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`lib/sys.cyr` now arrives through `lib/sigil.cyr`'s own include**, because kavach's sidecar no longer names it.
   sigil is declared, so `src/sysprobe.cyr`'s by-path include still resolves.
 
-### Known issue — the next CI run fails: a foreign guest cannot run on a uutils host ⚠
+### Fixed — `foreign` passes on Ubuntu 26.04
 
-- **Why it surfaces now.** GitHub's `ubuntu-latest` moved to Ubuntu 26.04 from 2026-10-19, and Ubuntu's coreutils
-  are uutils since 25.10. aethersafha's last CI run was 2026-10-11, so the next push is the first on that image.
-- **The defect.** Until kavach 3.14.0 a pinned exec names its program `/dev/fd/N`, which uutils' multicall binary
-  refuses. On those hosts `foreign_run` cannot run a uutils guest. `/bin/true` there is GNU, so it still runs.
-- **Measured in `ubuntu:26.04`** (uutils 0.10.0, as a non-root user, every suite built here and run in the container):
-  32 of 33 suites pass and 4 assertions fail, all in `foreign`, all reading the output of `/bin/echo hi`. 0.17.7's
-  `foreign` suite fails the same 4 of 23 on kavach 3.13.1, so this is not a regression.
-- **kavach 3.14.0 fixes it, and this release does not take it.** Its own pin is 6.7.9 and 0.17.8 takes 6.6.20-pinned
-  tags, though mehman 1.0.5 declares 3.14.0 for this reason (that dep is `optional`, so `[deps.kavach]` here decides).
-  Measured in a scratch copy on 6.6.20, where only `lib/kavach.cyr` differs: 33 of 33 suites on this host and **33 of
-  33 in `ubuntu:26.04`**, 4,707 assertions each, and both targets build.
+- **The failure.** CI's first run on the `ubuntu-26.04` image failed `tests/foreign.tcyr`, 4 of 23 assertions, all
+  reading the output of `/bin/echo hi`. Ubuntu's coreutils are uutils since 25.10: one multicall binary that takes the
+  utility's name from the path it was executed by. kavach 3.13.x execs an absolute program through the fd it pinned,
+  so that path is `/dev/fd/N`, and uutils refuses to start. 0.17.7's suite fails the same 4 in `ubuntu:26.04` on
+  kavach 3.13.1, so this is not a regression.
+- **The fix is agnosai 2.1.8's, made on the same cyrius 6.6.20 and kavach 3.13.3.** The suite's guests no longer run
+  the host's coreutils. Each is the test binary itself, re-executed through `/proc/self/exe`, so it is the same program
+  on every host. `/bin/true` goes too: it is GNU on 26.04 only by chance. The runner, the pin and every dep are unchanged.
+- **It is still the real path.** Inside the guest, `AT_EXECFN` reads `/dev/fd/9` on GNU and on uutils alike, so a
+  guest goes through kavach's pinned exec, the capture and the reap as a real one does.
+- **The suite is stricter: 23 → 25 assertions.** `foreign_run` returns OK for a guest that never started, which is why
+  only the byte reads failed. It now asserts the guest's own exit code: exactly 3 from `guest-exit 3`, and 0 from the
+  echoing guest.
+- **3 mutants killed:** a guest that prints something else, a lost exit code, and `/bin/echo` restored on uutils,
+  which now fails first on `the echoing guest exited 0 (got 1, expected 0)`.
+
+### Known issue — a coreutils guest cannot run on a uutils host ⚠
+
+- **Production keeps the limitation; only the suite stopped depending on it.** Until kavach is at least 3.14.0, a
+  foreign guest that is a coreutils program exits 1 with no output on such a host. That includes the Linux boot
+  greeter's `/bin/echo aethersafha guest` (`src/main.cyr`), so that window would show no text there. This was read
+  from the code, not measured in the compositor. A guest that is not a coreutils program is not affected.
+- **kavach 3.14.0 fixes it, and it is not available yet:** its own pin is 6.7.9, and every dep here stays on this
+  repo's pin (CLAUDE.md). mehman 1.0.5 declares 3.14.0, but that dep is `optional`, so `[deps.kavach]` here decides.
 
 ### Verified
 
 - **Host 4,347,552 B** (sha256 `c605ce98…`) · **`--agnos` 4,301,336 B** (sha256 `c355e5cf…`).
-- **33 / 33 suites, 4,707 assertions, 0 failed** (0.17.7: the same). No compiler warning points at `src/`.
+- **33 / 33 suites, 4,709 assertions, 0 failed** (0.17.7: 33 / 4,707). No compiler warning points at `src/`.
+- **Every `ci.yml` step replayed in `ubuntu:26.04`** (uutils 0.10.0, the real `cyrius` CLI, a non-root user, git
+  added): format, deps, build, test and coverage all pass, 33 / 33 and 4,709.
 - `scripts/qemu-linux-input.sh` → PASS for focus, hostile, sigint, drag and silent, on this binary (same hash).
 - `check-dep-tags.sh` → 7 deps clean · `cyrius deps --verify` → 84 verified · CI's format check clean on all 79 files
-  under the 6.6.20 formatter · `cyrius coverage --min 69` passes (879 of 1,259 functions).
+  under the 6.6.20 formatter · `cyrius coverage --min 69` passes (880 of 1,259 functions).
 - **A clean resolve reproduces the tree.** With an empty `lib/`, an empty dep cache and no sibling checkouts, `lib/`,
   `cyrius.lock` and the host binary all come out byte-identical.
 - 11 of 12 `programs/` build. `puka_desktop_probe.cyr` does not (`ae_bhumi` is undefined), and neither did it at

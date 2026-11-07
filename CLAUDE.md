@@ -71,6 +71,12 @@ cyrius test                              # run tests/*.tcyr
   never report a version difference between this repo and its siblings as a defect — repos legitimately
   sit on different pins. ⚠ A pin bump is a **real source change**, not a number: it re-vendors `lib/`
   and changes the compiled binary, so it is never free housekeeping.
+- **DEPS STAY ON THE PIN.** Every `[deps.*]` tag is that dep's release pinned to this repo's
+  `[package].cyrius`. A tag on a newer Cyrius is not available, not even for a real fix, and not even when
+  another dep's manifest declares it, until the operator moves the pin.
+- **NEVER ROLL THE CI RUNNER BACK.** `ubuntu-latest` stays. A failure on a new image is fixed in this repo's
+  code or tests; pinning an older image hides it. When CI goes red, read how siblings on the same pin solved
+  the same failure (their `CHANGELOG.md`) before proposing anything else.
 
 ## Documentation
 
