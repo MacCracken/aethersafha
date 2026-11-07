@@ -45,17 +45,17 @@
 #
 # --- Storage model ---
 #
-# Module-scope BSS buffers, BYTE-addressed via store8/load8. NOTE the
-# Cyrius var-array unit rule: at MODULE scope `var X[N]` allocates N*u64
-# (8N bytes), so `var kashi_font16[3616]` reserves 28.25 KiB of BSS but we
-# use only the first 3616 BYTES (one byte per glyph row).
-# `var kashi_font8[1808]` reserves 14.1 KiB and uses the first 1808 bytes.
-# See architecture note 001 for the rationale of using bytes as the
-# var-array N. Each glyph buffer holds the 224 CP437 cells followed
-# directly by the KASHI_EXT_COUNT extension cells — the two ranges are
-# contiguous, so one `(ch - KASHI_GLYPH_FIRST) * size` offset reaches both.
-# The Unicode reverse table (kashi_cp437_rev) is the one exception to
-# "N = bytes": one u64 slot per entry, see its declaration.
+# Module-scope buffers, BYTE-addressed via store8/load8. NOTE the Cyrius
+# var-array unit rule: at MODULE scope `var X[N]` reserves N u64 slots =
+# 8N bytes (inside a function it is N bytes). So each glyph buffer
+# declares bytes-used / 8 slots: `var kashi_font16[452]` is 3,616 bytes,
+# exactly the 226 glyphs x 16 rows it holds — no slack past the last cell
+# (1.1.1; until then N was the byte count, reserving 8x). cycc emits
+# module-scope arrays into the file image, so every byte reserved here is
+# a byte of every consumer's binary. See architecture note 001. Each
+# glyph buffer holds the 224 CP437 cells followed directly by the
+# KASHI_EXT_COUNT extension cells — the two ranges are contiguous, so one
+# `(ch - KASHI_GLYPH_FIRST) * size` offset reaches both.
 #
 # Glyph rows are packed top-to-bottom by `kashi_font_init()` from u64 literals
 # that read in scan order: for the 8x16 font, fset16(ch, hi, lo) where
@@ -118,26 +118,40 @@ enum KashiExtRange {
     KASHI_EXT_COUNT = 2;       # 0x101 - 0x100 + 1
 }
 
-# Module-scope BSS. See the "Storage model" note above for the u64-unit
-# rule: these reserve 8x their byte footprint but we address them per-byte.
-# Each holds (224 CP437 + 2 extension) = 226 glyphs.
-var kashi_font16[3616];    # 226 glyphs x 16 rows (VGA 8x16)        — bytes 0..3615
-var kashi_font8[1808];     # 226 glyphs x  8 rows (CGA 8x8)         — bytes 0..1807
-var kashi_font9_16[7232];  # 226 glyphs x 16 rows x 2 bytes (VGA 9x16, derived)
-var kashi_font_ready = 0;  # 1 after kashi_font_init() has run
-
 # Unicode reverse index of the CP437 high half (1.1.0, ADR 0011): 128
 # {codepoint, cell} entries in codepoint order, so kashi_cp437_from_unicode
 # can binary-search them. kashi_font_init writes each entry straight into
 # its own fixed slot (its source lists them already sorted) and then sets
 # kashi_cp437_n; empty (kashi_cp437_n == 0) before the first init.
-# ⚠ The one buffer in this file NOT sized in bytes: module-scope
-# `var X[128]` is 128 u64 slots (1 KiB) and each entry takes one whole
-# slot — byte 0 = codepoint >> 8, byte 1 = codepoint & 0xFF, byte 2 =
-# cell, bytes 3-7 unused. Every CP437 codepoint is <= U+25A0, so two
-# bytes hold it. Do not "fix" it to [1024]: that is 8 KiB.
+# Module-scope `var X[128]` is 128 u64 slots (1 KiB) and each entry takes
+# one whole slot — byte 0 = codepoint >> 8, byte 1 = codepoint & 0xFF,
+# byte 2 = cell, bytes 3-7 unused. Every CP437 codepoint is <= U+25A0, so
+# two bytes hold it. Do not "fix" it to [1024]: that is 8 KiB.
+# Declared BEFORE the glyph buffers (1.1.1): with cycc's declaration-order
+# layout that puts kashi-owned bytes on both sides of them, so a packer
+# write below cell 0x20 lands here, where src/test.cyr's "fset guard"
+# checksum sees it. Layout is the compiler's, not a contract (cyrius
+# 6.6.13): nothing may reach one global from another's address.
 var kashi_cp437_rev[128];
 var kashi_cp437_n = 0;     # entries filled: 0 before kashi_font_init, then 128 (never reset)
+
+# Glyph storage — see the "Storage model" note above. The sizes count u64
+# SLOTS: N u64 = 8N bytes = exactly the bytes used, addressed per byte.
+# Each buffer holds (224 CP437 + 2 extension) = 226 glyphs. Internal (the
+# `_` prefix): named only so src/test.cyr's "storage" group checks the
+# same N the declarations use — an array size takes a constant, not an
+# expression, so the byte count cannot be written as `bytes / 8` here. A
+# cell added past KASHI_EXT_LAST grows each N by (rows x stride) / 8, or
+# its rows land in the next buffer; the "storage" group fails until then.
+enum _KashiFontStore {
+    _KASHI_FONT16_SLOTS = 452;    # 3,616 B = 226 glyphs x 16 rows
+    _KASHI_FONT8_SLOTS = 226;     # 1,808 B = 226 glyphs x  8 rows
+    _KASHI_FONT9_16_SLOTS = 904;  # 7,232 B = 226 glyphs x 16 rows x 2 bytes
+}
+var kashi_font16[_KASHI_FONT16_SLOTS];      # VGA 8x16
+var kashi_font8[_KASHI_FONT8_SLOTS];        # CGA 8x8
+var kashi_font9_16[_KASHI_FONT9_16_SLOTS];  # VGA 9x16 (derived at init)
+var kashi_font_ready = 0;  # 1 after kashi_font_init() has run
 
 # Pack one 8x16 glyph's 16 row-bytes into kashi_font16[(ch-0x20)*16 .. +15].
 # hi = rows 0-7 (top first), lo = rows 8-15. Byte (hi>>56) is the top row.
@@ -145,11 +159,13 @@ var kashi_cp437_n = 0;     # entries filled: 0 before kashi_font_init, then 128 
 fn kashi_fset16(ch, hi, lo) {
     # Defensive bound (audit 2026-05-27, F1): a table-authoring typo with
     # ch outside [FIRST, EXT_LAST] would compute a negative or overrun
-    # offset and silently corrupt BSS before/after the buffer. init runs
-    # once, so this guard is free. All current calls are in-range; this
-    # protects any future built-in font added past the current three. The
-    # upper bound is the last EXTENSION cell (1.1.0): the buffer is sized
-    # for CP437 + the extension block, nothing past it.
+    # offset and silently corrupt the storage before/after the buffer —
+    # since 1.1.1 the buffers carry no slack, so past the end is the next
+    # glyph buffer itself. init runs once, so this guard is free. All
+    # current calls are in-range; this protects any future built-in font
+    # added past the current three. The upper bound is the last EXTENSION
+    # cell (1.1.0): the buffer is sized for CP437 + the extension block,
+    # nothing past it.
     if (ch < KASHI_GLYPH_FIRST) { return 0; }
     if (ch > KASHI_EXT_LAST) { return 0; }
     var g = &kashi_font16 + (ch - KASHI_GLYPH_FIRST) * 16;
@@ -813,7 +829,7 @@ fn kashi_font_init() {
 # 1 once kashi_font_init() has populated the tables, else 0. Lets a
 # freestanding consumer assert init ran before the first render (audit
 # 2026-05-27, F2 — previously the flag was write-only). Pre-init the
-# buffers are zeroed BSS, so access is bounds-safe and renders blank.
+# buffers are zero-filled, so access is bounds-safe and renders blank.
 fn kashi_font_is_ready() {
     return kashi_font_ready;
 }
@@ -879,7 +895,7 @@ fn kashi_glyph_encoded(ch) {
     return 1;
 }
 
-# Base pointer to a glyph's contiguous row bytes within the BSS buffer.
+# Base pointer to a glyph's contiguous row bytes within its font buffer.
 # Returns the address of row 0; the consumer reads `height` bytes from it.
 # Returns 0 (null) for an out-of-range cell (see kashi_glyph_encoded) or
 # unknown font — the caller must null-check (a freestanding kernel cannot

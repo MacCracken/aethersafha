@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "aethersafha — AI-augmented AGNOS compositor (Cyrius port, from 27207 lines of Rust)"
 license = "AGPL-3.0-only"
 language = "cyrius"
-cyrius = "6.6.11"
+cyrius = "6.6.20"
 
 [build]
 entry = "src/main.cyr"
@@ -39,14 +39,14 @@ stdlib = [
 [deps.bhumi]
 git = "https://github.com/MacCracken/bhumi.git"
 # path = "../bhumi"
-tag = "1.4.5"
+tag = "1.4.6"
 modules = ["dist/bhumi.cyr"]
 
 # Desktop theme tokens (the MUDRA / SHANTA palettes); src/theme.cyr packs them for the framebuffer.
 [deps.rupa]
 git = "https://github.com/MacCracken/rupa.git"
 # path = "../rupa"
-tag = "0.1.8"
+tag = "0.1.9"
 modules = ["dist/rupa.cyr"]
 
 # Bitmap console fonts. Only the freestanding glyph-data core (kashi_font_init, kashi_glyph_row):
@@ -55,14 +55,14 @@ modules = ["dist/rupa.cyr"]
 [deps.kashi]
 git = "https://github.com/MacCracken/kashi.git"
 # path = "../kashi"
-tag = "1.1.0"
+tag = "1.1.1"
 modules = ["src/font_data.cyr"]
 
 # Foreign-app "swallow" backend: hosts foreign-ABI app surfaces in a kavach sandbox.
 [deps.mehman]
 git = "https://github.com/MacCracken/mehman.git"
 # path = "../mehman"
-tag = "1.0.4"
+tag = "1.0.5"
 modules = ["src/types.cyr", "src/surface.cyr", "src/sandbox.cyr"]
 
 # mehman's sandbox backend. Declared so its bundle is prepended: mehman's src/sandbox.cyr names
@@ -70,14 +70,14 @@ modules = ["src/types.cyr", "src/surface.cyr", "src/sandbox.cyr"]
 [deps.kavach]
 git = "https://github.com/MacCracken/kavach.git"
 # path = "../kavach"
-tag = "3.13.1"
+tag = "3.13.3"
 modules = ["dist/kavach.cyr"]
 
 # Image decode (PNG and JPEG to RGBA8) for the wallpaper. Use it; do not hand-roll a decoder here.
 [deps.chitra]
 git = "https://github.com/MacCracken/chitra.git"
 # path = "../chitra"
-tag = "1.0.3"
+tag = "1.0.4"
 modules = ["dist/chitra.cyr"]
 
 # Display-plane contract with clients: message types and the wire codec. The transport (Unix socket,
@@ -85,5 +85,5 @@ modules = ["dist/chitra.cyr"]
 [deps.setu]
 git = "https://github.com/MacCracken/setu.git"
 # path = "../setu"
-tag = "0.8.13"
+tag = "0.8.14"
 modules = ["dist/setu.cyr"]

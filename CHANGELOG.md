@@ -5,6 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.17.8] — 2026-11-06 — Cyrius 6.6.20, and every dep on its 6.6.20 tag
+
+> A toolchain move at the operator's request. Each declared dep moves to its release pinned to 6.6.20, and nothing
+> in `src/`, `tests/` or `programs/` changes except the generated version string. **The next CI run will fail** on a
+> defect 0.17.7 already has; see the known issue below. The commit, the tag and the push are the operator's.
+
+### Changed — Cyrius 6.6.11 → 6.6.20
+
+- **`lib/` is re-vendored from the new pin: 83 → 84 files.** 56 change, `poison` and `tls_hostid` are new, and
+  `hashmap_fast` leaves (below). Every stdlib file is byte-identical to the 6.6.20 snapshot.
+- **The migration notes for 6.6.12–6.6.20 reach no code here, checked item by item:**
+  - The build reports 0 `duplicate fn`, so 6.6.20's rule that every call binds a redefined fn's last definition
+    changes nothing.
+  - `sizeof`, `mulh64`, `fncall0`..`fncall8` (reserved at 6.6.20) and `f64_le`, `f64_ge`, `f64_trunc` (6.6.13) have
+    no uses in this repo's source.
+  - There are no `struct` declarations (a named struct argument became a copy at 6.6.16) and no `*T` parameters
+    (`p + n` scales by `sizeof(T)` since 6.6.17).
+  - Nothing loads a seccomp filter on itself, so 6.6.16's move to `sendto` for socket writes kills nothing here.
+  - `bayan_json_parse`, whose nested values changed at 6.6.13, has no caller. JSON goes through bayan's `_v_` tree
+    API, and the suites that parse daimon's nested document pass.
+- **`cyrius.lock` is regenerated from nothing.** `cyrius lib sync` re-hashes `lib/` under the new pin before the
+  undeclared leaves are refreshed, so `cyrius deps` then refuses `lib/sys.cyr`, and the old tags' commit rows stay.
+  Deleting the lock and running `cyrius deps` writes all eight commit pins correctly.
+- **Sizes.** Host +58,968 B, `--agnos` +63,056 B. Static data falls 1,255,840 → 1,172,496 B, and unreachable code
+  rises 4,891 → 4,979 fns (1,639,481 → 1,681,987 B).
+
+### Changed — deps to their 6.6.20 tags
+
+| Dep | 0.17.7 | 0.17.8 | What reaches this build |
+|---|---|---|---|
+| bhumi | 1.4.5 | **1.4.6** | No code. The bundle gains a `# Requires` block |
+| rupa | 0.1.8 | **0.1.9** | No code. The bundle gains a `# Requires` block |
+| kashi | 1.1.0 | **1.1.1** | The glyph buffers are right-sized. No glyph changes; kashi measures −88,576 B of image |
+| mehman | 1.0.4 | **1.0.5** | Nothing: `lib/mehman_*.cyr` is unchanged |
+| kavach | 3.13.1 | **3.13.3** | 3.13.2's backend and capture fixes. 3.13.3 itself is a toolchain release |
+| chitra | 1.0.3 | **1.0.4** | No decode code. The bundle gains a `# Requires` block |
+| setu | 0.8.13 | **0.8.14** | No code, and no wire change. The bundle gains a `# Requires` block |
+
+- **`[deps].stdlib` is unchanged.** From 6.6.18 a dep's sidecar names only what its bundle needs: bhumi goes 10 → 3
+  leaves, kavach 36 → 16, setu 12 → 6, chitra 10 → 3 and rupa 8 → 1. This manifest already declares what it uses.
+- **`lib/hashmap_fast.cyr` is gone.** Only kavach's old sidecar named it. `cyrius deps` never deletes, so it stayed
+  behind, unreferenced, under a green build and a green `deps --verify`. A resolve into an empty `lib/` found it.
+- **`lib/sys.cyr` now arrives through `lib/sigil.cyr`'s own include**, because kavach's sidecar no longer names it.
+  sigil is declared, so `src/sysprobe.cyr`'s by-path include still resolves.
+
+### Known issue — the next CI run fails: a foreign guest cannot run on a uutils host ⚠
+
+- **Why it surfaces now.** GitHub's `ubuntu-latest` moved to Ubuntu 26.04 from 2026-10-19, and Ubuntu's coreutils
+  are uutils since 25.10. aethersafha's last CI run was 2026-10-11, so the next push is the first on that image.
+- **The defect.** Until kavach 3.14.0 a pinned exec names its program `/dev/fd/N`, which uutils' multicall binary
+  refuses. On those hosts `foreign_run` cannot run a uutils guest. `/bin/true` there is GNU, so it still runs.
+- **Measured in `ubuntu:26.04`** (uutils 0.10.0, as a non-root user, every suite built here and run in the container):
+  32 of 33 suites pass and 4 assertions fail, all in `foreign`, all reading the output of `/bin/echo hi`. 0.17.7's
+  `foreign` suite fails the same 4 of 23 on kavach 3.13.1, so this is not a regression.
+- **kavach 3.14.0 fixes it, and this release does not take it.** Its own pin is 6.7.9 and 0.17.8 takes 6.6.20-pinned
+  tags, though mehman 1.0.5 declares 3.14.0 for this reason (that dep is `optional`, so `[deps.kavach]` here decides).
+  Measured in a scratch copy on 6.6.20, where only `lib/kavach.cyr` differs: 33 of 33 suites on this host and **33 of
+  33 in `ubuntu:26.04`**, 4,707 assertions each, and both targets build.
+
+### Verified
+
+- **Host 4,347,552 B** (sha256 `c605ce98…`) · **`--agnos` 4,301,336 B** (sha256 `c355e5cf…`).
+- **33 / 33 suites, 4,707 assertions, 0 failed** (0.17.7: the same). No compiler warning points at `src/`.
+- `scripts/qemu-linux-input.sh` → PASS for focus, hostile, sigint, drag and silent, on this binary (same hash).
+- `check-dep-tags.sh` → 7 deps clean · `cyrius deps --verify` → 84 verified · CI's format check clean on all 79 files
+  under the 6.6.20 formatter · `cyrius coverage --min 69` passes (879 of 1,259 functions).
+- **A clean resolve reproduces the tree.** With an empty `lib/`, an empty dep cache and no sibling checkouts, `lib/`,
+  `cyrius.lock` and the host binary all come out byte-identical.
+- 11 of 12 `programs/` build. `puka_desktop_probe.cyr` does not (`ae_bhumi` is undefined), and neither did it at
+  0.17.7 on 6.6.11. CI builds no program.
+- ⚠ Not run on iron, and the `--agnos` binary is compile-verified only.
+
 ## [0.17.7] — 2026-10-10 — setu 0.8.13: one buffer reader, and nothing leaked per message
 
 > A follow-up to 0.17.6. setu 0.8.13 fixes the two setu defects 0.17.6 found and worked around, so the
