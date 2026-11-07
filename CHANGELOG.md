@@ -5,6 +5,83 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.18.0] — 2026-11-06 — Cyrius 6.7.9, and a coreutils guest runs on a uutils host
+
+> The pin moves onto Cyrius's 6.7 language line, which is why this is a minor. Each declared dep moves to its release
+> pinned to 6.7.9, and `src/` changes only in the generated version string. kavach 3.14.0 closes 0.17.8's known issue.
+> The commit, the tag and the push are the operator's.
+
+### Changed — Cyrius 6.6.20 → 6.7.9
+
+- **`lib/` is re-vendored from the new pin.** 55 files change and it stays at 84. Every stdlib file is byte-identical
+  to the 6.7.9 snapshot.
+- **6.7 refuses nothing here.** Both targets build with 0 `duplicate fn` and no new warning, all 79 files are clean
+  under the 6.7.9 formatter, and `programs/` builds as it did.
+- **6.7 also changes what some compiling code computes, which a green build cannot show, so the migration notes for
+  6.7.0–6.7.9 were searched for in `src/`, `tests/` and `programs/`.** All 82 files, with comments and strings masked,
+  have zero sites of each:
+  - a lone `!` (until 6.7.3 the lexer dropped it, so `!x` compiled as `x`);
+  - `~`, or a unary `-` on a name (6.7.9 changes how they bind before a literal operator);
+  - typed pointers and `*p` dereferences (6.7.8 and 6.7.9);
+  - `struct`, `impl`, `f32`, `bool` and slices;
+  - the newly reserved `trait`, `const`, `true`, `false`, `do` and `dyn`;
+  - an own definition of `sys_ppoll`, `sock_set_nodelay` or `f64_parse_n`.
+- **The search can fail.** Each pattern fires on planted code, and all 1,676 top-level fns survive the masking.
+- **`println` of a name declared an integer (6.7.6) does not arise.** The repo has 3 typed declarations and prints
+  none of them.
+- **6.7.9's reset of a child's signal mask and ignored SIGPIPE does not reach client spawn:** `src/main.cyr` forks and
+  execs directly. It does reach a kavach guest, which is the behaviour a guest should have.
+- **`cyrius.lock` is regenerated from nothing and gains a ninth commit row,** sankoch 2.8.7, through chitra's own
+  `[deps.sankoch]`. Its `zlib` profile is not vendored: `"sankoch"` is a stdlib leaf here, so `lib/sankoch.cyr` stays.
+- **Sizes.** Host +9,912 B, `--agnos` +5,832 B. Static data falls 1,172,496 → 1,170,080 B.
+
+### Changed — deps to their 6.7.9 tags
+
+| Dep | 0.17.8 | 0.18.0 | What reaches this build, read from the vendored diff |
+|---|---|---|---|
+| bhumi | 1.4.6 | **1.5.0** | One version line |
+| rupa | 0.1.9 | **0.2.0** | One version line |
+| kashi | 1.1.1 | **1.2.0** | Nothing: `lib/kashi_font_data.cyr` is unchanged |
+| mehman | 1.0.5 | **1.1.0** | Nothing: `lib/mehman_*.cyr` is unchanged |
+| kavach | 3.13.3 | **3.14.0** | The pinned exec runs uutils (below) |
+| chitra | 1.0.4 | **1.1.3** | 1.1.1's audit fixes, and its internal names prefixed |
+| setu | 0.8.14 | **0.9.0** | One version line, and no wire change |
+
+- **chitra has four tags on 6.7.9, and 1.1.3 is the newest.** 1.1.1 corrects JPEG colour-space handling and several
+  refusals, so some outputs and error codes move, each toward the reference decoders. No frozen name changed.
+  `src/` matches on no `CHITRA_` code, so none of those codes changes a path here.
+- **`[deps].stdlib` is unchanged.**
+
+### Fixed — a coreutils guest runs on a uutils host
+
+- **kavach 3.14.0 execs a pinned program as `/proc/self/fd/N`, which uutils accepts.** This closes 0.17.8's known
+  issue, and the Linux boot greeter's `/bin/echo` takes that path. Inside a guest, `AT_EXECFN` now reads
+  `/proc/self/fd/9` where it read `/dev/fd/9`, on GNU and on uutils alike.
+- **`tests/foreign.tcyr` runs the host's `/bin/echo` as a guest again: 25 → 30 assertions.** The re-exec guests stay,
+  so the rest of the suite tests this code and not the runner's image. With kavach 3.13.3 on this pin, the new group
+  fails 3 of its 5 on uutils, so it can fail.
+
+### Changed — comments the pin made false
+
+- **Since 6.7.6 a `path` is a dev override,** read only under `CYRIUS_LOCAL` or `--local`, so it no longer beats `tag`
+  on a default build. `cyrius.cyml`'s comment and `check-dep-tags.sh`'s header now say so. The gate itself is unchanged
+  and still fails on a live `path`.
+
+### Verified
+
+- **Host 4,357,464 B** (sha256 `3ed6dc66…`) · **`--agnos` 4,307,168 B** (sha256 `fca37d08…`).
+- **33 / 33 suites, 4,714 assertions, 0 failed** (0.17.8: 33 / 4,709). No compiler warning points at `src/`.
+- **Every `ci.yml` step replayed in `ubuntu:26.04`** (uutils 0.10.0, the real `cyrius` CLI, a non-root user, git
+  added): format, deps, build, test and coverage all pass, 33 / 33 and 4,714. The binary built there is the same
+  `3ed6dc66…`.
+- `scripts/qemu-linux-input.sh` → PASS for focus, hostile, sigint, drag and silent, on this binary (same hash).
+- `check-dep-tags.sh` → 7 deps clean · `cyrius deps --verify` → 84 verified · `cyrius deps --locked` passes · CI's
+  format check clean on all 79 files · `cyrius coverage --min 69` passes (880 of 1,259 functions).
+- **A clean resolve reproduces the tree.** With an empty `lib/`, an empty dep cache and no sibling checkouts, `lib/`
+  and `cyrius.lock` come out byte-identical.
+- 11 of 12 `programs/` build. `puka_desktop_probe.cyr` still does not, as at 0.17.7 and 0.17.8.
+- ⚠ Not run on iron, and the `--agnos` binary is compile-verified only.
+
 ## [0.17.8] — 2026-11-06 — Cyrius 6.6.20, and every dep on its 6.6.20 tag
 
 > A toolchain move at the operator's request. Each declared dep moves to its release pinned to 6.6.20, and `src/`

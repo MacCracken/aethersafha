@@ -18,20 +18,17 @@ fn t_ok(x): i64 {
     return 0;
 }
 
-# ⛔ EVERY GUEST THIS SUITE RUNS IS THIS BINARY, RE-EXECUTED, NOT THE HOST'S COREUTILS. They were `/bin/true`
-# and `/bin/echo`, which made the suite a test of the runner's coreutils. Ubuntu's are uutils since 25.10:
-# one multicall binary that takes the utility's name from the path it was executed by. kavach 3.13.x execs
-# an absolute program through the fd it pinned, so that path is `/dev/fd/N`, and uutils refuses to start:
-# exit 1, no stdout. `foreign_run` still returned OK, because the sandbox ran and reaped it, so the only
-# asserts that failed were the ones reading the captured bytes. agnosai 2.1.8 met the same failure on the
-# same kavach, and this is its fix.
-#
+# ⛔ THE SUITE'S GUESTS ARE THIS BINARY, RE-EXECUTED, SO A RUN TESTS THIS CODE AND NOT THE RUNNER'S IMAGE.
 # `/proc/self/exe` pins this very file, so a guest takes the real path (the sandbox, the pinned exec, the
 # capture, the reap) and is the same program on every host. It answers only to its own argv shape, so the
 # suite under `cyrius test` (argc 1) never takes it.
 #
-# ⚠ THE LIMIT STAYS IN PRODUCTION. On a uutils host a coreutils guest exits 1 until kavach is at least
-# 3.14.0, and that includes the boot greeter's `/bin/echo`. See the roadmap's Known cleanup.
+# ⛔ ONE GUEST IS THE HOST'S `/bin/echo`, ON PURPOSE: it is the production path, the boot greeter's. Ubuntu's
+# coreutils are uutils since 25.10: one multicall binary that takes the utility's name from the path it was
+# executed by. Below 3.14.0 kavach execs a pinned program as `/dev/fd/N`, and uutils refuses to start: exit
+# 1, no stdout. 3.14.0 execs `/proc/self/fd/N`, which uutils accepts. `foreign_run` returns OK for a guest
+# that never started, so the exit code is what tells them apart. On a GNU host this group passes either way;
+# on a uutils host it fails with kavach below 3.14.0.
 #
 #   guest-echo WORD   prints WORD and a newline, exits 0
 #   guest-exit N      exits N (one digit)
@@ -90,6 +87,15 @@ fn main() {
     assert_eq(load8(sbuf + 0), 104, "surface byte 0 = 'h' (captured guest output)");
     assert_eq(load8(sbuf + 1), 105, "surface byte 1 = 'i'");
     assert_eq(load8(sbuf + 2), 10, "surface byte 2 = newline");
+
+    test_group("mehman — the host's own /bin/echo runs as a guest, whichever coreutils it has");
+    var hf = foreign_new("/bin/echo hi", 64, 8);
+    assert(t_ok(hf), "foreign_new for the host's /bin/echo");
+    assert_eq(foreign_run(hf), 0, "the host's /bin/echo returns MehmanError.OK");
+    assert_eq(foreign_exit_status(hf), 0, "  ...and exits 0: it really started");
+    var hbuf = MehmanSurface_buffer(foreign_surface(hf));
+    assert_eq(load8(hbuf + 0), 104, "  ...and its output is captured: 'h'");
+    assert_eq(load8(hbuf + 1), 105, "  ...'i'");
 
     test_group("mehman — present the captured surface as window content");
     kashi_font_init();   # the glyph tables must be live before draw_text_lines

@@ -12,6 +12,8 @@
 # so each dep resolves from its published tag and `cyrius.lock` pins the commit it resolved to. This
 # gate now reads the dormant line as the sibling's LOCATION (the oracle it checks against) and FAILS
 # on a live one: uncommenting a `path` for cross-repo work is fine, committing it is not.
+# ⚠ Since cyrius 6.7.6 a `path` is a dev override, read only under `CYRIUS_LOCAL` or `--local`, so the
+# mechanism above no longer fires on a default build. A live line still fails here: the rule stands.
 #
 # Per declared [deps.*] with a live or dormant `path`:
 #   0. the `path` line is dormant                                   (live → FAIL)

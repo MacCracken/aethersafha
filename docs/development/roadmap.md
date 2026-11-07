@@ -52,7 +52,8 @@ each module's size, test count and Cyrius home.
 | **0.17.5** | Tests and benchmarks | ✅ **Shipped.** Every Rust test of every PORT row is re-expressed (`tests/system.tcyr` holds the end-to-end ones); the parity plan's to-do list is empty and only the OBSOLETE row is left. Cyrius benches cover every series Rust benchmarked; `docs/benchmarks.md` keeps Rust's CSV as a record beside them; `scripts/bench-history.sh` runs `cyrius bench`. The coverage floor rises to 68%. |
 | **0.17.6** | Delete `rust-old/` | ✅ **Shipped.** The gate passed: every parity row CLOSED (the OBSOLETE row through [`../architecture/002-rust-public-api-map.md`](../architecture/002-rust-public-api-map.md)), nothing of value lost, every reference pointed at tag `0.17.5` — the last tag that carries the directory. `parity-plan.md` retired with it. Folded in: setu 0.8.12, whose bounded reads let the Linux accept path handshake without blocking (D12). |
 | **0.17.7** | setu 0.8.13 | ✅ **Shipped.** setu reads a client's shared buffer without waiting or following a link, and allocates nothing per message; aethersafha returns to setu's reader on both targets and drops its own. |
-| **0.17.8** | Cyrius 6.6.20 | ✅ **Built.** The pin moves 6.6.11 → 6.6.20 and each declared dep moves to its 6.6.20 tag, with no change to `src/`. `foreign`'s guests re-exec the test binary, so CI passes on Ubuntu 26.04 with the runner and kavach unchanged. |
+| **0.17.8** | Cyrius 6.6.20 | ✅ **Shipped.** The pin moves 6.6.11 → 6.6.20 and each declared dep moves to its 6.6.20 tag, with no change to `src/`. `foreign`'s guests re-exec the test binary, so CI passes on Ubuntu 26.04 with the runner and kavach unchanged. |
+| **0.18.0** | Cyrius 6.7.9 | ✅ **Built.** The pin moves onto the 6.7 language line and each declared dep moves to its 6.7.9 tag, with no change to `src/`. kavach 3.14.0 runs uutils guests, so `foreign` runs the host's `/bin/echo` again. |
 
 **The gate for deleting `rust-old/`:**
 1. Every `parity-plan.md` row is CLOSED.
@@ -151,11 +152,8 @@ it** until C4a closes (operator, 2026-08-16).
   by-path include removed: host build green, same size, different hash; `--agnos` and the suites not run).
   Moving to it and correcting that file's comment is its own change.
 - `README.md`'s build steps still begin with `cyrius lib sync --full`, which has been wrong since 0.16.27.
-- `programs/puka_desktop_probe.cyr` does not build (`ae_bhumi` undefined, reachable), at 0.17.7 and 0.17.8 alike.
+- `programs/puka_desktop_probe.cyr` does not build (`ae_bhumi` undefined, reachable), and has not since at least 0.17.7.
   CI builds no program, so nothing catches this.
-- **A coreutils guest cannot run on a uutils host until kavach is at least 3.14.0**, whose own pin is 6.7.9. When the
-  pin reaches it, add back an assertion that a host `/bin/echo` runs as a guest (agnosai's
-  `_t_kb_execute_runs_a_host_binary`), since `tests/foreign.tcyr` no longer exercises one.
 - **Stale comments the audit found.** Fix each with the bite that touches its file:
   - `render.cyr:5-6`, `:226` ("premultiplied") and `:1403` ("chars*6");
   - `shell_render.cyr:5`;
