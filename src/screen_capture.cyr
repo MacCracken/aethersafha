@@ -61,11 +61,13 @@ enum ScapErr {          # CaptureError -> i64 (payload strings/ids dropped)
     SCAP_ERR_PERM_EXPIRED       = 5;   # PermissionExpired(agent)
     SCAP_ERR_WINDOW_NOT_FOUND   = 6;   # WindowNotFound(surface_id)
     SCAP_ERR_REGION_OOB         = 7;   # RegionOutOfBounds — also any width or height <= 0
-    SCAP_ERR_ENCODING           = 8;   # EncodingError — an encoder refused (dims <= 0) or had no memory
+    SCAP_ERR_ENCODING           = 8;   # EncodingError — an encoder refused the size, or had no memory
     SCAP_ERR_NO_MEMORY          = 9;   # port-only: an allocation for the capture failed (Rust aborts)
 }
 enum ScapCap {
     SCAP_MAX_HISTORY = 100;   # history ring-buffer cap (Rust const MAX_HISTORY)
+    SCAP_MAX_DIM     = 65535; # the largest width or height an encoder takes
+    SCAP_MAX_PIXELS  = 268435456; # 16384 x 16384: BMP's u32 sizes and PNG's IDAT length both hold it
 }
 
 # ---------------------------------------------------------------------------
@@ -314,43 +316,50 @@ fn scap_buf_wrap(out, len): i64 {
 # 0x00RRGGBB (bhumi XRGB); the X byte is padding, so alpha is ALWAYS 0xFF.
 # ⛔ Each returns 0 for width, height or pixel count <= 0, BEFORE allocating:
 # alloc/fl_alloc return 0 for a size <= 0 and the loops would write through it.
+# ⛔ And for a width or height past SCAP_MAX_DIM, or a pixel count past their product:
+# the size math wraps i64 far above that, and a wrapped size is a small buffer for a
+# large loop. Inside the limits every product here fits, and so do the file formats' own
+# fields: BMP's sizes are u32, and a PNG chunk's length stops at 2^31 - 1.
 # ---------------------------------------------------------------------------
 
-# Adler-32 (RFC 1950). scap_adler32("") == 1, scap_adler32("Wikipedia") == 0x11E60398.
-fn scap_adler32(ptr, len): i64 {
-    var a = 1;
-    var b = 0;
-    var i = 0;
-    while (i < len) {
-        a = (a + load8(ptr + i)) % 65521;
-        b = (b + a) % 65521;
-        i = i + 1;
-    }
-    return ((b << 16) | a) & 0xFFFFFFFF;
+# Can an encoder take width x height? -> 1 / 0.
+fn scap_dims_ok(width, height): i64 {
+    if ((width <= 0) || (height <= 0)) { return 0; }
+    if ((width > ScapCap.SCAP_MAX_DIM) || (height > ScapCap.SCAP_MAX_DIM)) { return 0; }
+    if (width * height > ScapCap.SCAP_MAX_PIXELS) { return 0; }
+    return 1;
 }
 
-# CRC-32 (PNG/zlib polynomial 0xEDB88320) update over a byte range.
-fn scap_crc_update(crc, ptr, len): i64 {
+# n bytes from s to d, not overlapping: 32 at a time, then the tail. The stdlib memcpy is a byte loop.
+fn scap_copy(d, s, n): i64 {
     var i = 0;
-    while (i < len) {
-        crc = (crc ^ load8(ptr + i)) & 0xFFFFFFFF;
-        var k = 0;
-        while (k < 8) {
-            if ((crc & 1) != 0) { crc = ((crc >> 1) ^ 0xEDB88320) & 0xFFFFFFFF; }
-            else { crc = (crc >> 1) & 0xFFFFFFFF; }
-            k = k + 1;
-        }
+    var e = n - 31;
+    while (i < e) {
+        store64(d + i, load64(s + i));
+        store64(d + i + 8, load64(s + i + 8));
+        store64(d + i + 16, load64(s + i + 16));
+        store64(d + i + 24, load64(s + i + 24));
+        i = i + 32;
+    }
+    while (i < n) {
+        store8(d + i, load8(s + i));
         i = i + 1;
     }
-    return crc;
+    return 0;
 }
-# scap_png_crc32(type,type_len,data,data_len): CRC over type bytes then data.
-# scap_png_crc32("IEND", 4, 0, 0) == 0xAE426082.
+
+# Adler-32 (RFC 1950), sankoch's. scap_adler32("") == 1, scap_adler32("Wikipedia") == 0x11E60398.
+fn scap_adler32(ptr, len): i64 { return adler32(ptr, len); }
+
+# scap_png_crc32(type,type_len,data,data_len): CRC-32 (PNG/zlib polynomial) over type bytes then
+# data, sankoch's. scap_png_crc32("IEND", 4, 0, 0) == 0xAE426082.
 fn scap_png_crc32(type_ptr, type_len, data_ptr, data_len): i64 {
-    var crc = 0xFFFFFFFF;
-    crc = scap_crc_update(crc, type_ptr, type_len);
-    crc = scap_crc_update(crc, data_ptr, data_len);
-    return (crc ^ 0xFFFFFFFF) & 0xFFFFFFFF;
+    var st[8];
+    crc32_init_table();
+    store64(&st, 0xFFFFFFFF);
+    crc32_update(&st, type_ptr, type_len);
+    crc32_update(&st, data_ptr, data_len);
+    return crc32_final(&st);
 }
 # scap_put_be32(dst, v): write a big-endian u32 (PNG length/CRC/IHDR dims).
 fn scap_put_be32(dst, v): i64 {
@@ -362,19 +371,16 @@ fn scap_put_be32(dst, v): i64 {
 }
 
 # scap_encode_raw(pix, npix): RawArgb — 4 bytes/pixel, [B,G,R,A=0xFF] (Rust's
-# px.to_ne_bytes() on little-endian). -> *ScapBuf, or 0 if npix <= 0 / no memory.
+# px.to_ne_bytes() on little-endian). -> *ScapBuf, or 0 if npix <= 0, npix is past
+# SCAP_MAX_DIM squared, or no memory.
 fn scap_encode_raw(pix, npix): i64 {
-    if (npix <= 0) { return 0; }
+    if ((npix <= 0) || (npix > ScapCap.SCAP_MAX_DIM * ScapCap.SCAP_MAX_DIM)) { return 0; }
     var out = fl_alloc(npix * 4);
     if (out == 0) { return 0; }
     var i = 0;
     while (i < npix) {
         var v = load64(pix + i * 8);
-        var o = out + i * 4;
-        store8(o + 0, v & 0xFF);
-        store8(o + 1, (v >> 8) & 0xFF);
-        store8(o + 2, (v >> 16) & 0xFF);
-        store8(o + 3, 0xFF);              # A: XRGB has none; opaque (see ALPHA above)
+        store32(out + i * 4, (v & 0xFFFFFF) | 0xFF000000);   # A: XRGB has none; opaque (see ALPHA above)
         i = i + 1;
     }
     return scap_buf_wrap(out, npix * 4);
@@ -382,9 +388,9 @@ fn scap_encode_raw(pix, npix): i64 {
 
 # scap_encode_bmp(pix, width, height): 32-bit BITMAPINFOHEADER BMP, top-down
 # (negative height), BGRA, uncompressed. file_size = 54 + width*4*height.
-# -> *ScapBuf, or 0 if width/height <= 0 / no memory.
+# -> *ScapBuf, or 0 if scap_dims_ok refuses the size / no memory.
 fn scap_encode_bmp(pix, width, height): i64 {
-    if ((width <= 0) || (height <= 0)) { return 0; }
+    if (scap_dims_ok(width, height) == 0) { return 0; }
     var row_size = width * 4;
     var pixel_data_size = row_size * height;
     var file_size = 54 + pixel_data_size;
@@ -413,11 +419,7 @@ fn scap_encode_bmp(pix, width, height): i64 {
     var n = width * height;
     while (i < n) {
         var v = load64(pix + i * 8);
-        var o = out + 54 + i * 4;
-        store8(o + 0, v & 0xFF);          # B
-        store8(o + 1, (v >> 8) & 0xFF);   # G
-        store8(o + 2, (v >> 16) & 0xFF);  # R
-        store8(o + 3, 0xFF);              # A (opaque — see ALPHA above)
+        store32(out + 54 + i * 4, (v & 0xFFFFFF) | 0xFF000000);   # BGRA (opaque — see ALPHA above)
         i = i + 1;
     }
     return scap_buf_wrap(out, file_size);
@@ -454,8 +456,7 @@ fn scap_zlib_store(raw, raw_len, out): i64 {
         store8(out + cur, last); cur = cur + 1;
         store16(out + cur, blk); cur = cur + 2;                   # LEN (LE)
         store16(out + cur, (blk ^ 0xFFFF) & 0xFFFF); cur = cur + 2; # NLEN (~LEN, LE)
-        var i = 0;
-        while (i < blk) { store8(out + cur + i, load8(raw + pos + i)); i = i + 1; }
+        scap_copy(out + cur, raw + pos, blk);
         cur = cur + blk;
         pos = pos + blk;
     }
@@ -471,20 +472,20 @@ fn scap_png_chunk(dst, type_ptr, data_ptr, data_len): i64 {
     store8(dst + 5, load8(type_ptr + 1));
     store8(dst + 6, load8(type_ptr + 2));
     store8(dst + 7, load8(type_ptr + 3));
-    var i = 0;
-    while (i < data_len) { store8(dst + 8 + i, load8(data_ptr + i)); i = i + 1; }
+    scap_copy(dst + 8, data_ptr, data_len);
     var crc = scap_png_crc32(type_ptr, 4, data_ptr, data_len);
     scap_put_be32(dst + 8 + data_len, crc);
     return 12 + data_len;
 }
 
 # scap_encode_png(pix, width, height): PNG (8-bit RGBA, filter None, zlib STORED).
-# Signature + IHDR + IDAT + IEND, hand-rolled CRC-32/Adler-32. -> *ScapBuf, or 0
-# if width/height <= 0 / no memory.
+# Signature + IHDR + IDAT + IEND. -> *ScapBuf, or 0 if scap_dims_ok refuses the size /
+# no memory (the first PNG makes sankoch's 16 KiB CRC table).
 # ⚠ The zlib stream is written straight into the IDAT chunk, not into its own
 # buffer and copied: at 2560x1440 that buffer was 14.7 MB, and its copy, per capture.
 fn scap_encode_png(pix, width, height): i64 {
-    if ((width <= 0) || (height <= 0)) { return 0; }
+    if (scap_dims_ok(width, height) == 0) { return 0; }
+    if (crc32_init_table() < 0) { return 0; }
     # IHDR data (13 bytes) — on the stack, nothing reads it after this returns
     var ihdr[16];
     scap_put_be32(&ihdr + 0, width);
@@ -506,11 +507,8 @@ fn scap_encode_png(pix, width, height): i64 {
         var x = 0;
         while (x < width) {
             var v = load64(pix + (y * width + x) * 8);
-            var o = raw + rowstart + 1 + x * 4;
-            store8(o + 0, (v >> 16) & 0xFF);  # R
-            store8(o + 1, (v >> 8) & 0xFF);   # G
-            store8(o + 2, v & 0xFF);          # B
-            store8(o + 3, 0xFF);              # A (opaque — see ALPHA above)
+            # RGBA in memory, opaque (see ALPHA above)
+            store32(raw + rowstart + 1 + x * 4, ((v >> 16) & 0xFF) | (v & 0xFF00) | ((v & 0xFF) << 16) | 0xFF000000);
             x = x + 1;
         }
         y = y + 1;
@@ -535,9 +533,9 @@ fn scap_encode_png(pix, width, height): i64 {
 }
 
 # scap_encode_pixels(pix, npix, width, height, fmt): dispatch. -> *ScapBuf, or 0
-# (EncodingError) for width/height/npix <= 0 or no memory.
+# (EncodingError) for a size scap_dims_ok refuses, npix <= 0 or no memory.
 fn scap_encode_pixels(pix, npix, width, height, fmt): i64 {
-    if ((width <= 0) || (height <= 0)) { return 0; }
+    if (scap_dims_ok(width, height) == 0) { return 0; }
     if (fmt == ScapFmt.SCAP_FMT_RAW_ARGB) { return scap_encode_raw(pix, npix); }
     if (fmt == ScapFmt.SCAP_FMT_BMP) { return scap_encode_bmp(pix, width, height); }
     return scap_encode_png(pix, width, height);
@@ -586,14 +584,20 @@ fn scap_capture_full_screen(fb, err_out): i64 {
     if ((w <= 0) || (h <= 0)) { store64(err_out, ScapErr.SCAP_ERR_REGION_OOB); return 0; }
     var src = scap_pix_alloc(w, h, err_out);
     if (src == 0) { return 0; }
-    var pix = scap_pix_ptr(src);
+    var d = scap_pix_ptr(src);
+    var pitch = bhumi_fb_pitch(fb);
+    var bpp = bhumi_fb_bpp(fb);
+    var srow = bhumi_fb_pixels(fb);
     var y = 0;
     while (y < h) {
-        var x = 0;
-        while (x < w) {
-            store64(pix + (y * w + x) * 8, bhumi_fb_get(fb, x, y));
-            x = x + 1;
+        var sp = srow;
+        var e = srow + w * bpp;
+        while (sp < e) {
+            store64(d, load32(sp));
+            d = d + 8;
+            sp = sp + bpp;
         }
+        srow = srow + pitch;
         y = y + 1;
     }
     return src;

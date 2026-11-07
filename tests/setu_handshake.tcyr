@@ -96,7 +96,8 @@ fn main() {
     # ⭐ THE TWO RESYNCS — the whole fix. Neither of these is a protocol error, because record LOSS
     # produces both of them from a perfectly well-behaved client.
     assert_eq(setu_hs_action(1, SETU_COMMIT), SetuHsAct.HS_SKIP, "state 1 + commit -> SKIP (its attach was dropped)");
-    assert_eq(setu_hs_action(2, SETU_ATTACH), SetuHsAct.HS_ATTACH, "state 2 + attach -> re-attach (our commit was dropped)");
+    assert_eq(setu_hs_action(2, SETU_ATTACH), SetuHsAct.HS_ATTACH,
+      "state 2 + attach -> re-attach (our commit was dropped)");
 
     # -----------------------------------------------------------------------
     test_group("setu handshake — kinds loss CANNOT explain are still errors");
@@ -164,7 +165,7 @@ fn main() {
     # -----------------------------------------------------------------------
     test_group("setu handshake — a long run of orphan commits does not fail, it waits");
     # The pathological case: the reader landed such that every surviving record is a COMMIT (the client
-    # was killed mid-stream, or the ring holds one parity). This must be "not yet", never "error".
+    # was killed mid-stream, or the ring holds one parity). This must read as "still waiting", never "error".
     var orphans = alloc(8 * 8);
     var oi = 0;
     while (oi < 8) { store64(orphans + oi * 8, SETU_COMMIT); oi = oi + 1; }
@@ -172,7 +173,7 @@ fn main() {
 
     # -----------------------------------------------------------------------
     # ⛔⛔ 0.16.30: SURFACE GEOMETRY IS CLIENT INPUT. Both handshake paths checked only
-    # `0 < h * stride <= 16 MB`, and every CPU frame re-reads `w * h * 4` bytes into that `h * stride`
+    # `0 < h * stride <= the cap`, and every CPU frame re-reads `w * h * 4` bytes into that `h * stride`
     # cache — so a client could make the compositor write past its own heap block.
     test_group("setu handshake — the geometry rule (Rust's ShmBufferInfo::validate)");
     assert_eq(setu_surface_dims_ok(100, 50), 1, "100x50 is a surface");
@@ -190,10 +191,12 @@ fn main() {
       "THE OVERFLOW: a 2,400-byte cache for a 2,400,000-byte read is refused");
     assert_eq(setu_attach_ok(100, 0 - 50, 0 - 400), 0,
       "negative h and stride are refused, though their product (+20000) passed the old check");
-    assert_eq(setu_attach_ok(2048, 2048, 8192), 1, "exactly 16 MB is the cap");
-    assert_eq(setu_attach_ok(2048, 2049, 8192), 0, "one row over the cap is refused");
-    assert_eq(setu_attach_ok(100, 1, 16777217), 0, "a stride over the cap is refused");
-    # ⚠ h = 2^62 + 1 at stride 4: h * stride WRAPS to 4, which the old `0 < nbytes <= 16 MB` accepted.
+    assert_eq(setu_attach_ok(2048, 2048, 16384), 1, "exactly 32 MiB is the cap: agnos's GPU slot");
+    assert_eq(setu_attach_ok(2048, 2049, 16384), 0, "one row over the cap is refused");
+    assert_eq(setu_attach_ok(100, 1, 33554433), 0, "a stride over the cap is refused");
+    assert_eq(setu_attach_ok(3840, 2130, 15360), 1, "a 4K screen's maximized window, a titlebar short of it");
+    assert_eq(setu_attach_ok(3840, 2160, 15360), 1, "the whole 4K screen");
+    # ⚠ h = 2^62 + 1 at stride 4: h * stride WRAPS to 4, which the old `0 < nbytes <= cap` accepted.
     assert_eq(setu_attach_ok(1, 4611686018427387905, 4), 0, "a product that wraps i64 is refused");
 
     #ifndef CYRIUS_TARGET_AGNOS

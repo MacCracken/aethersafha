@@ -44,14 +44,16 @@ fn main(): i64 {
     test_group("route — Rust's route_input: a click on the background is None");
     var cbg = comp_new();
     assert_eq(t_press_at(cbg, 0, 0), 1, "a left press yields one outcome");
-    assert_eq(route_out_kind(0), RouteAct.RA_NONE, "a click on the background is None (route_input_click_on_background)");
+    assert_eq(route_out_kind(0), RouteAct.RA_NONE,
+      "a click on the background is None (route_input_click_on_background)");
     assert_eq(route_out_btn(0), INPUT_BTN_LEFT, "  ...and it names the left button");
     assert_eq(route_out_val(0), 1, "  ...going down");
     assert_eq(t_release(cbg), 1, "the release yields one outcome");
     assert_eq(route_out_kind(0), RouteAct.RA_NONE, "  ...None again");
     assert_eq(route_out_val(0), 0, "  ...going up");
     t_press_at(cbg, 5000, 5000);
-    assert_eq(route_out_kind(0), RouteAct.RA_NONE, "a click far from anything is None (input_routing_click_on_empty_is_none)");
+    assert_eq(route_out_kind(0), RouteAct.RA_NONE,
+      "a click far from anything is None (input_routing_click_on_empty_is_none)");
     t_release(cbg);
     assert_eq(route_out_kind(7), 0 - 1, "an outcome index past the end reads -1, not a plausible RA_NONE");
     assert_eq(route_out_kind(0 - 1), 0 - 1, "  ...and so does a negative one");
@@ -94,10 +96,12 @@ fn main(): i64 {
     # -----------------------------------------------------------------------
     test_group("route — Rust's route_input: a key goes to the focused window, or nowhere");
     var ck = comp_new();
-    assert_eq(route_key(ck, bhumi_key_event(1, 65)), RouteAct.RA_NONE, "with nothing focused a key goes nowhere (route_input_key_press_no_focus)");
+    assert_eq(route_key(ck, bhumi_key_event(1, 65)), RouteAct.RA_NONE,
+      "with nothing focused a key goes nowhere (route_input_key_press_no_focus)");
     assert_eq(route_out_n(), 1, "  ...one outcome");
     var wk = comp_create_window(ck, 10, 10, 200, 100, "K");
-    assert_eq(route_key(ck, bhumi_key_event(1, 65)), RouteAct.RA_KEY_TO_FOCUSED, "with a window focused the key is its (route_input_key_press_with_focus)");
+    assert_eq(route_key(ck, bhumi_key_event(1, 65)), RouteAct.RA_KEY_TO_FOCUSED,
+      "with a window focused the key is its (route_input_key_press_with_focus)");
     assert_eq(route_out_kind(0), RouteAct.RA_KEY_TO_FOCUSED, "  ...as the outcome says");
     assert_eq(route_out_win(0), win_id(wk), "  ...the focused window");
     assert_eq(route_out_x(0), 65, "  ...keycode 65 (HID F8: bare, a client's key since 0.16.25)");
@@ -108,19 +112,24 @@ fn main(): i64 {
 
     # ⭐ THE LATCH LIVES HERE, and the chord is the port's own (Rust had no compositor keys).
     test_group("route — the held-modifier latch, and the chord it makes");
-    assert_eq(route_key(ck, bhumi_key_event(1, 0xE0)), RouteAct.RA_KEY_TO_FOCUSED, "LCtrl's own press still reaches the client — it is how a client learns a modifier");
+    assert_eq(route_key(ck, bhumi_key_event(1, 0xE0)), RouteAct.RA_KEY_TO_FOCUSED,
+      "LCtrl's own press still reaches the client — it is how a client learns a modifier");
     assert_eq(route_chrome_mod(), 1, "  ...and the chrome modifier is held");
     assert_eq(route_mods(), 1, "  ...as bit 0 of the latch");
-    assert_eq(route_key(ck, bhumi_key_event(1, 65)), RouteAct.RA_CHORD, "Ctrl+F8 is a chord: the compositor's, never the client's");
+    assert_eq(route_key(ck, bhumi_key_event(1, 65)), RouteAct.RA_CHORD,
+      "Ctrl+F8 is a chord: the compositor's, never the client's");
     assert_eq(route_out_x(0), 65, "  ...naming the key");
     assert_eq(route_out_y(0), 1, "  ...and the held modifiers");
     assert_eq(route_out_win(0), 0, "  ...and no window");
-    assert_eq(route_key(ck, bhumi_key_event(1, 0x04)), RouteAct.RA_CHORD, "an unclaimed Ctrl+A is swallowed too: the wire carries no modifier, so it would arrive as a bare a");
+    assert_eq(route_key(ck, bhumi_key_event(1, 0x04)), RouteAct.RA_CHORD,
+      "an unclaimed Ctrl+A is swallowed too: the wire carries no modifier, so it would arrive as a bare a");
     assert_eq(route_key(ck, bhumi_key_event(0, 65)), RouteAct.RA_CHORD, "  ...and so is a release under Ctrl");
-    assert_eq(route_key(ck, bhumi_key_event(1, 0xE1)), RouteAct.RA_KEY_TO_FOCUSED, "Shift under Ctrl is a modifier's own edge, not a chord");
+    assert_eq(route_key(ck, bhumi_key_event(1, 0xE1)), RouteAct.RA_KEY_TO_FOCUSED,
+      "Shift under Ctrl is a modifier's own edge, not a chord");
     assert_eq(route_mods(), 3, "  ...and both are held");
     route_key(ck, bhumi_key_event(0, 0xE1));
-    assert_eq(route_key(ck, bhumi_key_event(0, 0xE0)), RouteAct.RA_KEY_TO_FOCUSED, "LCtrl's release reaches the client");
+    assert_eq(route_key(ck, bhumi_key_event(0, 0xE0)), RouteAct.RA_KEY_TO_FOCUSED,
+      "LCtrl's release reaches the client");
     assert_eq(route_chrome_mod(), 0, "  ...and the chrome modifier is down no longer");
     assert_eq(route_key(ck, bhumi_key_event(1, 65)), RouteAct.RA_KEY_TO_FOCUSED, "F8 is bare again: the client's");
     route_key(ck, bhumi_key_event(1, 0xE4));
@@ -128,7 +137,8 @@ fn main(): i64 {
     route_key(ck, bhumi_key_event(0, 0xE4));
     assert_eq(route_chrome_mod(), 0, "  ...until it is released");
     # ⛔ The 297-px shape: dx = 256 + 0xE0 has bit 8 set and a low byte of LCtrl.
-    assert_eq(route_key(ck, bhumi_motion_event(256 + 0xE0, 0)), RouteAct.RA_NONE, "a motion whose low byte reads as a pressed LCtrl is not a key");
+    assert_eq(route_key(ck, bhumi_motion_event(256 + 0xE0, 0)), RouteAct.RA_NONE,
+      "a motion whose low byte reads as a pressed LCtrl is not a key");
     assert_eq(route_out_n(), 0, "  ...it yields nothing");
     assert_eq(route_chrome_mod(), 0, "  ...and holds no modifier");
     route_key(ck, bhumi_key_event(1, 0xE3));
@@ -148,7 +158,8 @@ fn main(): i64 {
     assert_eq(win_x(wd), 150, "the window followed: start x + 100 (drag_workflow)");
     assert_eq(win_y(wd), 100, "  ...and start y + 50");
     assert_eq(t_release(cd), 1, "the release yields one outcome");
-    assert_eq(route_out_kind(0), RouteAct.RA_END_INTERACTIVE, "  ...the end of the drag, and no client click: the press was the compositor's");
+    assert_eq(route_out_kind(0), RouteAct.RA_END_INTERACTIVE,
+      "  ...the end of the drag, and no client click: the press was the compositor's");
     t_move(cd, 30, 30);
     assert_eq(win_x(wd), 150, "after the release a motion moves the pointer, not the window");
     assert_eq(win_y(wd), 100, "  ...in either axis");
@@ -162,7 +173,8 @@ fn main(): i64 {
     t_move(cg, 0 - 1000, 0);
     assert_eq(win_x(wg), 0, "dragged off the left of the screen, the window stops at x = 0");
     t_move(cg, 50, 0);
-    assert_eq(win_x(wg), 0, "  ...and stays while its grab point would still be off-screen (a drag fed one delta at a time moved it here)");
+    assert_eq(win_x(wg), 0,
+      "  ...and stays while its grab point would still be off-screen (a drag fed one delta at a time moved it here)");
     t_move(cg, 100, 0);
     assert_eq(win_x(wg), 50, "  ...then moves with the pointer once it is back in range");
     assert_eq(input_ptr_x() - win_x(wg), 100, "  ...with the grab point under the pointer again");
@@ -182,7 +194,8 @@ fn main(): i64 {
     t_move(ce, 40, 0);
     assert_eq(win_x(we), 50, "a motion after it moves nothing");
     assert_eq(t_release(ce), 1, "the release yields one outcome");
-    assert_eq(route_out_kind(0), RouteAct.RA_NONE, "  ...nobody's: the press was the compositor's, with or without a gesture");
+    assert_eq(route_out_kind(0), RouteAct.RA_NONE,
+      "  ...nobody's: the press was the compositor's, with or without a gesture");
     assert_eq(t_press_at(ce, 50 + 400 - 2, 200), 1, "a press on the right strip yields one outcome");
     assert_eq(route_out_kind(0), RouteAct.RA_BEGIN_RESIZE, "  ...a resize");
     assert_eq(route_resize_id(), win_id(we), "the resize state names the window");
@@ -211,19 +224,22 @@ fn main(): i64 {
     var wr2 = comp_create_window(cr, 500, 50, 200, 200, "R2");
     input_ptr_set(100, 100);
     assert_eq(route_pointer(cr, bhumi_button_event(2, 2), T_SW, T_SH), 1, "a right press yields one outcome");
-    assert_eq(route_out_kind(0), RouteAct.RA_CLIENT_CLICK, "a right-click on a window is the client's (right_click_on_window)");
+    assert_eq(route_out_kind(0), RouteAct.RA_CLIENT_CLICK,
+      "a right-click on a window is the client's (right_click_on_window)");
     assert_eq(route_out_win(0), win_id(wr1), "  ...the window under it");
     assert_eq(route_out_btn(0), INPUT_BTN_RIGHT, "  ...as wire button 2, the kernel's bit order (Rust's X11 3)");
     assert_eq(route_out_x(0), 50, "  ...at content-relative x (Rust sent the screen point)");
     assert_eq(route_out_y(0), 50 - TITLEBAR_H, "  ...and content-relative y");
-    assert_eq(comp_focused_id(cr), win_id(wr2), "a right-click focuses nothing: window management is the left button's");
+    assert_eq(comp_focused_id(cr), win_id(wr2),
+      "a right-click focuses nothing: window management is the left button's");
     assert_eq(route_drag_id(), 0, "  ...and starts nothing");
     assert_eq(route_pointer(cr, bhumi_button_event(0, 0), T_SW, T_SH), 1, "its release yields one outcome");
     assert_eq(route_out_kind(0), RouteAct.RA_CLIENT_CLICK, "  ...the client's");
     assert_eq(route_out_val(0), 0, "  ...going up");
     input_ptr_set(100, 60);
     route_pointer(cr, bhumi_button_event(2, 2), T_SW, T_SH);
-    assert_eq(route_out_kind(0), RouteAct.RA_NONE, "a right-click on the titlebar is nobody's: chrome is not the client's surface");
+    assert_eq(route_out_kind(0), RouteAct.RA_NONE,
+      "a right-click on the titlebar is nobody's: chrome is not the client's surface");
     assert_eq(route_out_btn(0), INPUT_BTN_RIGHT, "  ...naming the right button");
     route_pointer(cr, bhumi_button_event(0, 0), T_SW, T_SH);
 
@@ -233,7 +249,8 @@ fn main(): i64 {
     test_group("route — Rust's resize_window and its minimum");
     var cz = comp_new();
     var wz = comp_create_window(cz, 50, 50, 400, 300, "Z");
-    assert_eq(win_resize_by(wz, Deco.DECO_RESIZE_BR, 500 - win_w(wz), 400 - win_h(wz), 1920, 1080), 1, "a resize reports the change");
+    assert_eq(win_resize_by(wz, Deco.DECO_RESIZE_BR, 500 - win_w(wz), 400 - win_h(wz), 1920, 1080), 1,
+      "a resize reports the change");
     assert_eq(win_w(wz), 500, "the width is 500 (resize_window)");
     assert_eq(win_h(wz), 400, "  ...the height 400");
     assert_eq(win_x(wz), 50, "  ...and the origin is kept");
@@ -279,10 +296,14 @@ fn main(): i64 {
     assert_eq(deco_hit(ev, 100, 429), Deco.DECO_RESIZE_BL, "the window's last row and first column is the corner");
     assert_eq(deco_hit(ev, 100, 430), Deco.DECO_NONE, "  ...one row lower is outside");
     var en = win_new(2, 100, 100, WIN_MIN_W, WIN_MIN_H, "N");
-    assert_eq(deco_hit(en, deco_min_x(en), deco_btn_y(en)), Deco.DECO_MIN, "at the floor the minimize button is still a button");
-    assert_eq(deco_hit(en, deco_close_x(en) + BTN_W - 1, deco_btn_y(en)), Deco.DECO_CLOSE, "the close button's last column is the close button");
-    assert_eq(deco_hit(en, deco_close_x(en) + BTN_W, deco_btn_y(en)), Deco.DECO_RESIZE_R, "  ...the next is the right strip");
-    assert_eq(deco_hit(en, 100 + RESIZE_M, deco_btn_y(en)), Deco.DECO_TITLEBAR, "and the strip left of the buttons drags");
+    assert_eq(deco_hit(en, deco_min_x(en), deco_btn_y(en)), Deco.DECO_MIN,
+      "at the floor the minimize button is still a button");
+    assert_eq(deco_hit(en, deco_close_x(en) + BTN_W - 1, deco_btn_y(en)), Deco.DECO_CLOSE,
+      "the close button's last column is the close button");
+    assert_eq(deco_hit(en, deco_close_x(en) + BTN_W, deco_btn_y(en)), Deco.DECO_RESIZE_R,
+      "  ...the next is the right strip");
+    assert_eq(deco_hit(en, 100 + RESIZE_M, deco_btn_y(en)), Deco.DECO_TITLEBAR,
+      "and the strip left of the buttons drags");
 
     # -----------------------------------------------------------------------
     # A window at (200, 100), 300x200: x 200..499, right edge 500.
@@ -291,7 +312,8 @@ fn main(): i64 {
     var wl = comp_create_window(cl, 200, 100, 300, 200, "L");
     var idl = win_id(wl);
     assert_eq(t_press_at(cl, 202, 200), 1, "a press on the left strip yields one outcome");
-    assert_eq(route_out_kind(0), RouteAct.RA_BEGIN_RESIZE, "  ...a resize, and nothing for the client: the strip is chrome (Rust: BeginResize alone)");
+    assert_eq(route_out_kind(0), RouteAct.RA_BEGIN_RESIZE,
+      "  ...a resize, and nothing for the client: the strip is chrome (Rust: BeginResize alone)");
     assert_eq(route_out_x(0), Deco.DECO_RESIZE_L, "  ...on the left grip");
     assert_eq(route_resize_id(), idl, "the resize state names the window");
     t_move(cl, 0 - 50, 30);
@@ -349,12 +371,14 @@ fn main(): i64 {
     var wR = comp_create_window(cR, 100, 100, 300, 200, "RR");
     t_press_at(cR, 397, 200);
     assert_eq(route_out_x(0), Deco.DECO_RESIZE_R, "a press on the right strip begins a right resize");
-    assert_eq(route_out_n(), 1, "  ...and that is ALL it yields: the strip lies over the content, and the press used to reach the client too");
+    assert_eq(route_out_n(), 1,
+      "  ...and that is ALL it yields: the strip lies over the content, and the press used to reach the client too");
     t_move(cR, 0 - 400, 0);
     assert_eq(win_w(wR), WIN_MIN_W, "the right edge pushed past the floor stops at the minimum");
     assert_eq(win_x(wR), 100, "  ...with the origin kept");
     t_move(cR, 150, 0);
-    assert_eq(win_w(wR), WIN_MIN_W, "coming back, the edge waits for the pointer (a resize fed one delta at a time grew here)");
+    assert_eq(win_w(wR), WIN_MIN_W,
+      "coming back, the edge waits for the pointer (a resize fed one delta at a time grew here)");
     t_move(cR, 200, 0);
     assert_eq(win_w(wR), 253, "  ...then follows it");
     assert_eq(win_x(wR) + win_w(wR) - input_ptr_x(), 3, "  ...3 px past the pointer, where it was grabbed");
@@ -385,7 +409,8 @@ fn main(): i64 {
     assert_eq(win_x(wa), 100, "A, now under the pointer, is not dragged in B's place");
     assert_eq(win_y(wa), 100, "  ...in either axis");
     assert_eq(t_release(cx), 1, "the release yields one outcome");
-    assert_eq(route_out_kind(0), RouteAct.RA_NONE, "  ...nobody's: NOT a release for A's client, which never got the press");
+    assert_eq(route_out_kind(0), RouteAct.RA_NONE,
+      "  ...nobody's: NOT a release for A's client, which never got the press");
     t_press_at(cx, 102, 200);
     assert_eq(route_out_kind(0), RouteAct.RA_BEGIN_RESIZE, "A's left strip begins a resize");
     comp_close_window(cx, ida);
@@ -413,11 +438,14 @@ fn main(): i64 {
     assert_eq(route_out_win(0), idt2, "  ...of T");
     assert_eq(comp_find_by_id(cc, idt2), 0 - 1, "T is closed");
     assert_eq(t_release(cc), 1, "the release, a frame later, yields one outcome");
-    assert_eq(route_out_kind(0), RouteAct.RA_NONE, "  ...nobody's: NOT a release for U's client, now under the pointer");
+    assert_eq(route_out_kind(0), RouteAct.RA_NONE,
+      "  ...nobody's: NOT a release for U's client, now under the pointer");
     var wt3 = comp_create_window(cc, 100, 100, 300, 200, "T3");
     input_ptr_set(deco_close_x(wt3) + 2, deco_btn_y(wt3) + 2);
-    assert_eq(route_pointer(cc, bhumi_button_event(2, 3), T_SW, T_SH), 1, "a folded close click with a right press in the same drain yields one outcome");
-    assert_eq(route_out_kind(0), RouteAct.RA_CLOSE, "  ...the Close: the right press is not handed to U at a point the user never clicked in it");
+    assert_eq(route_pointer(cc, bhumi_button_event(2, 3), T_SW, T_SH), 1,
+      "a folded close click with a right press in the same drain yields one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_CLOSE,
+      "  ...the Close: the right press is not handed to U at a point the user never clicked in it");
     route_pointer(cc, bhumi_button_event(0, 0), T_SW, T_SH);
     assert_eq(comp_focused_id(cc), win_id(wu), "and U, the window left, holds focus");
 
@@ -480,7 +508,8 @@ fn main(): i64 {
     var co = comp_new();
     var wo = comp_create_window(co, 100, 100, 300, 200, "O");
     input_ptr_set(150, 200);
-    assert_eq(route_pointer(co, bhumi_button_event(0, 1), T_SW, T_SH), 2, "a folded click on the content yields its press AND its release");
+    assert_eq(route_pointer(co, bhumi_button_event(0, 1), T_SW, T_SH), 2,
+      "a folded click on the content yields its press AND its release");
     assert_eq(route_out_val(0), 1, "  ...the press first");
     assert_eq(route_out_val(1), 0, "  ...then the release");
     assert_eq(route_out_win(1), win_id(wo), "  ...both for the window's client");
@@ -488,7 +517,8 @@ fn main(): i64 {
     assert_eq(route_pointer(co, bhumi_button_event(1, 1), T_SW, T_SH), 0, "a button still held is no transition");
     assert_eq(t_release(co), 1, "  ...and it releases once");
     input_ptr_set(150, 110);
-    assert_eq(route_pointer(co, bhumi_button_event(0, 1), T_SW, T_SH), 2, "a folded titlebar click yields two outcomes");
+    assert_eq(route_pointer(co, bhumi_button_event(0, 1), T_SW, T_SH), 2,
+      "a folded titlebar click yields two outcomes");
     assert_eq(route_out_kind(0), RouteAct.RA_BEGIN_DRAG, "  ...the drag begins");
     assert_eq(route_out_kind(1), RouteAct.RA_END_INTERACTIVE, "  ...and ends in the same event");
     assert_eq(route_drag_id(), 0, "  ...leaving no gesture behind");
@@ -497,6 +527,108 @@ fn main(): i64 {
     assert_eq(route_out_btn(0), INPUT_BTN_MIDDLE, "  ...naming the middle button, wire 3");
     assert_eq(route_drag_id(), 0, "  ...and it starts no drag: only the left button manages windows");
     t_release(co);
+
+    # -----------------------------------------------------------------------
+    test_group("route — a release goes to the window that got the press (the implicit grab)");
+    var cg1 = comp_new();
+    var ga = comp_create_window(cg1, 0, 0, 300, 300, "A");
+    var gb = comp_create_window(cg1, 400, 0, 300, 300, "B");
+    t_press_at(cg1, 100, 100);
+    assert_eq(route_out_kind(0), RouteAct.RA_CLIENT_CLICK, "a press on A's content is A's");
+    assert_eq(route_out_win(0), win_id(ga), "  ...A");
+    input_ptr_set(500, 100);
+    assert_eq(t_release(cg1), 1, "released over B: one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_CLIENT_CLICK, "  ...still a client's");
+    assert_eq(route_out_win(0), win_id(ga), "  ...A's, not B's");
+    assert_eq(route_out_val(0), 0, "  ...going up");
+    assert_eq(route_out_x(0), 299, "  ...at A's last content column: a client never sees a point off its surface");
+    assert_eq(route_out_y(0), 100 - win_body_y(ga), "  ...in the row the pointer is on");
+    t_press_at(cg1, 100, 100);
+    input_ptr_set(790, 590);
+    assert_eq(t_release(cg1), 1, "released over empty desktop: one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_CLIENT_CLICK, "  ...still A's");
+    assert_eq(route_out_win(0), win_id(ga), "  ...A");
+    assert_eq(route_out_y(0), 299, "  ...at A's last content row");
+    t_press_at(cg1, 100, 100);
+    input_ptr_set(100, 5);
+    t_release(cg1);
+    assert_eq(route_out_win(0), win_id(ga), "released over A's own titlebar: A's");
+    assert_eq(route_out_y(0), 0, "  ...at content row 0, never a negative row");
+
+    test_group("route — the grab is per button");
+    input_ptr_set(100, 100);
+    assert_eq(route_pointer(cg1, bhumi_button_event(2, 2), T_SW, T_SH), 1, "right goes down on A");
+    assert_eq(route_out_win(0), win_id(ga), "  ...A's");
+    input_ptr_set(500, 100);
+    assert_eq(route_pointer(cg1, bhumi_button_event(6, 6), T_SW, T_SH), 1, "middle goes down on B, right held");
+    assert_eq(route_out_win(0), win_id(gb), "  ...B's");
+    assert_eq(route_out_btn(0), INPUT_BTN_MIDDLE, "  ...the middle button");
+    assert_eq(route_pointer(cg1, bhumi_button_event(4, 4), T_SW, T_SH), 1, "right comes up over B");
+    assert_eq(route_out_win(0), win_id(ga), "  ...A's");
+    assert_eq(route_out_btn(0), INPUT_BTN_RIGHT, "  ...the right button");
+    input_ptr_set(100, 100);
+    assert_eq(route_pointer(cg1, bhumi_button_event(0, 0), T_SW, T_SH), 1, "middle comes up over A");
+    assert_eq(route_out_win(0), win_id(gb), "  ...B's");
+    assert_eq(route_out_x(0), 0, "  ...at B's first column");
+    assert_eq(route_out_btn(0), INPUT_BTN_MIDDLE, "  ...the middle button");
+
+    test_group("route — a press nobody got has a release nobody gets");
+    t_press_at(cg1, 790, 590);
+    assert_eq(route_out_kind(0), RouteAct.RA_NONE, "a press on empty desktop is nobody's");
+    input_ptr_set(100, 100);
+    assert_eq(t_release(cg1), 1, "released over A: one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_NONE, "  ...nobody's: A never got the press");
+    input_ptr_set(790, 590);
+    route_pointer(cg1, bhumi_button_event(2, 2), T_SW, T_SH);
+    input_ptr_set(100, 100);
+    route_pointer(cg1, bhumi_button_event(0, 0), T_SW, T_SH);
+    assert_eq(route_out_kind(0), RouteAct.RA_NONE, "  ...and the same for the right button");
+    assert_eq(route_out_btn(0), INPUT_BTN_RIGHT, "  ...which it names");
+
+    test_group("route — the window that got the press changes during the press");
+    # A moved: its release is worked out from where it is now.
+    t_press_at(cg1, 100, 100);
+    win_move(ga, 40, 0);
+    t_release(cg1);
+    assert_eq(route_out_x(0), 60, "a window that moved: the point is relative to where it is now");
+    win_move(ga, 0, 0);
+    # Minimized: it still exists and its client still holds the button.
+    t_press_at(cg1, 100, 100);
+    input_apply(cg1, InputAction.IA_MINIMIZE_FOCUSED, T_SW, T_SH - TITLEBAR_H);
+    assert_eq(win_state(ga), WinState.WS_MINIMIZED, "A is minimized with its button down");
+    t_release(cg1);
+    assert_eq(route_out_kind(0), RouteAct.RA_CLIENT_CLICK, "  ...and still hears the release");
+    assert_eq(route_out_win(0), win_id(ga), "  ...A");
+    win_set_state(ga, WinState.WS_NORMAL);
+    # ⛔ Closed: nobody is left to tell, and the window underneath never got the press.
+    var gu = comp_create_window(cg1, 0, 0, 300, 300, "U");
+    var gt = comp_create_window(cg1, 0, 0, 300, 300, "T");
+    t_press_at(cg1, 100, 100);
+    assert_eq(route_out_win(0), win_id(gt), "T is on top and gets the press");
+    comp_close_window(cg1, win_id(gt));
+    assert_eq(t_release(cg1), 1, "T closed with the button down: one outcome");
+    assert_eq(route_out_kind(0), RouteAct.RA_NONE, "  ...nobody's: NOT a release for U, now under the pointer");
+    assert_eq(route_out_val(0), 0, "  ...going up");
+    t_press_at(cg1, 100, 100);
+    assert_eq(route_out_win(0), win_id(gu), "the next press starts clean: U's");
+    t_release(cg1);
+    assert_eq(route_out_win(0), win_id(gu), "  ...and so does its release");
+
+    test_group("route — a press in a close-button event does not eat another button's release");
+    var cg2 = comp_new();
+    var ha = comp_create_window(cg2, 0, 0, 300, 300, "A");
+    var hb = comp_create_window(cg2, 400, 0, 300, 300, "B");
+    input_ptr_set(100, 100);
+    route_pointer(cg2, bhumi_button_event(2, 2), T_SW, T_SH);
+    assert_eq(route_out_win(0), win_id(ha), "right goes down on A");
+    input_ptr_set(deco_close_x(hb) + 2, deco_btn_y(hb) + 2);
+    assert_eq(route_pointer(cg2, bhumi_button_event(1, 1), T_SW, T_SH), 2,
+      "left closes B as right comes up: two outcomes");
+    assert_eq(route_out_kind(0), RouteAct.RA_CLOSE, "  ...the close first");
+    assert_eq(route_out_kind(1), RouteAct.RA_CLIENT_CLICK, "  ...then right's release");
+    assert_eq(route_out_win(1), win_id(ha), "  ...A's: it got the press");
+    assert_eq(route_out_btn(1), INPUT_BTN_RIGHT, "  ...the right button");
+    t_release(cg2);
 
     return assert_summary();
 }

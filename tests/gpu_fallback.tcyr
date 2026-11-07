@@ -431,7 +431,7 @@ fn main() {
     assert_eq(AE_GPU_OPBIT_GLYPH, 1 << 3, "AE_GPU_OPBIT_GLYPH == 1 << 0x03");
 
     # ----- gpu.cyr — the #87 wallpaper slot budget (pure) ---------
-    # ⛔ A `#86` slot is capped at 2 MB (agnos SHM_MAX_SIZE = 2097152, 16 slots system-wide), so a
+    # ⛔ A `#86` slot is capped by the kernel's `shm_slot_max`, 32 MB on agnos, with 16 slots system-wide, so a
     # full-screen XRGB wallpaper fits only at some geometries. This is the ONLY part of the #87
     # wallpaper path a box without an AMD GPU can execute — QEMU exposes no AMD PCI device, so
     # `gpu_find` never matches and every other branch is dead there.
@@ -480,7 +480,7 @@ fn main() {
     assert_eq(ae_chrome_on_gpu(), 0, "  and with no GPU frame, chrome is not on the GPU either");
 
     test_group("gpu.cyr — wallpaper #86 slot budget (pure)");
-    # 800x600x4 = 1,920,000 — archaemenid's actual scanout geometry, and it FITS.
+    # The rule is pure arithmetic, so a 2 MB cap pins it as well as the real one. 800x600x4 = 1,920,000 FITS.
     assert_eq(ae_gpu_wp_fits(800, 600, 2097152), 1, "800x600 fits one 2 MB slot");
     # 1280x800x4 = 4,096,000 and 2560x1440x4 = 14,745,600 — they do not.
     assert_eq(ae_gpu_wp_fits(1280, 800, 2097152), 0, "1280x800 does NOT");
@@ -513,7 +513,8 @@ fn main() {
     assert_eq(ae_text_run_len(0), 13, "  of 13 CELLS — 12 scalars and '…' — not the 25 bytes of its UTF-8");
     assert_eq(load16(ae_text_run_ptr(0)), 0x9A, "  'Ü' is CP437 0x9A");
     assert_eq(load16(ae_text_run_ptr(0) + 2), 0, "  '—' is a blank cell");
-    assert_eq(load16(ae_text_run_ptr(0) + 4), kashi_cp437_from_unicode(0xFFFD), "  the ill-formed byte is U+FFFD's cell");
+    assert_eq(load16(ae_text_run_ptr(0) + 4), kashi_cp437_from_unicode(0xFFFD),
+      "  the ill-formed byte is U+FFFD's cell");
     assert_eq(load16(ae_text_run_ptr(0) + 24), kashi_cp437_from_unicode(0x2026), "  and the cut is '…''s");
     assert_eq(gf_gt(load16(ae_text_run_ptr(0) + 24), 0xFF), 1, "  ...a cell past 0xFF, intact in the pool");
     # The widest run there is: 63 two-byte scalars and '…', 64 cells — and the slot is sized for exactly that.
@@ -527,7 +528,8 @@ fn main() {
     store8(gtl + 200, 0);
     win_set_title(gtw, gtl);
     win_resize(gtw, 1000, 40);
-    assert_eq(gf_caption_diff(gtc, gtg, gtw, GTI, gtink), 0, "a 100-scalar title: the GPU pack is the CPU frame's caption");
+    assert_eq(gf_caption_diff(gtc, gtg, gtw, GTI, gtink), 0,
+      "a 100-scalar title: the GPU pack is the CPU frame's caption");
     assert_eq(ae_text_run_len(0), AE_TEXT_CHARS, "  one run of AE_TEXT_CHARS cells (200 bytes of title)");
     assert_eq(ae_text_bytes(ae_text_run_len(0)), ae_text_bytes(AE_TEXT_CHARS), "  which fills the glyph slot exactly");
     assert_eq(gf_gt(load64(gtink), 1000), 1, "  (63 'é' of ink)");
@@ -579,7 +581,8 @@ fn main() {
     ae_gpu_mode = 1;
     ae_gpu_frame_plan(comp6, fb6);
     render_window(fb6, wpm, 1);
-    assert_eq(bhumi_fb_get(fb6, 10 + 30, 10 + TITLEBAR_H + 30), popq, "premultiplied, opaque words: the client's word, exactly");
+    assert_eq(bhumi_fb_get(fb6, 10 + 30, 10 + TITLEBAR_H + 30), popq,
+      "premultiplied, opaque words: the client's word, exactly");
     assert_eq(bhumi_fb_get(fb6, 10, 10 + TITLEBAR_H), popq, "  at the body's first pixel too");
     win_set_opacity(wpm, 128);
     bhumi_fb_clear(fb6, 0);
@@ -589,6 +592,126 @@ fn main() {
       "at window opacity 128 the word is op 0x06's blend over the translucent body, as on iron");
     assert_eq(gf_gt(gf_count(fb6, popq), 0), 0, "  so no pixel carries the bare word");
     ae_gpu_mode = 0;
+
+    # ⛔ A REFUSAL NAMING A CLIENT'S SLOT IS THAT CLIENT'S, AND THE GPU STAYS (R-01). `ae_gpu_present_frame` is
+    # agnos-only, so the two decisions it makes are tested here both ways, with the rc values the kernel sends.
+    test_group("gpu fallback — a client's slot refusal costs that window, a device refusal the mode");
+    var fl_ok = AE_GPU_CAP_PRESENT | AE_GPU_CAP_ARMED | AE_GPU_CAP_CARVEOUT;
+    var SLOT = AeGpuRefusal.AE_GPU_REF_SLOT;
+    var DEV = AeGpuRefusal.AE_GPU_REF_DEVICE;
+    assert_eq(ae_gpu_refusal_kind(1, 0 - 3, 0), SLOT, "#92 GPO_E_BADSLOT: the slot's");
+    assert_eq(ae_gpu_refusal_kind(1, 0 - 4, 0), SLOT, "#92 GPO_E_SLOTSIZE: the slot's");
+    assert_eq(ae_gpu_refusal_kind(1, 0 - ((2 << 8) | 3), 0), SLOT, "  the op index does not change the reason");
+    assert_eq(ae_gpu_refusal_kind(1, 0 - 1, fl_ok), DEV, "#92 GPO_E_NOGPU: the device's");
+    assert_eq(ae_gpu_refusal_kind(1, 0 - 8, fl_ok), DEV, "#92 GPO_E_DISPATCH: the device's");
+    assert_eq(ae_gpu_refusal_kind(1, 0 - 13, fl_ok), DEV, "#92 GPO_E_UNPROVEN: the device's");
+    assert_eq(ae_gpu_refusal_kind(1, 0 - 15, fl_ok), DEV, "#92 GPO_E_BATCH: the device's");
+    assert_eq(ae_gpu_refusal_kind(0, 0 - 1, fl_ok), SLOT, "#87 -1 with the GPU healthy: the slot's");
+    assert_eq(ae_gpu_refusal_kind(0, 0 - 1, AE_GPU_CAP_PRESENT | AE_GPU_CAP_CARVEOUT), DEV,
+      "#87 -1, not armed: the device's");
+    assert_eq(ae_gpu_refusal_kind(0, 0 - 1, AE_GPU_CAP_ARMED | AE_GPU_CAP_CARVEOUT), DEV,
+      "#87 -1, no GPU: the device's");
+    assert_eq(ae_gpu_refusal_kind(0, 0 - 1, 0), DEV, "#87 -1 and #89 refused too: the device's");
+
+    var wref = win_new(90, 0, 0, 64, 64, "REF");
+    win_set_client_buf(wref, 5, 64, 64);
+    ae_gpu_mode = 1;
+    ae_gpu_blend = 1;
+    assert_eq(ae_gpu_refusal_apply(SLOT, wref), 0, "a slot refusal leaves the frame running");
+    assert_eq(ae_gpu_mode, 1, "  and ae_gpu_mode stays 1");
+    assert_eq(ae_gpu_blend, 1, "  and the shader route with it");
+    assert_eq(ae_gpu_window_admissible(wref, 400, 400), 0, "  and the next plan sends that window to the CPU");
+    win_set_client_buf(wref, 5, 64, 64);
+    assert_eq(ae_gpu_window_admissible(wref, 400, 400), 0,
+      "a re-attach of the same slot stays refused, as puka's does every frame");
+    win_set_client_buf(wref, 6, 64, 64);
+    assert_eq(ae_gpu_window_admissible(wref, 400, 400), 1, "a re-attach to another slot is admitted again");
+    var wref2 = win_new(91, 0, 0, 64, 64, "REF2");
+    win_set_client_buf(wref2, 5, 64, 64);
+    assert_eq(ae_gpu_window_admissible(wref2, 400, 400), 1, "the same slot id in another window is that window's own");
+    # ⛔ Slot ids recycle in one 16-slot table shared by `#71` and `#86`, so an id that comes back is a new slot. A
+    # refusal that outlived the move would keep the whole desktop on the CPU for the life of that window.
+    win_set_client_buf(wref, 5, 64, 64);
+    assert_eq(ae_gpu_window_admissible(wref, 400, 400), 1, "an id that left and came back is a new slot: admitted");
+    assert_eq(ae_gpu_refusal_apply(DEV, wref2), 1, "a device refusal loses the frame");
+    assert_eq(ae_gpu_mode, 0, "  and clears ae_gpu_mode for the run");
+    assert_eq(ae_gpu_blend, 0, "  and the shader route with it");
+    ae_inval_owed = 0;
+
+    # ⛔ THE WALLPAPER IS PUBLISHED ONLY TO A FRAME THAT WILL BLIT IT (R-02). `wp_fill_band` paints nothing while
+    # `ae_gpu_wp_on()` is 1, so a plan that staged the wallpaper and then refused the frame left a CPU frame with
+    # no backdrop at all: a black desktop, with trails.
+    test_group("gpu fallback — the staged wallpaper is published with the frame, not before it");
+    assert_eq(ae_gpu_wp_publish(1, 1, 1), 1, "staged, a GPU frame, chrome on the GPU: the GPU paints it");
+    assert_eq(ae_gpu_wp_publish(1, 0, 0), 0, "staged, the plan refused: the CPU paints it");
+    assert_eq(ae_gpu_wp_publish(1, 0, 1), 0, "staged, the plan refused, whatever the chrome says");
+    assert_eq(ae_gpu_wp_publish(1, 1, 0), 0,
+      "staged, chrome on the CPU: the #39 band would cover it, so the CPU paints it");
+    assert_eq(ae_gpu_wp_publish(0, 1, 1), 0, "not staged: nothing to publish");
+
+    # ⛔ THE COVERAGE SLOT IS SIZED FOR THE SCREEN, ONCE (R-05). A slot cannot grow, and a refused rect retires
+    # the chrome path for the run, so a slot sized by the first alpha rect capped every later one at it.
+    test_group("gpu fallback — the coverage slot is created at the screen's size");
+    assert_eq(ae_gpu_cov_size(1, 2560 * 1440, 33554432), 2560 * 1440,
+      "a one-pixel first rect still takes the whole screen");
+    assert_eq(ae_gpu_cov_size(2560 * 1440, 2560 * 1440, 33554432), 2560 * 1440,
+      "a full-screen first rect fits exactly");
+    assert_eq(ae_gpu_cov_size(100, 2560 * 1440, 2097152), 2097152, "the kernel's slot cap bounds it");
+    assert_eq(ae_gpu_cov_size(100, 2560 * 1440, 0), 2560 * 1440, "a cap of 0 is the kernel saying nothing");
+    assert_eq(ae_gpu_cov_size(5000, 100, 33554432), 5000,
+      "a rect past the screen, which the queue cannot make, still fits itself");
+    assert_eq(ae_gpu_cov_size(0, 2560 * 1440, 33554432), 0, "an empty rect is refused");
+    assert_eq(ae_gpu_cov_size(2097153, 2560 * 1440, 2097152), 0, "a rect past one slot is refused, not truncated");
+
+    # ⛔ A BUFFER'S ROWS ARE ITS OWN, NOT THE WINDOW'S (R-07). A window dragged narrower than the buffer behind it
+    # keeps the client's row stride until the client re-attaches.
+    test_group("gpu fallback — a window narrower than its buffer walks the buffer's rows");
+    var wrow = win_new(94, 0, 0, 120, 60, "ROWS");
+    var rowpx = alloc(240 * 2 * 4);
+    var ri = 0;
+    while (ri < 240) {
+        store32(rowpx + ri * 4, Sentinel.SENT_A);                # row 0
+        store32(rowpx + (240 + ri) * 4, Sentinel.SENT_B);        # row 1
+        ri = ri + 1;
+    }
+    win_set_pix(wrow, rowpx);
+    win_set_buf_size(wrow, 240, 2);
+    var fbrow = bhumi_fb_new(200, 100);
+    bhumi_fb_clear(fbrow, 0);
+    render_window(fbrow, wrow, 0);
+    assert_eq(bhumi_fb_get(fbrow, 10, TITLEBAR_H), Sentinel.SENT_A, "row 0 is the buffer's row 0");
+    assert_eq(bhumi_fb_get(fbrow, 10, TITLEBAR_H + 1), Sentinel.SENT_B,
+      "row 1 is the buffer's row 1, not more of row 0");
+    # a padded attach: 4 words of pixels in rows 32 bytes apart
+    var wpad = win_new(96, 0, 0, 120, 60, "PAD");
+    var padpx = alloc(120 * 2 * 8);
+    memset(padpx, 0, 120 * 2 * 8);
+    ri = 0;
+    while (ri < 120) {
+        store32(padpx + ri * 4, Sentinel.SENT_A);                # row 0
+        store32(padpx + 120 * 8 + ri * 4, Sentinel.SENT_B);      # row 1
+        ri = ri + 1;
+    }
+    win_set_pix(wpad, padpx);
+    win_set_buf_size(wpad, 120, 2);
+    win_set_buf_stride(wpad, 120 * 8);
+    bhumi_fb_clear(fbrow, 0);
+    render_window(fbrow, wpad, 0);
+    assert_eq(bhumi_fb_get(fbrow, 10, TITLEBAR_H + 1), Sentinel.SENT_B,
+      "a padded buffer's row 1 is the attach's row 1");
+    var wgpad = win_new(97, 0, 0, 100, 100, "GPAD");
+    win_set_client_buf(wgpad, 12, 100, 100);
+    win_set_buf_stride(wgpad, 800);
+    assert_eq(ae_gpu_window_admissible(wgpad, 400, 400), 0, "a padded buffer is the CPU's");
+    win_set_buf_stride(wgpad, 400);
+    assert_eq(ae_gpu_window_admissible(wgpad, 400, 400), 1, "  and a tight one is the GPU's");
+    # the GPU has no stride to give: `#87` and `#92` read rows `w * 4` bytes apart
+    var wnarrow = win_new(95, 0, 0, 100, 100, "NARROW");
+    win_set_client_buf(wnarrow, 11, 200, 100);
+    assert_eq(ae_gpu_window_admissible(wnarrow, 400, 400), 0, "a window narrower than its buffer is the CPU's");
+    win_set_client_buf(wnarrow, 11, 100, 200);
+    assert_eq(ae_gpu_window_admissible(wnarrow, 400, 400), 1,
+      "a window shorter than its buffer is not: the rows line up");
 
     # ⛔⛔ THIS FILE HAD NO `assert_summary()` AND WAS THEREFORE NOT A GATE AT ALL.
     # It was the only suite in tests/ missing it. Every assertion above ran, a failure printed its

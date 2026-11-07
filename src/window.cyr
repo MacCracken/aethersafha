@@ -91,12 +91,31 @@ enum WinOff {
     # window wrote its state into the buffer width, and a re-attach while minimized wrote a width into
     # the state the restore then set. Found by review; pinned in tests/aethersafha.tcyr.
     W_PREMIN = 200;
-    W_SZ    = 208;
+    # ⭐ ITS CLIENT IS GONE. > 0: the row that named this window is finished with it, and the number is the
+    # order those rows went in, which says what the cap evicts first (`comp_client_make_room`). 0: a live row
+    # names it, or no client ever did. WIN_POOLED: it is in the pool, waiting for `win_new`.
+    W_GONE  = 208;
+    W_POOLNEXT = 216;   # the next window in the pool
+    # ⭐ THE ROW STRIDE THE CLIENT ATTACHED, in bytes: its buffer's rows and the cache's are this far apart. 0 means no
+    # attach said so, and the rows are `W_BUF_W * 4` apart, or `W_W * 4` for a surface with no attach at all.
+    W_BUF_STRIDE = 224;
+    W_BUF_GEN = 232;    # counts changes of W_BUFID: a slot id that comes back is a new slot
+    W_SZ    = 240;
 }
+
+enum WinPool { WIN_POOLED = -1; }
+
+# ⛔ A WINDOW IS A BUMP `alloc`, WHICH NOTHING GIVES BACK, and a client's connect, present and hang-up mints
+# one. So a window nothing can reach goes to this pool (`win_recycle`) and `win_new` takes from it first:
+# the windows a session ever allocates are the most it held at once, whatever passed through them.
+var ae_win_pool = 0;
+var ae_win_gone_seq = 0;
 
 # win_new(id, x, y, w, h, title_cstr) -> *Window (0 on OOM)
 fn win_new(id, x, y, w, h, title): i64 {
-    var p = alloc(W_SZ);
+    var p = ae_win_pool;
+    if (p != 0) { ae_win_pool = load64(p + W_POOLNEXT); }
+    if (p == 0) { p = alloc(W_SZ); }
     if (p == 0) { return 0; }
     store64(p + W_ID, id);
     store64(p + W_X, x);
@@ -112,6 +131,8 @@ fn win_new(id, x, y, w, h, title): i64 {
     store64(p + W_BUFID, 0);
     store64(p + W_BUF_W, 0);
     store64(p + W_BUF_H, 0);
+    store64(p + W_BUF_STRIDE, 0);
+    store64(p + W_BUF_GEN, 0);
     store64(p + W_CFD, 0);
     store64(p + W_KEYMODE, 0);
     # ⛔ W_PREMUL WAS MISSING HERE while every other slot was zeroed, and the allocator does not
@@ -128,7 +149,41 @@ fn win_new(id, x, y, w, h, title): i64 {
     store64(p + W_PY, 0 - 1);
     store64(p + W_PW, 0);
     store64(p + W_PH, 0);
+    store64(p + W_RX, 0);
+    store64(p + W_RY, 0);
+    store64(p + W_RW, 0);
+    store64(p + W_RH, 0);
+    store64(p + W_GONE, 0);
+    store64(p + W_POOLNEXT, 0);
     return p;
+}
+
+# Give a window nothing can reach back to `win_new`, with whatever cache it still owns. ⚠ Only for a window
+# off the desktop whose row is finished with it (W_GONE): a row names its window by pointer, so a window
+# closed by hand under a live row waits for that row. Its fields stay readable until `win_new` takes it.
+# -> 1, or 0 when it was in the pool already.
+fn win_recycle(p): i64 {
+    if (load64(p + W_GONE) == WinPool.WIN_POOLED) { return 0; }
+    win_pix_release(p);
+    store64(p + W_GONE, WinPool.WIN_POOLED);
+    store64(p + W_POOLNEXT, ae_win_pool);
+    ae_win_pool = p;
+    return 1;
+}
+
+fn win_gone(p): i64 { return load64(p + W_GONE); }
+# The row that named this window is finished with it. Marked once: the order is when its client went.
+fn win_mark_gone(p): i64 {
+    if (load64(p + W_GONE) != 0) { return 0; }
+    ae_win_gone_seq = ae_win_gone_seq + 1;
+    store64(p + W_GONE, ae_win_gone_seq);
+    return 1;
+}
+# 1 when a setu client presented this window, live or gone; a compositor-seeded window never counts.
+fn win_is_client(p): i64 {
+    if (load64(p + W_CFD) != 0) { return 1; }
+    if (load64(p + W_GONE) > 0) { return 1; }
+    return 0;
 }
 
 # The previous-frame rect. render_frame reads these to compute damage, then stamps the current
@@ -245,6 +300,26 @@ fn win_bufid(p) { return load64(p + W_BUFID); }
 fn win_buf_w(p) { return load64(p + W_BUF_W); }
 fn win_buf_h(p) { return load64(p + W_BUF_H); }
 fn win_set_buf_size(p, w, h) { store64(p + W_BUF_W, w); store64(p + W_BUF_H, h); return 0; }
+fn win_buf_stride(p) { return load64(p + W_BUF_STRIDE); }
+fn win_buf_gen(p) { return load64(p + W_BUF_GEN); }
+fn win_set_buf_stride(p, s) { store64(p + W_BUF_STRIDE, s); return 0; }
+
+# ⭐⭐ ONE MESSAGE FOR EVERY RECORD THE COMPOSITOR SENDS. setu's constructors each allocate a fresh SetuMsg,
+# which is their contract, and the bump heap never gives one back, so a key, a focus change or a pointer move
+# through one costs 80 B for good. `setu_send` encodes at once and keeps nothing, so one message filled per send
+# says the same bytes. ⚠ It lives in this file because this is the first in the include chain that sends;
+# a module-scope var must be declared before the code that uses it.
+var ae_out_msg[10];    # module scope: 10 x u64 = SETU_MSG_SIZE bytes
+
+# Send `kind` to `fd` with up to four args; the kind's table entry says how many go on the wire. -> setu_send's.
+fn ae_send(fd, kind, a0, a1, a2, a3): i64 {
+    var m = setu__msg_init(&ae_out_msg, kind);
+    setu_msg_set_arg(m, 0, a0);
+    setu_msg_set_arg(m, 1, a1);
+    setu_msg_set_arg(m, 2, a2);
+    setu_msg_set_arg(m, 3, a3);
+    return setu_send(fd, m);
+}
 
 # 1 when the window's CURRENT extent is fully backed by the client's attached buffer.
 # ⛔ EVERY READER OF A CLIENT BUFFER MUST ASK THIS FIRST. A window whose size the compositor changed
@@ -259,8 +334,7 @@ fn win_set_buf_size(p, w, h) { store64(p + W_BUF_W, w); store64(p + W_BUF_H, h);
 fn win_notify_resize(p): i64 {
     var fd = load64(p + W_CFD);
     if (fd == 0) { return 0; }                        # no client (the compositor's own window)
-    return setu_send(fd, setu_configure(load64(p + W_ID), load64(p + W_W), load64(p + W_H),
-        load64(p + W_STATE)));
+    return ae_send(fd, SETU_CONFIGURE, load64(p + W_ID), load64(p + W_W), load64(p + W_H), load64(p + W_STATE));
 }
 
 fn win_buf_covers(p): i64 {
@@ -279,10 +353,19 @@ fn win_buf_covers(p): i64 {
 # the sites that forgot it — so the id cannot be set without saying how big the buffer behind it is.
 # ⚠ w/h are the CLIENT's declared surface size, never the window's.
 fn win_set_client_buf(p, id, w, h) {
+    if (id != load64(p + W_BUFID)) { store64(p + W_BUF_GEN, load64(p + W_BUF_GEN) + 1); }
     store64(p + W_BUFID, id);
     store64(p + W_BUF_W, w);
     store64(p + W_BUF_H, h);
     return 0;
+}
+# Stop naming the client's buffer: its owner is gone, so the id means nothing, and the kernel can hand it to
+# the next client. ⚠ W_BUF_W / W_BUF_H stay: they are how the cached pixels are laid out, and the window keeps
+# showing those. -> 1 when it named one.
+fn win_buf_forget(p): i64 {
+    if (load64(p + W_BUFID) == 0) { return 0; }
+    store64(p + W_BUFID, 0);
+    return 1;
 }
 fn win_cfd(p) { return load64(p + W_CFD); }
 fn win_set_cfd(p, fd) { store64(p + W_CFD, fd); return 0; }

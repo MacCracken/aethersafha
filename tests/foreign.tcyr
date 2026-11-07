@@ -2,6 +2,8 @@
 # mehman/kavach/TLS surface is auto-prepended via cyrius.cyml [deps.*].
 include "src/geom.cyr"
 include "src/window.cyr"
+include "src/theme.cyr"    # render_window packs its colours through it
+include "src/cursor.cyr"
 include "src/render.cyr"   # render_foreign_content presents captured surfaces
 include "src/compositor.cyr"
 include "src/gestures.cyr"
@@ -16,6 +18,30 @@ include "src/foreign.cyr"
 fn t_ok(x): i64 {
     if (x != 0) { return 1; }
     return 0;
+}
+
+# How many pixels of the rect hold `c`.
+fn t_lit(fb, x, y, w, h, colr): i64 {
+    var n = 0;
+    var yy = y;
+    while (yy < y + h) {
+        var xx = x;
+        while (xx < x + w) {
+            if (bhumi_fb_get(fb, xx, yy) == colr) { n = n + 1; }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    return n;
+}
+
+# `n` bytes ending on a PROT_NONE page: a read past them faults.
+fn t_guarded(n): i64 {
+    var pg = 4096;
+    var rn = ((n + pg - 1) / pg) * pg;
+    var base = syscall(9, 0, rn + pg, 3, 0x22, 0 - 1, 0);
+    syscall(10, base + rn, pg, 0);
+    return base + rn - n;
 }
 
 # ⛔ THE SUITE'S GUESTS ARE THIS BINARY, RE-EXECUTED, SO A RUN TESTS THIS CODE AND NOT THE RUNNER'S IMAGE.
@@ -70,9 +96,9 @@ fn main() {
     var before = comp_count(desk_comp(d));
     var fw = desktop_host_foreign(d, "gimp", 40, 40, 640, 480, "GIMP (foreign)");
     assert(t_ok(fw), "desktop_host_foreign succeeds");
-    assert(t_ok(foreign_window(fw)), "a compositor window backs the foreign surface");
+    assert(t_ok(foreign_window(d, fw)), "a compositor window backs the foreign surface");
     assert_eq(comp_count(desk_comp(d)), before + 1, "compositor gained the foreign window");
-    assert_eq(win_is_agent(foreign_window(fw)), 0, "foreign window is not agent-owned");
+    assert_eq(win_is_agent(foreign_window(d, fw)), 0, "foreign window is not agent-owned");
 
     test_group("mehman — run a sandboxed guest (kavach PROCESS backend)");
     var rf = foreign_new("/proc/self/exe guest-exit 3", 100, 100);
@@ -127,10 +153,10 @@ fn main() {
     var pfb = bhumi_fb_new(200, 100);
     bhumi_fb_clear(pfb, 0);
     # before the guest runs there is nothing to present (no-op).
-    assert_eq(render_foreign_content(pfb, pf), 0, "no content before the guest runs");
+    assert_eq(render_foreign_content(pfb, pd, pf), 0, "no content before the guest runs");
     assert_eq(foreign_run(pf), 0, "guest ran (capture OK)");
-    # present every hosted foreign app; the captured "hi" paints the window body.
-    assert_eq(render_desktop_foreign(pd, pfb), 1, "render_desktop_foreign drew 1 app");
+    # the captured "hi" paints the window body.
+    render_foreign_content(pfb, pd, pf);
     var green = bhumi_xrgb(190, 230, 190);
     var lit = 0;
     var yy = 30;
@@ -143,6 +169,82 @@ fn main() {
         yy = yy + 1;
     }
     assert(t_ok(lit), "captured guest text painted pixels in the window body");
+
+    # ⛔ A GUEST'S OUTPUT IS UNTRUSTED AND ITS WINDOW CAN GO (R-04, STATE-7). It fills the surface with no NUL, runs
+    # past any line and any row of its window, and outlives a window the operator closed.
+    test_group("mehman — guest text stays inside its own window");
+    var cd = desktop_new();
+    var clf = desktop_host_foreign(cd, T_GUEST_ECHO_HI, 40, 30, 100, 60, "clip");
+    assert_eq(foreign_run(clf), 0, "guest ran");
+    var cbuf = MehmanSurface_buffer(foreign_surface(clf));
+    var csz = surface_size_bytes(foreign_surface(clf));
+    memset(cbuf, 65, csz);
+    var cl = 0;
+    while (cl < 40) {                              # rows of a line far wider than the window
+        store8(cbuf + 60 + cl * 61, 10);
+        cl = cl + 1;
+    }
+    var cfb = bhumi_fb_new(400, 300);
+    bhumi_fb_clear(cfb, 0);
+    render_foreign_content(cfb, cd, clf);
+    var cwin = foreign_window(cd, clf);
+    var bx = win_x(cwin);
+    var by = win_body_y(cwin);
+    assert(t_ok(t_lit(cfb, bx, by, 100, 60, green)), "a long guest line paints inside the window body");
+    assert_eq(t_lit(cfb, 0, 0, 400, by, green), 0, "  nothing above the body");
+    assert_eq(t_lit(cfb, bx + 100, 0, 300 - bx, 300, green), 0, "  nothing right of the body");
+    assert_eq(t_lit(cfb, 0, by + 60, 400, 300 - by - 60, green), 0, "  nothing below the body");
+    assert_eq(t_lit(cfb, 0, 0, bx, 300, green), 0, "  nothing left of the body");
+
+    win_minimize(cwin);
+    bhumi_fb_clear(cfb, 0);
+    render_foreign_content(cfb, cd, clf);
+    assert_eq(t_lit(cfb, 0, 0, 400, 300, green), 0, "a minimized window's guest draws nothing");
+    win_set_state(cwin, WinState.WS_NORMAL);
+
+    assert_eq(foreign_window(cd, clf) == cwin, 1, "the window is found by its id");
+    comp_close_window(desk_comp(cd), win_id(cwin));
+    assert_eq(foreign_window(cd, clf), 0, "a closed window is no longer found");
+    bhumi_fb_clear(cfb, 0);
+    assert_eq(render_foreign_content(cfb, cd, clf), 0, "its guest presents nothing");
+    assert_eq(t_lit(cfb, 0, 0, 400, 300, green), 0, "  and paints nothing");
+
+    test_group("mehman — guest text is drawn in its window's z slot");
+    var zd = desktop_new();
+    var zf = desktop_host_foreign(zd, T_GUEST_ECHO_HI, 40, 30, 200, 100, "below");
+    assert_eq(foreign_run(zf), 0, "guest ran");
+    var zup = comp_create_window(desk_comp(zd), 40, 30, 60, 60, "above");
+    var zfb = bhumi_fb_new(400, 300);
+    bhumi_fb_clear(zfb, 0);
+    var zbuf = MehmanSurface_buffer(foreign_surface(zf));
+    memset(zbuf, 66, 40);                          # one line across both windows
+    var zw = foreign_window(zd, zf);
+    render_window(zfb, zw, 0);
+    assert(t_ok(t_lit(zfb, win_x(zw), win_body_y(zw), 200, 100, green)), "render_window draws its guest's text");
+    render_window(zfb, zup, 1);
+    assert_eq(t_lit(zfb, win_x(zup), win_y(zup), 60, TITLEBAR_H + 60, green), 0, "  and the window above covers it");
+    assert(t_ok(t_lit(zfb, win_x(zup) + 60, win_body_y(zw), 140, 100, green)), "  the part it does not cover stays");
+
+    # ⚠ LAST, because on a reader that runs past the surface this is a SIGSEGV, not a failed assertion.
+    test_group("mehman — a guest that fills its surface leaves no NUL, and nothing reads past it");
+    var gd = desktop_new();
+    var gf = desktop_host_foreign(gd, T_GUEST_ECHO_HI, 0, 0, 480, 300, "full");
+    assert_eq(foreign_run(gf), 0, "guest ran");
+    var gsurf = surface_new(480, 300, MehmanPixelFormat.XRGB8888, 480 * 4, t_guarded(480 * 4 * 300));
+    store64(gf + FGN_SURF, gsurf);
+    memset(MehmanSurface_buffer(gsurf), 65, 480 * 4 * 300);
+    var gfb = bhumi_fb_new(800, 600);
+    bhumi_fb_clear(gfb, 0);
+    render_foreign_content(gfb, gd, gf);
+    assert(t_ok(t_lit(gfb, 0, 0, 480, 330, green)), "the full surface draws, and the read stopped at its end");
+    # a surface this short decodes to its last byte, where a lead byte asks for bytes that are not there
+    var ssurf = surface_new(10, 1, MehmanPixelFormat.XRGB8888, 40, t_guarded(40));
+    store64(gf + FGN_SURF, ssurf);
+    memset(MehmanSurface_buffer(ssurf), 67, 40);
+    store8(MehmanSurface_buffer(ssurf) + 39, 0xF0);
+    bhumi_fb_clear(gfb, 0);
+    render_foreign_content(gfb, gd, gf);
+    assert(t_ok(t_lit(gfb, 0, 0, 480, 330, green)), "a sequence cut by the surface's end decodes inside it");
 
     return assert_summary();
 }

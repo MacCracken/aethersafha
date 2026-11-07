@@ -42,27 +42,24 @@ var ae_gpu_blend  = 0;    # 1 = gpu_shader_op#92 is usable (caps bit3) — selec
 var ae_gpu_blend_seen = 0;
 var ae_gpu_alpha_seen  = 0;   # 1 = the op-0x06 line has been printed this run
 var ae_gpu_fallback_seen = 0;
-var ae_gpu_wp_demote = 0;
-var ae_gpu_op_demote = 0;
+var ae_gpu_wp_demote = 0;   # latch: named the non-solid-wallpaper demotion once (M6-C1a)
+var ae_gpu_op_demote = 0;   # latch: named the translucent-window demotion once (M6-C3)
 
 # ⭐⭐ THE WALLPAPER ON THE GPU — `#86` slot + `#87 gpu_blit_shm`, the SAME path a client surface takes
 # (`AE-2`, iron-proven for an opaque surface). No new kernel op, no shader, no driver stack.
 # ⛔ mabda is NOT involved: its GPU surface rides Linux's driver stack while this band is the agnos
-# kernel's own ring-3 `#82`-`#94` (roadmap, corrected 2026-08-01). Decode is chitra's, on CPU.
-# ⛔⛔ THE 2 MB CAP IS ON UPLOADS, NOT ON THE DESKTOP — do not read the table below as a resolution
+# kernel's own ring-3 `#82`-`#94` (roadmap, standing rulings). Decode is chitra's, on CPU.
+# ⛔⛔ THE 32 MB CAP IS ON UPLOADS, NOT ON THE DESKTOP — do not read the numbers below as a resolution
 # limit. `gpu_blit_arm` sizes the back buffer from boot_info as `pitch * height` (14.7 MB at 2560x1440),
 # so the clear, the chrome `#88` fills, the `#92` glyphs and blend, and the `#84` flip all run at full
 # native resolution; `AE-9` burned there. What the cap bites is what userland UPLOADS through `#86`:
-# a full-screen wallpaper, and any single client surface over 2 MB (a window larger than ~724x724,
-# which falls back to the CPU per-window exactly as `AE-6`'s routing intends). Client windows fit today
-# because a window is smaller than the screen.
+# a full-screen wallpaper, and a client surface, whose ATTACH is refused past the same 32 MiB
+# (`SURF_MAX_BYTES`, setu_dispatch.cyr).
 #
-# ⛔ A `#86` slot is
-# capped at **2 MB** (`SHM_MAX_SIZE = 2097152`, 16 slots system-wide). A full-screen XRGB wallpaper is
-# `w*h*4`, so: 800x600 = 1,920,000 -> **FITS**, and that is archaemenid's actual scanout geometry.
-# 1280x800 = 4,096,000 and 2560x1440 = 14,745,600 -> do NOT. Tiling across slots was considered and
-# rejected: 8 slots for a 1440p wallpaper is half the system's supply held permanently, and re-uploading
-# strips per frame moves more bytes through the CPU than the CPU blit it replaces.
+# ⛔ A `#86` slot is capped at **32 MB** (`SHM_GPU_MAX_SIZE = 33554432`, 16 slots system-wide). A full-screen
+# XRGB wallpaper is `w*h*4`, so 2560x1440 = 14,745,600 and 3840x2160 = 33,177,600 both FIT, and only a larger
+# screen does not. Tiling across slots is rejected: it holds several of the 16 slots permanently, and
+# re-uploading strips per frame moves more bytes through the CPU than the CPU blit it replaces.
 # ⇒ Gated on the caps-reported `shm_slot_max` at RUNTIME, never on an assumed number, and a wallpaper
 # that does not fit demotes the frame with its size named.
 var ae_gpu_wp_slot = 0;
@@ -74,6 +71,18 @@ var ae_gpu_wp_fail = 0;       # latched: too big, no slot, or a failed write
 var ae_gpu_wp_ready = 0;      # 1 = this frame's wallpaper is staged and will be blitted by #87
 
 fn ae_gpu_wp_on(): i64 { return ae_gpu_wp_ready; }
+
+# PURE: does the GPU paint the wallpaper this frame? -> the value of `ae_gpu_wp_ready`.
+# ⛔⛔ `wp_fill_band` PAINTS NOTHING WHEN THIS IS 1, so it may be 1 only on a frame that will really blit the staged
+# slot. A plan that stages it and then refuses the frame would leave a CPU frame with no backdrop producer: a black
+# desktop with trails. A GPU frame whose chrome is on the CPU would lose it the same way: the `#39` band carries a
+# framebuffer with no backdrop over the blit. In both the CPU paints the wallpaper like any other layer.
+fn ae_gpu_wp_publish(staged, frame_ok, chrome_on_gpu): i64 {
+    if (staged != 1) { return 0; }
+    if (frame_ok != 1) { return 0; }
+    if (chrome_on_gpu != 1) { return 0; }
+    return 1;
+}
 
 # ⚠ `ae_gpu_alpha_chrome` — the third member of the frame plan — is declared in render.cyr beside
 # `ae_gpu_frame_ok` and `ae_gpu_plan_n`, for the same forward-reference reason those two are. It is
@@ -100,8 +109,8 @@ fn ae_gpu_wp_ensure(fw, fh): i64 {
     if (ae_gpu_wp_fail == 1) { return 0; }
     if (wp_kind() != 2) { return 0; }            # AE_WP_IMAGE only — solid is #88, gradient is neither
     var need = fw * fh * 4;
-    # ⚠ Ask the kernel's number, do not hardcode 2 MB: `shm_slot_max` is caps +24 and a later kernel
-    # raising the cap should light this up with no edit here.
+    # ⚠ Ask the kernel's number, do not hardcode one: `shm_slot_max` is caps +24, so a kernel that changes
+    # the cap takes effect here with no edit.
     if (ae_gpu_wp_fits(fw, fh, ae_gpu_shm_slot_max) == 0) {
         ae_gpu_wp_fail = 1;
         println("aethersafha: wallpaper too large for one #86 slot (bytes needed, then slot max):");
@@ -150,7 +159,7 @@ fn ae_gpu_wp_ensure(fw, fh): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     return 0;
     #endif
-}   # latch: named the translucent-window demotion once (M6-C3)   # latch: named the non-solid-wallpaper demotion once (M6-C1a)
+}
 
 # gpu_caps#89 flag bits (kernel: syscall.cyr gpu_caps_sys).
 var AE_GPU_CAP_PRESENT  = 1;    # bit0 — a GPU is bound
@@ -276,14 +285,16 @@ fn ae_gpu_probe(): i64 {
     println_int(ae_gpu_blend);
     println_int(ae_gpu_glyph_op);
     # ⚠ STATE THE BUDGET RATHER THAN DISCOVERING IT BY FAILING. The glyph path needs one `#86` slot and each
-    # client surface needs one; there are only `shm_max` in the whole system and `shm_create` rounds every
-    # request up to a 2 MB page. Printing the free count at probe time means a later "no slot for glyphs"
+    # client surface needs one; there are only `shm_max` in the whole system, and each is a fixed 32 MB
+    # window whatever was asked for. Printing the free count at probe time means a later "no slot for glyphs"
     # has a cause in the same log instead of being a mystery.
     println("aethersafha: gpu back buffer and slot budget");
     println_int(ae_gpu_bb_w);
     println_int(ae_gpu_bb_h);
     println_int(ae_gpu_shm_free);
-    if (ae_gpu_batched == 1) { println("aethersafha: #92 is BATCHED -- a failure means an indeterminate prefix landed"); }
+    if (ae_gpu_batched == 1) {
+        println("aethersafha: #92 is BATCHED -- a failure means an indeterminate prefix landed");
+    }
     #endif
     return ae_gpu_mode;
 }
@@ -380,7 +391,97 @@ fn ae_gpu_demote(): i64 {
     ae_gpu_blend = 0;
     ae_gpu_glyph_op = 0;
     ae_gpu_frame_ok = 0;
+    # ⚠ The frame that demotes has already rendered as a GPU frame, so the first CPU frame owes the whole screen,
+    # for both flipped buffers (`rend_band_compute` would find the change of path a frame later).
+    ae_inval_owed = 2;
     return 0;
+}
+
+# ⛔⛔ WHO REFUSED: THE CLIENT'S SLOT, OR THE DEVICE? A window's composite can fail for two different reasons,
+# and they owe different answers. A slot the client freed, a `#71` slot the engines cannot reach, or a slot too
+# small for the window are that client's; `ae_gpu_demote` would answer any of them by taking the GPU away from
+# every window for the rest of the run. A dead engine, a lost back buffer or an expired watchdog are the device's,
+# and only demoting is right.
+# PURE, for a host: `shader` 1 is `#92`, whose `rc` names a reason (`ae_gpu_err_reason`); GPO_E_BADSLOT (3) and
+# GPO_E_SLOTSIZE (4) are the slot's, and every other reason is the device's or this file's own.
+# ⚠ `#87` answers -1 for ALL of it (`gpu_blit_shm_sys`), so `shader` 0 asks `flags`, a fresh `#89` word: with the
+# GPU present, armed and carved out, what is left is the slot. A failed CP-DMA reads the same way and costs one
+# window; the next `#88`, `#92` or `#84`, which name no client, then demote as they always have.
+enum AeGpuRefusal {
+    AE_GPU_REF_SLOT   = 1;
+    AE_GPU_REF_DEVICE = 2;
+}
+fn ae_gpu_refusal_kind(shader, rc, flags): i64 {
+    if (shader == 1) {
+        var why = ae_gpu_err_reason(rc);
+        if (why == 3) { return AeGpuRefusal.AE_GPU_REF_SLOT; }
+        if (why == 4) { return AeGpuRefusal.AE_GPU_REF_SLOT; }
+        return AeGpuRefusal.AE_GPU_REF_DEVICE;
+    }
+    var need = AE_GPU_CAP_PRESENT | AE_GPU_CAP_ARMED | AE_GPU_CAP_CARVEOUT;
+    if ((flags & need) == need) { return AeGpuRefusal.AE_GPU_REF_SLOT; }
+    return AeGpuRefusal.AE_GPU_REF_DEVICE;
+}
+
+# The `#89` flags word as it stands now, 0 when refused. Bounded: `gpu_caps_sys` arms (a no-op once armed), walks
+# the slot table and returns. Read only on a refusal.
+fn ae_gpu_caps_flags(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var caps[32];                       # function-local => 32 BYTES, the #89 record size
+    if (sys_gpu_caps(&caps, 32) != 0) { return 0; }
+    return load32(&caps + 0) & 0xFFFFFFFF;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+}
+
+# The surfaces the GPU has refused, as (window id, buffer generation) pairs. A slot the engines cannot read stays that
+# way, so the window goes to the CPU, which reads it through `setu_buf_read`, while the pair stands: the frames it is
+# on screen cost that, and the mode stays. The pair ends with a re-attach to another slot or with the window, whose
+# id is never reused. The generation is what makes the first true: slot ids recycle in one table shared by `#71`
+# and `#86`, so an id that left and came back is a new slot, and the plan is all-or-nothing, so a stale refusal would
+# hold the whole desktop on the CPU. A window that keeps re-attaching one slot keeps its generation.
+# Eight is one per live client row; the oldest entry goes first.
+enum AeGpuRefusedK { AE_GPU_REFUSED_MAX = 8; }
+var ae_gpu_refused_win[8];
+var ae_gpu_refused_gen[8];
+var ae_gpu_refused_next = 0;
+var ae_gpu_refused_n = 0;         # refusals answered, for the one log line and the tests
+
+fn ae_gpu_refuse_has(id, gen): i64 {
+    var i = 0;
+    while (i < AE_GPU_REFUSED_MAX) {
+        if (load64(&ae_gpu_refused_win + i * 8) == id) {
+            if (load64(&ae_gpu_refused_gen + i * 8) == gen) { return 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Answer a refusal of `kind` for `win`. -> 1 when the device went and the frame is lost, 0 when the frame goes on
+# and only this window's surface is missing from it: its chrome is down, and the next plan puts it on the CPU.
+fn ae_gpu_refusal_apply(kind, win): i64 {
+    if (kind == AeGpuRefusal.AE_GPU_REF_DEVICE) {
+        ae_gpu_demote();
+        return 1;
+    }
+    store64(&ae_gpu_refused_win + ae_gpu_refused_next * 8, win_id(win));
+    store64(&ae_gpu_refused_gen + ae_gpu_refused_next * 8, win_buf_gen(win));
+    ae_gpu_refused_next = (ae_gpu_refused_next + 1) % AE_GPU_REFUSED_MAX;
+    ae_gpu_refused_n = ae_gpu_refused_n + 1;
+    if (ae_gpu_refused_n == 1) {
+        println("aethersafha: a client's slot was refused, or a copy of it failed -- that window goes to the CPU, the GPU stays");  #skip-lint
+    }
+    return 0;
+}
+
+# The refusal of the composite of `win`, by `#92` (`shader` 1) or `#87`. -> ae_gpu_refusal_apply's answer.
+fn ae_gpu_refused(shader, rc, win): i64 {
+    var flags = 0;
+    if (shader == 0) { flags = ae_gpu_caps_flags(); }
+    return ae_gpu_refusal_apply(ae_gpu_refusal_kind(shader, rc, flags), win);
 }
 
 # --- Pre-flip capture: the only way a compositor can be graded on iron ------------------------
@@ -473,6 +574,13 @@ fn ae_gpu_window_admissible(win, fw, fh): i64 {
     # 2560x1416; `cr2=0x12600000`, exit 142). Refusing here routes the frame to the CPU path, which
     # applies the same guard, until the client re-attaches at the size CONFIGURE asked for.
     if (win_buf_covers(win) == 0) { return 0; }
+    # ⛔ `#87` AND `#92` TAKE NO STRIDE: both read rows `w * 4` bytes apart (`gpu_blit_shm_sys`, `gpo_slot_bytes`). A
+    # window narrower than its buffer would shear on the GPU, so it goes to the CPU, which walks the buffer's own
+    # rows, until the client re-attaches at the size CONFIGURE asked for.
+    if (win_w(win) != win_buf_w(win)) { return 0; }
+    if (win_buf_stride(win) > 0) { if (win_buf_stride(win) != win_w(win) * 4) { return 0; } }
+    # ⚠ A SURFACE THE GPU HAS REFUSED stays on the CPU, which can read it, for as long as the pair stands.
+    if (ae_gpu_refuse_has(win_id(win), win_buf_gen(win)) == 1) { return 0; }
     var w = win_w(win);
     var h = win_h(win);
     var dx = win_x(win);
@@ -522,12 +630,11 @@ fn ae_gpu_frame_plan(comp, fb): i64 {
     # ⚠ LATCHED AND LOUD. Silence here is indistinguishable from a wallpaper that simply failed to
     # paint, and this arc has already paid for that shape twice. The gradient-as-N-`#88`-bands route is
     # the C1b follow-on that removes the demotion.
-    # ⛔ A TRANSLUCENT WINDOW DEMOTES THE FRAME, same reason as a non-solid wallpaper (M6-C3):
-    # `#88 gpu_fill_rect` writes a flat colour with no read-modify-write, and `#92` op 0x01 blends the
+    # ⛔ A TRANSLUCENT WINDOW DEMOTES THE FRAME ON A KERNEL WITHOUT `#92` op 0x06, same reason as a non-solid
+    # wallpaper: `#88 gpu_fill_rect` writes a flat colour with no read-modify-write, and op 0x01 blends the
     # per-pixel alpha the CLIENT authored — its op record has nowhere to put a compositor-applied
-    # uniform α (`op / src_id / wh / dstxy`, and the kernel REJECTS a non-zero reserved dword). So a
-    # window opacity is not expressible on this band at all today; that is a kernel ask, not a
-    # renderer change. See roadmap M6-C3.
+    # uniform α (`op / src_id / wh / dstxy`, and the kernel REJECTS a non-zero reserved dword). Op 0x06
+    # carries that α, and the loop below reads whether this kernel advertises it (CHANGELOG 0.16.2).
     var wv = comp_windows(comp);
     var wi = 0;
     var wn = vec_len(wv);
@@ -574,10 +681,10 @@ fn ae_gpu_frame_plan(comp, fb): i64 {
                     if (ae_gpu_op_demote == 0) {
                         ae_gpu_op_demote = 1;
                         # ⚠ NAME THE KERNEL, NOT THE FEATURE. This line used to say op 0x06 was "unadvertised
-                        # (unburned)" and that the GPU frame "cannot yet z-order overlapping windows" — both
+                        # (unburned)" and that the GPU frame could not z-order overlapping windows — both
                         # were true when written and both are false now. What is left is the only thing this
                         # branch actually observes: THIS kernel does not advertise the op.
-                        println("aethersafha: GPU frame DEMOTED — a translucent window and this kernel does not advertise #92 op 0x06 (needs agnos 1.56.44+); CPU path for the run");
+                        println("aethersafha: GPU frame DEMOTED — a translucent window and this kernel does not advertise #92 op 0x06 (needs agnos 1.56.44+); CPU path for the run");  #skip-lint
                     }
                     return 0;
                 } }
@@ -586,8 +693,9 @@ fn ae_gpu_frame_plan(comp, fb): i64 {
     }
     # ⭐ An IMAGE wallpaper is expressible via `#87` when it fits a slot — try to stage it, and only
     # fall through to the demotion when it cannot be. `ae_gpu_wp_ready` is read by `wp_fill_band` so
-    # the CPU never paints a backdrop the GPU is about to blit over.
-    ae_gpu_wp_ready = 0;
+    # the CPU never paints a backdrop the GPU is about to blit over. ⛔ Staging is not publishing: the
+    # flag is set at the end of the plan, beside `ae_gpu_frame_ok`, by `ae_gpu_wp_publish`.
+    var wp_staged = 0;
     # ⛔⛔ NOT ON AN ALPHA-CHROME FRAME, AND THIS ONE IS A SILENT BLACK DESKTOP IF MISSED.
     # `#87`-staged wallpaper and CPU chrome are mutually exclusive: `wp_fill_band` paints NOTHING when
     # `ae_gpu_wp_on()` is 1 (the GPU is about to blit it), while the `#39` band blit — which an
@@ -601,10 +709,10 @@ fn ae_gpu_frame_plan(comp, fb): i64 {
         if (wp_kind() == 2) {
             # ⚠ Read the geometry here rather than using `fw`/`fh` — this gate runs BEFORE they are
             # declared below, and hoisting them would reorder the cheap early-outs above it.
-            if (ae_gpu_wp_ensure(bhumi_fb_width(fb), bhumi_fb_height(fb)) == 1) { ae_gpu_wp_ready = 1; }
+            if (ae_gpu_wp_ensure(bhumi_fb_width(fb), bhumi_fb_height(fb)) == 1) { wp_staged = 1; }
         }
     }
-    if (ae_gpu_wp_ready == 0) {
+    if (wp_staged == 0) {
         if (wp_gpu_expressible() == 0) {
             if (ae_gpu_wp_demote == 0) {
                 ae_gpu_wp_demote = 1;
@@ -617,6 +725,7 @@ fn ae_gpu_frame_plan(comp, fb): i64 {
     var fh = bhumi_fb_height(fb);
     if (fw < 1) { return 0; }
     if (fh < 1) { return 0; }
+    ae_gpu_cov_screen = fw * fh;
     # ⛔⛔ A RETIRED CURSOR TAKES THE WHOLE FRAME OFF THE GPU, and it has to — ORDERING, not visibility.
     # The `#39` chrome blit is the BOTTOM layer: client surfaces composite ON TOP of it (step 2 of
     # `ae_gpu_present_frame`, above the text and cursor emits). So a CPU-drawn cursor lives in the blit
@@ -642,6 +751,7 @@ fn ae_gpu_frame_plan(comp, fb): i64 {
     }
     ae_gpu_frame_ok = 1;
     ae_gpu_plan_n = n;
+    ae_gpu_wp_ready = ae_gpu_wp_publish(wp_staged, ae_gpu_frame_ok, ae_chrome_on_gpu());
     return 1;
 }
 
@@ -750,7 +860,7 @@ fn ae_gpu_alpha_ok(): i64 {
 # `w` bytes per row for `h` rows; when every byte is identical the PITCH CANNOT MATTER, so a single
 # buffer sized to the largest rect satisfies a titlebar, a body and an accent strip alike. The kernel
 # accepts an oversized slot (`gpo_slot_bytes(op,w,h) > shm_size` is the refusal, syscall.cyr:4199).
-# ⇒ The upload happens when the ALPHA or the high-water SIZE changes — not per rect and not per frame.
+# ⇒ The upload happens when the ALPHA changes — not per rect and not per frame.
 #
 # ⚠ PRECISION, STATED: `blend_cov.s` documents itself as within 1 of exact rational arithmetic (two
 # rounding sites: the coverage multiply and the final pack). Since 0.17.4 the CPU arm (`rend_blend`,
@@ -758,7 +868,8 @@ fn ae_gpu_alpha_ok(): i64 {
 # same bytes rather than ±1 per channel apart — until 0.17.3 the CPU blended straight colour and truncated.
 var ae_gpu_cov_slot  = 0;      # #86 slot holding the constant coverage mask (0 = none yet)
 var ae_gpu_cov_buf   = 0;      # host staging buffer, ae_gpu_cov_cap bytes
-var ae_gpu_cov_cap   = 0;      # bytes currently allocated AND uploaded
+var ae_gpu_cov_cap   = 0;      # bytes allocated, and uploaded when `ae_gpu_cov_alpha` is set
+var ae_gpu_cov_screen = 0;     # fw * fh of the planned frame: the largest rect the queue can hold
 var ae_gpu_cov_alpha = 0 - 1;  # the alpha the slot is filled with (-1 = never filled)
 var ae_gpu_cov_fail  = 0;      # latched: no slot, no memory, or a refused write
 
@@ -794,35 +905,47 @@ fn ae_gpu_chrome_cpu_needed(translucent, alpha_ok, cov_ok): i64 {
     return 1;
 }
 
+# PURE: the bytes to create the coverage slot with, for a first rect of `need` bytes. 0 refuses.
+# ⛔ THE SCREEN'S, NOT THE RECT'S. A slot cannot grow and the queue clips every rect to the framebuffer, so one byte
+# per screen pixel serves every rect there can be; sized by the first rect, a later and larger one would be refused
+# and the refusal retires the chrome path for the run. Bounded by the kernel's cap: on a kernel whose slot holds less,
+# only a rect past that cap is refused. `slot_max` 0 is the kernel telling us nothing.
+fn ae_gpu_cov_size(need, screen_px, slot_max): i64 {
+    if (need < 1) { return 0; }
+    var size = need;
+    if (screen_px > size) { size = screen_px; }
+    if (slot_max > 0) {
+        if (need > slot_max) { return 0; }
+        if (size > slot_max) { size = slot_max; }
+    }
+    return size;
+}
+
 # Ensure the coverage slot holds `need` bytes of the constant `alpha`. -> 1 ready, 0 refused.
-# ⚠ GROW-ONLY, and it re-uploads on a size increase as well as an alpha change: the bytes past the old
-# high-water are uninitialised in the slot, and a mask byte the compositor did not choose is a pixel it
-# did not choose.
+# ⭐ CREATED ONCE, at `ae_gpu_cov_size`, and re-uploaded whole when the alpha changes.
 fn ae_gpu_cov_ensure(need, alpha): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     if (ae_gpu_cov_fail == 1) { return 0; }
     if (need < 1) { return 0; }
     # ⛔ REFUSE RATHER THAN TRUNCATE. A rect larger than one `#86` slot cannot be masked, and quietly
     # masking part of it would paint a hard edge mid-window. The caller demotes instead.
-    if (ae_gpu_shm_slot_max > 0) { if (need > ae_gpu_shm_slot_max) { return 0; } }
-    if (need > ae_gpu_cov_cap) {
-        var sl = ae_gpu_cov_slot;
-        if (sl == 0) {
-            sl = sys_shm_create_gpu(need);
-            if (sl < 1) {
-                ae_gpu_cov_fail = 1;
-                println("aethersafha: no graphics-visible slot for alpha chrome -- translucent frames go to the CPU");
-                return 0;
-            }
-            ae_gpu_cov_slot = sl;
+    var size = ae_gpu_cov_size(need, ae_gpu_cov_screen, ae_gpu_shm_slot_max);
+    if (size == 0) { return 0; }
+    # ⚠ A slot cannot grow, so a rect past the one slot is a refusal, not a re-create: re-creating would
+    # leak the old slot out of a 16-slot system-wide supply.
+    if (ae_gpu_cov_slot != 0) { if (need > ae_gpu_cov_cap) { return 0; } }
+    if (ae_gpu_cov_slot == 0) {
+        var sl = sys_shm_create_gpu(size);
+        if (sl < 1) {
+            ae_gpu_cov_fail = 1;
+            println("aethersafha: no graphics-visible slot for alpha chrome -- translucent frames go to the CPU");
+            return 0;
         }
-        # ⚠ A slot cannot grow, so a rect past the ORIGINAL request is a refusal, not a re-create:
-        # re-creating would leak the old slot out of a 16-slot system-wide supply.
-        if (need > ae_gpu_cov_cap) { if (ae_gpu_cov_cap > 0) { return 0; } }
-        var b = alloc(need);
+        ae_gpu_cov_slot = sl;
+        var b = alloc(size);
         if (b == 0) { ae_gpu_cov_fail = 1; return 0; }
         ae_gpu_cov_buf = b;
-        ae_gpu_cov_cap = need;
+        ae_gpu_cov_cap = size;
         ae_gpu_cov_alpha = 0 - 1;               # a new buffer holds nothing yet
     }
     if (ae_gpu_cov_alpha != alpha) {
@@ -953,9 +1076,9 @@ fn ae_gpu_emit_chrome(): i64 { return ae_gpu_emit_chrome_range(0, ae_rect_count(
 # x-offset rather than converting a format.
 #
 # ⛔ ONE SLOT, ALLOCATED ONCE, REUSED EVERY FRAME. `#86 shm_create_gpu` slots are scarce (16 in the whole
-# system, and `shm_create` rounds every request up to a 2 MB page), so allocating per run — or per frame —
+# system, each a fixed 32 MB window whatever was asked for), so allocating per run — or per frame —
 # would exhaust the table in seconds. The slot is sized for the widest run the queue allows.
-var ae_gpu_glyph_slot = 0;      # GPU-visible 1bpp staging slot (0 = not yet allocated)
+var ae_gpu_glyph_slot = 0;      # GPU-visible 1bpp staging slot (0 = none allocated)
 var ae_gpu_glyph_buf = 0;       # userland packing buffer, allocated with it
 var ae_gpu_text_seen = 0;       # first-occurrence log latch
 var ae_gpu_text_fail = 0;       # 1 = the slot could not be had; stop retrying every frame
@@ -1136,7 +1259,7 @@ var ae_cur_vr[4];
 # unidentifiable white blob.
 #
 # ⛔ IT SHARES THE GLYPH SLOT, and that is safe only because it runs after the text drain has finished with
-# it. `#86` slots are scarce (16 system-wide, each rounded up to 2 MB) so a second slot for 40 bytes would
+# it. `#86` slots are scarce (16 system-wide, each a fixed 32 MB window) so a second slot for 40 bytes would
 # be indefensible — but this ordering dependency is real: moving this call above the text drain would have
 # the cursor's mask overwritten by the first caption.
 #
@@ -1250,9 +1373,9 @@ fn ae_gpu_emit_cursor(): i64 {
 # ae_gpu_present_frame — composite and flip one frame on the GPU.
 # Returns 1 if the frame was presented on the GPU, 0 if the caller must fall back to the CPU present.
 #
-# ⚠ Returns 0 (not a partial frame) on ANY per-window failure, and the caller then presents the CPU way.
-# A half-composited frame is worse than a slower one: the chrome is already in the back buffer at that
-# point, so bailing without presenting leaves it unshown rather than showing content-less windows.
+# ⚠ Returns 0 (not a partial frame) when the device refuses, and the caller then presents the CPU way. A refusal
+# naming a client's slot is not that: the window's own chrome is down, the frame goes on without its surface, and
+# the next plan puts the window on the CPU (`ae_gpu_refusal_apply`).
 fn ae_gpu_present_frame(comp, fb): i64 {
     # ⛔ THE PLAN DECIDES, NOT THIS FUNCTION. ae_gpu_frame_plan already ran every window through
     # ae_gpu_window_admissible BEFORE the frame was rendered, and render_window composited on the
@@ -1267,10 +1390,11 @@ fn ae_gpu_present_frame(comp, fb): i64 {
     if (px == 0) { return 0; }
     if (fw < 1) { return 0; }
     if (fh < 1) { return 0; }
-    # ⚠ CONSISTENCY GUARD, not a second derivation. The setu accept block runs BETWEEN the plan and
-    # this call and can push a new window, which the plan never saw and render_window never drew.
-    # Compositing it here would blit a surface with no chrome under it. A changed count means the
-    # plan is stale: present on the CPU this frame and re-plan next.
+    # ⚠ CONSISTENCY GUARD, not a second derivation, and not what keeps the plan true: the frame loop serves
+    # every client BEFORE the plan, so nothing changes a window or a buffer between it and this call
+    # (tests/frame_order.tcyr), an eviction plus a map included, which a count could not see. This catches
+    # a caller that breaks that order and pushes a window the plan never saw: compositing it would blit
+    # a surface with no chrome under it, so it presents on the CPU and re-plans next frame.
     if (vec_len(comp_windows(comp)) != ae_gpu_plan_n) { return 0; }
 
     # 0. ⭐ THE WALLPAPER, FIRST — it is the bottom layer, so it goes down before the chrome rects.
@@ -1282,7 +1406,7 @@ fn ae_gpu_present_frame(comp, fb): i64 {
         if (sys_gpu_blit_shm(ae_gpu_wp_slot, (fh << 16) | fw, 0) != 0) { ae_gpu_demote(); return 0; }
     }
 
-    # 1. Chrome layer -> back buffer, DEFERRED — ⭐⭐ NOW DAMAGE-LIMITED (`AE-0a`).
+    # 1. Chrome layer -> back buffer, held for the one flip — ⭐⭐ NOW DAMAGE-LIMITED (`AE-0a`).
     #
     # ⛔ THE BAND IS `union(cur, prev)`, AND THAT IS FORCED BY THE FLIP, NOT A CHOICE.
     # `#84 present` FLIPS THE RENDER TARGET on every present (agnos kernel/core/gpu.cyr —
@@ -1386,7 +1510,7 @@ fn ae_gpu_present_frame(comp, fb): i64 {
         if (win_state(win) == WinState.WS_MINIMIZED) { bid = 0; }
         if (bid != 0) {
             # ⚠ NO BOUNDS RE-CHECK HERE. ae_gpu_window_admissible already cleared every window in
-            # this frame, and render_window skipped its CPU composite on the strength of that. A
+            # this frame, on the state this loop reads: nothing mutates a window after the plan. A
             # second, independently-written copy of the same rule is how the two drift apart.
             var w = win_w(win);
             var h = win_h(win);
@@ -1394,10 +1518,9 @@ fn ae_gpu_present_frame(comp, fb): i64 {
             var dy = win_body_y(win);              # the content sits below the titlebar — see window.cyr
             var wh = (h << 16) | w;
             var dstxy = (dy << 16) | dx;
-            # ⛔ A FAILURE HERE IS A GPU REFUSAL, NOT A GEOMETRY PROBLEM — geometry was settled by the
-            # plan. So demote: the next frame runs entirely on the CPU and the desktop keeps working.
-            # Without this the compositor retries a refusing GPU every frame forever while
-            # render_window keeps skipping its composite, and the screen stays blank.
+            # ⛔ GEOMETRY WAS SETTLED BY THE PLAN, SO A FAILURE HERE IS A REFUSAL, of this client's slot or of
+            # the device, and `ae_gpu_refused` says which. Only the device's demotes: the next frame runs
+            # entirely on the CPU and the desktop keeps working.
             # ⭐ THE ROUTING DECISION, PER WINDOW. A premultiplied surface goes to the shader
             # (`#92` op 0x01, a real `out = src + dst*(1 - src_a)`); everything else takes the opaque
             # copy (`#87`). ⚠ And a premultiplied surface on a boot with NO shader envelope falls back to
@@ -1422,7 +1545,8 @@ fn ae_gpu_present_frame(comp, fb): i64 {
                         brc = ae_gpu_blend_rect_alpha(bid, wh, dstxy, wa);
                         if (ae_gpu_alpha_seen == 0) {
                             ae_gpu_alpha_seen = 1;
-                            println("aethersafha: compositing a TRANSLUCENT client surface with #92 op 0x06 (uniform alpha)");
+                            println(
+                              "aethersafha: compositing a TRANSLUCENT client surface with #92 op 0x06 (uniform alpha)");
                         }
                     } else { brc = ae_gpu_blend_rect(bid, wh, dstxy); }
                 } else { brc = ae_gpu_blend_rect(bid, wh, dstxy); }
@@ -1431,15 +1555,14 @@ fn ae_gpu_present_frame(comp, fb): i64 {
                     # in the back buffer, so re-clear and refuse the flip; a per-op failure is repairable by
                     # demoting the frame to the CPU. Treating both as "demote" would present a partial frame.
                     if (ae_gpu_err_is_batch(brc) == 1) { ae_gpu_batch_recover(); ae_gpu_demote(); return 0; }
-                    ae_gpu_demote();
-                    return 0;
+                    if (ae_gpu_refused(1, brc, win) == 1) { return 0; }
                 }
                 # ⛔ SAY WHICH OP ACTUALLY RAN. This latch sat OUTSIDE the routing above, so the 1.56.44
                 # burn log printed *"compositing a client surface with #92 op 0x01"* on a frame where the
                 # only blended surface went through op 0x06 — both lines, one op. A log that names the
                 # wrong op is worse than no log: this tree reads these lines as the record of which
                 # kernel path composited, and op 0x01 was not it.
-                if (wa >= 255) {
+                if ((wa >= 255) && (brc == 0)) {
                     if (ae_gpu_blend_seen == 0) {
                         ae_gpu_blend_seen = 1;
                         println("aethersafha: compositing a client surface with #92 op 0x01 (shader blend)");
@@ -1447,8 +1570,9 @@ fn ae_gpu_present_frame(comp, fb): i64 {
                 }
             }
             if (use_blend == 0) {
-                if (sys_gpu_blit_shm(bid, wh, dstxy) != 0) { ae_gpu_demote(); return 0; }
-                if (win_premul(win) == 1) {
+                var grc = sys_gpu_blit_shm(bid, wh, dstxy);
+                if (grc != 0) { if (ae_gpu_refused(0, grc, win) == 1) { return 0; } }
+                if ((win_premul(win) == 1) && (grc == 0)) {
                     if (ae_gpu_fallback_seen == 0) {
                         ae_gpu_fallback_seen = 1;
                         println("aethersafha: premultiplied surface but no shader envelope -- using #87");
@@ -1493,7 +1617,6 @@ fn ae_gpu_present_frame(comp, fb): i64 {
         ae_gpu_demote();
         return 0;
     }
-
 
     # 2d. THE POINTER, LAST. Op order is paint order, so this is what makes the arrow top-most — over
     #     chrome, over captions, over client surfaces. ⛔ It must stay AFTER the text drain for a second

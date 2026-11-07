@@ -187,6 +187,16 @@ fn main() {
     }
     assert_eq(title_seen, 1, "the notification's TITLE is drawn in the ink colour");
 
+    test_group("notifications — a human override's card reads as text");
+    var osh = shell_new();
+    var ovn = shell_request_human_override(osh, "agent-x", "rm -rf /", "cleanup", 1000);
+    var oline[AE_TEXT_CAP_B];
+    panel_note_caption(&oline, shell_notif_app_name(ovn));
+    assert_eq(t_streq(&oline, "Agent: agent-x"), 1, "its app line is the agent");
+    panel_note_caption(&oline, shell_notif_title(ovn));
+    assert_eq(t_streq(&oline, "Human Override Requested"), 1, "its title line");
+    assert_eq(memeq(shell_notif_body(ovn), "agent-x", 7), 1, "its body starts with the agent");
+
     test_group("notifications — priority is visible without reading the text");
     # ⚠ The stripe is what makes a stack of notices scannable. A CRITICAL notice must not paint the
     # same stripe as a LOW one, or the field is modelled and not communicated.
@@ -246,7 +256,9 @@ fn main() {
     # took `alloc(24)`. The first pass warms anything lazily built (the font); the second must be free.
     var hsh = shell_new();
     var hfb = bhumi_fb_new(640, 400);
-    shell_show_notification(hsh, shell_notif_new(1, "AGNOS Desktop", "Welcome to AGNOS", "Your AI-native desktop environment", SH_NotifPriority.SH_PRIO_NORMAL, 0, 0, 0));
+    shell_show_notification(hsh,
+      shell_notif_new(1, "AGNOS Desktop", "Welcome to AGNOS", "Your AI-native desktop environment",
+        SH_NotifPriority.SH_PRIO_NORMAL, 0, 0, 0));
     shell_set_agent_count(hsh, 37);
     render_shell_panel(hfb, hsh);
     render_notifications(hfb, hsh);
@@ -274,12 +286,15 @@ fn main() {
     var llen = panel_note_caption(&cap, "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW");
     assert_eq(t_gt(llen * FONT_ADV, panel_note_text_w()), 0, "a long line's cells fit the text width");
     assert_eq(t_gt(10 + panel_note_text_w(), NOTE_W - 10), 0, "  ...which ends clear of the marker");
-    assert_eq(utf8_next_cp(utf8_next(&cap + utf8_offset(&cap, llen - 1))), 0x2026, "  ...and ends in '…', so the cut is visible");
+    assert_eq(utf8_next_cp(utf8_next(&cap + utf8_offset(&cap, llen - 1))), 0x2026,
+      "  ...and ends in '…', so the cut is visible");
     # Pixel proof on a 1280-wide framebuffer: the card's last 10 px and the PANEL_PAD right of it are
     # readable, so an overrun lands on pixels the test sees before it falls off the screen.
     var lsh = shell_new();
     var lfb = bhumi_fb_new(1280, 400);
-    shell_show_notification(lsh, shell_notif_new(1, "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", SH_NotifPriority.SH_PRIO_NORMAL, 0, 1, 0));
+    shell_show_notification(lsh,
+      shell_notif_new(1, "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW",
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", SH_NotifPriority.SH_PRIO_NORMAL, 0, 1, 0));
     render_notifications(lfb, lsh);
     var lcx = 1280 - PANEL_PAD - NOTE_W;
     var lmute = ae_bhumi(rupa_theme_mute(rupa_theme_active()));

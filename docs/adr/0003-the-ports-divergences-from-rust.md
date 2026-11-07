@@ -13,7 +13,7 @@
 `CLAUDE.md` sets the port's correctness bar as "matches what Rust did" and allows divergence "only with an
 ADR". The 2026-10-09 parity audit found many deliberate divergences recorded only in file headers, comments
 or the CHANGELOG, which disappear as evidence once `rust-old/` is deleted. It also found several silent ones;
-those are fixed rather than recorded (roadmap 0.17.1–0.17.4: the `"terminal"` context match, the security
+those are fixed rather than recorded (CHANGELOG 0.17.1–0.17.4: the `"terminal"` context match, the security
 dashboard's Info level, workspace defaults, the CPU blend). This ADR records the divergences that stay.
 
 ## Decision
@@ -70,6 +70,7 @@ fix.
   a missing value or a non-numeric count prints an error naming it and exits 2, like clap. The port takes
   the *first* of a repeated single-value flag and accepts a repeated boolean; clap refuses both. There is no
   `--flag=value`, no combined short flags and no `--` terminator. `--version` prints `aethersafha <VERSION>`.
+  `--clients` with `--frames` is refused as a conflict (0.18.2): the probe's verdict needs its own budget.
 - **Accessibility mirroring** (0.17.2). As in Rust, a node per window keyed by the window id, with
   "Window opened / closed" announcements. Differences:
   - Tree focus follows compositor focus on *every* change, including window creation and the close
@@ -79,6 +80,8 @@ fix.
   - Node ids are window ids, and both count from 1 (Rust's `Uuid`s could not collide). The desktop tree
     therefore holds window nodes only; minting a tree id into it would collide.
   - `desktop_sync_accessibility` is a port-only reconcile; with the hooks in place it changes nothing.
+  - The announcement queue keeps the newest 256 (0.18.2). Rust's `Vec` was unbounded, and nothing here
+    drains it yet.
 - **SIGINT** (0.17.2, Linux). Rust's `ctrl_c` ended the run loop; the port blocks SIGINT and reads it from
   a signalfd once per frame, then takes the Ctrl+Q teardown. Only SIGINT is handled, as in Rust.
   - A `--clients` probe that is interrupted exits 130, not 93/94, which would claim the whole budget was
@@ -91,6 +94,12 @@ fix.
     Ctrl+C as byte 3.
 - **Screen capture reads a framebuffer the caller passes in**; it does not call the renderer. This is the
   shape a compositor-side screenshot needs.
+- **A wallpaper is a PNG or a JPEG, and the decode has a budget** (0.18.2, `src/wallpaper.cyr`). The ceiling is four
+  screens of RGBA8, never below one 4K image. A file past 16 MiB returns -6, a BMP or GIF -7 (chitra decodes them, but the
+  ruling is PNG or JPEG), and an image past the ceiling -8; each falls back to the theme.
+- **Guest text stays in its window** (0.18.2, `src/foreign.cyr`): whole cells, clipped to the body, drawn in the window's z
+  slot, and bounded by the surface, where a full surface used to read past its end. A closed or minimized window's guest
+  draws nothing. It sits under the panel and the cursor.
 - **New client windows cascade from spawn coordinates in the frame loop**, not from a fixed placement rule
   in `create_window`.
 - **The minimum window is 120×60** (Rust: 200×100), sized to keep the three title-bar buttons inside the
@@ -139,11 +148,20 @@ fix.
 - **The security UI's effects** (0.17.3):
   - **pid guards.** The "no pid" sentinel is INT_MIN (`SEC_PID_NONE`), not the usual −1, because −1 is
     `kill`'s broadcast value. An enforced revoke with pid 0 sends nothing; Rust's `i32::try_from(0)`
-    succeeded and its `kill(0, SIGHUP)` signalled the compositor's own process group.
+    succeeded and its `kill(0, SIGHUP)` signalled the compositor's own process group. pid 1 and the
+    compositor's own pid are refused too (0.18.2), where Rust's `> 0` passed both: a kill answers
+    `ACTION_BLOCKED`, and a revoke succeeds and sends no signal.
   - **The audit line** is serde's: keys sorted (serde_json without `preserve_order` used a BTreeMap),
     the agent id as a decimal string, and a whole-second `YYYY-MM-DDTHH:MM:SS+00:00` timestamp (Rust's
     `to_rfc3339` carried a fraction). A failed write after a successful open warns, where Rust was
     silent. On agnos, which ignores `O_APPEND`, the writer seeks to the end itself.
+  - **The audit line's `details`** (0.18.2) is well-formed UTF-8 of at most 4096 bytes
+    (`SEC_AUDIT_DETAILS_MAX`). Ill-formed UTF-8, which a Rust `&str` cannot hold, becomes one U+FFFD per
+    maximal ill-formed subpart (§3.9, the rule of `String::from_utf8_lossy`). Longer text is cut between
+    scalars and ends in `…`; Rust wrote any length. Well-formed text under the bound is written byte for
+    byte as serde_json wrote it.
+  - **The audit log is opened `O_NOFOLLOW | O_NONBLOCK`, regular files only** (0.18.2). Rust followed links
+    and blocked on a FIFO. A log path that is a symlink, a FIFO or a device warns and writes nothing.
   - **The emergency kill's daimon DELETE** starts at once and is finished by the frame loop, at most
     four in flight. Rust spawned one per kill on its tokio runtime.
 - **The agent-list poll** (0.17.3, `src/daimon_client.cyr`) speaks to daimon 2.4.3, which Rust's poll
@@ -160,6 +178,9 @@ fix.
     takes the failed-poll path and the HUD stays as it was. daimon writes its keys as fixed literals, so
     its own answers cannot carry one. Also unlike serde_json, bayan accepts ill-formed UTF-8 or raw
     control bytes inside a string.
+  - A body past 32,000 `{`, `[`, `,` and `:` outside strings is refused unparsed as `DMN_R_TOO_LARGE`
+    and the HUD stays (0.18.2); Rust parsed anything that arrived. daimon holds at most 1000 agents, and
+    a full answer is about 17,000 of these.
   - A failed poll is not logged.
   - **On agnos the poll and the DELETE are no-ops.** Its `connect` blocks for up to 8 s, and a SYN to a
     closed port gets no RST, so the frame loop cannot dial out safely. The agnos agent gauge shows only
@@ -168,12 +189,18 @@ fix.
   - Every encoder writes alpha 0xFF. The port's framebuffer is XRGB; Rust wrote the pixel's top byte,
     which was translucent only under its panels.
   - A zero or negative size is refused before anything is allocated. That is Rust's `RegionOutOfBounds`
-    and `EncodingError`; Rust's encoders accepted 0×0.
+    and `EncodingError`; Rust's encoders accepted 0×0. A width or height above 65535 is refused the same
+    way (0.18.2), so no size arithmetic can wrap.
   - Buffers are freed: through `scap_result_free`, on ring eviction, and through the new
     `srec_mgr_remove_recording`.
   - Getters hand out the live record (the representation table above) rather than Rust's clones.
 
 - **Pointer routing** (0.17.4, `src/route.cyr`; Rust's `route_input`, drag and resize state):
+  - **A release goes to the window that got the press** (0.18.2), per button, with its point clamped into that
+    window's content; Rust's `ClientClick` was a press only. A window gone during the press gets nothing, and the
+    window underneath gets nothing either. A press nobody got has a release nobody gets.
+  - **A client hears the position before the event** (0.18.2): PTR_MOVE precedes BTN or SCROLL when the window or the
+    point changed since the last one it was told.
   - A gesture is anchored at the press, as Rust's `drag_state` and `resize_state` were, and keeps the
     grab offset. Rust's `apply_resize` snapped the moving edge onto the pointer, which with the port's
     6 px grips would jump up to 6 px.
@@ -233,6 +260,12 @@ fix.
   - **Errors are final.** Any handshake error disconnects the client at once, sending SETU_CLOSE first if
     it was given a surface id; a half-made window is removed and focus handed on.
   - **The table is 8 rows.** A ninth connection is accepted and closed at once until a row frees up.
+  - **A closed window ends its row.** A client that ignores SETU_CLOSE is disconnected 2 s after its window
+    leaves the desktop (`AE_CLOSE_BUDGET_MS`, 0.18.2), so it cannot hold a row for ever.
+- **At most 16 client windows** (0.18.2, `AE_CLIENT_WIN_MAX`, both targets). Rust had no cap. A client that hangs
+  up keeps its window, with its last pixels and no connection, so without a cap a loop of connect, present and
+  hang up slowed every frame without limit. The 17th evicts the window whose client went first, silently; a
+  surface is refused with -9 only when all 16 are live. A window with no client stops re-reading its buffer.
 - **A window appears at its first COMMIT** (0.17.6, both targets). The window minted at CREATE_SURFACE has
   an id but is not drawn, hit-tested or focused until its first committed ATTACH, and then appears at its
   final place with its buffer. That removes the empty frame at (0, 0) and a focus theft, and focus goes

@@ -106,11 +106,11 @@ fn main() {
 
     # ----- test_args_custom_values (main.rs:339) -------------------------------------------------
     test_group("flags — every accepted flag at once (main.rs test_args_custom_values)");
-    var c0 = t_parse("ae --secure --selftest --clients --fullclear --clearbg --bandbg --opacity 128 --frames 600 --wallpaper /w.png --client /a --spawn thoth");
+    var c0 = t_parse("ae --secure --selftest --fullclear --clearbg --bandbg --opacity 128 --frames 600 --wallpaper /w.png --client /a --spawn thoth");  #skip-lint
     assert_eq(flg_kind(c0), FlgKind.FLG_RUN, "all accepted flags -> RUN");
     assert_eq(flg_secure(c0), 1, "--secure");
     assert_eq(flg_selftest(c0), 1, "--selftest");
-    assert_eq(flg_clients(c0), 1, "--clients");
+    assert_eq(flg_clients(t_parse("ae --clients")), 1, "--clients");
     assert_eq(flg_fullclear(c0), 1, "--fullclear");
     assert_eq(flg_clearbg(c0), 1, "--clearbg");
     assert_eq(flg_bandbg(c0), 1, "--bandbg");
@@ -259,14 +259,18 @@ fn main() {
 
     # ----- every invocation found in the tree and in agnos ----------------------------------------
     test_group("flags — every invocation the harnesses use today still RUNS");
-    assert_eq(t_runs("/aethersafha --frames 0 --client /focus_client --client /focus_client"), 1, "qemu-input.py focus");
-    assert_eq(t_runs("/aethersafha --frames 0 --client /hostile_client --client /focus_client"), 1, "qemu-input.py hostile");
+    assert_eq(t_runs("/aethersafha --frames 0 --client /focus_client --client /focus_client"), 1,
+      "qemu-input.py focus");
+    assert_eq(t_runs("/aethersafha --frames 0 --client /hostile_client --client /focus_client"), 1,
+      "qemu-input.py hostile");
     assert_eq(t_runs("/aethersafha --frames 600 --client /present_probe"), 1, "qemu-linux-desktop.sh default");
     assert_eq(t_runs("/aethersafha --frames 600"), 1, "qemu-linux-desktop.sh with no setu");
-    assert_eq(t_runs("/aethersafha --clients"), 1, "qemu-linux-desktop.sh --clients; agnos aethersafha-clients-test.py");
+    assert_eq(t_runs("/aethersafha --clients"), 1,
+      "qemu-linux-desktop.sh --clients; agnos aethersafha-clients-test.py");
     assert_eq(t_runs("/bin/aethersafha --selftest"), 1, "agnos stage-tools.sh / burn-prep.sh --selftest");
     assert_eq(t_runs("/bin/aethersafha"), 1, "agnos kernel main.cyr `run /bin/aethersafha`; launcher-mode harnesses");
-    assert_eq(t_runs("/bin/aethersafha --opacity 128 --client /present_probe"), 1, "agnos console-line-preserve-test.py");
+    assert_eq(t_runs("/bin/aethersafha --opacity 128 --client /present_probe"), 1,
+      "agnos console-line-preserve-test.py");
     assert_eq(t_runs("/bin/aethersafha --wallpaper /mudra.png"), 1, "agnos ae-wallpaper-load-test.py");
 
     # ----- test_desktop_environment_new_secure_mode (main.rs:574) ---------------------------------
@@ -279,9 +283,34 @@ fn main() {
     var sd = desktop_new();
     if (flg_secure(sf) == 1) { desktop_apply_secure(sd); }
     assert_eq(comp_secure_mode(desk_comp(sd)), 1, "--secure -> comp_secure_mode == 1 (main.rs:83)");
-    assert_eq(sec_ui_get_security_level(desk_sec(sd)), SecLevel.SEC_LVL_ELEVATED, "--secure -> security level Elevated (main.rs:84)");
+    assert_eq(sec_ui_get_security_level(desk_sec(sd)), SecLevel.SEC_LVL_ELEVATED,
+      "--secure -> security level Elevated (main.rs:84)");
     assert_eq(sec_ui_is_emergency_mode(desk_sec(sd)), 0, "  ...and nothing else: no emergency mode");
     assert_eq(desktop_apply_secure(0), 0, "a null desktop is refused, not dereferenced");
+
+    # ----- the probe runs to its own budget, so a frame bound would end it short of a verdict ---------
+    test_group("flags — --clients and --frames together are refused");
+    var cf1 = t_parse("ae --clients --frames 5");
+    assert_eq(flg_kind(cf1), FlgKind.FLG_ERROR, "--clients --frames 5 is refused");
+    assert_eq(flg_err(cf1), FlgErr.FLG_E_CONFLICT, "  ...as a conflict");
+    assert_eq(t_err_names(cf1, "--frames"), 1, "  ...naming --frames");
+    assert_eq(flg_kind(t_parse("ae --frames 5 --clients")), FlgKind.FLG_ERROR, "in either order");
+    assert_eq(flg_kind(t_parse("ae --clients --frames 0")), FlgKind.FLG_ERROR, "--frames 0 too: the probe ends itself");
+    assert_eq(flg_kind(t_parse("ae --clients --frames 5 --help")), FlgKind.FLG_HELP,
+      "--help still stops the scan first");
+    assert_eq(flg_err(t_parse("ae --clients --frames 5 --bogus")), FlgErr.FLG_E_UNKNOWN,
+      "  ...as does the first bad argument");
+    var cfp[8];
+    sys_pipe(&cfp);
+    flg_error_print(cf1, load32(&cfp + 4));
+    var cfo = alloc(128);
+    var cfn = sys_read(load32(&cfp), cfo, 127);
+    sys_close(load32(&cfp));
+    sys_close(load32(&cfp + 4));
+    assert_eq(memeq(cfo, "aethersafha: --clients does not run with: --frames\n", 51), 1, "the error says which two");
+    assert_eq(cfn > 51, 1, "  ...then the usage hint");
+    assert_eq(t_runs("ae --clients --client /a"), 1, "--clients with --client still runs");
+    assert_eq(t_runs("ae --frames 5 --client /a"), 1, "--frames with --client still runs");
 
     # ----- a lone `-` is a WORD (flg_is_flagish), so it can be a value but never a flag ---------------
     test_group("flags — a lone '-' is a word, not a flag");

@@ -359,7 +359,8 @@ fn t_e2e_teardown(): i64 {
     while (j < 5) {
         var nid = shell_next_notif_id(sh);
         vec_push(nids, nid);
-        shell_show_notification(sh, shell_notif_new(nid, "app", "Notif", "", SH_NotifPriority.SH_PRIO_NORMAL, T_NOW, 0, 0));
+        shell_show_notification(sh,
+          shell_notif_new(nid, "app", "Notif", "", SH_NotifPriority.SH_PRIO_NORMAL, T_NOW, 0, 0));
         j = j + 1;
     }
     assert_eq(shell_notification_count(sh), 5, "five notifications");

@@ -5,7 +5,7 @@
 # focus tracking, tab-order navigation, screen-reader announcement queue,
 # and high-contrast theme definitions.
 #
-# Cyrius port notes (toolchain 6.3.35):
+# Cyrius port notes:
 #   - Every Rust struct is a heap object: alloc(_SZ) + named-offset enum,
 #     accessed via load64/store64 (same idiom as src/window.cyr,
 #     src/compositor.cyr, lib/bhumi.cyr).
@@ -99,6 +99,11 @@ enum AxStateOff {
 fn a11y_state_new(): i64 {
     var s = alloc(AX_S_SZ);
     if (s == 0) { return 0; }
+    return a11y_state_reset(s);
+}
+
+# Rust's Default values into an existing state. -> s.
+fn a11y_state_reset(s): i64 {
     store64(s + AX_S_FOCUSED, 0);
     store64(s + AX_S_SELECTED, 0);
     store64(s + AX_S_EXPANDED, 0);
@@ -141,7 +146,8 @@ enum AxNodeOff {
     AX_N_PARENT   = 40;   # parent id, 0 == None
     AX_N_BOUNDS   = 48;   # *Rect (src/geom.cyr), 0 == default/none
     AX_N_ACTIONS  = 56;   # vec of AxAction values
-    AX_N_SZ       = 64;
+    AX_N_NAMECAP  = 64;   # bytes the node owns at AX_N_NAME, 0 when the name is the caller's
+    AX_N_SZ       = 72;
 }
 
 # a11y_node_new(id, role, name_cstr) -> *AxNode (0 on OOM).
@@ -165,6 +171,7 @@ fn a11y_node_new(id, role, name): i64 {
     store64(n + AX_N_PARENT, 0);
     store64(n + AX_N_BOUNDS, 0);
     store64(n + AX_N_ACTIONS, acts);
+    store64(n + AX_N_NAMECAP, 0);
     return n;
 }
 
@@ -209,7 +216,8 @@ enum AxTreeOff {
     AX_T_FOCUSED_ID    = 8;    # focused node id, 0 == None
     AX_T_ANNOUNCEMENTS = 16;   # vec of cstr (announcement queue)
     AX_T_NEXTID        = 24;   # monotonic id counter (Uuid substitute)
-    AX_T_SZ            = 32;
+    AX_T_POOL          = 32;   # vec of retired window *AxNode, reused by the next window open
+    AX_T_SZ            = 40;
 }
 
 # a11y_tree_new() -> *AxTree (0 on OOM). Parity: AccessibilityTree::new /
@@ -221,6 +229,9 @@ fn a11y_tree_new(): i64 {
     if (nodes == 0) { return 0; }
     var ann = vec_new();
     if (ann == 0) { return 0; }
+    var pool = vec_new();
+    if (pool == 0) { return 0; }
+    store64(t + AX_T_POOL, pool);
     store64(t + AX_T_NODES, nodes);
     store64(t + AX_T_FOCUSED_ID, 0);
     store64(t + AX_T_ANNOUNCEMENTS, ann);
@@ -519,13 +530,30 @@ fn a11y_tree_search_by_role(t, role): i64 {
 # Announcements (screen-reader queue)
 # ============================================================================
 
-# Queue a screen-reader announcement (cstr, borrowed). Parity: announce.
-# ⚠ UNBOUNDED, AS IN RUST: `announcements` is a plain Vec that only `pending_announcements` empties,
-# and nothing in the Rust binary drained it. Every window open/close queues one, so a consumer that
-# never drains grows this vec for the whole session — a cap would be a new policy, not a port.
-fn a11y_tree_announce(t, message): i64 {
-    vec_push(load64(t + AX_T_ANNOUNCEMENTS), message);
+# ⛔ THE QUEUE IS A RING OF THE NEWEST AX_ANNOUNCE_CAP. Rust's was a plain Vec that only
+# `pending_announcements` emptied, and nothing in its binary drained it; nothing here does yet, and
+# every window open and close queues one. Unbounded, that is a leak for the life of the session.
+var AX_ANNOUNCE_CAP = 256;
+
+# Take ownership of `msg`, an fl_alloc'd cstr: the ring frees whatever it evicts. -> 0.
+fn a11y_ring_push(t, msg): i64 {
+    var q = load64(t + AX_T_ANNOUNCEMENTS);
+    if (vec_len(q) >= AX_ANNOUNCE_CAP) {
+        fl_free(vec_get(q, 0));
+        vec_remove(q, 0);
+    }
+    vec_push(q, msg);
     return 0;
+}
+
+# Queue a copy of the screen-reader announcement `message` (cstr), as Rust's to_string did.
+# Parity: announce. -> 0, -1 on OOM.
+fn a11y_tree_announce(t, message): i64 {
+    var n = strlen(message);
+    var msg = fl_alloc(n + 1);
+    if (msg == 0) { return 0 - 1; }
+    memcpy(msg, message, n + 1);
+    return a11y_ring_push(t, msg);
 }
 
 # Number of pending announcements (not part of Rust API; helper for draining).
@@ -533,8 +561,8 @@ fn a11y_tree_announcement_count(t): i64 {
     return vec_len(load64(t + AX_T_ANNOUNCEMENTS));
 }
 
-# Drain and return all pending announcements as a vec of cstr; the tree's queue
-# is reset to empty. Parity: pending_announcements (std::mem::take).
+# Drain and return all pending announcements as a vec of cstr, oldest first; the tree's queue
+# is reset to empty, and the strings are the caller's. Parity: pending_announcements (std::mem::take).
 fn a11y_tree_pending_announcements(t): i64 {
     var old = load64(t + AX_T_ANNOUNCEMENTS);
     var fresh = vec_new();
@@ -551,10 +579,27 @@ fn a11y_tree_pending_announcements(t): i64 {
 # id). Rust never collides because both are Uuids; here window ids and `a11y_tree_next_id` both count
 # from 1, so a tree that mirrors windows must not also mint ids — the desktop tree holds window nodes
 # only.
-# ⚠ Strings are COPIED (Rust clones): the node name and every announcement are fresh cstrs, so nothing
-# here borrows the caller's title buffer. This allocator has no free, so they live for the session.
+# ⚠ Strings are COPIED (Rust clones), so nothing here borrows the caller's title buffer. A node's name
+# lives for the session; an announcement lives until the ring evicts it or a drain hands it over.
 
 # Fresh NUL-terminated copy of cstr `s` (0 on OOM).
+# Copy `title` into the node's own name buffer, growing it only for a longer title. -> the name, 0 on OOM.
+fn a11y_node_own_name(n, title): i64 {
+    var len = strlen(title);
+    var buf = load64(n + AX_N_NAME);
+    if (len + 1 > load64(n + AX_N_NAMECAP)) {
+        var cap = len + 1;
+        if (cap < 64) { cap = 64; }
+        buf = alloc(cap);
+        if (buf == 0) { return 0; }
+        store64(n + AX_N_NAME, buf);
+        store64(n + AX_N_NAMECAP, cap);
+    }
+    memcpy(buf, title, len);
+    store8(buf + len, 0);
+    return buf;
+}
+
 fn a11y_cstr_dup(s): i64 {
     var n = strlen(s);
     var out = alloc(n + 1);
@@ -564,27 +609,13 @@ fn a11y_cstr_dup(s): i64 {
     return out;
 }
 
-# Fresh cstr `a` ++ `b` (0 on OOM). Parity substitute for `format!("{}{}", a, b)`.
-fn a11y_cstr_cat(a, b): i64 {
-    var la = strlen(a);
-    var lb = strlen(b);
-    var out = alloc(la + lb + 1);
-    if (out == 0) { return 0; }
-    memcpy(out, a, la);
-    memcpy(out + la, b, lb);
-    store8(out + la + lb, 0);
-    return out;
-}
-
-# Fresh copy of UTF-8 cstr `s` with every Unicode Cc char removed (0 on OOM). Parity:
+# Write UTF-8 cstr `s` to `out` (room for strlen(s) + 1) with every Unicode Cc char removed. Parity:
 # `title.chars().filter(|c| !c.is_control()).collect()` — Cc is U+0000-001F, U+007F, U+0080-009F.
 # ⭐ The C1 block is the two-byte sequence C2 80..C2 9F, so only a C2-LED pair is dropped: an 80..9F
 # byte elsewhere is a continuation of some other char (E2 80 99 is U+2019) and must survive. Every
 # other byte is kept as is, valid UTF-8 or not — this filters, it does not validate.
-fn a11y_strip_control(s): i64 {
+fn a11y_strip_control_to(out, s): i64 {
     var n = strlen(s);
-    var out = alloc(n + 1);
-    if (out == 0) { return 0; }
     var i = 0;
     var o = 0;
     while (i < n) {
@@ -612,29 +643,57 @@ fn a11y_strip_control(s): i64 {
         }
     }
     store8(out + o, 0);
+    return o;
+}
+
+# Fresh copy of `s` with every Unicode Cc char removed (0 on OOM).
+fn a11y_strip_control(s): i64 {
+    var out = alloc(strlen(s) + 1);
+    if (out == 0) { return 0; }
+    a11y_strip_control_to(out, s);
     return out;
 }
 
-# Internal: announce `prefix` ++ sanitized `title`.
+# Internal: announce `prefix` ++ sanitized `title`, built in the block the ring will own.
 fn a11y_announce_titled(t, prefix, title): i64 {
-    var clean = a11y_strip_control(title);
-    if (clean == 0) { return 0 - 1; }
-    var msg = a11y_cstr_cat(prefix, clean);
+    var pl = strlen(prefix);
+    var msg = fl_alloc(pl + strlen(title) + 1);
     if (msg == 0) { return 0 - 1; }
-    return a11y_tree_announce(t, msg);
+    memcpy(msg, prefix, pl);
+    a11y_strip_control_to(msg + pl, title);
+    return a11y_ring_push(t, msg);
 }
 
 # A window opened: add its node and announce it. -> the node id (== `id`), 0 on OOM.
 # Parity: compositor.rs:250-273 — role Window, name = the (unsanitized) title, bounds = the window's
 # geometry, actions [Focus, Click, Dismiss] in that order, then "Window opened: <sanitized title>".
+# ⛔ A client decides how often this runs, and `alloc` gives nothing back, so a window's node, its name, state, vecs
+# and rect are reused from the tree's pool. Without that a loop of connect, present and hang up grows the heap for
+# ever, however well the compositor reuses the window itself.
 fn a11y_tree_window_open(t, id, title, x, y, w, h): i64 {
-    var name = a11y_cstr_dup(title);
-    if (name == 0) { return 0; }
-    var node = a11y_node_new(id, AxRole.AX_ROLE_WINDOW, name);
-    if (node == 0) { return 0; }
-    var r = rect_new(x, y, w, h);
-    if (r == 0) { return 0; }
-    a11y_node_set_bounds(node, r);
+    var pool = load64(t + AX_T_POOL);
+    var node = 0;
+    if (vec_len(pool) > 0) {
+        node = vec_pop(pool);
+    } else {
+        node = a11y_node_new(id, AxRole.AX_ROLE_WINDOW, "");
+        if (node == 0) { return 0; }
+        var r0 = rect_new(x, y, w, h);
+        if (r0 == 0) { return 0; }
+        a11y_node_set_bounds(node, r0);
+    }
+    if (a11y_node_own_name(node, title) == 0) { return 0; }
+    store64(node + AX_N_ID, id);
+    store64(node + AX_N_ROLE, AxRole.AX_ROLE_WINDOW);
+    store64(node + AX_N_PARENT, 0);
+    a11y_state_reset(load64(node + AX_N_STATE));
+    vec_truncate(load64(node + AX_N_CHILDREN), 0);
+    vec_truncate(load64(node + AX_N_ACTIONS), 0);
+    var r = load64(node + AX_N_BOUNDS);
+    store64(r + RECT_X, x);
+    store64(r + RECT_Y, y);
+    store64(r + RECT_W, w);
+    store64(r + RECT_H, h);
     a11y_node_add_action(node, AxAction.AX_ACT_FOCUS);
     a11y_node_add_action(node, AxAction.AX_ACT_CLICK);
     a11y_node_add_action(node, AxAction.AX_ACT_DISMISS);
@@ -646,8 +705,13 @@ fn a11y_tree_window_open(t, id, title, x, y, w, h): i64 {
 # A window closed: remove its node (clearing tree focus if it held it) and announce it. Parity:
 # compositor.rs:337-347 — the announcement is made whether or not a node was there.
 fn a11y_tree_window_close(t, id, title): i64 {
-    a11y_tree_remove_node(t, id);
-    return a11y_announce_titled(t, "Window closed: ", title);
+    var node = a11y_tree_remove_node(t, id);
+    var r = a11y_announce_titled(t, "Window closed: ", title);
+    # After the announcement: `title` may be this node's own name. Only a node window_open made owns its name.
+    if (node != 0) {
+        if (load64(node + AX_N_NAMECAP) > 0) { vec_push(load64(t + AX_T_POOL), node); }
+    }
+    return r;
 }
 
 # Make tree focus follow the compositor's focused window id (0 = none). Parity: focus_window's

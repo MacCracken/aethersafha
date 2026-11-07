@@ -1,13 +1,12 @@
 # aethersafha — desktop session aggregate
 # Parity: the assembly the Rust lib.rs / main.rs did across the subsystems.
 #
-# Wires the compositor together with the leaf subsystems — shell, AI features,
-# security UI, accessibility, gestures, plugin host — so they are instantiated,
-# reachable, and connected from the running binary (not just standalone modules).
-# The one live cross-subsystem connection so far is compositor → accessibility (the
-# a11y tree mirrors the window stack); deeper wiring (shell panel, notifications,
-# input→gestures) follows. theme_bridge and the shell_integration tray were retired
-# at 0.17.0 (ADR 0004).
+# Builds the compositor and the leaf subsystems — shell, AI features, security UI, accessibility,
+# gestures, plugin host — and holds them for the running binary. Live: the shell panel and its
+# notifications draw every frame, the 5 s status tick feeds the panel and the AI context, and the a11y
+# tree mirrors the window stack. The gesture recognizer and the plugin host are built and held, and
+# nothing drives them: there is no touch input (roadmap D10), and nothing calls the host. theme_bridge
+# and the shell_integration tray are retired (ADR 0004).
 
 # The status poll steps daimon's agent-list GET (desktop_status_poll); include-once makes a second
 # include of it a no-op.
@@ -269,7 +268,8 @@ fn render_desktop(d, fb): i64 {
 fn desktop_initialize(d, now): i64 {
     var sh = desk_shell(d);
     var nid = shell_next_notif_id(sh);
-    var note = shell_notif_new(nid, "AGNOS Desktop", "Welcome to AGNOS", "Your AI-native desktop environment", SH_NotifPriority.SH_PRIO_NORMAL, now, 0, 0);
+    var note = shell_notif_new(nid, "AGNOS Desktop", "Welcome to AGNOS", "Your AI-native desktop environment",
+      SH_NotifPriority.SH_PRIO_NORMAL, now, 0, 0);
     if (note == 0) { return 0 - 1; }
     shell_show_notification(sh, note);
     var ai = desk_ai(d);
@@ -278,9 +278,8 @@ fn desktop_initialize(d, now): i64 {
     return 0;
 }
 
-# The UserPresent source, minted once rather than per tick: the arena never frees.
-# ⚠ THE TICK STILL LEAKS ITS EVENT: a 40 B ContextEvent per tick (56 B measured), kept by the history
-# and orphaned when its cap drops it — about 1 MB/day at 5 s. Recycling it is ai_features' to do.
+# The UserPresent source, minted once rather than per tick: the arena never frees. The tick's event
+# comes off the freelist, and the history frees it when its cap drops it (ai_update_context).
 var desk_src_desktop = 0;
 var desk_evt_seq = 0;   # parity: Uuid::new_v4 per event -> monotonic i64 (ADR 0003)
 

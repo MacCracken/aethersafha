@@ -58,7 +58,8 @@ fn main() {
     # ⛔ UNKNOWN takes the gauge track — an empty dot — and every MEASURED state keeps its colour.
     var trk = bhumi_xrgb(1, 2, 3);
     assert_eq(panel_net_dot_color(SH_NetStatus.SH_NET_UNKNOWN, trk), trk, "unknown → the empty track");
-    assert_eq(panel_net_dot_color(SH_NetStatus.SH_NET_CONNECTED, trk), bhumi_xrgb(90, 200, 90), "connected dot → green");
+    assert_eq(panel_net_dot_color(SH_NetStatus.SH_NET_CONNECTED, trk), bhumi_xrgb(90, 200, 90),
+      "connected dot → green");
     assert_eq(panel_net_dot_color(SH_NetStatus.SH_NET_ERROR, trk), bhumi_xrgb(210, 80, 80), "error dot → red");
 
     test_group("shell_render — render_shell_panel smoke (shell → framebuffer)");
@@ -95,7 +96,8 @@ fn main() {
     var nay = PANEL_H + NOTE_GAP + 5;                       # app-name row
     assert_eq(sr_cell_is(nfb, nx, nay, 0x82, nmute), 1, "the app name's 'é' is ONE cell, CP437 0x82");
     assert_eq(sr_cell_is(nfb, nx + FONT_ADV, nay, 0, nmute), 1, "  '—' is a blank cell: CP437 has none");
-    assert_eq(sr_cell_is(nfb, nx + 2 * FONT_ADV, nay, 'x', nmute), 1, "  and 'x' is the THIRD cell (byte-wise, the sixth)");
+    assert_eq(sr_cell_is(nfb, nx + 2 * FONT_ADV, nay, 'x', nmute), 1,
+      "  and 'x' is the THIRD cell (byte-wise, the sixth)");
     var nty = PANEL_H + NOTE_GAP + 17;                      # title row
     assert_eq(sr_cell_is(nfb, nx + 3 * FONT_ADV, nty, 0x82, nink), 1, "the title 'Café' ends in one 'é' cell");
     var nby = PANEL_H + NOTE_GAP + 29;                      # body row

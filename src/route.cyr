@@ -7,8 +7,8 @@
 # ⭐⭐ MOVED OUT OF main.cyr (0.17.4). This was the frame loop's `ae_pointer_event`, which only the frame
 # loop could reach: the titlebar drag that could be entered and never exited, the release no client got,
 # the titlebar coordinates sent to a client — each was found on a burn, because no suite could drive it.
-# The frame loop keeps the plumbing: it reads the bhumi batch, prints its log lines and delivers to
-# clients over setu. This module decides what each event MEANS.
+# The frame loop keeps the plumbing: it reads the bhumi batch and prints its log lines. This module decides
+# what each event MEANS, and `ae_ptr_forward` at the end of the file delivers an outcome over setu.
 #
 # ⭐ THE CONTRACT — feed it events and the screen size, read back what it decided:
 #   route_pointer(comp, ev, sw, sh)   one bhumi MOTION / BUTTON / SCROLL event
@@ -17,7 +17,8 @@
 # the port adds. Window management — focus, close, maximize, minimize, move, resize — is APPLIED here,
 # so a test reads it back off the compositor. Delivery is NOT: an outcome names the window by id and the
 # point relative to its content, and the caller sends it. So a suite drives this with `bhumi_*_event`
-# values and a compositor: no device, no framebuffer, no socket (tests/route.tcyr).
+# values and a compositor: no device, no framebuffer, no socket (tests/route.tcyr). The bytes a client
+# sees are tests/route_wire.tcyr's.
 #
 # ⚠ Bounds are PARAMETERS, as in input.cyr: the screen geometry is a main.cyr global declared after this
 # file is included, and Cyrius resolves forward references to functions but not to variables.
@@ -179,6 +180,16 @@ var ae_ptr_orig_h = 0;
 # a frame after the press found the window UNDERNEATH and handed its client a release it never got a press
 # for; the event-scoped `consumed` guard below covers only a press and release folded into one drain.
 var ae_ptr_chrome = 0;
+# ⭐ THE IMPLICIT GRAB. Per button (kernel bit), the id of the window whose client got the press; 0 = no client
+# did. The release goes there and nowhere else, wherever the pointer has got to: a client that saw a press and
+# never a release holds a stuck button, and one that saw only a release was told about a press it never got.
+# ⛔ AN ID, FOR THE REASON `ae_ptr_drag_id` IS ONE: a window can leave during a press (Ctrl+F4, its client
+# exiting, eviction at the window cap). Ids are never reused, so a stale id finds nothing and the release is
+# nobody's. It is NOT handed to the window now under the pointer, which never got the press.
+var ae_ptr_grab[3];        # module scope: INPUT_BTN_COUNT x u64
+
+# @public — the window holding button index `bit`'s grab, or 0.
+fn route_grab_id(bit): i64 { return load64(&ae_ptr_grab + bit * 8); }
 
 # @public — Rust's two interactive states, as views of the one gesture.
 fn route_drag_id(): i64 {
@@ -232,16 +243,47 @@ fn route_client_at(comp, px, py): i64 {
     return win;
 }
 
-# A button transition for whichever client's content is under the pointer: RA_CLIENT_CLICK, or RA_NONE.
-fn route_client_btn(comp, btn, pressed): i64 {
+# A press of button index `bit` for whichever client's content is under the pointer: RA_CLIENT_CLICK, and the
+# grab, or RA_NONE.
+fn route_client_press(comp, bit): i64 {
+    var btn = input_btn_wire(bit);
     var px = input_ptr_x();
     var py = input_ptr_y();
     var win = route_client_at(comp, px, py);
     if (win == 0) {
-        route_out_push(RouteAct.RA_NONE, 0, 0, 0, btn, pressed);
+        route_out_push(RouteAct.RA_NONE, 0, 0, 0, btn, 1);
         return 0;
     }
-    route_out_push(RouteAct.RA_CLIENT_CLICK, win_id(win), px - win_x(win), py - win_body_y(win), btn, pressed);
+    store64(&ae_ptr_grab + bit * 8, win_id(win));
+    route_out_push(RouteAct.RA_CLIENT_CLICK, win_id(win), px - win_x(win), py - win_body_y(win), btn, 1);
+    return 1;
+}
+
+# `v` held to [0, hi].
+fn route_clamp(v, hi): i64 {
+    if (v > hi) { v = hi; }
+    if (v < 0) { return 0; }
+    return v;
+}
+
+# The release of button index `bit`: RA_CLIENT_CLICK for the window holding its grab, else RA_NONE.
+# ⛔ THE POINT IS CLAMPED INTO THE CONTENT RECT. The pointer may be anywhere by now, and `route_client_at` says
+# why a client must never be handed a point off its surface.
+fn route_client_release(comp, bit): i64 {
+    var btn = input_btn_wire(bit);
+    var id = route_grab_id(bit);
+    store64(&ae_ptr_grab + bit * 8, 0);
+    var idx = 0 - 1;
+    if (id != 0) { idx = comp_find_by_id(comp, id); }
+    var win = 0;
+    if (idx >= 0) { win = comp_get(comp, idx); }
+    if (win == 0) {
+        route_out_push(RouteAct.RA_NONE, 0, 0, 0, btn, 0);
+        return 0;
+    }
+    var rx = route_clamp(input_ptr_x() - win_x(win), win_w(win) - 1);
+    var ry = route_clamp(input_ptr_y() - win_body_y(win), win_h(win) - 1);
+    route_out_push(RouteAct.RA_CLIENT_CLICK, id, rx, ry, btn, 0);
     return 1;
 }
 
@@ -253,7 +295,9 @@ fn route_pointer(comp, ev, sw, sh): i64 {
     var k = bhumi_ev_kind(ev);
     if (k == BhumiEvKind.BHUMI_EV_MOTION) { route_motion(comp, bhumi_motion_dx(ev), bhumi_motion_dy(ev), sw, sh); }
     if (k == BhumiEvKind.BHUMI_EV_SCROLL) { route_scroll(comp, bhumi_scroll_delta(ev)); }
-    if (k == BhumiEvKind.BHUMI_EV_BUTTON) { route_buttons(comp, bhumi_button_state(ev), bhumi_button_seen(ev), sw, sh); }
+    if (k == BhumiEvKind.BHUMI_EV_BUTTON) {
+        route_buttons(comp, bhumi_button_state(ev), bhumi_button_seen(ev), sw, sh);
+    }
     return ae_rt_out_n;
 }
 
@@ -355,9 +399,13 @@ fn route_buttons(comp, cur, seen, sw, sh): i64 {
     while (bit < INPUT_BTN_COUNT) {
         var bmask = input_btn_mask(bit);
         var trb = input_btn_transitions(ae_ptr_btn & bmask, cur, seen, bmask);
-        if (consumed == 0) {
-            if (input_btn_pressed(trb) == 1) { route_client_btn(comp, input_btn_wire(bit), 1); }
-            if (input_btn_released(trb) == 1) { route_client_btn(comp, input_btn_wire(bit), 0); }
+        if (input_btn_pressed(trb) == 1) {
+            if (consumed == 0) { route_client_press(comp, bit); }
+        }
+        # ⚠ `consumed` drops what a hit test would re-derive. A held grab derives nothing, and its client is
+        # owed the release.
+        if (input_btn_released(trb) == 1) {
+            if ((consumed == 0) || (route_grab_id(bit) != 0)) { route_client_release(comp, bit); }
         }
         bit = bit + 1;
     }
@@ -419,6 +467,7 @@ fn route_left_press(comp, sw, sh): i64 {
         return 0;
     }
     if (hit == Deco.DECO_BODY) {
+        store64(&ae_ptr_grab, id);
         route_out_push(RouteAct.RA_CLIENT_CLICK, id, px - win_x(win), py - win_body_y(win), INPUT_BTN_LEFT, 1);
         return 0;
     }
@@ -449,5 +498,75 @@ fn route_left_release(comp, consumed): i64 {
         route_out_push(RouteAct.RA_NONE, 0, 0, 0, INPUT_BTN_LEFT, 0);
         return 0;
     }
-    return route_client_btn(comp, INPUT_BTN_LEFT, 0);
+    return route_client_release(comp, 0);
+}
+
+# ============================================================================================
+# DELIVERY — the one function here that touches a socket
+# ============================================================================================
+# The last (window id, x, y) sent as a PTR_MOVE; id 0 = none yet. Window ids are never reused.
+var ae_ptr_fwd_id = 0;
+var ae_ptr_fwd_x = 0;
+var ae_ptr_fwd_y = 0;
+
+# Tell window `wid`'s client the pointer is at (rx, ry), unless that is the last position sent. -> 1 sent, 0 not.
+# ⚠ THE WINDOW IS PART OF THE KEY. A point in A's coordinates says nothing to B, and B's first motion can land
+# on the same surface-relative point A's last one did.
+# ⚠ Remembered only when it went out: a refused send has told the client nothing.
+fn ae_ptr_tell(cfd, wid, rx, ry): i64 {
+    if (wid == ae_ptr_fwd_id) {
+        if (rx == ae_ptr_fwd_x) {
+            if (ry == ae_ptr_fwd_y) { return 0; }
+        }
+    }
+    if (ae_send(cfd, SETU_INPUT_PTR_MOVE, wid, rx, ry, 0) < 0) { return 0; }
+    ae_ptr_fwd_id = wid;
+    ae_ptr_fwd_x = rx;
+    ae_ptr_fwd_y = ry;
+    return 1;
+}
+
+# Deliver routed outcome `i` — RA_CLIENT_MOVE, _CLICK or _SCROLL — to its window's client, using the setu
+# messages that already exist. -> 1 sent; 0 not (the window is gone or has no client, or a motion repeats).
+# ⚠ Coordinates are SURFACE-RELATIVE, as route.cyr computed them: a client knows nothing about where the
+# compositor placed it, so screen coordinates would make every client's hit-testing wrong by its own origin.
+# ⚠ The window is re-resolved BY ID, never trusted as a pointer from an earlier step.
+fn ae_ptr_forward(comp, i): i64 {
+    var wid = route_out_win(i);
+    var idx = comp_find_by_id(comp, wid);
+    if (idx < 0) { return 0; }
+    var win = comp_get(comp, idx);
+    if (win == 0) { return 0; }
+    var cfd = win_cfd(win);
+    if (cfd == 0) { return 0; }                 # no client: compositor-seeded, or its connection closed
+    var act = route_out_kind(i);
+    var rx = route_out_x(i);
+    var ry = route_out_y(i);
+    # ⚠ MOTION IS DEDUPED. Every frame the pointer is over a client cost a `#97` ring slot even when the
+    # surface-relative position had not changed, and that ring drops the OLDEST record when it fills — so a
+    # stationary pointer could push a client's real events out. A per-surface opt-in flag would need a
+    # protocol bit.
+    if (act == RouteAct.RA_CLIENT_MOVE) { return ae_ptr_tell(cfd, wid, rx, ry); }
+    # ⛔⛔ PTR_BTN AND PTR_SCROLL CARRY NO POSITION. crab and dhancha place them where the last PTR_MOVE put the
+    # pointer, and a window can move under a stationary pointer (Ctrl+F7..F10, a cascade, a close that uncovers
+    # it) or be clicked before it ever heard a motion. So the position goes first whenever it differs.
+    if (act == RouteAct.RA_CLIENT_CLICK) {
+        ae_ptr_tell(cfd, wid, rx, ry);
+        ae_send(cfd, SETU_INPUT_PTR_BTN, wid, route_out_btn(i), route_out_val(i), 0);
+        return 1;
+    }
+    # ⭐⭐ THE WHEEL (0.16.21). The outcome carries the signed delta.
+    # ⚠ NOT DEDUPED like motion, and not coalesced. A scroll is a discrete quantity the user asked
+    # for — dropping a repeat because it equals the last one would swallow the second notch of every
+    # steady scroll, which is the opposite of motion's problem.
+    # ⛔ THE CHAIN BELOW THIS LINE IS FIVE REPOS DEEP AND WAS BROKEN AT THE BOTTOM UNTIL 0.16.21: agnos
+    # 1.56.49 reads HID report byte [3] (it was documented and never read), bhumi 1.4.3 carries it as
+    # `BHUMI_EV_SCROLL`, setu 0.8.8 defines `SETU_INPUT_PTR_SCROLL`. Sending this against an older
+    # stack is inert, not wrong.
+    if (act == RouteAct.RA_CLIENT_SCROLL) {
+        ae_ptr_tell(cfd, wid, rx, ry);
+        ae_send(cfd, SETU_INPUT_PTR_SCROLL, wid, route_out_val(i), 0, 0);
+        return 1;
+    }
+    return 0;
 }

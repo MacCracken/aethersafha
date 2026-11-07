@@ -1,0 +1,174 @@
+# aethersafha — the Linux client launch: what a child inherits, and what becomes of it (src/spawn.cyr).
+#
+# ⛔ THE SUITE'S CLIENT IS THIS BINARY, RE-EXECUTED, AS IN tests/foreign.tcyr, SO A RUN TESTS THIS CODE AND NOT
+# THE RUNNER'S IMAGE. `ae_spawn_client` gives a child no arguments and one variable, so the verb travels as
+# the value of SETU_SOCKET. A value without the prefix is somebody's real socket, and the suite runs.
+#
+#   ae-spawn-t-fds     exits with `t_list_fds`'s answer
+#   ae-spawn-t-exit    exits 0
+#   ae-spawn-t-sleep   exits 0 after 1.5 s, which the parent's checks have to land inside
+#
+# Stdlib + [deps.*] auto-included via cyrius.cyml.
+include "src/sigint.cyr"
+include "src/spawn.cyr"
+
+# What `/proc/self/fd` holds, as an exit code: bits 0..2 say fds 0, 1, 2 are open, the rest count every fd from
+# 3 up, not counting the one this listing opened. 7 = exactly 0, 1, 2. 255 = no answer.
+fn t_list_fds(): i64 {
+    var dfd = sys_open("/proc/self/fd", 0, 0);
+    if (dfd < 0) { return 255; }
+    var buf[4096];
+    var mask = 0;
+    var extra = 0;
+    var n = syscall(SYS_GETDENTS64, dfd, &buf, 4096);
+    while (n > 0) {
+        var off = 0;
+        while (off < n) {
+            var name = &buf + off + 19;
+            if (load8(name) != 46) {
+                var fd = atoi(name);
+                if (fd < 3) { mask = mask | (1 << fd); }
+                elif (fd != dfd) { extra = extra + 1; }
+            }
+            off = off + load16(&buf + off + 16);
+        }
+        n = syscall(SYS_GETDENTS64, dfd, &buf, 4096);
+    }
+    sys_close(dfd);
+    return mask + extra * 8;
+}
+
+# The client's entry: its exit code, or -1 when this run is the suite.
+fn t_guest(): i64 {
+    var verb = getenv("SETU_SOCKET");
+    if (verb == 0) { return 0 - 1; }
+    if (memeq(verb, "ae-spawn-t-", 11) == 0) { return 0 - 1; }
+    if (streq(verb, "ae-spawn-t-fds") == 1) { return t_list_fds(); }
+    if (streq(verb, "ae-spawn-t-exit") == 1) { return 0; }
+    if (streq(verb, "ae-spawn-t-sleep") == 1) {
+        sleep_ms(1500);
+        return 0;
+    }
+    return 125;
+}
+
+# Wait for `pid`. -> its exit code, or -1 when it did not exit by itself.
+fn t_wait(pid): i64 {
+    var st = 0;
+    if (sys_waitpid(pid, &st, 0) != pid) { return 0 - 1; }
+    if (WIFEXITED(st) == 0) { return 0 - 1; }
+    return WEXITSTATUS(st);
+}
+
+# Reap until no child is left, or 5 s. -> 1 when none is left.
+fn t_reap_all(): i64 {
+    var t = 0;
+    ae_spawn_reap();
+    while ((ae_spawn_live() > 0) && (t < 500)) {
+        sleep_ms(10);
+        ae_spawn_reap();
+        t = t + 1;
+    }
+    if (ae_spawn_live() == 0) { return 1; }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    var guest_code = t_guest();
+    if (guest_code >= 0) { return guest_code; }
+
+    #ifndef CYRIUS_TARGET_AGNOS
+    test_group("spawn — a client inherits no compositor fd");
+    assert_eq(t_list_fds() & 7, 7, "this suite holds 0, 1 and 2, so a child has them to keep");
+    # O_RDWR with no O_CLOEXEC: exactly how bhumi opens /dev/fb0.
+    var mark = sys_open("/dev/null", 2, 0);
+    assert_eq(mark >= 3, 1, "an fd with no close-on-exec, as /dev/fb0 is");
+    var rl[16];
+    var top = 1024;
+    if (sys_getrlimit(7, &rl) == 0) { top = load64(&rl); }
+    if (top > 4096) { top = 4096; }
+    assert_eq(sys_dup2(mark, top - 1), top - 1, "and one at the top of the table");
+    var p1 = ae_spawn_client("/proc/self/exe", "ae-spawn-t-fds");
+    assert_eq(p1 > 0, 1, "the client started");
+    assert_eq(t_wait(p1), 7, "it holds exactly 0, 1 and 2");
+
+    test_group("spawn — the scan a kernel without close_range falls back to");
+    var p2 = sys_fork();
+    if (p2 == 0) {
+        ae_fds_close_scan();
+        sys_exit(t_list_fds());
+    }
+    assert_eq(t_wait(p2), 7, "it leaves 0, 1 and 2, up to the top of the table");
+    sys_close(top - 1);
+    sys_close(mark);
+
+    test_group("spawn — a client whose execve fails is seen, and reaped");
+    var st = 0;
+    ae_spawn_failed = 0;
+    var pf = ae_spawn_client("/nonexistent/client", "ae-spawn-t-none");
+    assert_eq(pf > 0, 1, "the fork succeeds: only the child can find out");
+    assert_eq(t_reap_all(), 1, "the child is reaped");
+    assert_eq(ae_spawn_failed, 1, "exit 127 latches the failure");
+    assert_eq(sys_waitpid(pf, &st, WNOHANG), 0 - 10, "no zombie: there is nothing left to wait for (ECHILD)");
+    assert_eq(ae_probe_verdict(ae_spawn_failed, 0, 0), 91, "--clients answers 91, not 93");
+
+    test_group("spawn — a client that ran and left is reaped, and is no failure");
+    ae_spawn_failed = 0;
+    var pe = ae_spawn_client("/proc/self/exe", "ae-spawn-t-exit");
+    assert_eq(pe > 0, 1, "the client started");
+    assert_eq(t_reap_all(), 1, "the child is reaped");
+    assert_eq(ae_spawn_failed, 0, "exit 0 latches nothing");
+    assert_eq(sys_waitpid(pe, &st, WNOHANG), 0 - 10, "no zombie");
+
+    test_group("spawn — a running client is left running");
+    var pr = ae_spawn_client("/proc/self/exe", "ae-spawn-t-sleep");
+    assert_eq(pr > 0, 1, "the client started");
+    assert_eq(ae_spawn_reap(), 0, "the reap takes nothing");
+    assert_eq(ae_spawn_live(), 1, "  ...and still holds it");
+    assert_eq(sys_waitpid(pr, &st, WNOHANG), 0, "  ...and it has not exited");
+    assert_eq(t_reap_all(), 1, "it is reaped when it exits");
+    assert_eq(sys_waitpid(pr, &st, WNOHANG), 0 - 10, "  ...leaving no zombie");
+
+    test_group("spawn — the reap takes only the pids this path started");
+    # ⛔ `waitpid(-1)` WOULD TAKE THIS ONE. foreign_run's guest is the same shape: kavach forks it and waits on
+    # its pid, and a reap that took any child would leave kavach an ECHILD and a guest with no exit status.
+    var other = sys_fork();
+    if (other == 0) { sys_exit(42); }
+    var pm = ae_spawn_client("/proc/self/exe", "ae-spawn-t-sleep");
+    assert_eq(pm > 0, 1, "this path's child is running, so the reap has work to do");
+    sleep_ms(100);
+    ae_spawn_reap();
+    ae_spawn_reap();
+    assert_eq(t_wait(other), 42, "the other child's exit code is still there for its owner");
+    assert_eq(t_reap_all(), 1, "this path's child is reaped");
+
+    test_group("spawn — the table of children is bounded, and a refusal comes before the fork");
+    ae_spawn_failed = 0;
+    var ti = 0;
+    var started = 0;
+    while (ti < AE_SPAWN_MAX) {
+        if (ae_spawn_client("/proc/self/exe", "ae-spawn-t-exit") > 0) { started = started + 1; }
+        ti = ti + 1;
+    }
+    assert_eq(started, AE_SPAWN_MAX, "the table holds AE_SPAWN_MAX children");
+    assert_eq(ae_spawn_client("/proc/self/exe", "ae-spawn-t-exit"), 0 - 1, "one more is refused");
+    assert_eq(t_reap_all(), 1, "they are all reaped");
+    assert_eq(ae_spawn_failed, 0, "  ...with no failure among them");
+    assert_eq(ae_spawn_client("/proc/self/exe", "ae-spawn-t-exit") > 0, 1, "a reaped row is free again");
+    assert_eq(t_reap_all(), 1, "  ...and it is reaped too");
+
+    test_group("spawn — the --clients ladder");
+    assert_eq(ae_probe_verdict(0, 0, 2), 95, "both presented: 95");
+    assert_eq(ae_probe_verdict(0, 0, 1), 94, "one presented: 94");
+    assert_eq(ae_probe_verdict(0, 0, 0), 93, "neither, and both started: 93");
+    assert_eq(ae_probe_verdict(1, 0, 2), 91, "a client that could not start outranks the others' presents");
+    assert_eq(ae_probe_verdict(0, 1, 1), SIGI_PROBE_EXIT, "an interrupted run is no verdict");
+    assert_eq(ae_probe_verdict(1, 1, 0), 91, "  ...but 91 stands, as ADR 0003 says");
+
+    #endif
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);

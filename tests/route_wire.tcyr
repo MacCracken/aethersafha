@@ -1,0 +1,191 @@
+# aethersafha — what a client hears about the pointer, read off a real socket (`ae_ptr_forward`).
+#
+# ⭐ THE ORACLE IS THE WIRE. PTR_BTN and PTR_SCROLL carry no position: crab and dhancha place a click where the
+# last PTR_MOVE put the pointer, so the order of records on the socket is the whole contract.
+#
+# Stdlib + [deps.*] auto-included via cyrius.cyml.
+include "lib/bhumi.cyr"
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/theme.cyr"
+include "src/cursor.cyr"
+include "src/render.cyr"
+include "src/gpu.cyr"
+include "src/wallpaper.cyr"
+include "src/input.cyr"
+include "src/route.cyr"
+
+var T_SW = 1280;
+var T_SH = 720;
+
+var t_m = 0;
+var t_fds[2];
+
+# A window with a real client connection. -> the client's end; the window lands in `t_win`.
+var t_win = 0;
+fn t_client(comp, x, y, w, h): i64 {
+    if (sys_socketpair(SETU_AF_UNIX, SETU_SOCK_SEQPACKET, 0, &t_fds) != 0) { return 0 - 1; }
+    t_win = comp_create_window(comp, x, y, w, h, "w");
+    win_set_cfd(t_win, load32(&t_fds));
+    fd_set_nonblocking(load32(&t_fds));
+    return load32(&t_fds + 4);
+}
+
+# Route one event and deliver every outcome, in order, as the frame loop does.
+fn t_event(comp, ev): i64 {
+    var n = route_pointer(comp, ev, T_SW, T_SH);
+    var i = 0;
+    while (i < n) {
+        ae_ptr_forward(comp, i);
+        i = i + 1;
+    }
+    return n;
+}
+
+# The next record a client holds: its kind, or -1 when there is none. Its args stay in `t_m`.
+fn t_next(cli): i64 {
+    if (setu_poll_input(cli, t_m) != 1) { return 0 - 1; }
+    return setu_msg_kind(t_m);
+}
+
+fn t_arg(i): i64 { return setu_msg_arg(t_m, i); }
+
+fn main(): i64 {
+    alloc_init();
+    t_m = setu_msg_new();
+
+    # -----------------------------------------------------------------------
+    test_group("route wire — a click after the window moved under a stationary pointer");
+    var c1 = comp_new();
+    var cli1 = t_client(c1, 100, 200, 300, 200);
+    var w1 = t_win;
+    input_ptr_set(250, 300);
+    t_event(c1, bhumi_motion_event(1, 0));
+    assert_eq(t_next(cli1), SETU_INPUT_PTR_MOVE, "the motion reaches the client");
+    assert_eq(t_arg(1), 151, "  ...at content x 151");
+    assert_eq(t_arg(2), 300 - win_body_y(w1), "  ...at content y");
+    input_apply(c1, InputAction.IA_MOVE_RIGHT, T_SW, T_SH - TITLEBAR_H);
+    var moved_x = 251 - win_x(w1);
+    assert_eq(moved_x != 151, 1, "Ctrl+F8 slid the window under the pointer");
+    t_event(c1, bhumi_button_event(1, 1));
+    assert_eq(t_next(cli1), SETU_INPUT_PTR_MOVE, "the press is preceded by a PTR_MOVE, the position changed");
+    assert_eq(t_arg(0), win_id(w1), "  ...for this window");
+    assert_eq(t_arg(1), moved_x, "  ...at the point the router worked out");
+    assert_eq(t_arg(2), 300 - win_body_y(w1), "  ...x and y");
+    assert_eq(t_next(cli1), SETU_INPUT_PTR_BTN, "then the button");
+    assert_eq(t_arg(1), INPUT_BTN_LEFT, "  ...left");
+    assert_eq(t_arg(2), 1, "  ...down");
+    assert_eq(t_next(cli1), 0 - 1, "and nothing else");
+    t_event(c1, bhumi_button_event(0, 0));
+    assert_eq(t_next(cli1), SETU_INPUT_PTR_BTN, "the release at the same point needs no PTR_MOVE");
+    assert_eq(t_arg(2), 0, "  ...up");
+    assert_eq(t_next(cli1), 0 - 1, "  ...and nothing else");
+
+    # -----------------------------------------------------------------------
+    test_group("route wire — a scroll after the window moved under a stationary pointer");
+    input_apply(c1, InputAction.IA_MOVE_RIGHT, T_SW, T_SH - TITLEBAR_H);
+    moved_x = 251 - win_x(w1);
+    t_event(c1, bhumi_scroll_event(3));
+    assert_eq(t_next(cli1), SETU_INPUT_PTR_MOVE, "the scroll is preceded by a PTR_MOVE");
+    assert_eq(t_arg(1), moved_x, "  ...at the new point");
+    assert_eq(t_next(cli1), SETU_INPUT_PTR_SCROLL, "then the scroll");
+    assert_eq(t_arg(1), 3, "  ...with its delta");
+    t_event(c1, bhumi_scroll_event(3));
+    assert_eq(t_next(cli1), SETU_INPUT_PTR_SCROLL, "a second notch at the same point needs no PTR_MOVE");
+    assert_eq(t_next(cli1), 0 - 1, "  ...and nothing else");
+
+    # -----------------------------------------------------------------------
+    test_group("route wire — a first click with no motion before it");
+    var c2 = comp_new();
+    var cli2 = t_client(c2, 300, 300, 200, 100);
+    input_ptr_set(320, 340);
+    t_event(c2, bhumi_button_event(2, 2));
+    assert_eq(t_next(cli2), SETU_INPUT_PTR_MOVE, "the client hears where the pointer is");
+    assert_eq(t_arg(1), 20, "  ...content x");
+    assert_eq(t_next(cli2), SETU_INPUT_PTR_BTN, "then the right button");
+    assert_eq(t_arg(1), INPUT_BTN_RIGHT, "  ...right");
+    t_event(c2, bhumi_button_event(0, 0));
+    assert_eq(t_next(cli2), SETU_INPUT_PTR_BTN, "the release");
+    assert_eq(t_next(cli2), 0 - 1, "  ...alone");
+
+    # -----------------------------------------------------------------------
+    test_group("route wire — the dedupe is keyed on the window as well as the point");
+    var c3 = comp_new();
+    var cla = t_client(c3, 0, 0, 300, 200);
+    var wa = t_win;
+    var clb = t_client(c3, 400, 0, 300, 200);
+    var wb = t_win;
+    input_ptr_set(49, 80);
+    t_event(c3, bhumi_motion_event(1, 0));
+    assert_eq(t_next(cla), SETU_INPUT_PTR_MOVE, "A hears the pointer");
+    assert_eq(t_arg(1), 50, "  ...at x 50");
+    assert_eq(t_arg(2), 80 - win_body_y(wa), "  ...and y");
+    input_ptr_set(449, 80);
+    t_event(c3, bhumi_motion_event(1, 0));
+    assert_eq(t_next(clb), SETU_INPUT_PTR_MOVE, "B hears the pointer at the same content point");
+    assert_eq(t_arg(0), win_id(wb), "  ...for its own window");
+    assert_eq(t_arg(1), 50, "  ...at x 50");
+    input_ptr_set(450, 80);
+    t_event(c3, bhumi_motion_event(0, 0));
+    assert_eq(t_next(clb), 0 - 1, "the same window at the same point sends nothing");
+    assert_eq(t_next(cla), 0 - 1, "  ...and A heard nothing of B's");
+
+    # -----------------------------------------------------------------------
+    test_group("route wire — a position that did not go out is not remembered");
+    var c4 = comp_new();
+    var cli4 = t_client(c4, 100, 100, 200, 100);
+    var w4 = t_win;
+    var good = win_cfd(w4);
+    win_set_cfd(w4, 1000);                    # no such fd: every send is refused
+    input_ptr_set(150, 160);
+    t_event(c4, bhumi_motion_event(1, 0));
+    assert_eq(t_next(cli4), 0 - 1, "the refused send reached nobody");
+    win_set_cfd(w4, good);
+    t_event(c4, bhumi_button_event(1, 1));
+    assert_eq(t_next(cli4), SETU_INPUT_PTR_MOVE, "the click still carries the position");
+    assert_eq(t_next(cli4), SETU_INPUT_PTR_BTN, "  ...then the button");
+    t_event(c4, bhumi_button_event(0, 0));
+    t_next(cli4);
+
+    # -----------------------------------------------------------------------
+    test_group("route wire — a release off the window that got the press");
+    var c5 = comp_new();
+    var cli5a = t_client(c5, 0, 0, 300, 300);
+    var w5a = t_win;
+    var cli5b = t_client(c5, 400, 0, 300, 300);
+    input_ptr_set(100, 100);
+    t_event(c5, bhumi_button_event(1, 1));
+    assert_eq(t_next(cli5a), SETU_INPUT_PTR_MOVE, "the press carries its position");
+    assert_eq(t_next(cli5a), SETU_INPUT_PTR_BTN, "  ...then the button");
+    input_ptr_set(500, 100);
+    t_event(c5, bhumi_button_event(0, 0));
+    assert_eq(t_next(cli5a), SETU_INPUT_PTR_MOVE, "released over B: A hears where the release landed");
+    assert_eq(t_arg(1), 299, "  ...held to A's own surface");
+    assert_eq(t_arg(2), 100 - win_body_y(w5a), "  ...y");
+    assert_eq(t_next(cli5a), SETU_INPUT_PTR_BTN, "  ...then the release");
+    assert_eq(t_arg(0), win_id(w5a), "  ...for A");
+    assert_eq(t_arg(2), 0, "  ...up");
+    assert_eq(t_next(cli5b), 0 - 1, "B heard nothing of a press it never got");
+
+    # -----------------------------------------------------------------------
+    test_group("route wire — the window that got the press closed during it");
+    var c6 = comp_new();
+    var cli6u = t_client(c6, 0, 0, 300, 300);
+    var cli6t = t_client(c6, 0, 0, 300, 300);
+    var w6t = t_win;
+    input_ptr_set(100, 100);
+    t_event(c6, bhumi_button_event(1, 1));
+    assert_eq(t_next(cli6t), SETU_INPUT_PTR_MOVE, "the top window gets the press");
+    assert_eq(t_next(cli6t), SETU_INPUT_PTR_BTN, "  ...and the button");
+    comp_close_window(c6, win_id(w6t));
+    t_event(c6, bhumi_button_event(0, 0));
+    assert_eq(t_next(cli6t), SETU_CLOSE, "its client hears the close");
+    assert_eq(t_next(cli6t), 0 - 1, "  ...and no release after it");
+    assert_eq(t_next(cli6u), 0 - 1, "the window underneath hears nothing");
+
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);

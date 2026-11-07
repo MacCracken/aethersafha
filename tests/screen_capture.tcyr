@@ -156,6 +156,81 @@ fn four_px(v): i64 {
     return p;
 }
 
+# FNV-1a of the n bytes at p, to 60 bits.
+fn t_hash(p, n): i64 {
+    var h = 1469598103934665603;
+    var i = 0;
+    while (i < n) {
+        h = ((h ^ load8(p + i)) * 1099511628211) & 0xFFFFFFFFFFFFFFF;
+        i = i + 1;
+    }
+    return h;
+}
+
+# A w x h framebuffer captured, then each format hashed against what the byte-at-a-time encoders
+# wrote for the same pixels: a word and table rewrite of them must not move one byte. The X byte is
+# non-zero, and alpha must not read it. -> the mismatches, of four.
+fn t_pinned(w, h, want_pix, want_raw, want_bmp, want_png): i64 {
+    var fb = bhumi_fb_new(w, h);
+    var y = 0;
+    while (y < h) {
+        var x = 0;
+        while (x < w) {
+            bhumi_fb_set(fb, x, y, ((x * 977 + y * 131 + x * y * 7) * 2654435761) & 0xFFFFFFFF);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    var perr = 0;
+    var src = scap_capture_full_screen(fb, &perr);
+    var p = scap_pix_ptr(src);
+    var bad = 0;
+    if (t_hash(p, w * h * 8) != want_pix) { bad = bad + 1; }
+    var b = scap_encode_raw(p, w * h);
+    if (t_hash(scap_buf_ptr(b), scap_buf_len(b)) != want_raw) { bad = bad + 1; }
+    scap_buf_free(b);
+    b = scap_encode_bmp(p, w, h);
+    if (t_hash(scap_buf_ptr(b), scap_buf_len(b)) != want_bmp) { bad = bad + 1; }
+    scap_buf_free(b);
+    b = scap_encode_png(p, w, h);
+    if (t_hash(scap_buf_ptr(b), scap_buf_len(b)) != want_png) { bad = bad + 1; }
+    scap_buf_free(b);
+    scap_pix_free(src);
+    return bad;
+}
+
+# One encoder call in a forked child, on a 4 KiB pixel buffer, so a size that was not refused ends only
+# the child. `which`: 0 bmp(a, b), 1 png(a, b), 2 raw(a), 3 pixels(1, a, b, RAW).
+# -> 1042 refused, 1007 returned a buffer, the signal that ended it, or -1 if it had not ended after ~3 s.
+fn t_encode_in_child(which, a, b): i64 {
+    var pid = sys_fork();
+    if (pid == 0) {
+        var pix = fl_alloc(4096);
+        var r = 0;
+        if (which == 0) { r = scap_encode_bmp(pix, a, b); }
+        if (which == 1) { r = scap_encode_png(pix, a, b); }
+        if (which == 2) { r = scap_encode_raw(pix, a); }
+        if (which == 3) { r = scap_encode_pixels(pix, 1, a, b, ScapFmt.SCAP_FMT_RAW_ARGB); }
+        if (r == 0) { syscall(60, 42); }
+        syscall(60, 7);
+    }
+    var st[8];
+    store64(&st, 0);
+    var tries = 0;
+    while (tries < 300) {
+        if (sys_waitpid(pid, &st, 1) == pid) {       # WNOHANG
+            var status = load64(&st) & 0xFFFFFFFF;
+            if (WIFSIGNALED(status) == 1) { return WTERMSIG(status); }
+            return 1000 + WEXITSTATUS(status);
+        }
+        sleep_ms(10);
+        tries = tries + 1;
+    }
+    sys_kill(pid, 9);
+    sys_waitpid(pid, &st, 0);
+    return 0 - 1;
+}
+
 fn main() {
     alloc_init();
     # freed fl blocks read 0xA5 and redzone overruns are counted: the free checks need both
@@ -232,6 +307,55 @@ fn main() {
     assert_eq(scap_encode_pixels(ep, 4, 0 - 2, 0 - 2, RAW), 0, "dispatch w=-2 h=-2 RAW refused");
     assert_eq(scap_encode_pixels(ep, 4, 2, 0, BMP), 0, "dispatch h=0 BMP refused");
     assert_eq(scap_encode_pixels(ep, 4, 0 - 1, 4, PNG), 0, "dispatch w=-1 PNG refused");
+
+    # -----------------------------------------------------------------------
+    test_group("screen_capture — a pixel count no file format's fields can hold is refused");
+    # BMP's sizes are u32 and PNG's chunk length stops at 2^31 - 1, so a size can fit i64 and still write a
+    # corrupt file.
+    assert_eq(scap_dims_ok(65535, 1), 1, "65535 x 1 is fine");
+    assert_eq(scap_dims_ok(16384, 16384), 1, "16384 x 16384 is the limit");
+    assert_eq(scap_dims_ok(16385, 16384), 0, "one row past it is refused");
+    assert_eq(scap_dims_ok(23171, 23171), 0, "PNG's IDAT length would pass 2^31 - 1 here");
+    assert_eq(scap_dims_ok(65535, 16385), 0, "BMP's u32 sizes would wrap here");
+    assert_eq(scap_dims_ok(65535, 65535), 0, "both dimensions at their own limit is still too many pixels");
+
+    test_group("screen_capture — encoders refuse a size above 65535 (no wrapped size math)");
+    # Each runs in a forked child: unrefused, it writes through a size that wrapped.
+    assert_eq(t_encode_in_child(0, 65536, 1), 1042, "bmp w=65536 refused");
+    assert_eq(t_encode_in_child(0, 1, 65536), 1042, "bmp h=65536 refused");
+    assert_eq(t_encode_in_child(0, 0x100000000, 0x40000000), 1042, "bmp w*4*h wrapping to 0 refused");
+    assert_eq(t_encode_in_child(1, 65536, 1), 1042, "png w=65536 refused");
+    assert_eq(t_encode_in_child(1, 1, 65536), 1042, "png h=65536 refused");
+    assert_eq(t_encode_in_child(1, 0x40000000, 0x100000000), 1042, "png raw_len wrapping refused");
+    assert_eq(t_encode_in_child(2, 0x4000000000000001, 0), 1042, "raw npix*4 wrapping refused");
+    assert_eq(t_encode_in_child(2, 65535 * 65535 + 1, 0), 1042, "raw past 65535 x 65535 refused");
+    assert_eq(t_encode_in_child(3, 65536, 1), 1042, "dispatch w=65536 RAW refused");
+    assert_eq(t_encode_in_child(3, 1, 65536), 1042, "dispatch h=65536 RAW refused");
+    var edge = fl_alloc(65535 * 8);
+    memset(edge, 0, 65535 * 8);
+    var ebmp = scap_encode_bmp(edge, 65535, 1);
+    assert(t_ok(ebmp), "bmp w=65535 encodes");
+    assert_eq(scap_buf_len(ebmp), 54 + 65535 * 4, "  ...to its whole size");
+    scap_buf_free(ebmp);
+    var epng = scap_encode_png(edge, 1, 65535);
+    assert(t_ok(epng), "png h=65535 encodes");
+    scap_buf_free(epng);
+    fl_free(edge);
+
+    # -----------------------------------------------------------------------
+    test_group("screen_capture — every format's bytes, pinned");
+    assert_eq(t_pinned(1, 1, 575912640112382435, 95775848814226458, 643364628488767603, 159808468686363498), 0, "1x1");
+    assert_eq(t_pinned(7, 3, 342001804437664479, 1002177793886816302, 838422066760374383, 1115432305053294809), 0,
+      "7x3: under the 32-byte copy");
+    assert_eq(t_pinned(8, 1, 677804454425118010, 1090488508097331463, 288836576531018783, 55490319999948522), 0,
+      "8x1: 33 bytes of IDAT data");
+    assert_eq(t_pinned(300, 240, 931304915993252936, 672428050737817266, 40527493269602526, 1106644979352481473), 0,
+      "300x240: past one stored block");
+    assert_eq(t_pinned(5000, 20, 567398042537339944, 997213774770764294, 461125460522336224, 636471385892314566), 0,
+      "5000x20: a row past 16 KiB");
+    assert_eq(t_pinned(20, 5000, 588972852579327289, 633185836299266669, 729907651591966783, 774782741076949422), 0,
+      "20x5000: a long stack of short rows");
+
     # the zlib size is exact at the 65,535-byte block boundaries
     assert_eq(scap_zlib_size(0), 11, "zlib size of empty == 2 + 5 + 4");
     assert_eq(scap_zlib_size(65535), 2 + 5 + 65535 + 4, "zlib size: exactly one full block");

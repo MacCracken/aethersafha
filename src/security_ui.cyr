@@ -22,8 +22,8 @@
 #                          alive; heap objects store the pointer, not a copy.
 #   - tracing macros     -> println(cstr) log lines (best-effort, no-op-able).
 #   - Option<u32> pid   -> i64, SEC_PID_NONE (-2^31, not -1) == None. Signalled
-#                          only when sec_pid_ok (0 < pid <= i32::MAX), on both
-#                          targets.
+#                          only when sec_pid_ok (1 < pid <= i32::MAX, not our own),
+#                          on both targets.
 #   - write_audit_log    -> sec_write_audit_log: serde_json's line (bayan) appended
 #                          to sec_ui_audit_log_path(); a failure warns, never fails.
 #   - libc::kill         -> sys_kill (SIGHUP on an enforced revoke, SIGKILL on an
@@ -37,6 +37,7 @@
 # The emergency kill's deregistration is the daimon client's DELETE; include-once makes main.cyr's
 # own include of it (through desktop.cyr) a no-op.
 include "src/daimon_client.cyr"
+include "src/utf8.cyr"     # the audit line's text; include-once, as render.cyr includes it too
 
 # ---------------------------------------------------------------------------
 # Ring-buffer capacity caps (Rust consts).
@@ -59,9 +60,10 @@ enum SecIdSpace {
 }
 
 # ---------------------------------------------------------------------------
-# Agent pids (Rust: Option<u32>). ⛔ Only 0 < pid <= SEC_PID_MAX ever reaches
-# kill: on Linux kill(0, sig) signals the caller's whole process group and
-# kill(-1, sig) every process the user owns; on agnos pid 0 is a real slot.
+# Agent pids (Rust: Option<u32>). ⛔ Only a sec_pid_ok pid ever reaches kill, one
+# in 1 < pid <= SEC_PID_MAX that is not our own: on Linux kill(0, sig) signals the
+# caller's whole process group and kill(-1, sig) every process the user owns; on
+# agnos pid 0 is a real slot.
 # ⛔ None is INT_MIN, NOT the port's usual -1: -1 is kill's broadcast value, so
 # one broken guard would turn "no pid" into "every process". Linux's kill
 # answers INT_MIN (after its 32-bit truncation too) with -ESRCH, and agnos
@@ -868,11 +870,14 @@ fn sec_ui_grant_permission_enforced(u, agent_id, agent_name, permission, now): i
     return SecErr.SEC_ERR_OK;
 }
 
-# sec_pid_ok(pid): 1 if `pid` may be signalled (0 < pid <= SEC_PID_MAX), else 0.
-# Every sys_kill in this module is behind it.
+# sec_pid_ok(pid): 1 if `pid` may be signalled (1 < pid <= SEC_PID_MAX, and not the compositor
+# itself), else 0. Every sys_kill in this module is behind it.
+# ⛔ pid 1 and our own pid pass Rust's guard. SIGKILL to pid 1 takes the system down where we run as
+# root, and to our own pid ends the desktop, on a value an agent's record carries.
 fn sec_pid_ok(pid): i64 {
-    if (pid <= 0) { return 0; }
+    if (pid <= 1) { return 0; }
     if (pid > SecPid.SEC_PID_MAX) { return 0; }
+    if (pid == sys_getpid()) { return 0; }
     return 1;
 }
 
@@ -959,6 +964,10 @@ fn sec_ui_emergency_kill_agent(u, agent_id, pid, now): i64 {
 # The audit log (Rust write_audit_log).
 # ---------------------------------------------------------------------------
 
+# The longest `details` an audit line carries, in bytes. A permission and an agent name reach it from
+# callers, and nothing else bounds them; every detail the port itself writes is far under this.
+var SEC_AUDIT_DETAILS_MAX = 4096;
+
 # The log's path; 0 == Rust's /var/log/agnos/audit.log. Process-wide, as Rust's
 # associated fn was. ⛔ Tests point it at a file of their own before any
 # enforced call.
@@ -990,10 +999,42 @@ fn sec_audit_rfc3339(now): i64 {
     return out;
 }
 
+# sec_audit_details(details): `details` as the line carries it: well-formed UTF-8,
+# at most SEC_AUDIT_DETAILS_MAX bytes. -> cstr, or 0 on OOM. Text that is well-formed
+# and fits comes back byte for byte, so its line is the one serde_json wrote.
+# Ill-formed input, which a Rust &str could not hold and JSON may not carry, is one
+# U+FFFD per maximal subpart (src/utf8.cyr), the rule of Rust's own from_utf8_lossy.
+# Text past the bound is cut between scalars and ends in U+2026, the same cut as the
+# window captions. Decoding stops there, so a long field costs a strlen and no more.
+fn sec_audit_details(details): i64 {
+    var cap = strlen(details) * 3;     # every byte a U+FFFD, the worst it can grow
+    if (cap > SEC_AUDIT_DETAILS_MAX) { cap = SEC_AUDIT_DETAILS_MAX; }
+    var out = alloc(cap + 1);
+    if (out == 0) { return 0; }
+    var s = details;
+    var o = 0;
+    var keep = 0 - 1;                  # where a U+2026 would still fit, once the text nears the bound
+    while (1 == 1) {
+        var r = utf8_next(s);
+        var l = utf8_next_len(r);
+        if (l == 0) { break; }
+        var w = utf8_enc_len(utf8_next_cp(r));
+        if (keep < 0) { if (o + w > SEC_AUDIT_DETAILS_MAX - 3) { keep = o; } }
+        if (o + w > cap) {
+            o = keep + utf8_encode(out + keep, 0x2026);
+            break;
+        }
+        o = o + utf8_encode(out + o, utf8_next_cp(r));
+        s = s + l;
+    }
+    store8(out + o, 0);
+    return out;
+}
+
 # sec_audit_line(event_type, agent_id, details, now): the JSON Rust's
-# write_audit_log wrote, without its newline. -> cstr; 0 only when the timestamp
-# cannot allocate — an allocation failure inside the JSON build ends the process
-# (bayan's and str_builder's abort), as an OOM aborted Rust.
+# write_audit_log wrote, without its newline. -> cstr; 0 only when the timestamp or
+# the details cannot allocate — an allocation failure inside the JSON build ends the
+# process (bayan's and str_builder's abort), as an OOM aborted Rust.
 # ⚠ THE KEYS ARE SORTED, not in json! order: rust-old/Cargo.toml takes serde_json
 # without preserve_order and nothing in rust-old/Cargo.lock turns it on (serde_json
 # has no indexmap dep there), so the object was a BTreeMap. bayan escapes as
@@ -1002,9 +1043,11 @@ fn sec_audit_rfc3339(now): i64 {
 fn sec_audit_line(event_type, agent_id, details, now): i64 {
     var ts = sec_audit_rfc3339(now);
     if (ts == 0) { return 0; }
+    var text = sec_audit_details(details);
+    if (text == 0) { return 0; }
     var obj = bayan_json_v_obj_new();
     bayan_json_v_obj_set(obj, str_from("agent_id"), bayan_json_v_str_new(str_from_int(agent_id)));
-    bayan_json_v_obj_set(obj, str_from("details"), bayan_json_v_str_new(str_from(details)));
+    bayan_json_v_obj_set(obj, str_from("details"), bayan_json_v_str_new(str_from(text)));
     bayan_json_v_obj_set(obj, str_from("event_type"), bayan_json_v_str_new(str_from(event_type)));
     bayan_json_v_obj_set(obj, str_from("source"), bayan_json_v_str_new(str_from("security-ui")));
     bayan_json_v_obj_set(obj, str_from("timestamp"), bayan_json_v_str_new(str_from(ts)));
@@ -1019,11 +1062,35 @@ fn sec_audit_warn(path): i64 {
     return 0 - 1;
 }
 
+# Is `fd` on a regular file? -> 1 / 0. Asked of the descriptor, never the path: a
+# name checked before the open can be swapped for something else after it.
+# agnos has no fstat; fd_kind#111 reads the caller's own fd table and cannot wait.
+fn sec_audit_fd_regular(fd): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (sys_fd_kind(fd) == FdKind.FDK_FILE) { return 1; }
+    return 0;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var st[144];                                  # struct stat
+    if (sys_fstat(fd, &st) != 0) { return 0; }
+    if ((load32(&st + STAT_MODE) & 0xF000) == 0x8000) { return 1; }   # S_IFMT == S_IFREG
+    return 0;
+    #endif
+}
+
 # sec_write_audit_log(event_type, agent_id, details, now): append one line to
 # the audit log, creating it if absent (Rust: create + append, writeln!).
 # -> 0 written, -1 not (after a warning). As in Rust, a failure never fails the
 # caller: every caller ignores the result. Rust stayed silent on a failed write
 # after a good open; the port warns there too.
+# ⛔ THE LOG IS A REGULAR FILE, AND NOTHING AT ITS PATH MAY HOLD THE FRAME LOOP. This
+# runs on the compositor's one thread. O_NOFOLLOW: the log is not written through a
+# link, which could aim it anywhere the compositor may write. O_NONBLOCK: open(2) on
+# a FIFO waits for a reader forever; with it, no reader is ENXIO at once and a reader
+# is caught by the regular-file check below. It changes nothing for a regular file.
+# agnos: file_open maps O_NOFOLLOW to AO_NOFOLLOW, which ext2 and ZFS honour and FAT
+# cannot need. It has no O_NONBLOCK to map and needs none: open#7 never waits, and
+# ext2_open refuses any inode that is not a regular file.
 # agnos: the kernel creates a file only in an existing directory (sys_open's
 # ext2 arm) and nothing in the stack makes /var/log/agnos, so on a stock image
 # this warns. ⚠ The kernel ignores AO_APPEND (ext2_open starts at 0, so a write
@@ -1041,16 +1108,24 @@ fn sec_write_audit_log(event_type, agent_id, details, now): i64 {
     memcpy(buf, line, n);
     store8(buf + n, 10);
 
+    var oflags = O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW;
+    #ifndef CYRIUS_TARGET_AGNOS
+    oflags = oflags | O_NONBLOCK;
+    #endif
     #ifdef CYRIUS_TARGET_AGNOS
-    var probe = file_open(path, O_RDONLY, 0);
+    var probe = file_open(path, O_RDONLY | O_NOFOLLOW, 0);
     if (probe >= 0) {
         var seekable = xlseek(probe, 0, 2);
         file_close(probe);
         if (seekable < 0) { return sec_audit_warn(path); }
     }
     #endif
-    var fd = file_open(path, O_WRONLY | O_CREAT | O_APPEND, 0x1B6);    # 0666, Rust's default
+    var fd = file_open(path, oflags, 0x1B6);    # 0666, Rust's default
     if (fd < 0) { return sec_audit_warn(path); }
+    if (sec_audit_fd_regular(fd) == 0) {
+        file_close(fd);
+        return sec_audit_warn(path);
+    }
     #ifdef CYRIUS_TARGET_AGNOS
     xlseek(fd, 0, 2);
     #endif

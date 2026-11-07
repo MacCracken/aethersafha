@@ -12,7 +12,7 @@
 enum ForeignOff {
     FGN_GUEST  = 0;    # *MehmanGuestSpec
     FGN_SURF   = 8;    # *MehmanSurface
-    FGN_WIN    = 16;   # *Window (in the compositor), or 0
+    FGN_WIN    = 16;   # id of its window, or 0. ⛔ Not a pointer: a closed window's object goes back to the pool
     FGN_RESULT = 24;   # last foreign_run MehmanError, or -1 (never run)
     FGN_EXIT   = 32;   # last kavach exec status
     FGN_SZ     = 40;
@@ -41,12 +41,18 @@ fn foreign_new(command, w, h): i64 {
 
 fn foreign_guest(f)       { return load64(f + FGN_GUEST); }
 fn foreign_surface(f)     { return load64(f + FGN_SURF); }
-fn foreign_window(f)      { return load64(f + FGN_WIN); }
+fn foreign_window_id(f)   { return load64(f + FGN_WIN); }
 fn foreign_result(f)      { return load64(f + FGN_RESULT); }
 fn foreign_exit_status(f) { return load64(f + FGN_EXIT); }
 fn foreign_has_run(f): i64 {
     if (load64(f + FGN_RESULT) >= 0) { return 1; }
     return 0;
+}
+# The hosted app's window while it is on `desk`, or 0 once it closed.
+fn foreign_window(desk, f): i64 {
+    var i = comp_find_by_id(desk_comp(desk), foreign_window_id(f));
+    if (i < 0) { return 0; }
+    return comp_get(desk_comp(desk), i);
 }
 
 # foreign_run(f): run the foreign guest in a kavach PROCESS sandbox (real
@@ -73,38 +79,47 @@ fn desktop_host_foreign(desk, command, x, y, w, h, title): i64 {
     if (f == 0) { return 0; }
     var win = comp_create_window(desk_comp(desk), x, y, w, h, title);
     win_set_agent(win, 0);
-    store64(f + FGN_WIN, win);
+    store64(f + FGN_WIN, win_id(win));
     vec_push(desk_foreign(desk), f);
+    ae_foreign_desk = desk;
+    ae_win_guest_draw = &render_foreign_window;
     return f;
 }
 
-# render_foreign_content(fb, f): present a hosted foreign app's captured surface as
-# its window's content — the mehman "swallow" made visible. The guest's captured
-# stdout lives in the surface buffer (NUL-terminated by surface_blit_bytes'
-# zero-fill) and is drawn as text in the window body, below the titlebar. This is
-# the stdout-as-framebuffer MVP (mehman ADR 0004); real XRGB pixel fidelity is the
-# next step. A no-op until the guest has actually run. -> pixel height drawn.
-fn render_foreign_content(fb, f): i64 {
+# render_foreign_content(fb, desk, f): present a hosted foreign app's captured surface as
+# its window's content — the mehman "swallow" made visible. The guest's captured stdout lives in the surface
+# buffer and is drawn as text in the window body, below the titlebar. This is the stdout-as-framebuffer MVP
+# (mehman ADR 0004); real XRGB pixel fidelity is the next step. A no-op until the guest has actually run, once
+# its window has closed, and while it is minimized. -> pixel height drawn.
+# ⛔ THE BUFFER IS THE GUEST'S, so its bytes are bounded by the surface, not by a NUL: `surface_blit_bytes`
+# zero-fills only what a guest left over, and one that fills the surface leaves none. And they are clipped to the
+# window body, which a line or a row of guest output runs past as easily as anything else.
+fn render_foreign_content(fb, desk, f): i64 {
     if (foreign_has_run(f) == 0) { return 0; }
-    var win = foreign_window(f);
+    var win = foreign_window(desk, f);
     if (win == 0) { return 0; }
-    var buf = MehmanSurface_buffer(foreign_surface(f));
+    if (win_state(win) == WinState.WS_MINIMIZED) { return 0; }
+    var surf = foreign_surface(f);
+    var buf = MehmanSurface_buffer(surf);
     if (buf == 0) { return 0; }
-    var tx = win_x(win) + 6;
-    var ty = win_body_y(win) + 4;
-    return draw_text_lines(fb, buf, tx, ty, bhumi_xrgb(190, 230, 190));
+    var bx = win_x(win);
+    var by = win_body_y(win);
+    return draw_text_lines_in(fb, buf, surface_size_bytes(surf), bx + 6, by + 4, bhumi_xrgb(190, 230, 190),
+      bx, by, win_w(win), win_h(win));
 }
 
-# render_desktop_foreign(desk, fb): present every hosted foreign app's captured
-# content on top of the composited window bodies. Called right after render_desktop
-# in the frame loop. -> the number of foreign apps drawn.
-fn render_desktop_foreign(desk, fb): i64 {
-    var v = desk_foreign(desk);
+# ⭐ IN THE WINDOW'S OWN Z SLOT. `render_window` calls this, through `ae_win_guest_draw`, after the window's body,
+# so a window above covers the text, as do the panel and the pointer, which are drawn later. It finds the hosted
+# app by the window it was handed. -> pixel height drawn.
+var ae_foreign_desk = 0;
+fn render_foreign_window(fb, win): i64 {
+    var v = desk_foreign(ae_foreign_desk);
     var n = vec_len(v);
     var i = 0;
     while (i < n) {
-        render_foreign_content(fb, vec_get(v, i));
+        var f = vec_get(v, i);
+        if (foreign_window_id(f) == win_id(win)) { return render_foreign_content(fb, ae_foreign_desk, f); }
         i = i + 1;
     }
-    return n;
+    return 0;
 }

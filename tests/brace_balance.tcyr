@@ -73,7 +73,8 @@ fn main(): i64 {
     assert_eq(bb_depth_of("fn f() { if (x) { y(); } }\n"), 0, "a balanced fn is depth 0");
     assert_eq(bb_depth_of("fn f() {\n"), 1, "an unclosed fn is depth 1");
     assert_eq(bb_depth_of("}\n{\n"), 0 - 1, "a close before any open is refused, not netted to 0");
-    assert_eq(bb_depth_of("var s = \"{\";\nvar c = '}';\n# {\n"), 0, "braces in strings, chars and comments do not count");
+    assert_eq(bb_depth_of("var s = \"{\";\nvar c = '}';\n# {\n"), 0,
+      "braces in strings, chars and comments do not count");
     assert_eq(bb_depth_of("var s = \"\\\"{\";\n"), 0, "an escaped quote does not end the string early");
     assert_eq(bb_depth_of("#ifdef A\nwhile (a) {\n#endif\n#ifndef A\nwhile (b) {\n#endif\n}\n"), 1,
       "the retired split loop head counts as depth 1");

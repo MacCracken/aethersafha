@@ -469,6 +469,67 @@ fn comp_retire_add(x, y, w, h): i64 {
     return 0;
 }
 
+# ⭐⭐ THE CAP ON CLIENT WINDOWS, and it is what bounds the churn. A client that presents and hangs up leaves
+# its window on the desktop (setu_clients.cyr), so without a cap connect, present, hang up, repeat grows the
+# frame and the heap for as long as it runs: every window is composited every frame, and holds its cache.
+# ⭐ 16 = AE_CLIENT_MAX live clients, with room for as many windows of clients that have gone. It is also
+# agnos's SHM_MAX, the surfaces its kernel can hold at once. Worst case 16 x SURF_MAX_BYTES (512 MiB) of
+# caches and 16 composites a frame, however long the session runs.
+# ⭐ AT THE CAP THE WINDOW WHOSE CLIENT WENT FIRST MAKES ROOM, so dead windows cannot lock out a live client.
+# Only with every window live is a surface refused (-9), and a row holds one window, so that takes a cap
+# below AE_CLIENT_MAX: at 16 a client is never refused for this.
+var AE_CLIENT_WIN_MAX = 16;
+
+# The client windows on the desktop, live and gone (`win_is_client`).
+fn comp_client_count(c): i64 {
+    var v = load64(c + C_WINDOWS);
+    var n = vec_len(v);
+    var i = 0;
+    var count = 0;
+    while (i < n) {
+        count = count + win_is_client(vec_get(v, i));
+        i = i + 1;
+    }
+    return count;
+}
+
+# The window on the desktop whose client went first, or 0 when none has gone.
+fn comp_oldest_gone(c): i64 {
+    var v = load64(c + C_WINDOWS);
+    var n = vec_len(v);
+    var i = 0;
+    var old = 0;
+    while (i < n) {
+        var win = vec_get(v, i);
+        if (win_gone(win) > 0) {
+            if (old == 0) { old = win; }
+            if (win_gone(win) < win_gone(old)) { old = win; }
+        }
+        i = i + 1;
+    }
+    return old;
+}
+
+# 1 when one more client window can enter the desktop, by evicting if it must. Changes nothing.
+fn comp_client_room(c): i64 {
+    if (comp_client_count(c) < AE_CLIENT_WIN_MAX) { return 1; }
+    if (comp_oldest_gone(c) != 0) { return 1; }
+    return 0;
+}
+
+# Make the room `comp_client_room` promised, evicting from the window whose client went first. Nobody is told:
+# nobody is on the other end. -> how many windows left.
+fn comp_client_make_room(c): i64 {
+    var left = 0;
+    while (comp_client_count(c) >= AE_CLIENT_WIN_MAX) {
+        var old = comp_oldest_gone(c);
+        if (old == 0) { return left; }
+        comp_remove_window(c, win_id(old));
+        left = left + 1;
+    }
+    return left;
+}
+
 # comp_close_all_clients(c) -> the number of clients told to close.
 #
 # ⛔⛔ THE COMPOSITOR HAD NO SESSION TEARDOWN ON agnos AT ALL, and that is a resource leak with a hard
@@ -489,7 +550,10 @@ fn comp_retire_add(x, y, w, h): i64 {
 # ⚠ It does NOT unlink or retire anything. A closing compositor is about to stop drawing forever, so
 # the retired-rect bookkeeping `comp_close_window` needs for a REPAINT has no consumer here — and
 # walking the vector while removing from it is how that path would go wrong.
-# ⚠ `win_cfd == 0` is a compositor-seeded window with no client. Nothing to notify, and not an error.
+# ⚠ `win_cfd == 0` is a window with no client: compositor-seeded, or its connection closed. Nothing to
+# notify, and not an error.
+# ⚠ THE WINDOWS ON THE DESKTOP ONLY. A client still in its handshake has none: `ae_clients_close_all`
+# (setu_clients.cyr) is this plus those, and it is what the quit calls.
 fn comp_close_all_clients(c): i64 {
     var v = load64(c + C_WINDOWS);
     var n = vec_len(v);
@@ -500,7 +564,7 @@ fn comp_close_all_clients(c): i64 {
         if (win != 0) {
             var cfd = win_cfd(win);
             if (cfd != 0) {
-                setu_send(cfd, setu_close(win_id(win)));
+                ae_send(cfd, SETU_CLOSE, win_id(win), 0, 0, 0);
                 told = told + 1;
             }
         }
@@ -530,7 +594,8 @@ fn comp_close_window(c, id): i64 {
         # reclaims both when the process dies. So this send is not a courtesy; it is the release
         # mechanism. A client that ignores `SETU_CLOSE` still leaks, which is why crab and puka were
         # taught to honour it in the same change.
-        # ⚠ `win_cfd == 0` is a compositor-seeded window with no client at all. Nothing to notify.
+        # ⚠ `win_cfd == 0` is a window with no client: compositor-seeded, or its connection closed. Nothing
+        # to notify.
         # ⛔ SAY WHICH CASE THIS WAS. The close path used to print nothing at all, and that cost a QEMU
         # run: F4 arrived (the usage trace proved it), no client acknowledged, and the log could not
         # distinguish "correctly told nobody, because this window has no client" from "the send is
@@ -541,7 +606,7 @@ fn comp_close_window(c, id): i64 {
         # human-driven event and the identity of the case is the whole question, not the count.
         var dying_cfd = win_cfd(dying);
         if (dying_cfd != 0) {
-            setu_send(dying_cfd, setu_close(win_id(dying)));
+            ae_send(dying_cfd, SETU_CLOSE, win_id(dying), 0, 0, 0);
             if (ae_close_told == 0) {
                 ae_close_told = 1;
                 println("aethersafha: closed a window and sent SETU_CLOSE to its client");
@@ -606,6 +671,10 @@ fn comp_remove_window(c, id): i64 {
         comp_focus_topmost_visible(c);
     } else {
         if (idx < f) { store64(c + C_FOCUSED, f - 1); }   # the focused window moved down one slot
+    }
+    # ⭐ THE LAST THING DONE WITH IT. A window whose row is finished with it is unreachable now.
+    if (dying != 0) {
+        if (win_gone(dying) > 0) { win_recycle(dying); }
     }
     return 0;
 }

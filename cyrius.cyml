@@ -23,7 +23,7 @@ stdlib = [
     "tls", "tls_native", "tls_native_conn", "tls_native_ctx", "tls_native_lowlevel",
     "tls_native_hs12", "tls_native_hs13", "tls_native_keysched",
     "sha1", "keccak", "sigil", "sakshi",
-    # chitra → sankoch (PNG inflate); sankoch's lock calls mutex_lock, hence "thread":
+    # chitra (PNG inflate) and screen_capture (crc32, adler32) → sankoch; its lock calls mutex_lock, hence "thread":
     "sankoch", "thread",
     # JSON: plugin messages, the security audit log, daimon's agent list
     "bayan",

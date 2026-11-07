@@ -2,9 +2,10 @@
 # Parity: rust-old/src/renderer.rs  (Framebuffer, window decorations, damage)
 #
 # Draws the compositor's window stack into the bhumi XRGB8888 framebuffer: per window a themed body, a
-# focus-tinted titlebar with its caption and buttons, a 1 px border, and the client surface — blended with the
-# kernel's own `#92` arithmetic, so a CPU frame holds the words a GPU frame does. Plus the damage band, the
-# chrome rect and glyph queues the GPU frame drains, and the kashi bitmap text.
+# focus-tinted titlebar with its caption and buttons, a 1 px border, and the client surface — a premultiplied
+# one blended with the kernel's own `#92` arithmetic and any other copied as `#87` copies it, so a CPU frame
+# holds the words a GPU frame does. Plus the damage band, the chrome rect and glyph queues the GPU frame
+# drains, and the kashi bitmap text.
 
 # ⚠ THE DECODER IS INCLUDED BY THE MODULE THAT NEEDS IT, NOT BY EVERY UNIT THAT COMPILES THIS ONE. All text
 # below decodes through it, and render.cyr is compiled by main.cyr, the test and bench files that exercise
@@ -65,6 +66,57 @@ enum RenderK {
 # blend straight colour and TRUNCATE, so a translucent titlebar on a CPU frame sat up to one step per channel
 # off the same titlebar on iron, with an alpha byte of 0 where iron's holds the kernel's. ⚠ Clamped once and
 # walked by rows like `fill_rect`; it was a `bhumi_fb_get` / `bhumi_fb_set` pair per pixel.
+# ⭐ A ROW IS ONE RUN, AND THE STRING INSTRUCTIONS ARE THE RUN'S LOOP. `rep stosd` and `rep movsd` lay down the same
+# words as a store loop, and a 2560x1440 clear takes 0.3 ms through them against 3.7. ⚠ Under 8 px the plain loop
+# wins (a 1 px border side costs +150% through `rep`), so the callers keep it for short rows. tests/pixel_spans.tcyr
+# holds both arms to a per-pixel reference.
+# ae_row_fill(p, color, n): `n` 32-bit pixels of `color` from `p`.
+fn ae_row_fill(p, color, n): i64 {
+    #ifdef CYRIUS_ARCH_X86
+    asm {
+        0x57;                  # push rdi
+        param_load(rdi, 0);
+        param_load(rax, 1);
+        param_load(rcx, 2);
+        0xFC;                  # cld
+        0xF3; 0xAB;            # rep stosd
+        0x5F;                  # pop rdi
+    }
+    #else
+    var e = p + n * 4;
+    while (p < e) {
+        store32(p, color);
+        p = p + 4;
+    }
+    #endif
+    return 0;
+}
+
+# ae_row_copy(d, s, n): `n` 32-bit pixels from `s` to `d`, which do not overlap.
+fn ae_row_copy(d, s, n): i64 {
+    #ifdef CYRIUS_ARCH_X86
+    asm {
+        0x56;                  # push rsi
+        0x57;                  # push rdi
+        param_load(rdi, 0);
+        param_load(rsi, 1);
+        param_load(rcx, 2);
+        0xFC;                  # cld
+        0xF3; 0xA5;            # rep movsd
+        0x5F;                  # pop rdi
+        0x5E;                  # pop rsi
+    }
+    #else
+    var e = s + n * 4;
+    while (s < e) {
+        store32(d, load32(s));
+        d = d + 4;
+        s = s + 4;
+    }
+    #endif
+    return 0;
+}
+
 fn fill_rect_a(fb, x, y, w, h, color, a): i64 {
     if (a >= 255) { return fill_rect(fb, x, y, w, h, color); }
     if (a <= 0) { return 0; }
@@ -146,12 +198,18 @@ fn fill_rect(fb, x, y, w, h, color): i64 {
     var row   = (bhumi_fb_pixels(fb) + y0 * pitch) + x0 * bpp;
     var span  = (x1 - x0) * bpp;
     var yy    = y0;
+    var npx   = x1 - x0;
+    var flat  = 0;
+    if ((npx >= 8) && (bpp == 4)) { flat = 1; }
     while (yy < y1) {
-        var p = row;
-        var e = row + span;
-        while (p < e) {
-            store32(p, color);
-            p = p + bpp;
+        if (flat == 1) { ae_row_fill(row, color, npx); }
+        else {
+            var p = row;
+            var e = row + span;
+            while (p < e) {
+                store32(p, color);
+                p = p + bpp;
+            }
         }
         row = row + pitch;
         yy = yy + 1;
@@ -185,12 +243,7 @@ fn rend_clear_band(fb, y, h, color): i64 {
     var pitch = bhumi_fb_pitch(fb);
     var bpp = bhumi_fb_bpp(fb);
     if (pitch != fw * bpp) { return fill_rect(fb, 0, y0, fw, y1 - y0, color); }
-    var p = bhumi_fb_pixels(fb) + y0 * pitch;
-    var e = bhumi_fb_pixels(fb) + y1 * pitch;
-    while (p < e) {
-        store32(p, color);
-        p = p + 4;
-    }
+    ae_row_fill(bhumi_fb_pixels(fb) + y0 * pitch, color, (y1 - y0) * fw);
     return 0;
 }
 
@@ -210,7 +263,8 @@ fn rend_clear_band(fb, y, h, color): i64 {
 # for free — an out-of-bounds `bhumi_fb_set` dropped the write and the source index moved on. Here
 # the source offset has to be advanced by the same amount the destination was clipped by, or a
 # partly-offscreen window draws the wrong part of its own surface.
-fn blit_rect(fb, dx, dy, src, sw, sh): i64 {
+# `stride` is the source's bytes per row, which a client's buffer keeps whatever its window does.
+fn blit_rect_s(fb, dx, dy, src, sw, sh, stride): i64 {
     if (src == 0) { return 0; }
     if (sw <= 0) { return 0; }
     if (sh <= 0) { return 0; }
@@ -233,44 +287,74 @@ fn blit_rect(fb, dx, dy, src, sw, sh): i64 {
     var pitch = bhumi_fb_pitch(fb);
     var bpp   = bhumi_fb_bpp(fb);
     var drow  = (bhumi_fb_pixels(fb) + y0 * pitch) + x0 * bpp;
-    var srow  = (src + sy0 * sw * 4) + sx0 * 4;
+    var srow  = (src + sy0 * stride) + sx0 * 4;
     var n     = x1 - x0;
     var yy    = y0;
+    var flat  = 0;
+    if ((n >= 8) && (bpp == 4)) { flat = 1; }
     while (yy < y1) {
-        var d = drow;
-        var s = srow;
-        var i = 0;
-        while (i < n) {
-            store32(d, load32(s));
-            d = d + bpp;
-            s = s + 4;
-            i = i + 1;
+        if (flat == 1) { ae_row_copy(drow, srow, n); }
+        else {
+            var d = drow;
+            var s = srow;
+            var i = 0;
+            while (i < n) {
+                store32(d, load32(s));
+                d = d + bpp;
+                s = s + 4;
+                i = i + 1;
+            }
         }
         drow = drow + pitch;
-        srow = srow + sw * 4;
+        srow = srow + stride;
         yy = yy + 1;
     }
     return 0;
 }
 
-# rend_composite_surface(fb, dx, dy, src, sw, sh, premul, alpha): put a client surface on a CPU frame the way
+# blit_rect(fb, dx, dy, src, sw, sh): a tightly packed source.
+fn blit_rect(fb, dx, dy, src, sw, sh): i64 { return blit_rect_s(fb, dx, dy, src, sw, sh, sw * 4); }
+
+# rend_composite_surface(fb, dx, dy, src, sw, sh, stride, premul, alpha): put a client surface on a CPU frame the way
 # gpu.cyr's per-window routing puts it on a GPU frame (`ae_gpu_present_frame` step 2). A PREMULTIPLIED surface
 # is blended — `#92` op 0x01 at full opacity, op 0x06 at the window's `alpha` — and any other surface is
 # copied, as `#87` copies it, at any opacity: `#87` has no alpha, and neither does this copy.
 # ⚠ The GPU arm falls back to `#87` for a premultiplied surface on a boot with no shader envelope; a CPU frame
 # always blends, i.e. it draws what iron with the envelope draws, which is the iron-proven configuration.
-fn rend_composite_surface(fb, dx, dy, src, sw, sh, premul, alpha): i64 {
-    if (premul == 1) { return rend_composite_premul(fb, dx, dy, src, sw, sh, alpha); }
-    return blit_rect(fb, dx, dy, src, sw, sh);
+fn rend_composite_surface(fb, dx, dy, src, sw, sh, stride, premul, alpha): i64 {
+    if (premul == 1) { return rend_composite_premul_s(fb, dx, dy, src, sw, sh, stride, alpha); }
+    return blit_rect_s(fb, dx, dy, src, sw, sh, stride);
 }
 
-# rend_composite_premul(fb, dx, dy, src, sw, sh, alpha): src-over a premultiplied sw x sh surface at (dx,dy),
-# clipped exactly as `blit_rect` clips — source pixels skipped by the amount the destination was clipped.
+# ⭐ `round_half_up(d * ia / 255)`, the one division op 0x01 does per byte, as T[(ia << 8) | d] = (d * ia * 2 + 255) /
+# 510: 64 KB, allocated and built once, and the walk over translucent pixels is a third cheaper for it. -> T, or 0
+# if it could not be allocated (the caller then divides, as exactly).
+var ae_pm_tab = 0;
+fn rend_premul_tab(): i64 {
+    if (ae_pm_tab != 0) { return ae_pm_tab; }
+    var t = alloc(65536);
+    if (t == 0) { return 0; }
+    var ia = 0;
+    while (ia < 256) {
+        var d = 0;
+        while (d < 256) {
+            store8(t + (ia << 8) + d, (d * ia * 2 + 255) / 510);
+            d = d + 1;
+        }
+        ia = ia + 1;
+    }
+    ae_pm_tab = t;
+    return t;
+}
+
+# rend_composite_premul_s(fb, dx, dy, src, sw, sh, stride, alpha): src-over a premultiplied sw x sh surface at
+# (dx,dy) whose rows are `stride` bytes apart, clipped exactly as `blit_rect_s` clips — source pixels skipped by the
+# amount the destination was clipped.
 # ⭐ Exact shortcuts keep the common case cheap: a pixel with alpha 255 IS the op 0x01 result (ia = 0) and is
 # four lookups in the opaque-source table under op 0x06, and a zero pixel leaves the destination as it was
 # under either op (sa = sc = 0). Measured on the host, 1280x720, per frame: a copy 2.2 ms; op 0x01 over
 # opaque pixels 3.3 ms, over sa = 128 pixels 19.2 ms; op 0x06 at alpha 128 over opaque pixels 11.4 ms.
-fn rend_composite_premul(fb, dx, dy, src, sw, sh, alpha): i64 {
+fn rend_composite_premul_s(fb, dx, dy, src, sw, sh, stride, alpha): i64 {
     if (src == 0) { return 0; }
     if (sw <= 0) { return 0; }
     if (sh <= 0) { return 0; }
@@ -290,22 +374,64 @@ fn rend_composite_premul(fb, dx, dy, src, sw, sh, alpha): i64 {
     if (x1 <= x0) { return 0; }
     if (y1 <= y0) { return 0; }
     var u = 0;
+    var pt = 0;
     if (alpha < 255) { u = rend_blend_utab(alpha); }       # also builds the per-alpha tables
+    else { pt = rend_premul_tab(); }
     var pitch = bhumi_fb_pitch(fb);
     var bpp   = bhumi_fb_bpp(fb);
     var drow  = (bhumi_fb_pixels(fb) + y0 * pitch) + x0 * bpp;
-    var srow  = (src + sy0 * sw * 4) + sx0 * 4;
+    var srow  = (src + sy0 * stride) + sx0 * 4;
     var n     = x1 - x0;
     var yy    = y0;
+    var flat  = 0;
+    if ((alpha >= 255) && (n >= 8) && (bpp == 4)) { flat = 1; }
     while (yy < y1) {
         var d = drow;
         var s = srow;
         var i = 0;
+        # ⭐ A ROW OF OPAQUE WORDS IS op 0x01'S RESULT AS IT STANDS, and that is nearly every row of a real client, so
+        # it is checked by the two-word stride and copied whole. `ope` is the row's whole 16-byte groups.
+        if (flat == 1) {
+            var q = 0;
+            var ope = n >> 2;
+            var aw = 0xFF000000FF000000;
+            while (q < ope) {
+                var qs = s + (q << 4);
+                if ((load64(qs) & load64(qs + 8) & aw) != aw) { break; }
+                q = q + 1;
+            }
+            if (q >= ope) {
+                var qt = ope << 2;
+                while (qt < n) {
+                    if ((load32(s + qt * 4) >> 24) != 255) { break; }
+                    qt = qt + 1;
+                }
+                if (qt >= n) {
+                    ae_row_copy(d, s, n);
+                    i = n;
+                }
+            }
+        }
         while (i < n) {
             var sp = load32(s);
             if (sp != 0) {
                 if (alpha >= 255) {
-                    if ((sp >> 24) == 255) { store32(d, sp); }
+                    var sa8 = sp >> 24;
+                    if (sa8 == 255) { store32(d, sp); }
+                    elif (pt != 0) {
+                        # `rend_px_premul`, its divides looked up
+                        var dq = load32(d);
+                        var pr = pt + ((255 - sa8) << 8);
+                        var c0 = (sp & 0xFF) + load8(pr + (dq & 0xFF));
+                        var c1 = ((sp >> 8) & 0xFF) + load8(pr + ((dq >> 8) & 0xFF));
+                        var c2 = ((sp >> 16) & 0xFF) + load8(pr + ((dq >> 16) & 0xFF));
+                        var c3 = sa8 + load8(pr + ((dq >> 24) & 0xFF));
+                        if (c0 > 255) { c0 = 255; }
+                        if (c1 > 255) { c1 = 255; }
+                        if (c2 > 255) { c2 = 255; }
+                        if (c3 > 255) { c3 = 255; }
+                        store32(d, ((c3 << 24) | (c2 << 16)) | ((c1 << 8) | c0));
+                    }
                     else { store32(d, rend_px_premul(sp, load32(d))); }
                 }
                 else {
@@ -329,10 +455,15 @@ fn rend_composite_premul(fb, dx, dy, src, sw, sh, alpha): i64 {
             i = i + 1;
         }
         drow = drow + pitch;
-        srow = srow + sw * 4;
+        srow = srow + stride;
         yy = yy + 1;
     }
     return 0;
+}
+
+# rend_composite_premul(fb, dx, dy, src, sw, sh, alpha): a tightly packed source.
+fn rend_composite_premul(fb, dx, dy, src, sw, sh, alpha): i64 {
+    return rend_composite_premul_s(fb, dx, dy, src, sw, sh, sw * 4, alpha);
 }
 
 # ============================================================================================
@@ -556,6 +687,11 @@ var ae_band_h = 0;
 # the band — a stale desktop that no window rect can explain. -1 = no frame has been cleared yet.
 var ae_last_bg = 0 - 1;
 var ae_last_wp = 0 - 1;   # last-seen wallpaper serial; see rend_band_compute
+# ⛔ THE FRAME PATH IS PART OF THE DAMAGE INPUT TOO: 0 a CPU frame, 1 a GPU frame with its chrome on the CPU, 2 a
+# GPU frame with its chrome on the GPU. A GPU frame draws nothing into the userland framebuffer, so outside the
+# band that framebuffer is whatever it last held, and a CPU frame presents all of it; going the other way, the
+# back buffers hold what the last CPU frame put in one of them.
+var ae_last_path = 0;
 # ⛔⛔ FRAMES OF FULL-SCREEN REPAINT STILL OWED. A whole-screen invalidation costs TWO consecutive
 # no-band frames, not one, for exactly the reason `comp_retire` exists (compositor.cyr:196): `#84
 # present` FLIPS the render target, so a repaint applied for one frame lands in ONE buffer and the
@@ -760,11 +896,14 @@ fn rend_band_compute(fh, bg): i64 {
     # ⇒ One sample, one store, one decision. Adding a third invalidation source later must follow this
     # shape, not append another early-returning gate.
     var wps = wp_serial();
+    var path = ae_gpu_frame_ok + ae_chrome_on_gpu();
     var stale = 0;
     if (bg != ae_last_bg) { stale = 1; }
     if (wps != ae_last_wp) { stale = 1; }
+    if (path != ae_last_path) { stale = 1; }
     ae_last_bg = bg;
     ae_last_wp = wps;
+    ae_last_path = path;
     # ⛔ TWO FRAMES, ONE PER BUFFER — see ae_inval_owed. Returning here on the change frame ALONE was
     # the defect: `render.tcyr` even asserted it ("the frame AFTER a theme switch bands normally
     # again"), so the suite enshrined the stale buffer as correct.
@@ -1142,6 +1281,10 @@ fn render_title(fb, win, color): i64 {
     return draw_text(fb, &cap + kb, tx + k * FONT_ADV, win_y(win) + (TITLEBAR_H - FONT_H) / 2, color);
 }
 
+# foreign.cyr's guest text, a fn(fb, win) set when a foreign app is hosted. A pointer because this file compiles in
+# units that never reach foreign.cyr.
+var ae_win_guest_draw = 0;
+
 fn render_window(fb, win, focused): i64 {
     # ⛔ A MINIMIZED WINDOW IS NOT DRAWN — said by the drawing site itself (0.17.4). `render_desktop` skips one and
     # so does the GPU present loop; this guard means no caller draws one by forgetting to. Rust dropped a hidden
@@ -1184,26 +1327,33 @@ fn render_window(fb, win, focused): i64 {
     # window body below the titlebar. Re-run EVERY frame from the cached buffer so the surface
     # persists on screen — the desktop redraw above would otherwise overwrite it (it did: the
     # present composited for one frame, then vanished, leaving the screendump blank). w×h are
-    # the surface dims (comp_create_window used the CREATE_SURFACE w/h). bhumi_fb_set clips to fb.
+    # the window's size, clamped below to what the client attached. `rend_composite_surface` clips to fb.
     var spix = win_pix(win);
     var bid = win_bufid(win);
     # ⛔ SAME GUARD AS THE GPU GATE, and it must be here too: refusing on the GPU side only routes an
     # over-sized window to THIS path, which would then read past the client's slot itself. Clamp the
     # extent to what the client actually attached until it re-attaches at the CONFIGURE size.
+    # ⚠ NOT GATED ON `bid`. The extent outlives the id: a window whose client went keeps showing a cache laid
+    # out at that extent (`win_buf_forget`), and it can still be maximized.
     var bw = win_buf_w(win);
     var bh = win_buf_h(win);
-    if (bid != 0) {
-        if (bw > 0) { if (w > bw) { w = bw; } }
-        if (bh > 0) { if (h > bh) { h = bh; } }
+    # ⛔ THE CACHE'S ROWS ARE THE ATTACH'S, NOT THE WINDOW'S. A window dragged narrower than its buffer keeps the
+    # buffer's stride until the client re-attaches; walked at `w * 4` it shears.
+    var stride = w * 4;
+    if (bw > 0) {
+        stride = bw * 4;
+        if (win_buf_stride(win) > 0) { stride = win_buf_stride(win); }
+        if (w > bw) { w = bw; }
     }
+    if (bh > 0) { if (h > bh) { h = bh; } }
     # ⛔ AND NEVER PAST THE CACHE ITSELF (0.17.6). A setu client's cache is now a `fl_alloc` block the window
     # owns (`win_pix_adopt`), sized `h * stride` at its last applied attach, and a block over 4 KB is its own
     # mapping, so reading past it can fault where the bump heap read a neighbour. The clamp above trusts
     # `win_buf_w` / `win_buf_h`; this bounds the copy and the composite by the bytes that exist, whatever they say.
     var pcap = win_pixcap(win);
     if (pcap > 0) {
-        if (w > 0) {
-            var prows = pcap / (w * 4);
+        if (stride > 0) {
+            var prows = pcap / stride;
             if (h > prows) { h = prows; }
         }
     }
@@ -1215,13 +1365,11 @@ fn render_window(fb, win, focused): i64 {
     # renders here — #87 composites on top of it, which is exactly why gpu.cyr blits the chrome layer with
     # blit#39's DEFER bit first and presents once at the end.
     #
-    # ⛔ THE GATE IS ae_gpu_frame_ok, NOT "is there a GPU". It used to be `ae_gpu_active()` — a flag set
-    # once at startup meaning only "a GPU exists and is armed". But ae_gpu_present_frame refuses
-    # individual FRAMES for reasons this function cannot see (a window past an edge, a premultiplied
-    # surface with no shader path), and on refusal the caller presented the framebuffer as it stood:
-    # chrome, and no window content at all. ae_gpu_frame_plan now settles the question for the whole
-    # frame BEFORE any of it is drawn, so "the GPU will do it" and "so I will not" are the same fact
-    # read from the same place.
+    # ⛔ THE GATE IS ae_gpu_frame_ok, NOT "is there a GPU". `ae_gpu_active()` means only "a GPU exists and is
+    # armed", and a GPU refuses individual FRAMES for reasons this function cannot see (a window past an
+    # edge, a buffer that does not cover its window, a slot it has refused); gating on that shows chrome
+    # and no window content. ae_gpu_frame_plan settles the question for the whole frame BEFORE any of it is
+    # drawn, so "the GPU will do it" and "so I will not" are the same fact read from the same place.
     if (ae_gpu_frame_ok == 0) {
         # LIVE surface: pull the client's LATEST frame out of the shared buffer into the cache each
         # frame. A client that keeps writing its buffer (setu_buf_write, no re-present) animates the
@@ -1229,15 +1377,17 @@ fn render_window(fb, win, focused): i64 {
         # ⚠ setu's reader (0.8.13) cannot wait on the client-named path: a FIFO, a symlink or a short file at
         # the buffer's name is refused at once and the cache keeps the last frame (setu_dispatch.cyr).
         if (bid != 0) {
-            if (spix != 0) { setu_buf_read(bid, spix, w * h * 4); }
+            if (spix != 0) { setu_buf_read(bid, spix, h * stride); }
         }
         # Row-walking copy (blit_rect) rather than the per-pixel bhumi_fb_set loop this used to be.
         # Same pixels, same clipping; measured 23.974 ms -> see blit_rect's header for the numbers.
         # ⭐ 0.17.4: routed as gpu.cyr routes it — a premultiplied surface is BLENDED with the kernel's op 0x01
         # / op 0x06 arithmetic at this window's opacity, anything else copied as `#87` copies it. A CPU frame
         # copied every surface, so the same window was opaque here and translucent on iron.
-        if (spix != 0) { rend_composite_surface(fb, x, win_body_y(win), spix, w, h, win_premul(win), wa); }
+        if (spix != 0) { rend_composite_surface(fb, x, win_body_y(win), spix, w, h, stride, win_premul(win), wa); }
     }
+    # ⭐ What a hosted foreign guest shows lies on this window's body, so it goes down here, in the window's z slot.
+    if (ae_win_guest_draw != 0) { fncall2(ae_win_guest_draw, fb, win); }
     return 0;
 }
 
@@ -1277,10 +1427,6 @@ fn rend_outline(fb, x, y, w, h, t, color, a): i64 {
 fn draw_rect_outline(fb, x, y, w, h, color): i64 { return rend_outline(fb, x, y, w, h, 1, color, 255); }
 
 # render_border(fb, win, color, a): the ring BORDER_W outside the window's rect, titlebar included.
-# ⛔⛔ CALLED AFTER THE BODY AND TITLEBAR FILLS, AND THE ORDER IS LOAD-BEARING ON THE GPU. gpu.cyr's op 0x02
-# coverage slot takes its capacity from the FIRST alpha rect it ever stages and refuses a larger one later
-# (`ae_gpu_cov_ensure`), and a refusal retires the chrome path for the run. A 1 px ring side staged first
-# would cap the slot below the body that follows it.
 fn render_border(fb, win, color, a): i64 {
     return rend_outline(fb, win_x(win) - BORDER_W, win_y(win) - BORDER_W, win_w(win) + 2 * BORDER_W,
       win_total_h(win) + 2 * BORDER_W, BORDER_W, color, a);
@@ -1303,8 +1449,8 @@ fn render_border(fb, win, color, a): i64 {
 # matches the windows drawn on it.
 fn rend_frame_damage(comp, fb, bg): i64 {
     # ============================================================================================
-    # ⭐ THE DAMAGE MODEL. Computed every frame; NOT yet driving the blit — see gpu.cyr for why
-    # (the #84 buffer flip makes a single-frame band two-frames-stale on the other buffer).
+    # ⭐ THE DAMAGE MODEL. Computed every frame, and it drives the band below. gpu.cyr says why that band
+    # spans two frames (the #84 buffer flip makes a single-frame band two-frames-stale on the other buffer).
     # ============================================================================================
     # 0.9.8 shipped the plumbing and it reduced NOTHING, because the clear touched every pixel and
     # so damage was always the whole screen. The fix is not a bigger clear-optimisation — it is
@@ -1459,7 +1605,8 @@ enum FontK {
 # overwriting each other in whichever order the frame happens to run. So the decision is taken ONCE per
 # frame, before anything is drawn, and every fill in that frame follows it.
 enum AeRect {
-    AE_RECT_MAX = 768;   # ~10 rects a window (4 of them the border) x AE_MARK_MAX (64) windows + the panel, the clear band, the launcher
+    # ~10 rects a window (4 of them the border) x AE_MARK_MAX (64) windows + the panel, the clear band, the launcher
+    AE_RECT_MAX = 768;
 }
 var ae_rect_n = 0;
 var ae_rect_x[768];
@@ -1743,28 +1890,31 @@ fn ae_text_bytes(len): i64 { return ae_text_stride(len) * FONT_H; }
 # (`bit (7 - col)`), so this is a bit-for-bit copy at a horizontal offset, not a format conversion.
 # ⚠ Pure — no syscalls, no framebuffer — so `tests/render.tcyr` can verify the bit layout on any machine
 # instead of on the operator's only box.
+# ⭐ BY BYTE SHIFTS, not bit by bit: the glyph pointer is resolved once per cell, and a row lands in the one or two
+# bytes it straddles. This runs for every run of every GPU frame.
 fn ae_text_pack_1bpp(dst, cells, len): i64 {
     var stride = ae_text_stride(len);
     var total = stride * FONT_H;
     var z = 0;
+    while (z + 8 <= total) { store64(dst + z, 0); z = z + 8; }
     while (z < total) { store8(dst + z, 0); z = z + 1; }
     var i = 0;
     while (i < len) {
-        var ch = load16(cells + i * 2);
-        var row = 0;
-        while (row < FONT_H) {
-            var bits = kashi_glyph_row(KASHI_FONT_VGA_8X16, ch, row);
-            var c = 0;
-            while (c < FONT_W) {
-                if ((bits & (1 << (7 - c))) != 0) {
-                    var px = i * FONT_ADV + c;
-                    var byi = row * stride + px / 8;
-                    var bit = px - (px / 8) * 8;
-                    store8(dst + byi, load8(dst + byi) | (1 << (7 - bit)));
+        var gp = kashi_glyph_ptr(KASHI_FONT_VGA_8X16, load16(cells + i * 2));
+        if (gp != 0) {
+            var px = i * FONT_ADV;
+            var sh = px & 7;
+            var d = dst + (px >> 3);
+            var row = 0;
+            while (row < FONT_H) {
+                var bits = load8(gp + row);
+                if (bits != 0) {
+                    store8(d, load8(d) | (bits >> sh));
+                    if (sh != 0) { store8(d + 1, load8(d + 1) | ((bits << (8 - sh)) & 0xFF)); }
                 }
-                c = c + 1;
+                d = d + stride;
+                row = row + 1;
             }
-            row = row + 1;
         }
         i = i + 1;
     }
@@ -1811,8 +1961,34 @@ fn ae_text_cells(dst, s, max): i64 {
     return n;
 }
 
+# ⭐ A CELL WHOLLY ON THE FRAMEBUFFER is written through a row pointer, its glyph resolved once; only a cell an edge
+# cuts pays `bhumi_fb_set`'s per-pixel clip. A title takes 5 us this way and 24 through `bhumi_fb_set`.
 fn draw_char(fb, ch, x, y, color): i64 {
     var row = 0;
+    if ((x >= 0) && (y >= 0) && (bhumi_fb_bpp(fb) == 4)) {
+        if ((x + FONT_W <= bhumi_fb_width(fb)) && (y + FONT_H <= bhumi_fb_height(fb))) {
+            var gp = kashi_glyph_ptr(KASHI_FONT_VGA_8X16, ch);
+            if (gp == 0) { return 1; }
+            var pitch = bhumi_fb_pitch(fb);
+            var rp = bhumi_fb_pixels(fb) + y * pitch + x * 4;
+            while (row < FONT_H) {
+                var rb = load8(gp + row);
+                if (rb != 0) {
+                    if ((rb & 128) != 0) { store32(rp, color); }
+                    if ((rb & 64) != 0) { store32(rp + 4, color); }
+                    if ((rb & 32) != 0) { store32(rp + 8, color); }
+                    if ((rb & 16) != 0) { store32(rp + 12, color); }
+                    if ((rb & 8) != 0) { store32(rp + 16, color); }
+                    if ((rb & 4) != 0) { store32(rp + 20, color); }
+                    if ((rb & 2) != 0) { store32(rp + 24, color); }
+                    if ((rb & 1) != 0) { store32(rp + 28, color); }
+                }
+                rp = rp + pitch;
+                row = row + 1;
+            }
+            return 1;
+        }
+    }
     while (row < FONT_H) {
         var bits = kashi_glyph_row(KASHI_FONT_VGA_8X16, ch, row);
         var col = 0;
@@ -1863,29 +2039,62 @@ fn draw_text(fb, s, x, y, color): i64 {
     return cx - x;
 }
 
-# draw_text_lines(fb, s, x, y, color): like draw_text, but honors '\n' (U+000A) as a
-# line break — a foreign guest's captured stdout is multi-line. NUL ends. Returns
-# the total pixel height drawn (from y to the last line's baseline).
+# draw_text_lines_in(fb, s, n, x, y, color, rx, ry, rw, rh): text from (x, y) that honors '\n' (U+000A) as a line
+# break — a foreign guest's captured stdout is multi-line — over the `n` bytes at `s`, which end at a NUL if one
+# comes first and need not hold one. Only the glyphs wholly inside the rect are drawn, and a glyph outside it still
+# advances. Returns the total pixel height drawn (from y to the last line's baseline).
 # ⚠ Decoded like draw_text. A '\n' is always a unit of its own — 0x0A continues no sequence — so a sequence cut
 # short by a newline is one U+FFFD and the line still breaks.
-fn draw_text_lines(fb, s, x, y, color): i64 {
+# ⛔ `utf8_next` STOPS ONLY AT A BYTE THAT CANNOT CONTINUE, so a lead byte at the end of `s` would read past it. The
+# last three bytes are decoded from a terminated copy, and a sequence the end cuts short is one U+FFFD.
+# ⭐ Its cost is the rect's, not the text's: it stops below the last row, and skips what is left of a line past the
+# right edge byte by byte, so what a guest wrote past the window costs a scan and draws nothing.
+fn draw_text_lines_in(fb, s, n, x, y, color, rx, ry, rw, rh): i64 {
     ae_font_ensure();                               # the cell map reads the tables too — see `ae_text_cell`
+    var tail[8];                                    # function-local => 8 BYTES
+    var x1 = rx + rw;
+    var y1 = ry + rh;
     var cx = x;
     var cy = y;
     var i = 0;
-    while (1) {
-        var r = utf8_next(s + i);
-        if (utf8_next_len(r) == 0) { break; }
+    while (i < n) {
+        if (cy + FONT_H > y1) { break; }
+        var p = s + i;
+        if (n - i < 4) {
+            store64(&tail, 0);
+            var t = 0;
+            while (i + t < n) { store8(&tail + t, load8(s + i + t)); t = t + 1; }
+            p = &tail;
+        }
+        var r = utf8_next(p);
+        var l = utf8_next_len(r);
+        if (l == 0) { break; }
         if (utf8_next_cp(r) == 10) {
             cx = x;
             cy = cy + FONT_H + 2;
         } else {
-            draw_char(fb, ae_text_cell(utf8_next_cp(r)), cx, cy, color);
+            if ((cx >= rx) && (cy >= ry) && (cx + FONT_W <= x1)) {
+                draw_char(fb, ae_text_cell(utf8_next_cp(r)), cx, cy, color);
+            }
             cx = cx + FONT_ADV;
+            if (cx >= x1) {
+                while (i + l < n) {
+                    var b = load8(s + i + l);
+                    if ((b == 10) || (b == 0)) { break; }
+                    l = l + 1;
+                }
+            }
         }
-        i = i + utf8_next_len(r);
+        i = i + l;
     }
     return cy - y;
+}
+
+# draw_text_lines(fb, s, x, y, color): draw_text_lines_in for a NUL-terminated string, with no rect but the
+# framebuffer's own per-pixel clip.
+fn draw_text_lines(fb, s, x, y, color): i64 {
+    var far = 1 << 32;
+    return draw_text_lines_in(fb, s, strlen(s), x, y, color, 0 - far, 0 - far, 2 * far, 2 * far);
 }
 
 # text_width(s): pixel width of a UTF-8 cstring in this font: cells * FONT_ADV - 1, 0 if empty.

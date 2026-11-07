@@ -202,7 +202,8 @@ fn main() {
     # The retired union must actually COVER the panel — a union that misses it repaints nothing.
     assert_eq(t_le(comp_retire_x(), lnch_panel_x(sw)), 1, "union starts at or left of the panel");
     assert_eq(t_le(comp_retire_y(), lnch_panel_y(sh)), 1, "  ...at or above it");
-    assert_eq(t_ge(comp_retire_x() + comp_retire_w(), lnch_panel_x(sw) + lnch_panel_w()), 1, "  ...and reaches its right edge");
+    assert_eq(t_ge(comp_retire_x() + comp_retire_w(), lnch_panel_x(sw) + lnch_panel_w()), 1,
+      "  ...and reaches its right edge");
     assert_eq(t_ge(comp_retire_y() + comp_retire_h(), lnch_panel_y(sh) + lnch_panel_h()), 1, "  ...and its bottom");
     # ⚠ The panel must be ON SCREEN for any of this to matter.
     assert_eq(t_ge(lnch_panel_x(sw), 0), 1, "panel starts on screen");

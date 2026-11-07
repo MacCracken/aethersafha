@@ -136,6 +136,27 @@ fn t_effect_in_child(which, pid): i64 {
     return t_reap(child);
 }
 
+# t_effect_in_child's kill or revoke with the forked child's own pid. Signals nobody but that child.
+fn t_self_effect_in_child(which): i64 {
+    var child = sys_fork();
+    if (child == 0) {
+        signal_default(SIGHUP);
+        if (syscall(109, 0, 0) != 0) { syscall(60, 99); }    # setpgid(0, 0)
+        var cu = sec_ui_new();
+        var me = sys_getpid();
+        var code = 0;
+        if (which == 0) {
+            code = sec_ui_emergency_kill_agent(cu, 77, me, 1760000000);
+        } else {
+            sec_ui_grant_permission_enforced(cu, 77, "agent", "file:read", 1760000000);
+            code = sec_ui_revoke_permission_enforced(cu, 77, "file:read", me, 1760000000);
+        }
+        syscall(60, code + 100 * vec_len(sec_ui_alerts(cu)));
+    }
+    if (child <= 0) { return 0 - 3; }
+    return t_reap(child);
+}
+
 # ---------------------------------------------------------------------------
 # write_audit_log: the line, its timestamp and escaping, from fixed epochs.
 # ---------------------------------------------------------------------------
@@ -150,7 +171,7 @@ fn t_audit_format(): i64 {
     # serde_json (no preserve_order) sorts the keys and prints compact.
     assert_streq(sec_audit_line("permission_granted", 700,
         "Permission 'file:read' granted to 'test-agent'", 1760000000),
-      "{\"agent_id\":\"700\",\"details\":\"Permission 'file:read' granted to 'test-agent'\",\"event_type\":\"permission_granted\",\"source\":\"security-ui\",\"timestamp\":\"2025-10-09T08:53:20+00:00\"}",
+      "{\"agent_id\":\"700\",\"details\":\"Permission 'file:read' granted to 'test-agent'\",\"event_type\":\"permission_granted\",\"source\":\"security-ui\",\"timestamp\":\"2025-10-09T08:53:20+00:00\"}",  #skip-lint
       "audit line: exact serde_json text");
 
     # Escaping: " \ newline tab and a raw 0x01, as serde_json writes them.
@@ -161,8 +182,110 @@ fn t_audit_format(): i64 {
     store8(det + 9, 101);    # 'e'
     store8(det + 10, 0);
     assert_streq(sec_audit_line("x", 0 - 3, det, 0),
-      "{\"agent_id\":\"-3\",\"details\":\"a\\\"b\\\\c\\nd\\u0001\\te\",\"event_type\":\"x\",\"source\":\"security-ui\",\"timestamp\":\"1970-01-01T00:00:00+00:00\"}",
+      "{\"agent_id\":\"-3\",\"details\":\"a\\\"b\\\\c\\nd\\u0001\\te\",\"event_type\":\"x\",\"source\":\"security-ui\",\"timestamp\":\"1970-01-01T00:00:00+00:00\"}",  #skip-lint
       "audit line: JSON escaping");
+    return 0;
+}
+
+# `details` of the audit line for the n bytes at b (given NUL-free, and copied here to a cstr), as
+# they decode back from the line: the JSON must parse, so this is the whole round trip. -> cstr.
+fn t_audit_details(b, n): i64 {
+    var det = alloc(n + 1);
+    memcpy(det, b, n);
+    store8(det + n, 0);
+    var line = sec_audit_line("x", 1, det, 0);
+    var v = bayan_json_v_parse_buf(line, strlen(line));
+    if (v == 0) { return "<not JSON>"; }
+    var d = bayan_json_v_str(bayan_json_v_obj_get_by_cstr(v, "details"));
+    if (d == 0) { return "<no details>"; }
+    return str_data(d);
+}
+
+# How many U+FFFD does the cstr s decode to, a replaced byte or an honest one alike?
+fn t_repl_count(s): i64 {
+    var c = 0;
+    var r = utf8_next(s);
+    while (utf8_next_len(r) != 0) {
+        if (utf8_next_cp(r) == UTF8_REPL) { c = c + 1; }
+        s = s + utf8_next_len(r);
+        r = utf8_next(s);
+    }
+    return c;
+}
+
+# ---------------------------------------------------------------------------
+# The line is UTF-8 whatever a field held, and a field cannot make it unbounded. The expected
+# bytes for ill-formed input are Python's bytes.decode('utf-8', 'replace'), the same maximal-subpart
+# rule as Rust's String::from_utf8_lossy.
+# ---------------------------------------------------------------------------
+fn t_audit_utf8(): i64 {
+    test_group("security_ui — audit line: well-formed text goes through untouched");
+    var wf = "e\xC3\xA9 \xE2\x82\xAC \xF0\x9F\x98\x80 \xEF\xBF\xBD \x7F \xC2\x85 \xE2\x80\xA8";
+    assert_streq(sec_audit_line("x", 1, wf, 0),
+      "{\"agent_id\":\"1\",\"details\":\"e\xC3\xA9 \xE2\x82\xAC \xF0\x9F\x98\x80 \xEF\xBF\xBD \x7F \xC2\x85 \xE2\x80\xA8\",\"event_type\":\"x\",\"source\":\"security-ui\",\"timestamp\":\"1970-01-01T00:00:00+00:00\"}",  #skip-lint
+      "every UTF-8 length, DEL, C1 and U+2028 are as serde_json wrote them");
+
+    test_group("security_ui — audit line: ill-formed UTF-8 is one U+FFFD per maximal subpart");
+    assert_streq(t_audit_details("a\xFFb", 3), "a\xEF\xBF\xBDb", "a lone FF");
+    assert_streq(t_audit_details("a\xE2\x80b", 4), "a\xEF\xBF\xBDb", "E2 80 cut short: one, the b kept");
+    assert_streq(t_audit_details("a\xC0\x80b", 4), "a\xEF\xBF\xBD\xEF\xBF\xBDb", "overlong C0 80: two");
+    assert_streq(t_audit_details("a\xED\xA0\x80b", 5), "a\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBDb",
+      "surrogate ED A0 80: three");
+    assert_streq(t_audit_details("a\xF4\x90\x80\x80b", 6), "a\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBDb",
+      "past U+10FFFF: four");
+    assert_streq(t_audit_details("a\xF0\x9F\x98", 4), "a\xEF\xBF\xBD", "F0 9F 98 cut by the end: one");
+    assert_streq(t_audit_details("\x80\xBF", 2), "\xEF\xBF\xBD\xEF\xBF\xBD", "stray continuation bytes: one each");
+
+    test_group("security_ui — audit line: details are bounded, cut at a scalar");
+    var big = alloc(1048577);
+    memset(big, 65, 1048576);
+    store8(big + 1048576, 0);
+    var at = alloc(SEC_AUDIT_DETAILS_MAX + 1);
+    memset(at, 65, SEC_AUDIT_DETAILS_MAX);
+    store8(at + SEC_AUDIT_DETAILS_MAX, 0);
+    assert_eq(strlen(t_audit_details(at, SEC_AUDIT_DETAILS_MAX)), SEC_AUDIT_DETAILS_MAX, "at the bound: whole");
+    var over = t_audit_details(big, SEC_AUDIT_DETAILS_MAX + 1);
+    assert_eq(strlen(over), SEC_AUDIT_DETAILS_MAX, "one byte past it: cut to the bound");
+    assert_eq(memeq(over + SEC_AUDIT_DETAILS_MAX - 3, "\xE2\x80\xA6", 3), 1, "  ...the last scalar a U+2026");
+    assert_eq(strlen(t_audit_details(big, 1048576)), SEC_AUDIT_DETAILS_MAX, "1 MiB: the same");
+    assert_eq(strlen(sec_audit_line("x", 1, big, 0)) < SEC_AUDIT_DETAILS_MAX + 200, 1, "  ...and so is the line");
+    var ctl = alloc(1048577);
+    memset(ctl, 1, 1048576);
+    store8(ctl + 1048576, 0);
+    assert_eq(strlen(sec_audit_line("x", 1, ctl, 0)) <= 6 * SEC_AUDIT_DETAILS_MAX + 200, 1,
+      "control bytes: six times that at most");
+    var euro = alloc(30001);
+    var ei = 0;
+    while (ei < 30000) { memcpy(euro + ei, "\xE2\x82\xAC", 3); ei = ei + 3; }
+    store8(euro + 30000, 0);
+    var ecut = t_audit_details(euro, 30000);
+    assert_eq(strlen(ecut) <= SEC_AUDIT_DETAILS_MAX, 1, "three-byte text is bounded too");
+    assert_eq(t_repl_count(ecut), 0, "  ...and is cut between scalars, not inside one");
+    assert_eq(memeq(ecut + strlen(ecut) - 3, "\xE2\x80\xA6", 3), 1, "  ...the last scalar a U+2026");
+
+    # A field a caller hands in reaches the file the same way.
+    var u = sec_ui_new();
+    var n0 = strlen(t_read(t_audit_path));
+    sec_ui_grant_permission_enforced(u, 9, "x\xFF\n{\"event_type\":\"forged\"}", "file:read", 1760000000);
+    var got = t_read(t_audit_path) + n0;
+    assert_eq(t_has_byte(got, 0xFF), 0, "a grant's ill-formed name does not reach the file");
+    assert_eq(t_repl_count(got), 1, "  ...a U+FFFD does");
+    assert_eq(t_count_byte(got, 10), 1, "  ...on the one line, its newline escaped");
+    return 0;
+}
+
+# How many bytes of the cstr s are `b`?
+fn t_count_byte(s, b): i64 {
+    var c = 0;
+    while (load8(s) != 0) {
+        if (load8(s) == b) { c = c + 1; }
+        s = s + 1;
+    }
+    return c;
+}
+
+fn t_has_byte(s, b): i64 {
+    if (t_count_byte(s, b) > 0) { return 1; }
     return 0;
 }
 
@@ -178,21 +301,21 @@ fn t_audit_file(): i64 {
     assert_eq(sec_ui_grant_permission_enforced(au, 31, "test-agent", "file:read", 1760000000),
       SecErr.SEC_ERR_OK, "audited grant OK");
     var got1 = t_read(t_audit_path) + before;
-    var want1 = "{\"agent_id\":\"31\",\"details\":\"Permission 'file:read' granted to 'test-agent'\",\"event_type\":\"permission_granted\",\"source\":\"security-ui\",\"timestamp\":\"2025-10-09T08:53:20+00:00\"}\n";
+    var want1 = "{\"agent_id\":\"31\",\"details\":\"Permission 'file:read' granted to 'test-agent'\",\"event_type\":\"permission_granted\",\"source\":\"security-ui\",\"timestamp\":\"2025-10-09T08:53:20+00:00\"}\n";  #skip-lint
     assert_streq(got1, want1, "grant appends its exact line");
 
     assert_eq(sec_ui_revoke_permission_enforced(au, 31, "file:read", SecPid.SEC_PID_NONE, 1760000001),
       SecErr.SEC_ERR_OK, "audited revoke OK");
     var got2 = t_read(t_audit_path) + before + strlen(want1);
     assert_streq(got2,
-      "{\"agent_id\":\"31\",\"details\":\"Permission 'file:read' revoked\",\"event_type\":\"permission_revoked\",\"source\":\"security-ui\",\"timestamp\":\"2025-10-09T08:53:21+00:00\"}\n",
+      "{\"agent_id\":\"31\",\"details\":\"Permission 'file:read' revoked\",\"event_type\":\"permission_revoked\",\"source\":\"security-ui\",\"timestamp\":\"2025-10-09T08:53:21+00:00\"}\n",  #skip-lint
       "revoke appends after the grant line");
 
     var mid = strlen(t_read(t_audit_path));
     assert_eq(sec_ui_emergency_kill_agent(au, 31, SecPid.SEC_PID_NONE, 1760000002),
       SecErr.SEC_ERR_OK, "audited kill OK");
     assert_streq(t_read(t_audit_path) + mid,
-      "{\"agent_id\":\"31\",\"details\":\"Agent killed via emergency kill switch\",\"event_type\":\"emergency_kill\",\"source\":\"security-ui\",\"timestamp\":\"2025-10-09T08:53:22+00:00\"}\n",
+      "{\"agent_id\":\"31\",\"details\":\"Agent killed via emergency kill switch\",\"event_type\":\"emergency_kill\",\"source\":\"security-ui\",\"timestamp\":\"2025-10-09T08:53:22+00:00\"}\n",  #skip-lint
       "kill appends its exact line");
     var kal = vec_get(sec_ui_alerts(au), 0);
     assert_streq(sec_alert_title(kal), "Emergency Kill: Agent 31", "kill alert title names the agent");
@@ -228,12 +351,79 @@ fn t_audit_file(): i64 {
     return 0;
 }
 
+# t_audit_path + `suffix`, unlinked so a crashed run cannot leave it in the way.
+fn t_side_path(suffix): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, t_audit_path);
+    str_builder_add_cstr(sb, suffix);
+    var p = str_data(str_builder_build(sb));
+    sys_unlink(p);
+    return p;
+}
+
+# One audit write to `path` in a forked child, so a writer that wedges fails an assertion here rather
+# than hanging the suite. -> 1009 refused, 1010 written, -1 still blocked after ~2 s (t_reap).
+fn t_audit_write_in_child(path): i64 {
+    var child = sys_fork();
+    if (child == 0) {
+        sec_ui_set_audit_log_path(path);
+        syscall(60, 10 + sec_write_audit_log("x", 1, "d", 0));
+    }
+    if (child <= 0) { return 0 - 3; }
+    return t_reap(child);
+}
+
+# ---------------------------------------------------------------------------
+# The log is a regular file named by its path: a link is not followed, and nothing can hold the writer.
+# ---------------------------------------------------------------------------
+fn t_audit_not_regular(): i64 {
+    test_group("security_ui — the audit log opens only a regular file");
+    var fifo = t_side_path(".fifo");
+    assert_eq(sys_mknodat(AT_FDCWD, fifo, 4096 | 0x180, 0), 0, "made a FIFO");
+    assert_eq(t_audit_write_in_child(fifo), 1009, "a FIFO with no reader: refused at once, not waited on");
+    var rfd = file_open(fifo, O_RDONLY | O_NONBLOCK, 0);
+    assert_eq(rfd >= 0, 1, "a reader on the FIFO");
+    assert_eq(t_audit_write_in_child(fifo), 1009, "a FIFO with a reader: refused");
+    var rb[16];
+    assert_eq(sys_read(rfd, &rb, 16) > 0, 0, "  ...and nothing was written to it");
+    sys_close(rfd);
+
+    var target = t_side_path(".target");
+    var tfd = file_open(target, O_WRONLY | O_CREAT | O_EXCL, 0x180);
+    assert_eq(tfd >= 0, 1, "made the link's target");
+    sys_close(tfd);
+    var link = t_side_path(".link");
+    assert_eq(sys_symlink(target, link), 0, "made a symlink");
+    assert_eq(t_audit_write_in_child(link), 1009, "a symlink: refused");
+    assert_eq(strlen(t_read(target)), 0, "  ...and its target is untouched");
+    var gone = t_side_path(".gone");
+    var dangling = t_side_path(".dangling");
+    assert_eq(sys_symlink(gone, dangling), 0, "made a dangling symlink");
+    assert_eq(t_audit_write_in_child(dangling), 1009, "a dangling symlink: refused");
+    assert_eq(file_open(gone, O_RDONLY, 0) < 0, 1, "  ...and it created nothing through the link");
+
+    assert_eq(t_audit_write_in_child("/dev/null"), 1009, "a device: refused");
+    assert_eq(t_audit_write_in_child("/tmp"), 1009, "a directory: refused");
+    var plain = t_side_path(".plain");
+    assert_eq(t_audit_write_in_child(plain), 1010, "a regular file: created and written");
+    assert_eq(strlen(t_read(plain)) > 0, 1, "  ...with its line");
+
+    sys_unlink(fifo);
+    sys_unlink(link);
+    sys_unlink(dangling);
+    sys_unlink(target);
+    sys_unlink(plain);
+    return 0;
+}
+
 # ---------------------------------------------------------------------------
 # Signals: the pid guard, SIGHUP on revoke, SIGKILL on kill — forked children only.
 # ---------------------------------------------------------------------------
 fn t_signals(): i64 {
     test_group("security_ui — pid guard");
-    assert_eq(sec_pid_ok(1), 1, "pid 1 signalable");
+    assert_eq(sec_pid_ok(1), 0, "pid 1 refused (init)");
+    assert_eq(sec_pid_ok(sys_getpid()), 0, "the compositor's own pid refused");
+    assert_eq(sec_pid_ok(2), 1, "pid 2 signalable");
     assert_eq(sec_pid_ok(0x7FFFFFFF), 1, "pid i32::MAX signalable");
     assert_eq(sec_pid_ok(0), 0, "pid 0 refused (own process group)");
     assert_eq(sec_pid_ok(0 - 1), 0, "pid -1 refused (every process)");
@@ -241,6 +431,12 @@ fn t_signals(): i64 {
     assert_eq(sec_pid_ok(0x80000000), 0, "pid i32::MAX + 1 refused");
     assert_eq(sec_pid_ok(0x100000001), 0, "pid 2^32 + 1 refused (would truncate to 1)");
     assert_eq(sec_pid_ok(0 - 0x80000000), 0, "pid -2^31 refused");
+
+    # A pid that has reached the compositor must not end it. Each child aims at itself and nothing
+    # else: it dying of the signal is the failure. 3 == ACTION_BLOCKED and no alert -> 1003.
+    test_group("security_ui — a kill or revoke aimed at the compositor's own pid");
+    assert_eq(t_self_effect_in_child(0), 1003, "kill of its own pid -> ACTION_BLOCKED, the child lives");
+    assert_eq(t_self_effect_in_child(1), 1000, "revoke with its own pid -> OK, no SIGHUP, the child lives");
 
     test_group("security_ui — emergency kill: invalid pid blocked, no effect");
     var size0 = strlen(t_read(t_audit_path));
@@ -356,7 +552,8 @@ fn t_evictions(): i64 {
         ei = ei + 1;
     }
     assert_eq(vec_len(sec_ui_get_active_alerts(eu)), SecCap.SEC_MAX_ALERTS, "500 active alerts");
-    sec_ui_show_security_alert(eu, sec_alert_new(9001, "Overflow alert", "", SecThreatLevel.SEC_TL_HIGH, "", 1000, 0, 0));
+    sec_ui_show_security_alert(eu,
+      sec_alert_new(9001, "Overflow alert", "", SecThreatLevel.SEC_TL_HIGH, "", 1000, 0, 0));
     var ea = sec_ui_alerts(eu);
     assert_eq(vec_len(ea), SecCap.SEC_MAX_ALERTS, "overflow: still 500");
     assert_eq(sec_alert_id(vec_get(ea, 0)), 2, "overflow: oldest (1) evicted");
@@ -368,7 +565,8 @@ fn t_evictions(): i64 {
     while (ri < SecCap.SEC_MAX_ALERTS) {
         var rres = 0;
         if (ri % 2 == 0) { rres = 1; }
-        sec_ui_show_security_alert(ru, sec_alert_new(ri + 1, "Alert", "", SecThreatLevel.SEC_TL_LOW, "", 1000, 0, rres));
+        sec_ui_show_security_alert(ru,
+          sec_alert_new(ri + 1, "Alert", "", SecThreatLevel.SEC_TL_LOW, "", 1000, 0, rres));
         ri = ri + 1;
     }
     sec_ui_show_security_alert(ru, sec_alert_new(9002, "New alert", "", SecThreatLevel.SEC_TL_MEDIUM, "", 1000, 0, 0));
@@ -489,7 +687,8 @@ fn main() {
     daimon_set_endpoint(0x0100007F, t_dport);
     var dku = sec_ui_new();
     var dai = ai_new();
-    assert_eq(sec_ui_emergency_kill_agent(dku, 77, SecPid.SEC_PID_NONE, 1760000000), SecErr.SEC_ERR_OK, "kill with no pid -> OK");
+    assert_eq(sec_ui_emergency_kill_agent(dku, 77, SecPid.SEC_PID_NONE, 1760000000), SecErr.SEC_ERR_OK,
+      "kill with no pid -> OK");
     assert_eq(daimon_delete_busy(), 1, "  ...and one DELETE is under way");
     var want = "DELETE /v1/agents/77 HTTP/1.1\r\n";
     var wlen = strlen(want);
@@ -982,7 +1181,9 @@ fn main() {
     assert_eq(sec_badge_color_for_trust(SecTrustLevel.SEC_TRUST_SANDBOXED), 0xFFCC8844, "color Sandboxed");
 
     t_audit_format();
+    t_audit_utf8();
     t_audit_file();
+    t_audit_not_regular();
     t_signals();
     t_evictions();
     t_record_fields();

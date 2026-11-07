@@ -311,6 +311,176 @@ fn t_context_equality(): i64 {
     return 0;
 }
 
+# A body at `buf` of one agent whose name is n bytes. -> its length.
+fn t_named_body(buf, n): i64 {
+    var pfx = "{\"agents\":[{\"id\":1,\"name\":\"";
+    var pl = strlen(pfx);
+    memcpy(buf, pfx, pl);
+    memset(buf + pl, 97, n);
+    memcpy(buf + pl + n, "\"}]}", 4);
+    return pl + n + 4;
+}
+
+# `{"agents":[1,1,...,1]}` of n elements, which is n + 2 structural tokens, at buf. -> its length.
+fn t_ints_body(buf, n): i64 {
+    memcpy(buf, "{\"agents\":[", 11);
+    var o = 11;
+    var i = 0;
+    while (i < n) {
+        store8(buf + o, 49);
+        store8(buf + o + 1, 44);
+        o = o + 2;
+        i = i + 1;
+    }
+    memcpy(buf + o - 1, "]}", 2);
+    return o + 1;
+}
+
+# `{"agents":[{"0":0,"1":0,...,"z":0}]}`: one agent with distinct keys, in at most cap bytes, or
+# with n keys and a final "z" when n > 0. 2 tokens a key, 5 tokens around them. -> its length.
+fn t_keys_body(buf, n, cap): i64 {
+    memcpy(buf, "{\"agents\":[{", 12);
+    var o = 12;
+    var k = 0;
+    while (o + 16 < cap && (n == 0 || k < n)) {
+        store8(buf + o, 34);
+        var d = k;
+        var w = 1;
+        while (d >= 10) { d = d / 10; w = w + 1; }
+        var q = k;
+        var j = w;
+        while (j > 0) {
+            store8(buf + o + j, 48 + q % 10);
+            q = q / 10;
+            j = j - 1;
+        }
+        o = o + w + 1;
+        memcpy(buf + o, "\":0,", 4);
+        o = o + 4;
+        k = k + 1;
+    }
+    memcpy(buf + o, "\"z\":0}]}", 8);
+    return o + 8;
+}
+
+# How many chunks of growable arena `al` are not AI_POLL_CHUNK? Only a request over the chunk size
+# makes one. The Allocator's state is the arena; its chain starts at +32, a chunk is {next, cap}.
+fn t_odd_chunks(al): i64 {
+    var odd = 0;
+    var ch = load64(load64(al + 32) + 32);
+    while (ch != 0) {
+        if (load64(ch + 8) != AI_POLL_CHUNK) { odd = odd + 1; }
+        ch = load64(ch);
+    }
+    return odd;
+}
+
+# Each body a little longer than the last: the arena chain must not take a chunk per poll. The heap
+# settles after the first poll of each arena and stays there for the whole climb.
+fn t_poll_chain(): i64 {
+    test_group("ai_features — poll: ascending bodies do not grow the arena chain");
+    var f = ai_new();
+    var buf = alloc(262144);
+    ai_poll_agents_apply(f, buf, t_named_body(buf, 17000), 1);
+    ai_poll_agents_apply(f, buf, t_named_body(buf, 17008), 2);
+    var u0 = alloc_used();
+    var n = 17016;
+    var last = 0;
+    while (n < 250000) {
+        last = ai_poll_agents_apply(f, buf, t_named_body(buf, n), 3);
+        n = n + 1032;
+    }
+    assert_eq(last, 1, "the longest body landed");
+    assert_eq(alloc_used() - u0, 0, "226 ascending polls: 0 B of heap past the first two");
+    assert_eq(str_len(ai_hud_name(t_state(f, 1))) > 240000, 1, "  ...and the HUD holds the last name whole");
+
+    # A key table of 2^15 slots and a vec of 2^15 are the largest requests a body under the token bound
+    # can make, at any position in the chain. Over the chunk size either one would add a chunk per climb.
+    test_group("ai_features — poll: the largest allocations a body can ask for fit one chunk");
+    var g = ai_new();
+    var pass = 0;
+    var u1 = 0;
+    while (pass < 2) {
+        if (pass == 1) { u1 = alloc_used(); }
+        var k = 8000;
+        while (k <= 15990) {
+            ai_poll_agents_apply(g, buf, t_ints_body(buf, k * 2), 1);
+            ai_poll_agents_apply(g, buf, t_keys_body(buf, k, 262000), 1);
+            k = k + 1000;
+        }
+        pass = pass + 1;
+    }
+    assert_eq(alloc_used() - u1, 0, "a second climb: 0 B of heap");
+    var pm = ai_poll_mem(g);
+    assert_eq(t_odd_chunks(load64(pm + AI_POLL_ARENA0)), 0, "every chunk of arena 0 is AI_POLL_CHUNK");
+    assert_eq(t_odd_chunks(load64(pm + AI_POLL_ARENA1)), 0, "every chunk of arena 1 is AI_POLL_CHUNK");
+    return 0;
+}
+
+# `{"agents":[` e,e,...,e `]}`, as many e of length el as fit in cap bytes, at buf. -> its length.
+fn t_repeat_body(buf, e, cap): i64 {
+    var el = strlen(e);
+    memcpy(buf, "{\"agents\":[", 11);
+    var o = 11;
+    while (o + el + 3 < cap) {
+        memcpy(buf + o, e, el);
+        store8(buf + o + el, 44);
+        o = o + el + 1;
+    }
+    memcpy(buf + o, e, el);
+    memcpy(buf + o + el, "]}", 2);
+    return o + el + 2;
+}
+
+# ⛔ A body's cost is its structure: 256 KiB of `{},` is 87,000 objects. Each shape here fits the
+# client's byte bound; each must be refused for its structure, costing no heap and no arena.
+fn t_poll_dense(): i64 {
+    test_group("ai_features — poll: a body far past daimon's 1000 agents is refused before parsing");
+    var f = ai_new();
+    ai_register_agent_hud(f, 5, str_from("kept"));
+    var buf = alloc(262144);
+    var u0 = alloc_used();
+    assert_eq(ai_poll_agents_apply(f, buf, t_repeat_body(buf, "{}", 262000), 1), 0 - 2, "262 KB of {}");
+    assert_eq(ai_poll_agents_apply(f, buf, t_repeat_body(buf, "[]", 262000), 1), 0 - 2, "262 KB of []");
+    assert_eq(ai_poll_agents_apply(f, buf, t_repeat_body(buf, "1", 262000), 1), 0 - 2, "262 KB of ints");
+    assert_eq(ai_poll_agents_apply(f, buf, t_repeat_body(buf, "\"a\"", 262000), 1), 0 - 2, "262 KB of strings");
+    assert_eq(ai_poll_agents_apply(f, buf, t_keys_body(buf, 0, 262000), 1), 0 - 2, "one agent of 262 KB of keys");
+    assert_eq(alloc_used() - u0, 0, "  ...at 0 B of heap");
+    assert_eq(load64(f + AI_FEAT_POLL), 0, "  ...the arenas never made");
+    assert_eq(ai_agent_hud_count(f), 1, "  ...and the HUD keeps what it had");
+
+    test_group("ai_features — poll: the token bound, exactly");
+    assert_eq(ai_poll_agents_apply(f, buf, t_ints_body(buf, AI_POLL_MAX_TOKENS - 2), 1), AI_POLL_MAX_TOKENS - 2,
+      "at the bound: lands");
+    assert_eq(ai_agent_hud_count(f), AI_POLL_MAX_TOKENS - 2, "  ...each element an agent with a minted id");
+    assert_eq(ai_poll_agents_apply(f, buf, t_ints_body(buf, AI_POLL_MAX_TOKENS - 1), 1), 0 - 2,
+      "one token past it: refused");
+    assert_eq(ai_agent_hud_count(f), AI_POLL_MAX_TOKENS - 2, "  ...and the HUD keeps what it had");
+
+    test_group("ai_features — poll: bytes inside a string are not structure");
+    var g = ai_new();
+    var n = 200000;
+    var pfx = "{\"agents\":[{\"id\":9,\"name\":\"";
+    var pl = strlen(pfx);
+    memcpy(buf, pfx, pl);
+    var i = 0;
+    while (i < n) { store8(buf + pl + i, load8("{[,:" + (i & 3))); i = i + 1; }
+    memcpy(buf + pl + n, "\"}]}", 4);
+    assert_eq(ai_poll_agents_apply(g, buf, pl + n + 4, 1), 1, "200 KB of {[,: in a name lands");
+    n = 199998;
+    i = 0;
+    while (i < n) {
+        store8(buf + pl + i, 92);
+        store8(buf + pl + i + 1, 34);
+        store8(buf + pl + i + 2, 44);
+        i = i + 3;
+    }
+    memcpy(buf + pl + n, "\"}]}", 4);
+    assert_eq(ai_poll_agents_apply(g, buf, pl + n + 4, 1), 1,
+      "  ...so does a name of \\\", that an escaped quote does not end");
+    return 0;
+}
+
 fn main() {
     alloc_init();
 
@@ -429,10 +599,12 @@ fn main() {
     var fpre3 = ai_new();
     ai_update_context(fpre3, make_window_event(32, "browser"));
     ai_update_context(fpre3, make_window_event(33, "mail"));
-    assert_eq(ai_context_type(ai_get_context(fpre3)), AI_ContextType.AI_CT_COMMUNICATION, "browser+mail -> Communication");
+    assert_eq(ai_context_type(ai_get_context(fpre3)), AI_ContextType.AI_CT_COMMUNICATION,
+      "browser+mail -> Communication");
     var fpre4 = ai_new();
     ai_update_context(fpre4, make_window_event(34, "Terminal"));
-    assert_eq(ai_context_type(ai_get_context(fpre4)), AI_ContextType.AI_CT_IDLE, "Terminal -> Idle (case-sensitive like str::contains)");
+    assert_eq(ai_context_type(ai_get_context(fpre4)), AI_ContextType.AI_CT_IDLE,
+      "Terminal -> Idle (case-sensitive like str::contains)");
 
     # --- update_context: duplicate app not added twice
     #     (test_update_context_window_opened_duplicate_app) ---
@@ -813,13 +985,15 @@ fn main() {
 
     test_group("ai_features — poll: daimon's integer id is the id; anything else is minted (Rust: Uuid::new_v4)");
     assert_eq(ai_poll_agent_id(bayan_json_v_int_new(17)), 17, "17 -> 17 (ADR 0003: Uuid -> i64)");
-    assert_eq(ai_poll_agent_id(bayan_json_v_int_new(0x4000000000000000)), 0x4000000000000000, "2^62 is below the minted base");
+    assert_eq(ai_poll_agent_id(bayan_json_v_int_new(0x4000000000000000)), 0x4000000000000000,
+      "2^62 is below the minted base");
     var mint_a = ai_poll_agent_id(0);
     var mint_b = ai_poll_agent_id(bayan_json_v_str_new(str_from("17")));
     assert_gte(mint_a, AI_HUD_ID_MINTED_BASE, "no id -> minted");
     assert_gte(mint_b, AI_HUD_ID_MINTED_BASE, "a string id -> minted");
     assert_neq(mint_a, mint_b, "each minted id is new");
-    assert_gte(ai_poll_agent_id(bayan_json_v_int_new(0)), AI_HUD_ID_MINTED_BASE, "0 -> minted (the HUD map cannot hold it)");
+    assert_gte(ai_poll_agent_id(bayan_json_v_int_new(0)), AI_HUD_ID_MINTED_BASE,
+      "0 -> minted (the HUD map cannot hold it)");
     assert_gte(ai_poll_agent_id(bayan_json_v_int_new(0 - 4)), AI_HUD_ID_MINTED_BASE, "negative -> minted");
     assert_gte(ai_poll_agent_id(bayan_json_v_float_new(f64_from(17))), AI_HUD_ID_MINTED_BASE, "17.0 -> minted");
     assert_gt(ai_poll_agent_id(bayan_json_v_int_new(AI_HUD_ID_MINTED_BASE)), AI_HUD_ID_MINTED_BASE,
@@ -828,10 +1002,12 @@ fn main() {
     test_group("ai_features — poll: cpu_percent and memory_mb keep Rust's as_f64 / as_u64 defaults");
     assert_eq(ai_poll_cpu_permille(bayan_json_v_int_new(12)), 120, "12 % -> 120 permille");
     assert_eq(ai_poll_cpu_permille(bayan_json_v_float_new(f64_div(f64_from(91), f64_from(2)))), 455, "45.5 % -> 455");
-    assert_eq(ai_poll_cpu_permille(bayan_json_v_float_new(f64_div(f64_from(0 - 5), f64_from(2)))), 0 - 25, "-2.5 % -> -25");
+    assert_eq(ai_poll_cpu_permille(bayan_json_v_float_new(f64_div(f64_from(0 - 5), f64_from(2)))), 0 - 25,
+      "-2.5 % -> -25");
     assert_eq(ai_poll_cpu_permille(bayan_json_v_str_new(str_from("12"))), 0, "a string -> 0");
     assert_eq(ai_poll_cpu_permille(0), 0, "missing -> 0");
-    assert_eq(ai_poll_cpu_permille(bayan_json_v_int_new(9223372036854775807)), AI_PCT_LIMIT, "a huge integer saturates");
+    assert_eq(ai_poll_cpu_permille(bayan_json_v_int_new(9223372036854775807)), AI_PCT_LIMIT,
+      "a huge integer saturates");
     var e19 = f64_mul(f64_from(1000000000), f64_from(10000000000));
     assert_eq(ai_poll_cpu_permille(bayan_json_v_float_new(e19)), AI_PCT_LIMIT, "a huge float saturates");
     assert_eq(ai_poll_mem_mb(bayan_json_v_int_new(512)), 512, "512 -> 512");
@@ -888,7 +1064,8 @@ fn main() {
     assert_eq(t_rfc_ok("2026-10-10X12:34:56Z"), 0, "X between date and time");
     assert_eq(t_rfc_ok("26-10-10T12:34:56Z"), 0, "a two-digit year");
     assert_eq(t_rfc_ok("2026-1a-10T12:34:56Z"), 0, "a letter in the month");
-    assert_eq(ai_poll_activity(bayan_json_v_str_new(str_from("2026-10-10T12:34:56Z")), 5), 1791635696, "a heartbeat is the activity");
+    assert_eq(ai_poll_activity(bayan_json_v_str_new(str_from("2026-10-10T12:34:56Z")), 5), 1791635696,
+      "a heartbeat is the activity");
     assert_eq(ai_poll_activity(bayan_json_v_str_new(str_from("yesterday")), 5), 5, "a bad one is now");
     assert_eq(ai_poll_activity(bayan_json_v_int_new(1791635696), 5), 5, "a number is no string: now");
     assert_eq(ai_poll_activity(0, 5), 5, "missing: now");
@@ -913,7 +1090,8 @@ fn main() {
     var ra = ai_res_new_a(sa, 1, 2, 3);
     assert_eq(ai_res_cpu(ra) + ai_res_mem(ra) * 10 + ai_res_gpu(ra) * 100, 321, "ai_res_new_a writes cpu, mem, gpu");
     var ha = ai_hud_new_a(sa, 8, str_from("h"), AI_AgentStatus.AI_AS_WAITING, str_from(""), 500, 9, ra);
-    assert_eq(ai_hud_id(ha) + ai_hud_progress(ha) + ai_hud_activity(ha), 517, "ai_hud_new_a writes id, progress, activity");
+    assert_eq(ai_hud_id(ha) + ai_hud_progress(ha) + ai_hud_activity(ha), 517,
+      "ai_hud_new_a writes id, progress, activity");
     assert_eq(ai_hud_status(ha), AI_AgentStatus.AI_AS_WAITING, "  ...and status");
     assert_eq(ai_hud_res(ha), ra, "  ...and the metrics");
 
@@ -934,7 +1112,7 @@ fn main() {
     var pf = ai_new();
     assert_eq(load64(pf + AI_FEAT_POLL), 0, "no poll arenas before the first poll");
     ai_register_agent_hud(pf, 3, str_from("stale"));
-    var b1 = "{\"agents\":[{\"id\":1,\"name\":\"a\",\"type\":\"User\",\"status\":2,\"pid\":7,\"exit_code\":null,\"limits_enforced\":true,\"contained\":true},{\"id\":2,\"name\":\"b\",\"type\":\"System\",\"status\":6,\"pid\":0,\"exit_code\":1}],\"count\":2}";
+    var b1 = "{\"agents\":[{\"id\":1,\"name\":\"a\",\"type\":\"User\",\"status\":2,\"pid\":7,\"exit_code\":null,\"limits_enforced\":true,\"contained\":true},{\"id\":2,\"name\":\"b\",\"type\":\"System\",\"status\":6,\"pid\":0,\"exit_code\":1}],\"count\":2}";  #skip-lint
     assert_eq(ai_poll_agents_apply(pf, b1, strlen(b1), 1700000123), 2, "two agents");
     assert_eq(ai_agent_hud_count(pf), 2, "the HUD holds exactly them");
     assert_eq(ai_get_agent_hud_state(pf, 3), 0, "the stale entry is cleared");
@@ -978,7 +1156,8 @@ fn main() {
     var bdupn = "{\"agents\":[{\"id\":1,\"id\":2}]}";
     assert_eq(ai_poll_agents_apply(pf, bdupn, strlen(bdupn), 1), 0 - 1, "a duplicate key inside an agent: refused too");
     var bzero = "{\"agents\":[{\"id\":01}]}";
-    assert_eq(ai_poll_agents_apply(pf, bzero, strlen(bzero), 1), 0 - 1, "a leading zero: refused, as serde_json refuses it");
+    assert_eq(ai_poll_agents_apply(pf, bzero, strlen(bzero), 1), 0 - 1,
+      "a leading zero: refused, as serde_json refuses it");
     assert_eq(ai_agent_hud_count(pf), 1, "  ...and the HUD is still untouched");
     var bne = "{\"agents\":[1,\"x\",null]}";
     assert_eq(ai_poll_agents_apply(pf, bne, strlen(bne), 9), 3, "elements that are not objects are still agents");
@@ -996,7 +1175,7 @@ fn main() {
     assert_eq(ne_ok, 3, "  ...each minted, named unknown, Idle, stamped now");
 
     test_group("ai_features — poll: fields of another type keep Rust's defaults; Rust's own shape still reads");
-    var bw = "{\"agents\":[{\"id\":2,\"name\":\"last\",\"status\":\"failed\"},{\"id\":5,\"name\":\"first\"},{\"id\":5,\"name\":\"second\",\"status\":2.0},{\"id\":6,\"name\":\"rusty\",\"status\":\"waiting\",\"current_task\":\"build\",\"last_heartbeat\":\"2026-10-10T12:34:56Z\",\"cpu_percent\":45.5,\"memory_mb\":512},{\"id\":7,\"name\":{\"x\":1},\"current_task\":3,\"status\":null}]}";
+    var bw = "{\"agents\":[{\"id\":2,\"name\":\"last\",\"status\":\"failed\"},{\"id\":5,\"name\":\"first\"},{\"id\":5,\"name\":\"second\",\"status\":2.0},{\"id\":6,\"name\":\"rusty\",\"status\":\"waiting\",\"current_task\":\"build\",\"last_heartbeat\":\"2026-10-10T12:34:56Z\",\"cpu_percent\":45.5,\"memory_mb\":512},{\"id\":7,\"name\":{\"x\":1},\"current_task\":3,\"status\":null}]}";  #skip-lint
     assert_eq(ai_poll_agents_apply(pf, bw, strlen(bw), 1700000000), 5, "five agents listed");
     assert_eq(ai_agent_hud_count(pf), 4, "  ...four ids: a repeated id keeps the last (HashMap::insert)");
     var w2 = t_state(pf, 2);
@@ -1006,7 +1185,8 @@ fn main() {
     assert_eq(str_eq(ai_hud_name(w5), str_from("second")), 1, "id 5 twice: the second");
     assert_eq(ai_hud_status(w5), AI_AgentStatus.AI_AS_IDLE, "  ...a float status 2.0 is no integer: Idle");
     var w6 = t_state(pf, 6);
-    assert_eq(ai_hud_status(w6), AI_AgentStatus.AI_AS_WAITING, "a string status reads Rust's table: waiting -> Waiting");
+    assert_eq(ai_hud_status(w6), AI_AgentStatus.AI_AS_WAITING,
+      "a string status reads Rust's table: waiting -> Waiting");
     assert_eq(str_eq(ai_hud_task(w6), str_from("build")), 1, "  ...current_task build");
     assert_eq(ai_hud_activity(w6), 1791635696, "  ...last_heartbeat is the activity");
     assert_eq(ai_res_cpu(ai_hud_res(w6)), 455, "  ...cpu 45.5 % -> 455 permille");
@@ -1036,6 +1216,9 @@ fn main() {
     assert_eq(alloc_used() - m0, 0, "twenty more polls: 0 B of heap");
     assert_eq(ai_agent_hud_count(mf), 2, "  ...and the HUD holds the last poll's two");
     assert_eq(ai_hud_activity(t_state(mf, 2)), 6, "  ...from the last poll");
+
+    t_poll_chain();
+    t_poll_dense();
 
     t_struct_literals();
     t_analyze_context();

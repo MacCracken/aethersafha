@@ -100,7 +100,8 @@ fn tsp_whitespace(): i64 {
       1, "non-ASCII White_Space separates too: each kind, and both ends of U+2000-U+200A");
     assert_eq(tsp_total(), 66, "eleven fields, 1..11");
     assert_eq(tsp_idle(), 4 + 5, "fields[3] + fields[4]");
-    assert_eq(tsp_line("cpu 1\u{200b}2 3\u{feff}4 5 6 7 8"), 1, "U+200B, one past U+200A, and U+FEFF are not White_Space");
+    assert_eq(tsp_line("cpu 1\u{200b}2 3\u{feff}4 5 6 7 8"), 1,
+      "U+200B, one past U+200A, and U+FEFF are not White_Space");
     assert_eq(tsp_total(), 5 + 6 + 7 + 8, "so 1<ZWSP>2 and 3<BOM>4 are single tokens, and not u64s");
     return 0;
 }
@@ -109,7 +110,7 @@ fn tsp_proc_stat(): i64 {
     test_group("sysprobe — the aggregate line of /proc/stat (read_cpu_usage)");
     # The first lines of the dev host's /proc/stat. guest (561442) and guest_nice (41345) are summed
     # although user and nice already contain them: that is Rust's total, so it is the port's.
-    assert_eq(tsp_stat("cpu  96455069 23393507 13437783 858127324 807108 6 63337 0 561442 41345\ncpu0 10015175 2378746 1214464 48338106 62272 0 24559 0 45468 3545\nintr 1 2 3\n"),
+    assert_eq(tsp_stat("cpu  96455069 23393507 13437783 858127324 807108 6 63337 0 561442 41345\ncpu0 10015175 2378746 1214464 48338106 62272 0 24559 0 45468 3545\nintr 1 2 3\n"),  #skip-lint
       1, "a real /proc/stat head");
     assert_eq(tsp_total(), 96455069 + 23393507 + 13437783 + 858127324 + 807108 + 6 + 63337 + 0 + 561442 + 41345,
       "total sums all ten fields");
@@ -159,24 +160,29 @@ fn tsp_meminfo(): i64 {
     test_group("sysprobe — /proc/meminfo (read_memory_usage, main.rs:252-274)");
     # ⛔ The dev host's head of /proc/meminfo. MemFree is 4.4 GB of 57.5 GB, so sysinfo's freeram would
     # read 923 permille used; MemAvailable, as Rust read it, says 208.
-    assert_eq(tsp_mem("MemTotal:       57500252 kB\nMemFree:         4418732 kB\nMemAvailable:   45512796 kB\nBuffers:         2643704 kB\nCached:         40840012 kB\n"),
+    assert_eq(tsp_mem("MemTotal:       57500252 kB\nMemFree:         4418732 kB\nMemAvailable:   45512796 kB\nBuffers:         2643704 kB\nCached:         40840012 kB\n"),  #skip-lint
       208, "MemAvailable, not MemFree: 208 permille used, not 923");
     assert_eq(tsp_mem("MemTotal: 1000 kB\nMemAvailable: 250 kB\n"), 750, "750 permille used");
     assert_eq(tsp_mem("MemAvailable: 250 kB\nMemTotal: 1000 kB\n"), 750, "in either order");
-    assert_eq(tsp_mem("MemTotal: 1000 kB\nMemFree: 250 kB\n"), 0 - 1, "no MemAvailable: UNKNOWN, never MemFree instead");
+    assert_eq(tsp_mem("MemTotal: 1000 kB\nMemFree: 250 kB\n"), 0 - 1,
+      "no MemAvailable: UNKNOWN, never MemFree instead");
     assert_eq(tsp_mem("MemFree: 250 kB\nMemAvailable: 250 kB\n"), 0 - 1, "no MemTotal: UNKNOWN");
     assert_eq(tsp_mem(""), 0 - 1, "an empty file: UNKNOWN");
     assert_eq(tsp_mem("MemTotal: 0 kB\nMemAvailable: 0 kB\n"), 0, "a zero total is 0, as Rust");
-    assert_eq(tsp_mem("MemTotal: 1000 kB\nMemAvailable: 2000 kB\n"), 0 - 1, "available above total: UNKNOWN (Rust: negative)");
+    assert_eq(tsp_mem("MemTotal: 1000 kB\nMemAvailable: 2000 kB\n"), 0 - 1,
+      "available above total: UNKNOWN (Rust: negative)");
     assert_eq(tsp_mem("MemTotal: abc kB\nMemAvailable: 250 kB\n"), 0 - 1, "a value that does not parse is missing");
-    assert_eq(tsp_mem("MemTotal:1000 kB\nMemAvailable: 250 kB\n"), 0 - 1, "the SECOND token is the value: here it is 'kB'");
+    assert_eq(tsp_mem("MemTotal:1000 kB\nMemAvailable: 250 kB\n"), 0 - 1,
+      "the SECOND token is the value: here it is 'kB'");
     assert_eq(tsp_mem("MemTotal: +1000 kB\nMemAvailable: 250 kB\n"), 750, "a '+' value parses, as u64::from_str");
-    assert_eq(tsp_mem(" MemTotal: 1000 kB\nMemAvailable: 250 kB\n"), 0 - 1, "starts_with is literal: indented is not MemTotal");
+    assert_eq(tsp_mem(" MemTotal: 1000 kB\nMemAvailable: 250 kB\n"), 0 - 1,
+      "starts_with is literal: indented is not MemTotal");
     assert_eq(tsp_mem("MemTotal: 1000 kB\nMemTotal: x kB\nMemAvailable: 250 kB\n"), 0 - 1,
       "a later MemTotal overwrites the earlier one, even with None, as Rust's loop does");
     assert_eq(tsp_mem("MemTotal: 1000 kB\nMemAvailable: 250 kB\nMemTotal: x kB\n"), 750,
       "but the scan stops once both are set");
-    assert_eq(tsp_mem("MemTotal: 9223372036854775808 kB\nMemAvailable: 1 kB\n"), 0 - 1, "a total an i64 cannot hold: UNKNOWN");
+    assert_eq(tsp_mem("MemTotal: 9223372036854775808 kB\nMemAvailable: 1 kB\n"), 0 - 1,
+      "a total an i64 cannot hold: UNKNOWN");
     assert_eq(tsp_mem("MemTotal: 1000 kB\r\nMemAvailable: 250 kB\r\n"), 750, "CRLF lines");
     assert_eq(tsp_mem("MemTotal: 1000 kB\nMemAvailable: 250"), 750, "a last line with no newline");
     return 0;

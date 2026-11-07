@@ -69,42 +69,44 @@ Port runs in this table (UTC, from `docs/benchmarks/runs.csv`):
 
 | Column | Run | Commit | Machine | Clocksource | cyrius |
 |---|---|---|---|---|---|
-| Port current | 2026-10-10T18:44:13Z | `eef1fbb+dirty` | AMD Ryzen 7 5800H with Radeon Graphics | hpet | 6.6.11 |
+| Port baseline | 2026-10-10T18:44:13Z | `eef1fbb+dirty` | AMD Ryzen 7 5800H with Radeon Graphics | hpet | 6.6.11 |
+| Port previous | 2026-11-07T02:27:52Z | `39da836` | AMD Ryzen 7 5800H with Radeon Graphics | hpet | 6.7.18 |
+| Port current | 2026-11-07T04:49:04Z | `39da836+dirty` | AMD Ryzen 7 5800H with Radeon Graphics | hpet | 6.7.18 |
 
-| Series | Rust `a460c3a` run 1 | Rust `a460c3a` run 2 | Port current |
-|---|---:|---:|---:|
-| `renderer/render_frame/1` | 490.6 µs | 352.2 µs | 2.7 ms |
-| `renderer/render_frame/5` | 917.6 µs | 694.7 µs | 4.5 ms |
-| `renderer/render_frame/10` | 1.6 ms | 1.2 ms | 6.7 ms |
-| `renderer/render_frame/20` | 2.5 ms | 2.0 ms | 11.4 ms |
-| `scene_graph/add_100_surfaces` | 16.4 µs | 14.7 µs | 9.9 µs |
-| `scene_graph/z_order_rebuild_50_surfaces` | 614.9 ns | 558.9 ns | 140.5 ns |
-| `framebuffer/create_1080p` | 188.3 µs | 125.5 µs | 2.4 ms |
-| `framebuffer/clear_1080p` | 156.6 µs | 136.2 µs | 2.2 ms |
-| `framebuffer/blit_400x300` | 77.9 µs | 64.2 µs | 290.9 µs |
-| `damage_tracker/add_50_damage_regions` | 206.8 ns | 211.2 ns | 811.6 ns |
-| `screen_capture/blit/to_1080p/256x256` | 49.8 µs | 36.4 µs | 160.5 µs |
-| `screen_capture/blit/to_1080p/640x480` | 224.5 µs | 167.7 µs | 731.0 µs |
-| `screen_capture/blit/to_1080p/1280x720` | 694.7 µs | 527.0 µs | 2.2 ms |
-| `screen_capture/png_encode/full_screen/720p` | 41.2 ms | 40.7 ms | 227.7 ms |
-| `screen_capture/png_encode/full_screen/1080p` | 94.0 ms | 92.9 ms | 520.6 ms |
-| `screen_capture/png_encode/full_screen/4K` | 405.5 ms | 389.2 ms | 2.03 s |
-| `screen_capture/bmp_encode/full_screen/720p` | 4.3 ms | 3.9 ms | 18.4 ms |
-| `screen_capture/bmp_encode/full_screen/1080p` | 10.1 ms | 9.5 ms | 41.1 ms |
-| `screen_capture/bmp_encode/full_screen/4K` | 78.9 ms | 74.8 ms | 158.6 ms |
-| `screen_capture/raw_encode/full_screen/720p` | 990.4 µs | 718.9 µs | 18.4 ms |
-| `screen_capture/raw_encode/full_screen/1080p` | 2.9 ms | 2.1 ms | 40.6 ms |
-| `screen_capture/raw_encode/full_screen/4K` | 48.0 ms | 45.7 ms | 157.4 ms |
-| `screen_capture/region_png/capture/256x256` | 3.2 ms | 3.0 ms | 16.8 ms |
-| `screen_capture/region_png/capture/640x480` | 13.2 ms | 12.4 ms | 78.3 ms |
-| `screen_capture/region_png/capture/1280x720` | 38.0 ms | 36.5 ms | 235.1 ms |
-| `screen_capture/region_png/capture/1920x1080` | 83.6 ms | 81.5 ms | 521.0 ms |
-| `screen_capture/pixel_buffer/clone/720p` | 142.5 µs | 77.7 µs | 12.6 ms |
-| `screen_capture/pixel_buffer/clone/1080p` | 786.2 µs | 349.4 µs | 28.3 ms |
-| `screen_capture/pixel_buffer/clone/4K` | 6.2 ms | 6.0 ms | 111.0 ms |
-| `screen_capture/argb_to_rgba/convert/720p` | 4.1 ms | 3.8 ms | 6.4 ms |
-| `screen_capture/argb_to_rgba/convert/1080p` | 10.2 ms | 8.6 ms | 14.5 ms |
-| `screen_capture/argb_to_rgba/convert/4K` | 37.8 ms | 34.7 ms | 53.1 ms |
+| Series | Rust `a460c3a` run 1 | Rust `a460c3a` run 2 | Port baseline | Port previous | Port current |
+|---|---:|---:|---:|---:|---:|
+| `renderer/render_frame/1` | 490.6 µs | 352.2 µs | 2.7 ms | 2.8 ms | 277.8 µs **-90%** |
+| `renderer/render_frame/5` | 917.6 µs | 694.7 µs | 4.5 ms | 4.6 ms | 461.9 µs **-90%** |
+| `renderer/render_frame/10` | 1.6 ms | 1.2 ms | 6.7 ms | 6.8 ms | 634.4 µs **-91%** |
+| `renderer/render_frame/20` | 2.5 ms | 2.0 ms | 11.4 ms | 11.5 ms | 1.1 ms **-91%** |
+| `scene_graph/add_100_surfaces` | 16.4 µs | 14.7 µs | 9.9 µs | 11.7 µs +19% | 12.5 µs +27% |
+| `scene_graph/z_order_rebuild_50_surfaces` | 614.9 ns | 558.9 ns | 140.5 ns | 143.4 ns | 143.6 ns |
+| `framebuffer/create_1080p` | 188.3 µs | 125.5 µs | 2.4 ms | 2.4 ms +3% | 2.5 ms +4% |
+| `framebuffer/clear_1080p` | 156.6 µs | 136.2 µs | 2.2 ms | 2.2 ms | 2.2 ms +4% |
+| `framebuffer/blit_400x300` | 77.9 µs | 64.2 µs | 290.9 µs | 294.3 µs | 16.4 µs **-94%** |
+| `damage_tracker/add_50_damage_regions` | 206.8 ns | 211.2 ns | 811.6 ns | 804.7 ns | 823.8 ns |
+| `screen_capture/blit/to_1080p/256x256` | 49.8 µs | 36.4 µs | 160.5 µs | 162.8 µs | 9.4 µs **-94%** |
+| `screen_capture/blit/to_1080p/640x480` | 224.5 µs | 167.7 µs | 731.0 µs | 747.0 µs | 50.4 µs **-93%** |
+| `screen_capture/blit/to_1080p/1280x720` | 694.7 µs | 527.0 µs | 2.2 ms | 2.2 ms | 155.9 µs **-93%** |
+| `screen_capture/png_encode/full_screen/720p` | 41.2 ms | 40.7 ms | 227.7 ms | 230.1 ms | 16.7 ms **-93%** |
+| `screen_capture/png_encode/full_screen/1080p` | 94.0 ms | 92.9 ms | 520.6 ms | 516.4 ms | 41.5 ms **-92%** |
+| `screen_capture/png_encode/full_screen/4K` | 405.5 ms | 389.2 ms | 2.03 s | 2.08 s | 132.5 ms **-93%** |
+| `screen_capture/bmp_encode/full_screen/720p` | 4.3 ms | 3.9 ms | 18.4 ms | 19.1 ms +4% | 5.7 ms **-69%** |
+| `screen_capture/bmp_encode/full_screen/1080p` | 10.1 ms | 9.5 ms | 41.1 ms | 42.3 ms | 11.8 ms **-71%** |
+| `screen_capture/bmp_encode/full_screen/4K` | 78.9 ms | 74.8 ms | 158.6 ms | 161.8 ms | 44.2 ms **-72%** |
+| `screen_capture/raw_encode/full_screen/720p` | 990.4 µs | 718.9 µs | 18.4 ms | 18.8 ms | 5.7 ms **-69%** |
+| `screen_capture/raw_encode/full_screen/1080p` | 2.9 ms | 2.1 ms | 40.6 ms | 41.7 ms | 11.9 ms **-71%** |
+| `screen_capture/raw_encode/full_screen/4K` | 48.0 ms | 45.7 ms | 157.4 ms | 159.4 ms | 41.3 ms **-74%** |
+| `screen_capture/region_png/capture/256x256` | 3.2 ms | 3.0 ms | 16.8 ms | 16.9 ms | 2.6 ms **-84%** |
+| `screen_capture/region_png/capture/640x480` | 13.2 ms | 12.4 ms | 78.3 ms | 78.7 ms | 11.5 ms **-85%** |
+| `screen_capture/region_png/capture/1280x720` | 38.0 ms | 36.5 ms | 235.1 ms | 233.9 ms | 32.6 ms **-86%** |
+| `screen_capture/region_png/capture/1920x1080` | 83.6 ms | 81.5 ms | 521.0 ms | 522.0 ms | 67.7 ms **-87%** |
+| `screen_capture/pixel_buffer/clone/720p` | 142.5 µs | 77.7 µs | 12.6 ms | 12.9 ms | 2.3 ms **-82%** |
+| `screen_capture/pixel_buffer/clone/1080p` | 786.2 µs | 349.4 µs | 28.3 ms | 28.9 ms | 5.0 ms **-82%** |
+| `screen_capture/pixel_buffer/clone/4K` | 6.2 ms | 6.0 ms | 111.0 ms | 112.0 ms | 17.6 ms **-84%** |
+| `screen_capture/argb_to_rgba/convert/720p` | 4.1 ms | 3.8 ms | 6.4 ms | 6.5 ms | 6.8 ms +6% |
+| `screen_capture/argb_to_rgba/convert/1080p` | 10.2 ms | 8.6 ms | 14.5 ms | 14.1 ms | 14.5 ms |
+| `screen_capture/argb_to_rgba/convert/4K` | 37.8 ms | 34.7 ms | 53.1 ms | 53.8 ms | 55.2 ms +4% |
 <!-- port-table:end -->
 
 ### What the first port run shows on its own

@@ -16,17 +16,21 @@
 # specifically (e.g. the TCP_RX_RING deadlock note), read it as a property of the OLD wire.
 
 # ⛔⛔ SURFACE GEOMETRY IS CLIENT INPUT, AND UNTIL 0.16.30 IT WAS TRUSTED. Both handshake paths checked
-# only `0 < h * stride <= 16 MB`, while every CPU-path frame re-reads `w * h * 4` bytes into that
+# only `0 < h * stride <= the cap`, while every CPU-path frame re-reads `w * h * 4` bytes into that
 # `h * stride` cache (`render_window`). A `stride < 4 * w`, or a negative `h` with a negative `stride`
 # (their product is positive), made the compositor write past its own heap block with bytes the client
 # chose; a negative CREATE_SURFACE width or height did the same by slipping under the read's clamp,
 # which only bounds from above. The wire carries signed 64-bit words, so all of it was reachable.
 # ⭐ Rust's `ShmBufferInfo::validate` enforced exactly this rule: dimensions non-zero, `stride >= width
 # * bpp`, overflow-checked products. The bounds below make every product here overflow-free:
-# w, h <= 16384 and stride <= 16 MB give h * stride <= 2^38.
+# w, h <= 16384 and stride <= 32 MiB give h * stride <= 2^39.
+# ⭐ 32 MiB IS WHAT A CLIENT CAN HOLD: agnos's GPU_SHM_SLOT_SIZE, so 3840x2160 fits, and a window maximized on
+# a 4K screen, which asks its client for that much less a titlebar, is not refused when it answers.
+# ⚠ It is also what one client can cost a frame on the CPU path (a live window is read every frame) and what
+# one cached window can hold (`AE_CLIENT_WIN_MAX`).
 enum SetuSurfK {
     SURF_MAX_DIM   = 16384;      # a side, in pixels — above 8K (7680x4320)
-    SURF_MAX_BYTES = 16777216;   # one attached buffer, h * stride: the cap both paths already had
+    SURF_MAX_BYTES = 33554432;   # one attached buffer, h * stride
 }
 
 # 1 when a CREATE_SURFACE extent is one the compositor can hold, else 0.
@@ -64,7 +68,7 @@ fn setu_srv_dispatch_close(cfd, sfd, path): i64 {
 # framing throughout (setu_srv_read_msg for frames, setu_srv_read_exact for the
 # raw payload).
 # ⛔ IT WAITS, AND ON LINUX WITHOUT A DEADLINE: each read is setu's default (setu_read_msg). For the
-# single-client probes only — never the frame loop (0.17.6, roadmap D12; see setu_clients.cyr).
+# single-client probes only — never the frame loop (CHANGELOG 0.17.6; see setu_clients.cyr).
 fn setu_srv_recv_committed(cfd, comp, out4): i64 {
     var m = setu_msg_new();
     if (setu_srv_read_msg(cfd, m) < 0) { return 0 - 6; }
@@ -87,7 +91,7 @@ fn setu_srv_recv_committed(cfd, comp, out4): i64 {
 # for no gain.
 # ⛔⛔ "SATISFIED PROMPTLY" HOLDS ONLY FOR A CLIENT THAT KEEPS GOING. One that sends CREATE_SURFACE and
 # stops holds the ATTACH read forever on Linux, where setu's read has no deadline. That wedged the Linux
-# frame loop through 0.17.5 (roadmap D12). The frame loop now serves every client through the per-client
+# frame loop through 0.17.5 (CHANGELOG 0.17.6). The frame loop now serves every client through the per-client
 # state machine this note called unnecessary (`setu_srv_handshake_drain`, setu_clients.cyr); this
 # function is left to the single-client callers.
 fn setu_srv_commit_from_create(m, cfd, comp, out4): i64 {
@@ -127,6 +131,7 @@ fn setu_srv_commit_from_create(m, cfd, comp, out4): i64 {
         # this the two silently diverge and the blit reads past the buffer — a page fault, not a
         # visual glitch. See win_buf_covers.
         win_set_client_buf(win, buf_id, w, ah);
+        win_set_buf_stride(win, stride);
     }
     if (buf_id <= 0) {
         if (setu_srv_read_exact(cfd, pix, nbytes) < 0) { return 0 - 6; }
@@ -351,7 +356,7 @@ fn setu_srv_serve_accepted(cfd, comp, fb): i64 {
 # ipc.md §9.4 names this exactly: "the preempt_disable; sti; hlt spin is the poison that made TCP
 # toxic — it starves the peer it is waiting on."
 # ⛔ AND ON LINUX IT MUST NOT EITHER, for a different reason: setu's read there has no deadline, so a
-# client that stopped mid-handshake held the frame loop forever (roadmap D12, through 0.17.5). Linux
+# client that stopped mid-handshake held the frame loop forever (through 0.17.5; CHANGELOG 0.17.6). Linux
 # clients have come through this step since 0.17.6 (setu_clients.cyr).
 #
 # ⚠ Under the retired TCP transport this was invisible: `accept()` only returned once a client had
@@ -394,16 +399,21 @@ enum SetuHsSt {
     HS_ST_SZ      = 96;
 }
 
-# A zeroed handshake scratch for one client. -> it, or 0 on OOM.
-fn setu_hs_st_new(): i64 {
-    var st = alloc(HS_ST_SZ);
-    if (st == 0) { return 0; }
+# Zero a handshake scratch for a new client. -> it.
+fn setu_hs_st_zero(st): i64 {
     var i = 0;
     while (i < HS_ST_SZ) {
         store64(st + i, 0);
         i = i + 8;
     }
     return st;
+}
+
+# A zeroed handshake scratch for one client. -> it, or 0 on OOM.
+fn setu_hs_st_new(): i64 {
+    var st = alloc(HS_ST_SZ);
+    if (st == 0) { return 0; }
+    return setu_hs_st_zero(st);
 }
 
 enum SetuHsAct {
@@ -436,6 +446,45 @@ enum SetuHsAct {
 # capped rather than latched — a first-sight latch would hide the second resize of a session, and an
 # ungated print would flood a console three procs share.
 var setu_resize_said = 0;
+
+# ⛔⛔ A LINE PER CONNECTION IS A LINE A CONNECTING PROCESS CONTROLS, AND THE FRAME LOOP IS WHAT PRINTS IT. Stdout
+# blocks when nobody drains it, so a process connecting in a loop could fill the pipe and stop the desktop.
+# Each kind of client line prints AE_SAY_MAX times in a session, then says it has stopped, so what they can
+# ever print together is a few KB, far below a pipe's 64 KB. Per kind, so that what a flood of one thing
+# uses up does not silence the others. ⚠ A cap, like `setu__resized_say`'s, not a first-sight latch: the
+# second client of a session is worth a line.
+enum AeSayK { AE_SAY_MAX = 16; }
+enum AeSay {
+    AE_SAY_CONN      = 0;
+    AE_SAY_FULL      = 1;
+    AE_SAY_PRESENT   = 2;
+    AE_SAY_HUNGUP    = 3;
+    AE_SAY_REFUSED   = 4;
+    AE_SAY_WITHDRAWN = 5;
+    AE_SAY_EVICT     = 6;
+}
+var ae_said[7];
+
+# 1 when a line of kind `k` may print. The first call past the cap prints `stopped`, which says so.
+fn ae_say_ok(k, stopped): i64 {
+    var n = load64(&ae_said + k * 8);
+    if (n > AeSayK.AE_SAY_MAX) { return 0; }
+    store64(&ae_said + k * 8, n + 1);
+    if (n < AeSayK.AE_SAY_MAX) { return 1; }
+    println(stopped);
+    return 0;
+}
+
+# Start every kind's count again, for a suite that reads the lines of one span.
+fn ae_say_reset(): i64 {
+    var i = 0;
+    while (i < 7) {
+        store64(&ae_said + i * 8, 0);
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn setu__resized_say(w, h): i64 {
     if (setu_resize_said >= 16) { return 0; }
     setu_resize_said = setu_resize_said + 1;
@@ -538,6 +587,9 @@ fn setu__hs_take(st, cfd, comp, title): i64 {
         # connection off the listener, `ae_client_accept`) still gets "setu-surface"; that is honest,
         # because nothing there knows better.
         if (setu_surface_dims_ok(setu_msg_arg(m, 0), setu_msg_arg(m, 1)) == 0) { return 0 - 12; }
+        # ⭐ Refused here while nothing is minted when every window at the cap is live. It is asked again at
+        # the first COMMIT, because a window is mapped there and handshakes overlap.
+        if (comp_client_room(comp) == 0) { return 0 - 9; }
         # ⭐ MINTED, NOT MAPPED: an id to reply with, and nothing on the desktop yet (see SetuHsSt).
         var win = comp_mint_window(comp, setu_msg_arg(m, 0), setu_msg_arg(m, 1), title);
         if (win == 0) { return 0 - 9; }
@@ -549,7 +601,7 @@ fn setu__hs_take(st, cfd, comp, title): i64 {
         # sending CREATE_SURFACE) still leaves this window minted, and a caller that disconnects the client
         # must be able to find it to release it. The state stays 0 until the reply is out.
         store64(st + HS_ST_WIN, win);
-        if (setu_srv_write_frame(cfd, setu_surface_created(win_id(win))) < 0) { return 0 - 7; }
+        if (ae_send(cfd, SETU_SURFACE_CREATED, win_id(win), 0, 0, 0) < 0) { return 0 - 7; }
         store64(st + HS_ST_STATE, 1);
         return 0;
     }
@@ -614,9 +666,9 @@ fn setu__hs_buf_irregular(buf_id): i64 {
 
 # Apply the committed attach, if a COMMIT left one due: at most ONE buffer read, into the window's own cache,
 # then the client buffer the window shows. The first one also places the window at (dstx, dsty) and maps it.
-# -> the window id (> 0) when one was applied, 0 when none was due, -14 when the cache could not be
-# allocated or the buffer not read, -15 when the buffer was refused and its name holds something that is
-# not a regular file.
+# -> the window id (> 0) when one was applied, 0 when none was due, -9 when a first present finds the cap and
+# every window live, -14 when the cache could not be allocated or the buffer not read, -15 when the buffer was
+# refused and its name holds something that is not a regular file.
 # On a negative the window keeps the client buffer it showed.
 fn setu__hs_apply(st, cfd, comp, dstx, dsty): i64 {
     if (load64(st + HS_ST_DUE) == 0) { return 0; }
@@ -627,6 +679,11 @@ fn setu__hs_apply(st, cfd, comp, dstx, dsty): i64 {
     # kept for it, and a window off the desktop never holds a cache.
     if (load64(st + HS_ST_PLACED) == 1) {
         if (comp_find_by_id(comp, win_id(win)) < 0) { return 0; }
+    }
+    # ⭐ THE CAP, BEFORE ANYTHING IS ALLOCATED OR READ. The eviction it promises waits for the map below: a
+    # client whose buffer turns out unreadable costs nobody a window.
+    if (load64(st + HS_ST_PLACED) == 0) {
+        if (comp_client_room(comp) == 0) { return 0 - 9; }
     }
     var w2 = load64(st + HS_ST_CW);
     var ah = load64(st + HS_ST_CH);
@@ -677,12 +734,19 @@ fn setu__hs_apply(st, cfd, comp, dstx, dsty): i64 {
     # ⛔ RECORD WHAT THE CLIENT ACTUALLY ATTACHED. Every later frame blits `win_w x win_h` out of this slot,
     # and the compositor can change those independently (maximize / resize). See win_buf_covers.
     win_set_client_buf(win, buf_id, w2, ah);
+    win_set_buf_stride(win, load64(st + HS_ST_CSTRIDE));
     # ⛔ PLACE ONCE, ON THE FIRST COMMIT ONLY (HS_ST_PLACED). `dstx/dsty` is the SPAWN placement, so moving
     # on every commit was harmless only while a second commit was unreachable (state 3 answered
     # HS_BAD). Now that a resize re-attaches, an unconditional move would yank a maximized window —
     # or one the operator has dragged — back to where it was launched, on its next present.
     # ⭐ AND MAP IT THEN: it enters the desktop at its place, showing its buffer (0.17.6).
     if (load64(st + HS_ST_PLACED) == 0) {
+        if (comp_client_make_room(comp) > 0) {
+            if (ae_say_ok(AeSay.AE_SAY_EVICT,
+                "aethersafha: no more 'client windows at the cap' lines -- capped") == 1) {
+                println("aethersafha: client windows at the cap -- the one whose client went first made room");
+            }
+        }
         win_move(win, dstx, dsty);
         store64(st + HS_ST_PLACED, 1);
         comp_map_window(comp, win);
@@ -788,7 +852,7 @@ fn setu_srv_serve_polled_at(cfd, comp, fb, dstx, dsty): i64 {
     return win_id(win);
 }
 
-# ⛔⛔ NOT THE FRAME LOOP'S ANY MORE (0.17.6, roadmap D12). Through 0.17.5 the Linux frame loop served
+# ⛔⛔ NOT THE FRAME LOOP'S ANY MORE (CHANGELOG 0.17.6). Through 0.17.5 the Linux frame loop served
 # every accepted client here, waiting for CREATE_SURFACE, ATTACH and COMMIT with setu's read, which on
 # Linux has no deadline. A client that connected and never sent stopped the desktop, and Ctrl+C with it.
 # Accepted clients now go through `setu_srv_handshake_drain` with the placed ones (setu_clients.cyr).
@@ -808,8 +872,8 @@ fn setu_srv_serve_accepted_at(cfd, comp, fb, dstx, dsty): i64 {
 # Forward a bhumi key event to the FOCUSED setu client over its persistent
 # connection. The mods arg carries the make/break for a FULL_KEYS surface (1 = press,
 # 0 = release); a press-only surface (the default) gets presses only with mods = 0 —
-# byte-identical to the pre-0.5.0 behaviour. No-op if the focused window is a
-# compositor-seeded window (win_cfd == 0) or nothing is focused. keysym = the bhumi HID
+# byte-identical to the pre-0.5.0 behaviour. No-op if the focused window has no
+# client (win_cfd == 0) or nothing is focused. keysym = the bhumi HID
 # usage. Returns 1 if a key was forwarded, else 0. This is the S->C leg of setu input.
 fn setu_srv_forward_key(comp, ev): i64 {
     var win = comp_focused_window(comp);
@@ -822,7 +886,7 @@ fn setu_srv_forward_key(comp, ev): i64 {
     var usage = bhumi_key_usage(ev);
     var val = 0;                                         # press-only surface: mods stays 0
     if (win_keymode(win) == 1) { val = pressed; }        # FULL_KEYS: mods = make/break (1/0)
-    setu_send(cfd, setu_input_key(win_id(win), usage, val));
+    ae_send(cfd, SETU_INPUT_KEY, win_id(win), usage, val, 0);
     return 1;
 }
 
@@ -837,7 +901,7 @@ fn setu_srv_notify_focus(comp, old_id, new_id): i64 {
         var ow = comp_get(comp, oi);
         if (ow != 0) {
             var ocfd = win_cfd(ow);
-            if (ocfd != 0) { setu_send(ocfd, setu_input_focus(old_id, 0)); }
+            if (ocfd != 0) { ae_send(ocfd, SETU_INPUT_FOCUS, old_id, 0, 0, 0); }
         }
     }
     var ni = comp_find_by_id(comp, new_id);
@@ -845,7 +909,7 @@ fn setu_srv_notify_focus(comp, old_id, new_id): i64 {
         var nw = comp_get(comp, ni);
         if (nw != 0) {
             var ncfd = win_cfd(nw);
-            if (ncfd != 0) { setu_send(ncfd, setu_input_focus(new_id, 1)); }
+            if (ncfd != 0) { ae_send(ncfd, SETU_INPUT_FOCUS, new_id, 1, 0, 0); }
         }
     }
     return 0;

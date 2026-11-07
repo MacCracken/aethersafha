@@ -273,10 +273,12 @@ fn main() {
     test_group("daimon — the request bytes");
     var qb = alloc(DMN_REQ_CAP);
     var ql = dmn_req_write(qb, "GET", "/v1/agents", 0, 0, 8090);
-    assert_eq(t_streq_n(qb, ql, "GET /v1/agents HTTP/1.1\r\nHost: localhost:8090\r\nAccept: */*\r\nConnection: close\r\n\r\n"), 1,
+    assert_eq(t_streq_n(qb, ql,
+        "GET /v1/agents HTTP/1.1\r\nHost: localhost:8090\r\nAccept: */*\r\nConnection: close\r\n\r\n"), 1,
       "GET: reqwest's Host and Accept, plus Connection: close");
     var dl = dmn_req_write(qb, "DELETE", "/v1/agents/", 1, 17, 8090);
-    assert_eq(t_streq_n(qb, dl, "DELETE /v1/agents/17 HTTP/1.1\r\nHost: localhost:8090\r\nAccept: */*\r\nConnection: close\r\n\r\n"), 1,
+    assert_eq(t_streq_n(qb, dl,
+        "DELETE /v1/agents/17 HTTP/1.1\r\nHost: localhost:8090\r\nAccept: */*\r\nConnection: close\r\n\r\n"), 1,
       "DELETE /v1/agents/<id> (security_ui.rs:552)");
     var big = dmn_req_write(qb, "DELETE", "/v1/agents/", 1, 0 - 9223372036854775807 - 1, 65535);
     assert_lt(big, DMN_REQ_CAP, "the longest request fits the slot's buffer");
@@ -401,7 +403,8 @@ fn main() {
     assert_eq(ai_get_agent_hud_state(ai, 99), 0, "  ...registered-before was cleared");
     assert_eq(t_hud_is(ai, 11, "pending-agent", AI_AgentStatus.AI_AS_IDLE), 1, "11 pending -> Idle");
     assert_eq(t_hud_is(ai, 12, "starting-agent", AI_AgentStatus.AI_AS_IDLE), 1, "12 starting -> Idle");
-    assert_eq(t_hud_is(ai, 13, "run \"fast\"", AI_AgentStatus.AI_AS_ACTING), 1, "13 running -> Acting, its escaped name decoded");
+    assert_eq(t_hud_is(ai, 13, "run \"fast\"", AI_AgentStatus.AI_AS_ACTING), 1,
+      "13 running -> Acting, its escaped name decoded");
     assert_eq(t_hud_is(ai, 14, "paused-agent", AI_AgentStatus.AI_AS_IDLE), 1, "14 paused -> Idle");
     assert_eq(t_hud_is(ai, 15, "stopping-agent", AI_AgentStatus.AI_AS_IDLE), 1, "15 stopping -> Idle");
     assert_eq(t_hud_is(ai, 16, "stopped-agent", AI_AgentStatus.AI_AS_IDLE), 1, "16 stopped -> Idle");
@@ -444,7 +447,8 @@ fn main() {
     t_resp_len = t_resp_len - 2;                       # two body bytes short of Content-Length
     assert_eq(t_exchange(ai, lfd), DmnResult.DMN_R_PROTOCOL, "a body short of its Content-Length");
     assert_eq(ai_agent_hud_count(ai), 7, "  ...the HUD keeps its seven");
-    var ck = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nd\r\n{\"agents\":[]}\r\n0\r\n\r\n";
+    var ck =
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nd\r\n{\"agents\":[]}\r\n0\r\n\r\n";
     t_resp = ck;
     t_resp_len = strlen(ck);
     assert_eq(t_exchange(ai, lfd), DmnResult.DMN_R_PROTOCOL, "a chunked answer is refused, not misread");
@@ -492,8 +496,47 @@ fn main() {
     memset(huge, 32, DMN_RESP_MAX + 16);
     memcpy(huge, nb, strlen(nb));
     t_answer("HTTP/1.1 200 OK", huge, DMN_RESP_MAX, 1);
-    assert_eq(t_exchange(ai, lfd), DmnResult.DMN_R_TOO_LARGE, "a body of DMN_RESP_MAX plus its head is over the default bound");
+    assert_eq(t_exchange(ai, lfd), DmnResult.DMN_R_TOO_LARGE,
+      "a body of DMN_RESP_MAX plus its head is over the default bound");
     assert_eq(ai_agent_hud_count(ai), 1, "  ...the HUD keeps what it had");
+
+    # -----------------------------------------------------------------------
+    test_group("daimon — daimon's full answer lands; a body past it is refused");
+    # max_agents, daimon src/config.cyr:13 and src/api_agent.cyr:152, as daimon writes them, with each
+    # agent's every optional field and a name that fills the byte bound.
+    var fsb = str_builder_new();
+    str_builder_add_cstr(fsb, "{\"agents\":[");
+    var fname = alloc(140);
+    memset(fname, 110, 139);
+    store8(fname + 139, 0);
+    var fi = 1;
+    while (fi <= 1000) {
+        if (fi > 1) { str_builder_add_cstr(fsb, ","); }
+        t_agent_json(fsb, fi, fname, "Service", 2, 100000 + fi, 0 - 1, 1, 1);
+        fi = fi + 1;
+    }
+    str_builder_add_cstr(fsb, "],\"count\":1000}");
+    var full = str_builder_build(fsb);
+    assert_gt(str_len(full), 250000, "the full answer is close to the byte bound");
+    t_answer("HTTP/1.1 200 OK", str_data(full), str_len(full), 1);
+    assert_eq(t_exchange(ai, lfd), DmnResult.DMN_R_FED, "1000 agents at their largest land");
+    assert_eq(ai_agent_hud_count(ai), 1000, "  ...all of them on the HUD");
+    assert_eq(t_hud_is(ai, 1000, fname, AI_AgentStatus.AI_AS_ACTING), 1, "  ...the last one read whole");
+    var dense = alloc(262144);
+    memset(dense, 32, 262144);
+    memcpy(dense, "{\"agents\":[", 11);
+    var dn = 0;
+    while (dn < 87000) {
+        memcpy(dense + 11 + dn * 3, "{},", 3);
+        dn = dn + 1;
+    }
+    memcpy(dense + 11 + dn * 3 - 1, "]}", 2);
+    t_answer("HTTP/1.1 200 OK", dense, 11 + dn * 3 + 1, 1);
+    assert_eq(t_exchange(ai, lfd), DmnResult.DMN_R_TOO_LARGE,
+      "87,000 empty objects: over the bound, though under its bytes");
+    assert_eq(ai_agent_hud_count(ai), 1000, "  ...the HUD keeps what it had");
+    var one = "{\"agents\":[{\"id\":5,\"name\":\"kept\"}]}";
+    assert_eq(ai_poll_agents_apply(ai, one, strlen(one), 1), 1, "back to the one agent the next group expects");
 
     # -----------------------------------------------------------------------
     test_group("daimon — the emergency kill's DELETE (fire-and-forget, never blocking)");

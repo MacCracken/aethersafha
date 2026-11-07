@@ -74,6 +74,13 @@ No further change is planned, and any change will be marked ⛔ in `CHANGELOG.md
 order plus one, **not X11**. The wheel is its own kind (`SETU_INPUT_PTR_SCROLL`, 12). Focus, decorations and drags
 are left-button only; the other buttons are forwarded and do nothing else.
 
+## Pointer
+
+- **PTR_BTN and PTR_SCROLL carry no position,** so a client reads the position from the PTR_MOVE before them. The
+  compositor sends one first whenever the window or the point changed since the last it told that client.
+- **A release goes to the window that got the press,** with its point clamped into that window's content, even if the
+  pointer has left it. A client whose press went elsewhere gets no release.
+
 ## 4. The largest surface a client may attach
 
 A client's pixels live in a kernel shared-memory slot the **client** creates. setu's `setu_client_present` tries
@@ -87,8 +94,24 @@ A client's pixels live in a kernel shared-memory slot the **client** creates. se
 - **16 slots system-wide** (`SHM_MAX`), shared by every client. A resize holds two for one present (setu 0.8.11).
 - **Over the cap**, the create fails and `setu_client_present` returns **−45** with nothing sent (setu ≥ 0.8.11), so a
   client can retry smaller.
+- **The compositor refuses an ATTACH past 32 MiB** (`SURF_MAX_BYTES`), the same as `#86`'s slot, so a 3840×2160 client
+  survives its own maximize. A refused ATTACH disconnects the client.
 - The compositor sends **no initial `SETU_CONFIGURE`** stating a cap. It sends `SETU_CONFIGURE(id, w, h, state)` when
   it resizes a window (maximize, a grip drag); a client that cannot allocate the new size keeps presenting its old one.
+
+## 5. What ends a client
+
+- **Disconnected at once:** a handshake error, or an ATTACH the geometry check refuses. A client that was given a
+  surface id and has not presented gets SETU_CLOSE first; one that has presented gets end of file.
+- **The handshake budget** is 10 s from accept to the first COMMIT, on Linux.
+- **The close budget** is 2 s: a Linux client that ignores SETU_CLOSE gets end of file 2 s after its window leaves
+  the desktop.
+- **Refused connections, on Linux.** Eight rows are live at once; a ninth connection is accepted and closed. A
+  connection is also closed if the compositor cannot allocate its handshake state.
+- **A client that hangs up keeps its window,** showing its last pixels on a CPU frame and the theme fill on a GPU
+  frame, until the operator closes it or a new client needs the room.
+- **At most 16 client windows.** The 17th evicts the window whose client went first, silently. CREATE_SURFACE is
+  refused with **−9** only when all 16 are live.
 
 ## Not the compositor's (recorded so the picture is whole)
 

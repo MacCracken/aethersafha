@@ -17,6 +17,7 @@
 #   * `--client` and `--spawn` repeat and keep every value, in order.
 #   * A value must not look like a flag (`-` plus anything): `--client --frames 5` is a missing value,
 #     not a client called `--frames` followed by a stray `5`.
+#   * `--clients` and `--frames` do not run together, in either order and whatever the count.
 #
 # ⚠ Needs `src/version_str.cyr` included first (`--version` prints `_VERSION_STR_AETHERSAFHA`).
 # ⚠ Rust's `--backend`, `--kiosk`, `--no-ai`, `--high-contrast` and `--accessibility` are RETIRED (ADR 0004)
@@ -35,13 +36,14 @@ enum FlgErr {
     FLG_E_NEEDS_VAL  = 2;   # a value-taking flag with nothing (or another flag) after it
     FLG_E_NOT_NUMBER = 3;   # a numeric flag whose value is not a non-negative decimal
     FLG_E_STRAY      = 4;   # a bare word no flag consumed
+    FLG_E_CONFLICT   = 5;   # two flags that do not run together
 }
 
 enum FlgOff {
     FLG_O_KIND      = 0;    # FlgKind
     FLG_O_ERR       = 8;    # FlgErr
     FLG_O_ERR_ARG   = 16;   # cstr: the offending argument (the flag itself for NEEDS_VAL)
-    FLG_O_ERR_FLAG  = 24;   # cstr: the flag a NOT_NUMBER value belonged to, else 0
+    FLG_O_ERR_FLAG  = 24;   # cstr: the flag a NOT_NUMBER value belonged to, or CONFLICT's other flag, else 0
     FLG_O_SELFTEST  = 32;   # 0/1
     FLG_O_CLIENTS   = 40;   # 0/1  `--clients` probe
     FLG_O_SECURE    = 48;   # 0/1  `--secure` / `-s`
@@ -185,6 +187,11 @@ fn flg_parse(n, av): i64 {
         }
         i = i + step;
     }
+    # ⛔ `--frames` stops the loop at a count, and the probe's verdict says its whole budget was spent: the pair
+    # answered 93 from a run it had cut short. The probe has its own stops, so the bound has nothing to add.
+    if ((flg_clients(f) == 1) && (flg_frames(f) >= 0)) {
+        return flg_fail(f, FlgErr.FLG_E_CONFLICT, "--frames", "--clients");
+    }
     return f;
 }
 
@@ -205,7 +212,7 @@ fn flg_usage_print(fd): i64 {
     flg_say(fd, "  --clients           probe: start puka + crab, exit 95..91 with the verdict\n");
     flg_say(fd, "  --client PATH       (Linux) launch the setu client at PATH; repeatable\n");
     flg_say(fd, "  --spawn NAME        (agnos) start a registered app at boot; repeatable\n");
-    flg_say(fd, "  --frames N          (Linux) stop after N frames; 0 = run until quit\n");
+    flg_say(fd, "  --frames N          (Linux) stop after N frames; 0 = run until quit; not with --clients\n");
     flg_say(fd, "  --opacity N         default window opacity, 0..255\n");
     flg_say(fd, "  --wallpaper [FILE]  PNG or JPEG backdrop; with no FILE, a gradient\n");
     flg_say(fd, "  --fullclear         diagnostic: repaint the whole frame every frame\n");
@@ -229,6 +236,11 @@ fn flg_error_print(f, fd): i64 {
         flg_say(fd, "aethersafha: ");
         flg_say(fd, flg_err_flag(f));
         flg_say(fd, " wants a number (0 or more), got: ");
+    }
+    elif (e == FlgErr.FLG_E_CONFLICT) {
+        flg_say(fd, "aethersafha: ");
+        flg_say(fd, flg_err_flag(f));
+        flg_say(fd, " does not run with: ");
     }
     else { flg_say(fd, "aethersafha: unexpected argument: "); }
     flg_say(fd, flg_err_arg(f));

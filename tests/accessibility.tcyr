@@ -14,6 +14,21 @@ fn t_ok(x): i64 {
     return 0;
 }
 
+# Write n >= 0 in decimal at b. -> the digits written.
+fn t_put_dec(b, n): i64 {
+    var w = 1;
+    var q = n;
+    while (q >= 10) { q = q / 10; w = w + 1; }
+    q = n;
+    var i = w;
+    while (i > 0) {
+        i = i - 1;
+        store8(b + i, 48 + q % 10);
+        q = q / 10;
+    }
+    return w;
+}
+
 fn main() {
     alloc_init();
 
@@ -222,6 +237,40 @@ fn main() {
     assert_eq(streq(vec_get(pending, 0), "Window opened"), 1, "pending[0] == \"Window opened\"");
     assert_eq(streq(vec_get(pending, 1), "Focus moved to OK button"), 1, "pending[1] == \"Focus moved to OK button\"");
     assert_eq(a11y_tree_announcement_count(atree), 0, "queue drained to 0");
+
+    test_group("a11y — the queue is a ring of the newest announcements");
+    var rt = a11y_tree_new();
+    var num = alloc(32);
+    var ri = 0;
+    while (ri < AX_ANNOUNCE_CAP + 5) {
+        store8(num + 0, 110);                         # 'n', then the index in decimal
+        store8(num + 1 + t_put_dec(num + 1, ri), 0);
+        a11y_tree_announce(rt, num);                  # one reused buffer: the queue keeps a copy
+        ri = ri + 1;
+    }
+    assert_eq(a11y_tree_announcement_count(rt), AX_ANNOUNCE_CAP, "held at the cap");
+    var ring = a11y_tree_pending_announcements(rt);
+    assert_eq(vec_len(ring), AX_ANNOUNCE_CAP, "a drain hands over the whole ring");
+    assert_eq(streq(vec_get(ring, 0), "n5"), 1, "the five oldest went");
+    store8(num + 1 + t_put_dec(num + 1, AX_ANNOUNCE_CAP + 4), 0);
+    assert_eq(streq(vec_get(ring, AX_ANNOUNCE_CAP - 1), num), 1, "the newest is last");
+
+    test_group("a11y — a window cycle's announcements cost nothing once the ring is full");
+    ri = 0;
+    while (ri <= AX_ANNOUNCE_CAP) {                   # one past: a block is made before one is evicted
+        a11y_tree_window_close(rt, 999, "Term");
+        ri = ri + 1;
+    }
+    var ru = alloc_used();
+    var rp = _fl_arena_pos;
+    ri = 0;
+    while (ri < 2000) {
+        a11y_tree_window_close(rt, 999, "Term\n");
+        ri = ri + 1;
+    }
+    assert_eq(alloc_used() - ru, 0, "2000 more: 0 B of heap");
+    assert_eq(_fl_arena_pos - rp, 0, "  ...and no new freelist block");
+    assert_eq(a11y_tree_announcement_count(rt), AX_ANNOUNCE_CAP, "  ...still at the cap");
     var again = a11y_tree_pending_announcements(atree);
     assert_eq(vec_len(again), 0, "a second drain is empty");
     assert_eq(vec_len(pending), 2, "the first drain's vec is not emptied by the second");
@@ -316,7 +365,8 @@ fn main() {
     a11y_tree_follow_focus(mt, 7);
     assert_eq(a11y_tree_focused_id(mt), 7, "follow_focus(7) focuses the window node");
     a11y_tree_follow_focus(mt, 99);
-    assert_eq(a11y_tree_focused_id(mt), 7, "follow_focus of an id with no node leaves focus (Rust `let _ = set_focus`)");
+    assert_eq(a11y_tree_focused_id(mt), 7,
+      "follow_focus of an id with no node leaves focus (Rust `let _ = set_focus`)");
     a11y_tree_follow_focus(mt, 0);
     assert_eq(a11y_tree_focused_id(mt), 0, "follow_focus(0) clears focus");
     assert_eq(a11y_node_is_focused(mn), 0, "  ...and unfocuses the node");
@@ -377,6 +427,38 @@ fn main() {
     assert_eq(vec_get(a11y_node_children(pnode), 0), childid, "child id recorded");
     var gotchild = a11y_tree_get_node(wtree, childid);
     assert_eq(a11y_node_parent(gotchild), pwin, "child parent points to window");
+
+    test_group("accessibility — a window's node is reused, and comes back as new");
+    var pt = a11y_tree_new();
+    a11y_tree_window_open(pt, 1, "first title, long enough to need its own room", 10, 20, 30, 40);
+    var pn = a11y_tree_get_node(pt, 1);
+    a11y_node_add_child(pn, 99);
+    a11y_state_set_hidden(a11y_node_state(pn), 1);
+    a11y_state_set_checked(a11y_node_state(pn), AxTristate.AX_TRISTATE_TRUE);
+    a11y_state_set_value(a11y_node_state(pn), "stale");
+    a11y_tree_set_focus(pt, 1);
+    a11y_tree_window_close(pt, 1, a11y_node_name(pn));
+    assert_eq(a11y_tree_focused_id(pt), 0, "closing the focused window clears tree focus");
+    a11y_tree_window_open(pt, 2, "second", 1, 2, 3, 4);
+    var pn2 = a11y_tree_get_node(pt, 2);
+    assert_eq(pn2, pn, "the retired node is the one reused");
+    assert_eq(a11y_node_id(pn2), 2, "  with the new id");
+    assert_eq(streq(a11y_node_name(pn2), "second"), 1, "  and the new name");
+    assert_eq(vec_len(a11y_node_children(pn2)), 0, "  and no old children");
+    assert_eq(vec_len(load64(pn2 + AX_N_ACTIONS)), 3, "  and exactly its three actions");
+    assert_eq(a11y_state_hidden(a11y_node_state(pn2)), 0, "  and not the old hidden flag");
+    assert_eq(a11y_state_checked(a11y_node_state(pn2)), AxTristate.AX_TRISTATE_NONE, "  and not the old checked state");
+    assert_eq(a11y_state_value(a11y_node_state(pn2)), 0, "  and not the old value");
+    assert_eq(rect_x(load64(pn2 + AX_N_BOUNDS)), 1, "  and the new bounds");
+    assert_eq(rect_h(load64(pn2 + AX_N_BOUNDS)), 4, "  all of them");
+    a11y_tree_add(pt, AxRole.AX_ROLE_WINDOW, "not from a window open");
+    var plast = vec_get(a11y_tree_nodes(pt), 1);
+    a11y_tree_window_close(pt, a11y_node_id(plast), "gone");
+    a11y_tree_window_open(pt, 3, "third", 0, 0, 1, 1);
+    assert_neq(a11y_tree_get_node(pt, 3), plast,
+      "a node window_open did not make is not reused: its name is not ours to write");
+    a11y_tree_window_close(pt, 404, "no such node");
+    assert_eq(vec_len(a11y_tree_nodes(pt)), 2, "closing an id with no node changes nothing");
 
     return assert_summary();
 }

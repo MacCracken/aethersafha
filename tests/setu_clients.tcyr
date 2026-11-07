@@ -1,6 +1,6 @@
 # aethersafha — the client table and its per-frame service (src/setu_clients.cyr), over real sockets.
 #
-# ⛔⛔ WHY THIS SUITE EXISTS (0.17.6, roadmap D12). Through 0.17.5 the Linux frame loop served an accepted
+# ⛔⛔ WHY THIS SUITE EXISTS (CHANGELOG 0.17.6). Through 0.17.5 the Linux frame loop served an accepted
 # client to completion inside one frame, with setu's waiting read, which has no deadline on Linux. A
 # process that connected and never sent stopped the desktop, and Ctrl+C with it. The frame loop itself
 # cannot be driven by a suite, so the service it runs per client was lifted into a module, and this
@@ -194,6 +194,7 @@ var sc_cap_w = 0 - 1;
 var sc_cap_keep = 0 - 1;
 var sc_cap_buf = 0;
 fn sc_capture_begin(): i64 {
+    ae_say_reset();                                 # the lines are capped for a session: this is a new span
     var fds = alloc(16);
     if (sys_pipe(fds) != 0) { return 0 - 1; }
     sc_cap_r = load32(fds);
@@ -403,7 +404,8 @@ fn main(): i64 {
     var hwin = comp_get(hc, comp_find_by_id(hc, hid));
     assert_eq(hwin, row_win(hrow), "the window minted at create_surface is on the desktop now");
     assert_eq(win_cfd(hwin), hsrv, "the window keeps the connection, for input");
-    assert_eq(win_x(hwin), 40, "and enters the desktop where the caller said: the frame that first draws it draws it there");
+    assert_eq(win_x(hwin), 40,
+      "and enters the desktop where the caller said: the frame that first draws it draws it there");
     assert_eq(win_bufid(hwin), hbid, "showing the buffer its commit applied");
     assert_neq(win_pix(hwin), 0, "with its cache filled");
     assert_eq(sc_serve(hc, hrow, t), 0, "frame 6: nothing new");
@@ -487,12 +489,13 @@ fn main(): i64 {
     var kid = setu_msg_arg(sc_m, 0);
     assert_eq(kid, win_id(kwin), "naming that window");
     assert_eq(sc_serve(kc, krow, 1499), 0, "it sends nothing more: in progress until the budget");
-    assert_eq(row_dead(krow), 0, "not yet retired");
+    assert_eq(row_dead(krow), 0, "the row stands");
     sc_capture_begin();
     sc_serve(kc, krow, 1500);
     var ksaid = sc_capture_end();
     assert_eq(row_dead(krow), 1, "at the budget it is retired");
-    assert_eq(sc_has(ksaid, "withdrew the surface it never presented"), 1, "and the compositor says it withdrew the surface");
+    assert_eq(sc_has(ksaid, "withdrew the surface it never presented"), 1,
+      "and the compositor says it withdrew the surface");
     assert_eq(comp_find_by_id(kc, kid), 0 - 1, "it was never on the desktop");
     assert_eq(comp_count(kc), 1, "only the other window is");
     assert_eq(comp_focused_id(kc), win_id(other), "still focused");
@@ -626,7 +629,8 @@ fn main(): i64 {
     setu_send(fcli, setu_create_surface(100, 50, 0));
     sc_serve(fc, frow, 1001);
     prev = setu_srv_focus_sync(fc, prev);                         # the frame's detector, as in main
-    assert_eq(sc_last_focus(xcli), 0 - 1, "X is told nothing: a half-made window is not on the desktop and takes no focus");
+    assert_eq(sc_last_focus(xcli), 0 - 1,
+      "X is told nothing: a half-made window is not on the desktop and takes no focus");
     assert_eq(sc_read_kind(fcli, 1000), SETU_SURFACE_CREATED, "F reads surface_created, and no focus message");
     var fid = setu_msg_arg(sc_m, 0);
     var fsrv = load64(&chan_fd + frow * 8);
@@ -682,7 +686,8 @@ fn main(): i64 {
     var mabuf = sc_attach(macli, maid, 80, 40, 1);
     assert_eq(sc_frame(mc, 1003, marows, 2), 1, "A presents");
     assert_eq(sc_last_id, maid, "A");
-    assert_eq(comp_focused_id(mc), maid, "and holds focus: its own window, though M1 was focused and B created after A");
+    assert_eq(comp_focused_id(mc), maid,
+      "and holds focus: its own window, though M1 was focused and B created after A");
     mprev = setu_srv_focus_sync(mc, mprev);
     assert_eq(sc_last_focus(macli), 1, "A is told it HAS focus");
     assert_eq(sc_last_focus(m1cli), 0, "M1 is told it lost it");
@@ -724,7 +729,8 @@ fn main(): i64 {
     assert_eq(row_dead(frow), 1, "a hostile re-attach on a live window retires the client");
     var fwin = comp_get(fc, comp_find_by_id(fc, fid));
     assert_neq(fwin, 0, "its window stays");
-    assert_eq(win_bufid(fwin), fbuf, "showing the buffer it validly attached");
+    assert_eq(win_bufid(fwin), 0, "naming no buffer now: its client is gone, and so is what the id meant");
+    assert_neq(win_pix(fwin), 0, "showing what it validly cached");
     assert_eq(win_buf_w(fwin), 100, "at the size it validly attached");
     assert_eq(win_cfd(fwin), 0, "detached");
     assert_eq(sc_open(fsrv), 0, "and its connection closed");
@@ -758,7 +764,8 @@ fn main(): i64 {
     setu_buf_close(cbuf);
 
     # -----------------------------------------------------------------------
-    test_group("setu clients — a half-made window cannot be closed by hand: it is not on the desktop until it presents");
+    test_group(
+      "setu clients — a half-made window cannot be closed by hand: it is not on the desktop until it presents");
     var wc = comp_new();
     assert_eq(sc_pair(), 0, "socketpair");
     var wcli = sc_cli;
@@ -781,7 +788,8 @@ fn main(): i64 {
     # the reuse, keyed on w and h alone, read `h * stride` bytes into a cache sized for a narrower stride.
     # ⭐ The oracles are the kernel's: whether a cache's pages are still mapped (/proc/self/maps — a block over
     # 4 KB is its own mapping, unmapped when freed) and the process's resident memory.
-    test_group("setu clients — a client's cache is reused, replaced (and freed) when too small, and freed with its window");
+    test_group(
+      "setu clients — a client's cache is reused, replaced (and freed) when too small, and freed with its window");
     var mm = comp_new();
     assert_eq(sc_pair(), 0, "socketpair");
     var mmcli = sc_cli;
@@ -820,7 +828,8 @@ fn main(): i64 {
     println("setu_clients: RSS kB before and after 32 frames alternating 2048x2048 / 2048x2047:");
     println_int(rss0);
     println_int(rss1);
-    assert_lt(rss1 - rss0, 65536, "32 alternating resizes keep the memory they had (under 64 MB; a cache kept per resize is 16 MB)");
+    assert_lt(rss1 - rss0, 65536,
+      "32 alternating resizes keep the memory they had (under 64 MB; a cache kept per resize is 16 MB)");
     assert_eq(win_pix(mmwin), mmpix, "the cache was reused: both sizes fit in it");
     assert_eq(win_bufid(mmwin), mbA, "and the window shows the last buffer committed");
     assert_eq(row_dead(mmrow), 0, "the client is live");
@@ -964,7 +973,8 @@ fn main(): i64 {
     println_int(aused);
     assert_eq(aused, 0, "0 B per record: setu's poll reads into the stack, the take into one message");
     # ⚠ Non-vacuous only if the records WERE served: nothing may be left queued on the server's side.
-    assert_eq(setu_poll_input(load64(&chan_fd + acrow * 8), sc_m), 0, "  ...and every record was drained (none left pending)");
+    assert_eq(setu_poll_input(load64(&chan_fd + acrow * 8), sc_m), 0,
+      "  ...and every record was drained (none left pending)");
     sys_close(accli);
     assert_lte(sc_serve_until_dead(ac, acrow, 1004, 3), 3, "it hangs up and is retired");
     setu_buf_close(acbuf);
@@ -975,7 +985,8 @@ fn main(): i64 {
     # 0.8.13), which must refuse each at once and leave `dst` as it was; this group guards that, and that
     # the handshake's classifier (`setu__hs_buf_irregular`) opens nothing. ⭐ The oracles are the clock and
     # the watchdog (a reader that waits never returns), inotify IN_OPEN (what was opened), and `dst`'s bytes.
-    test_group("setu clients — a FIFO, a symlink or a short file at a buffer's name is refused at once; nothing waits on it");
+    test_group(
+      "setu clients — a FIFO, a symlink or a short file at a buffer's name is refused at once; nothing waits on it");
     var QSEN = 0x5A5A5A5A5A5A5A5A;
     var qdst = alloc(72);
     var qbase = sc_fifo_id(sys_getpid());
@@ -1083,8 +1094,8 @@ fn main(): i64 {
     sc_serve(qc, lrow, 1003);
     assert_lt(sc_max_us, SC_PROMPT_US, "its re-attach to the FIFO returns at once");
     assert_eq(row_dead(lrow), 1, "and disconnects it");
-    assert_eq(win_bufid(lwin), qreal, "its window keeps the buffer it validly showed");
-    assert_neq(win_pix(lwin), 0, "and its cache");
+    assert_eq(win_bufid(lwin), 0, "its window names no buffer now");
+    assert_neq(win_pix(lwin), 0, "and keeps its cache");
     sys_close(lcli);
     sys_unlink(qfifo);
     sys_unlink(qlink);

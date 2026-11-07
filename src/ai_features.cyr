@@ -250,8 +250,10 @@ enum AI_EvtOff {
     AI_EVT_SZ       = 40;
 }
 
+# A ContextEvent, off the freelist: once ai_update_context has it the history owns it, and frees it
+# when the cap drops it. The source and metadata are the caller's and are not freed.
 fn ai_event_new(id, etyp, source, ts, meta): i64 {
-    var p = alloc(AI_EVT_SZ);
+    var p = fl_alloc(AI_EVT_SZ);
     if (p == 0) { return 0; }
     store64(p + AI_EVT_ID, id);
     store64(p + AI_EVT_TYPE, etyp);
@@ -476,6 +478,7 @@ fn ai_update_context(f, event): i64 {
         var drop = len - AI_HISTORY_CAP;
         var d = 0;
         while (d < drop) {
+            fl_free(vec_get(history, 0));
             vec_remove(history, 0);
             d = d + 1;
         }
@@ -1048,7 +1051,11 @@ fn ai_poll_agent_state(a, agent, now): i64 {
 # ⭐ SO A POLL ALLOCATES NOTHING THAT LASTS. On the never-freeing bump every poll would leak its
 # parse tree and its states, every 5 s for the life of the desktop, and a body at the client's
 # 256 KiB bound a whole tree at a time (while daimon is down, any local process may hold 8090).
-# Two arenas hold at most two bodies' worth, reused once they have grown to fit.
+# ⛔ NO SINGLE ALLOCATION MAY EXCEED AI_POLL_CHUNK. An arena takes the next chunk of its chain only
+# when that chunk fits the request; otherwise it links a new, right-sized chunk and keeps the old,
+# so requests over the chunk size would cost a chunk for good on every body a little longer than
+# the last. With one chunk size the next chunk always fits, the chain only ever reaches a poll's
+# high-water mark, and two arenas hold two polls' worth, reused.
 # ⚠ A STATE LIVES UNTIL THE NEXT BODY AFTER IT LEAVES THE MAP: that poll resets its arena. Read
 # the HUD fresh; never keep a state across polls (nothing in src/ does).
 enum AI_PollOff {
@@ -1057,7 +1064,41 @@ enum AI_PollOff {
     AI_POLL_CUR    = 16;   # the arena the map's poll states live in: 0 / 1, -1 before the first
     AI_POLL_SZ     = 24;
 }
-var AI_POLL_CHUNK = 16384;   # one chunk holds a body of a few agents, its tree and its states
+# The largest single allocations a body under the client's byte bound and AI_POLL_MAX_TOKENS can make
+# are a string of 256 KiB, an array's vec of 2^15 slots (256 KiB) and an object's key table of 2^15
+# slots (768 KiB). Each arena reserves one chunk at the first poll, whatever the body's size.
+var AI_POLL_CHUNK = 1048576;
+
+# ⛔ A BODY'S COST IS ITS STRUCTURE, NOT ITS BYTES: 256 KiB of `{},` is 87,000 objects, tens of
+# milliseconds of frame and tens of MB of arena held from then on, and any local process may answer
+# on 8090 while daimon is down. The largest answer daimon can give is 1000 agents (max_agents, daimon
+# src/config.cyr:13, refused at src/api_agent.cyr:152, and no flag or file changes it) of 17 tokens
+# each (_api_agent_json: `{`, 8 `:`, 7 `,` and the `,` before the next). This bound is 32 a record,
+# which leaves daimon room to add fields.
+var AI_POLL_MAX_TOKENS = 32000;
+
+# Is this body past AI_POLL_MAX_TOKENS? Counts the bytes that open a node of the parse tree, `{`, `[`,
+# `,` and `:`, outside strings, and stops at the first past the bound. -> 1 / 0.
+# Tokens the same way bayan does: a string runs to its first unescaped quote.
+fn ai_poll_too_dense(body, len): i64 {
+    var tokens = 0;
+    var in_str = 0;
+    var i = 0;
+    while (i < len) {
+        var c = load8(body + i);
+        if (in_str == 1) {
+            if (c == 92) { i = i + 1; }
+            elif (c == 34) { in_str = 0; }
+        } elif (c == 34) {
+            in_str = 1;
+        } elif (c == 44 || c == 58 || c == 91 || c == 123) {
+            tokens = tokens + 1;
+            if (tokens > AI_POLL_MAX_TOKENS) { return 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
 
 # f's poll arenas, made on first use. -> the record, or 0 on OOM.
 fn ai_poll_mem(f): i64 {
@@ -1078,13 +1119,15 @@ fn ai_poll_mem(f): i64 {
 # ai_poll_agents_apply(f, body, len, now): a 2xx body of GET /v1/agents onto f's HUD: Rust's
 # `resp.json()` and poll_agents (ai_features.rs:506-545), then the caller's clear + insert
 # (:479-485). `now` is epoch seconds, the default last_activity.
-# -> the number of agents the body lists (the HUD holds them, a repeated id once), or -1 when the
-#    body is not JSON (Rust's `resp.json()` Err) or memory ran out. On -1 the HUD is untouched. A
-#    duplicate key reads as not JSON here, where Rust kept the last (ADR 0003).
+# -> the number of agents the body lists (the HUD holds them, a repeated id once), -1 when the body
+#    is not JSON (Rust's `resp.json()` Err) or memory ran out, or -2 when it is past
+#    AI_POLL_MAX_TOKENS, refused before anything is parsed or allocated. On either the HUD is
+#    untouched. A duplicate key reads as not JSON here, where Rust kept the last (ADR 0003).
 # ⚠ A JSON body of any other shape is Rust's EMPTY list and CLEARS the HUD:
 #   `body["agents"].as_array()` is None for `{}`, `[]` or `{"agents":5}`. An element that is not an
 #   object is still an agent with every field defaulted, as `agent["id"]` on it is Null.
 fn ai_poll_agents_apply(f, body, len, now): i64 {
+    if (ai_poll_too_dense(body, len) == 1) { return 0 - 2; }
     var pm = ai_poll_mem(f);
     if (pm == 0) { return 0 - 1; }
     var spare = 0;

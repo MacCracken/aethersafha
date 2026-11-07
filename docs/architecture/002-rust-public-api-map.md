@@ -1,7 +1,7 @@
 # 002 — Where the Rust original's public API lives now
 
 > **As of 0.17.6**, the release that deletes `rust-old/`. Written because the deletion gate asked for it
-> (roadmap § 0.17.x, gate item 3): once the directory is gone, the question "where did `X` go?" has no
+> (CHANGELOG 0.17.6): once the directory is gone, the question "where did `X` go?" has no
 > answer in the tree unless one is written down. Tag **`0.17.5`** is the last that carries the Rust
 > original; read any file with `git show 0.17.5:rust-old/<path>`. A citation `rust-old/<path>[:<line>]`, or
 > a bare `<name>.rs:<line>` in a parity comment, means that path at that tag. Every Cyrius name below was

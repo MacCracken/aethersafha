@@ -2,9 +2,8 @@
 #
 # The one place where the desktop shell's data model meets the framebuffer.
 # Split out of src/render.cyr so that render.cyr (fill_rect, draw_char,
-# draw_text, render_window, render_frame, deco_*) stays free of shell.cyr
-# symbols and is reusable on its own — a standalone probe can include render.cyr
-# for native window chrome without pulling in the whole compositor.
+# draw_text, render_window, deco_*) stays free of shell.cyr symbols: a unit that
+# draws window chrome, such as tests/render.tcyr, compiles without the shell.
 #
 # Depends on: render.cyr (fill_rect) + shell.cyr (SystemStatus getters,
 # SH_NetStatus, shell_notification_count).

@@ -75,9 +75,9 @@ enum SH_LauncherActionKind {
 # ================================================================
 enum SH_NotifOff {
     N_ID           = 0;    # i64 monotonic id (parity: Uuid)
-    N_APP_NAME     = 8;    # cstr / Str-data pointer
-    N_TITLE        = 16;   # cstr / Str-data pointer
-    N_BODY         = 24;   # cstr / Str-data pointer
+    N_APP_NAME     = 8;    # cstr
+    N_TITLE        = 16;   # cstr
+    N_BODY         = 24;   # cstr
     N_PRIORITY     = 32;   # SH_NotifPriority
     N_TIMESTAMP    = 40;   # i64 epoch (parity: chrono::DateTime)
     N_REQ_ACTION   = 48;   # bool (0/1) requires_action
@@ -85,8 +85,8 @@ enum SH_NotifOff {
     N_SZ           = 64;
 }
 
-# shell_notif_new: allocate a Notification. app_name/title/body are
-# pointers (cstr literals or Str structs). -> *Notification (0 on OOM)
+# shell_notif_new: allocate a Notification. app_name/title/body are cstrs: the
+# notification surface reads them as text. -> *Notification (0 on OOM)
 fn shell_notif_new(id, app_name, title, body, priority, timestamp, requires_action, is_agent): i64 {
     var p = alloc(N_SZ);
     if (p == 0) { return 0; }
@@ -511,10 +511,11 @@ fn shell_override_body(agent_name, action, reason): i64 {
 # rust: request_human_override — Critical, requires_action, agent-related.
 # -> *Notification (0 on OOM).
 fn shell_request_human_override(sh, agent_name, action, reason, now): i64 {
-    var app_name = shell_override_app_name(agent_name);
-    var body = shell_override_body(agent_name, action, reason);
+    var app_name = str_data(shell_override_app_name(agent_name));
+    var body = str_data(shell_override_body(agent_name, action, reason));
     var id = shell_next_notif_id(sh);
-    var notif = shell_notif_new(id, app_name, "Human Override Requested", body, SH_NotifPriority.SH_PRIO_CRITICAL, now, 1, 1);
+    var notif = shell_notif_new(id, app_name, "Human Override Requested", body,
+      SH_NotifPriority.SH_PRIO_CRITICAL, now, 1, 1);
     if (notif == 0) { return 0; }
     shell_show_notification(sh, notif);
     return notif;

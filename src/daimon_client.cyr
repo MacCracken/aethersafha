@@ -4,20 +4,21 @@
 # daimon 2.4.3 serves both on 127.0.0.1:8090 (daimon src/config.cyr:10-11, src/router.cyr:56-70).
 #
 # ⛔⛔ NOTHING HERE MAY BLOCK THE FRAME LOOP — not with daimon absent, slow, or ACCEPTING AND NEVER
-# ANSWERING (roadmap D12: setu's blocking reads already let one silent peer wedge the compositor).
+# ANSWERING (CHANGELOG 0.17.6: a blocking read let one silent setu peer wedge the compositor).
 # Rust ran the poll on a tokio task; the port has one thread and a frame loop (ADR 0003), so a
 # request is a STATE MACHINE over a non-blocking socket, advanced once per frame:
 #   - the socket is opened SOCK_NONBLOCK, so connect() returns at once (EINPROGRESS), and connect()
-#     again asks how it went: EALREADY not yet, 0 or EISCONN connected, anything else failed;
+#     again asks how it went: EALREADY still connecting, 0 or EISCONN connected, anything else failed;
 #   - every send and recv passes MSG_DONTWAIT, and every send MSG_NOSIGNAL: a send to a peer that
 #     reset must not raise SIGPIPE, whose default action would end the compositor;
 #   - a step is one bounded round of those calls: it takes what has arrived and returns;
 #   - Rust's 5 s client timeout is an overall DEADLINE, checked on every step;
 #   - an answer is bounded (DMN_RESP_MAX), and one GET is in flight at most.
-# ⚠ lib/http.cyr and sandhi's client both BLOCK (a connect, then recv until EOF; sandhi only up to its
-# timeouts), so neither is used: a 5 s bound is still a 5 s frozen frame. A thread or a child process
-# could block in our place, but the HUD would then need a lock or a pipe back to the frame loop; the
-# state machine needs neither, and costs one non-blocking call a frame only while a request is out.
+# ⚠ The stdlib's http module (not in `[deps].stdlib`, so not in lib/) and sandhi's client both BLOCK (a
+# connect, then recv until EOF, each only up to its timeouts), so neither is used: a 5 s bound is still a
+# 5 s frozen frame. A thread or a child process could block in our place, but the HUD would then need a
+# lock or a pipe back to the frame loop; the state machine needs neither, and costs one non-blocking call
+# a frame only while a request is out.
 #
 # ⛔ agnos: EVERY ENTRY POINT IS A NO-OP. agnos has no non-blocking connect: sock_connect #47 blocks
 # the caller until the SYN-ACK, a RST or its 8 s ceiling (agnos kernel/core/syscall.cyr:11525-11548,
@@ -47,7 +48,7 @@ enum DmnResult {
     DMN_R_CONNECT   = 5;    # the connect failed: nothing listens (refused), or no route
     DMN_R_IO        = 6;    # a send or a receive failed (the peer reset)
     DMN_R_TIMEOUT   = 7;    # the deadline passed first (Rust: reqwest's 5 s timeout)
-    DMN_R_TOO_LARGE = 8;    # the answer is over the bound
+    DMN_R_TOO_LARGE = 8;    # the answer is over the bound, in bytes or in structure (AI_POLL_MAX_TOKENS)
     # Not an answer this client reads: no HTTP/1.x status line, a Transfer-Encoding, a Content-Length
     # it cannot read, or cut short by the close.
     DMN_R_PROTOCOL  = 9;
@@ -596,6 +597,7 @@ fn _dmn_poll_land(ai, r): i64 {
     var blen = load64(r + DMN_RQ_CLEN);
     if (blen < 0) { blen = load64(r + DMN_RQ_LEN) - head; }
     var n = ai_poll_agents_apply(ai, load64(r + DMN_RQ_BUF) + head, blen, clock_epoch_secs());
+    if (n == 0 - 2) { return DmnResult.DMN_R_TOO_LARGE; }
     if (n < 0) { return DmnResult.DMN_R_JSON; }
     return DmnResult.DMN_R_FED;
 }

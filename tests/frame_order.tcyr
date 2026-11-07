@@ -1,0 +1,100 @@
+# frame_order.tcyr — the frame loop's order, read from src/main.cyr.
+#
+# ⛔ WHY A SOURCE TEST. The loop is the body of `main`, so no host test can run a frame of it. The rule it holds is
+# one of order: everything that changes the window list or a window's buffer runs BEFORE ae_gpu_frame_plan, so the
+# plan, the render and the present judge one and the same desktop. A serve between the plan and the present can
+# re-attach a smaller buffer the plan never saw, and retire one window while mapping another, which leaves the
+# window count as it was. And the count guard sends the frame that maps a new window to the CPU present, of a
+# framebuffer a GPU frame did not draw.
+#
+# The file is read with comments and strings blanked, so a comment naming a function proves nothing.
+
+var fo_src = 0;
+var fo_len = 0;
+
+# Blank `#` comments, directives and string literals, keeping every offset.
+fn fo_blank(buf, n): i64 {
+    var i = 0;
+    while (i < n) {
+        var c = load8(buf + i);
+        if (c == 34) {
+            store8(buf + i, 32);
+            i = i + 1;
+            while (i < n) {
+                var q = load8(buf + i);
+                store8(buf + i, 32);
+                i = i + 1;
+                if (q == 92) { store8(buf + i, 32); i = i + 1; }
+                elif (q == 34) { break; }
+            }
+        }
+        elif (c == 35) {
+            while (i < n) {
+                if (load8(buf + i) == 10) { break; }
+                store8(buf + i, 32);
+                i = i + 1;
+            }
+        }
+        else { i = i + 1; }
+    }
+    return 0;
+}
+
+# The offset of `s` in the blanked source at or after `from`, or -1.
+fn fo_find(s, from): i64 {
+    var l = strlen(s);
+    var i = from;
+    while (i + l <= fo_len) {
+        if (memeq(fo_src + i, s, l) == 1) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+fn fo_lt(a, b): i64 {
+    if ((a >= 0) && (a < b)) { return 1; }
+    return 0;
+}
+
+fn fn_mutates_nothing(lo, hi, name): i64 {
+    var at = fo_find(name, lo);
+    if ((at >= 0) && (at < hi)) { return 0; }
+    return 1;
+}
+
+fn main(): i64 {
+    alloc_init();
+    test_group("frame order — src/main.cyr's loop");
+    fo_src = file_read_whole("src/main.cyr", &fo_len);
+    assert_neq(fo_src, 0, "src/main.cyr could be read");
+    if (fo_src == 0) { return assert_summary(); }
+    fo_blank(fo_src, fo_len);
+    var loop = fo_find("while (ae_loop_go(", 0);
+    assert_gt(loop, 0, "the frame loop's head is found");
+    var accept = fo_find("setu_srv_accept(", loop);
+    var poll = fo_find("ae_clients_poll(", loop);
+    var serve = fo_find("ae_client_serve(", loop);
+    var plan = fo_find("ae_gpu_frame_plan(", loop);
+    var render = fo_find("render_desktop(", loop);
+    var present = fo_find("ae_gpu_present_frame(", loop);
+    assert_gt(plan, 0, "the plan is in the loop");
+    assert_gt(present, 0, "the present is in the loop");
+    assert_eq(fo_lt(accept, poll), 1, "a new connection is taken before the clients are polled");
+    assert_eq(fo_lt(poll, serve), 1, "the clients are polled before they are served");
+    assert_eq(fo_lt(serve, plan), 1, "every client is served BEFORE the plan");
+    assert_eq(fo_lt(plan, render), 1, "the plan comes before the render");
+    assert_eq(fo_lt(render, present), 1, "the render comes before the present");
+    # the plan's verdict stands until the present: nothing here touches a window or a buffer
+    assert_eq(fn_mutates_nothing(plan, present, "ae_client_"), 1,
+      "no client is served, admitted or retired after the plan");
+    assert_eq(fn_mutates_nothing(plan, present, "setu_srv_accept("), 1, "no connection is taken after the plan");
+    assert_eq(fn_mutates_nothing(plan, present, "comp_create_window("), 1, "no window is created after the plan");
+    assert_eq(fn_mutates_nothing(plan, present, "comp_close_window("), 1, "no window is closed after the plan");
+    assert_eq(fn_mutates_nothing(plan, present, "comp_remove_window("), 1, "no window is removed after the plan");
+    assert_eq(fn_mutates_nothing(plan, present, "comp_map_window("), 1, "no window is mapped after the plan");
+    assert_eq(fn_mutates_nothing(plan, present, "win_set_client_buf("), 1, "no buffer is attached after the plan");
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);

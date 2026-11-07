@@ -293,7 +293,8 @@ fn main() {
     assert_eq(shell_launch_app(sh, "vivaldi"), SH_Err.SH_OK, "launch vivaldi OK");
     assert_eq(shell_launch_app(sh, "falkon"), SH_Err.SH_OK, "launch falkon OK");
     assert_eq(shell_launch_app(sh, "midori"), SH_Err.SH_OK, "launch midori OK");
-    assert_eq(shell_launch_app(sh, "cmdpalette"), SH_Err.SH_ERR_APP_NOT_FOUND, "no cmdpalette entry — rust never registered one");
+    assert_eq(shell_launch_app(sh, "cmdpalette"), SH_Err.SH_ERR_APP_NOT_FOUND,
+      "no cmdpalette entry — rust never registered one");
 
     # ============================================================
     # Registry + derived launcher items, field by field
@@ -305,16 +306,22 @@ fn main() {
     var C_AI = SH_AppCategory.SH_CAT_AI;
     var C_NET = SH_AppCategory.SH_CAT_INTERNET;
     assert_eq(t_app_matches(sh, "terminal", "Terminal", "terminal", C_SYS, 1), 1, "terminal entry + item match rust");
-    assert_eq(t_app_matches(sh, "filemanager", "File Manager", "folder", C_SYS, 0), 1, "filemanager entry + item match rust");
+    assert_eq(t_app_matches(sh, "filemanager", "File Manager", "folder", C_SYS, 0), 1,
+      "filemanager entry + item match rust");
     assert_eq(t_app_matches(sh, "settings", "Settings", "settings", C_SYS, 0), 1, "settings entry + item match rust");
-    assert_eq(t_app_matches(sh, "agent-manager", "Agent Manager", "bot", C_AI, 1), 1, "agent-manager entry + item match rust");
-    assert_eq(t_app_matches(sh, "audit-viewer", "Audit Viewer", "shield", C_SYS, 1), 1, "audit-viewer entry + item match rust");
-    assert_eq(t_app_matches(sh, "model-manager", "Model Manager", "cpu", C_AI, 1), 1, "model-manager entry + item match rust");
+    assert_eq(t_app_matches(sh, "agent-manager", "Agent Manager", "bot", C_AI, 1), 1,
+      "agent-manager entry + item match rust");
+    assert_eq(t_app_matches(sh, "audit-viewer", "Audit Viewer", "shield", C_SYS, 1), 1,
+      "audit-viewer entry + item match rust");
+    assert_eq(t_app_matches(sh, "model-manager", "Model Manager", "cpu", C_AI, 1), 1,
+      "model-manager entry + item match rust");
     assert_eq(t_app_matches(sh, "firefox", "Firefox", "firefox", C_NET, 0), 1, "firefox entry + item match rust");
     assert_eq(t_app_matches(sh, "chromium", "Chromium", "chromium", C_NET, 0), 1, "chromium entry + item match rust");
-    assert_eq(t_app_matches(sh, "zen-browser", "Zen Browser", "zen-browser", C_NET, 0), 1, "zen-browser entry + item match rust");
+    assert_eq(t_app_matches(sh, "zen-browser", "Zen Browser", "zen-browser", C_NET, 0), 1,
+      "zen-browser entry + item match rust");
     assert_eq(t_app_matches(sh, "brave", "Brave", "brave", C_NET, 0), 1, "brave entry + item match rust");
-    assert_eq(t_app_matches(sh, "librewolf", "LibreWolf", "librewolf", C_NET, 0), 1, "librewolf entry + item match rust");
+    assert_eq(t_app_matches(sh, "librewolf", "LibreWolf", "librewolf", C_NET, 0), 1,
+      "librewolf entry + item match rust");
     assert_eq(t_app_matches(sh, "vivaldi", "Vivaldi", "vivaldi", C_NET, 0), 1, "vivaldi entry + item match rust");
     assert_eq(t_app_matches(sh, "falkon", "Falkon", "falkon", C_NET, 0), 1, "falkon entry + item match rust");
     assert_eq(t_app_matches(sh, "midori", "Midori", "midori", C_NET, 0), 1, "midori entry + item match rust");
@@ -325,7 +332,8 @@ fn main() {
     assert_eq(str_eq(shell_item_desc(sf_item), str_from("Search for files on the system")), 1, "search-files desc");
     assert_eq(str_eq(shell_item_icon(sf_item), str_from("search")), 1, "search-files icon");
     assert_eq(shell_item_has_app(sf_item), 0, "search-files app None");
-    assert_eq(shell_action_kind(shell_item_action(sf_item)), SH_LauncherActionKind.SH_ACT_SEARCH_FILES, "search-files action SearchFiles");
+    assert_eq(shell_action_kind(shell_item_action(sf_item)), SH_LauncherActionKind.SH_ACT_SEARCH_FILES,
+      "search-files action SearchFiles");
     assert_eq(strlen(shell_action_arg(shell_item_action(sf_item))), 0, "search-files action arg empty (String::new())");
     assert_eq(shell_item_suggested(sf_item), 0, "search-files not suggested");
     assert_eq(shell_item_relevance(sf_item), 800, "search-files relevance 0.8 -> 800");
@@ -378,11 +386,10 @@ fn main() {
     var title_needle = str_from("Human Override Requested");
     var title_hay = str_from(ov_title);
     assert_eq(str_eq(title_hay, title_needle), 1, "override title matches");
-    # body (a Str fat pointer) contains agent name + action + reason
-    var ov_body = shell_notif_body(ov);
-    assert_eq(str_contains(ov_body, str_from("agent-a")), 1, "override body has agent name");
-    assert_eq(str_contains(ov_body, str_from("write /etc/passwd")), 1, "override body has action");
-    assert_eq(str_contains(ov_body, str_from("needs access")), 1, "override body has reason");
+    # app_name and body are cstrs, Rust's format! text, as render_notifications reads them
+    assert_eq(streq(shell_notif_app_name(ov), "Agent: agent-a"), 1, "override app_name matches");
+    assert_eq(streq(shell_notif_body(ov), "agent-a\n\nAction: write /etc/passwd\nReason: needs access"), 1,
+      "override body matches");
 
     # ============================================================
     # Launcher search: match / empty / no-result / case-insensitive / boost

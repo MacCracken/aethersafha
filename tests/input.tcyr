@@ -21,16 +21,20 @@ fn main() {
     assert_eq(input_map(bhumi_key_event(1, 0x3E), 1), InputAction.IA_MAXIMIZE_FOCUSED, "Ctrl+F5 → toggle maximize");
     assert_eq(input_map(bhumi_key_event(1, 0x3F), 1), InputAction.IA_MINIMIZE_FOCUSED, "Ctrl+F6 → minimize");
     assert_eq(input_map(bhumi_key_event(0, 0x3D), 1), InputAction.IA_NONE, "chord release → none");
-    assert_eq(input_map(bhumi_key_event(1, 0x04), 1), InputAction.IA_NONE, "Ctrl+unmapped → none (and the loop swallows it)");
+    assert_eq(input_map(bhumi_key_event(1, 0x04), 1), InputAction.IA_NONE,
+      "Ctrl+unmapped → none (and the loop swallows it)");
     # ⛔⛔ BARE KEYS ARE THE CLIENT'S. Every one of these used to be claimed and consumed; crab measured
     # on QEMU that its Esc, Tab and F10 never arrived and that bare Esc ended the desktop.
-    assert_eq(input_map(bhumi_key_event(1, 0x29), 0), InputAction.IA_NONE, "bare Esc → none: it is the client's cancel, not the desktop's exit");
+    assert_eq(input_map(bhumi_key_event(1, 0x29), 0), InputAction.IA_NONE,
+      "bare Esc → none: it is the client's cancel, not the desktop's exit");
     assert_eq(input_map(bhumi_key_event(1, 0x2B), 0), InputAction.IA_NONE, "bare Tab → none: the client's focus key");
     assert_eq(input_map(bhumi_key_event(1, 0x14), 0), InputAction.IA_NONE, "bare q → none: a letter");
     assert_eq(input_map(bhumi_key_event(1, 0x3D), 0), InputAction.IA_NONE, "bare F4 → none");
-    assert_eq(input_map(bhumi_key_event(1, 0x3E), 0), InputAction.IA_NONE, "bare F5 → none (crab's refresh could have had it)");
+    assert_eq(input_map(bhumi_key_event(1, 0x3E), 0), InputAction.IA_NONE,
+      "bare F5 → none (crab's refresh could have had it)");
     assert_eq(input_map(bhumi_key_event(1, 0x43), 0), InputAction.IA_NONE, "bare F10 → none: crab's menu bar");
-    assert_eq(input_map(bhumi_key_event(1, 0x29), 1), InputAction.IA_NONE, "Ctrl+Esc → none: Esc quits NOTHING any more");
+    assert_eq(input_map(bhumi_key_event(1, 0x29), 1), InputAction.IA_NONE,
+      "Ctrl+Esc → none: Esc quits NOTHING any more");
 
     test_group("input — the desktop's chrome keys are Ctrl chords too (0.16.26: Ctrl+F2, Ctrl+F3)");
     assert_eq(input_chrome_key(bhumi_key_event(1, 0x3B), 1), ChromeKey.CHROME_LAUNCHER, "Ctrl+F2 → the launcher");
@@ -42,23 +46,29 @@ fn main() {
     # PRESS ONLY — the loop acted on both edges once: three F3 presses, six theme switches (2026-08-18).
     assert_eq(input_chrome_key(bhumi_key_event(0, 0x3B), 1), ChromeKey.CHROME_NONE, "Ctrl+F2 RELEASE opens nothing");
     assert_eq(input_chrome_key(bhumi_key_event(0, 0x3C), 1), ChromeKey.CHROME_NONE, "Ctrl+F3 RELEASE switches nothing");
-    assert_eq(input_chrome_key(bhumi_key_event(1, 0x3D), 1), ChromeKey.CHROME_NONE, "Ctrl+F4 is a window key, not chrome");
+    assert_eq(input_chrome_key(bhumi_key_event(1, 0x3D), 1), ChromeKey.CHROME_NONE,
+      "Ctrl+F4 is a window key, not chrome");
     assert_eq(input_chrome_key(bhumi_key_event(1, 0x3A), 1), ChromeKey.CHROME_NONE, "Ctrl+F1 → none: unbound");
     # ⚠ And neither is a window action: `input_apply` must never see the launcher or the theme.
     assert_eq(input_map(bhumi_key_event(1, 0x3B), 1), InputAction.IA_NONE, "Ctrl+F2 is not an InputAction");
     assert_eq(input_map(bhumi_key_event(1, 0x3C), 1), InputAction.IA_NONE, "Ctrl+F3 is not an InputAction");
     # ⛔ THE 297-px SHAPE, FOR THE CHROME KEYS: dx = 256 + 0x3B has bit 8 set and low byte F2, so a
     # mapper that skipped the kind check would open the launcher on a horizontal mouse move.
-    assert_eq(input_chrome_key(bhumi_motion_event(256 + 0x3B, 0), 1), ChromeKey.CHROME_NONE, "dx=315 (low byte F2, bit 8 set) under Ctrl is not Ctrl+F2");
-    assert_eq(input_chrome_key(bhumi_motion_event(256 + 0x3C, 0), 1), ChromeKey.CHROME_NONE, "dx=316 (low byte F3, bit 8 set) under Ctrl is not Ctrl+F3");
+    assert_eq(input_chrome_key(bhumi_motion_event(256 + 0x3B, 0), 1), ChromeKey.CHROME_NONE,
+      "dx=315 (low byte F2, bit 8 set) under Ctrl is not Ctrl+F2");
+    assert_eq(input_chrome_key(bhumi_motion_event(256 + 0x3C, 0), 1), ChromeKey.CHROME_NONE,
+      "dx=316 (low byte F3, bit 8 set) under Ctrl is not Ctrl+F3");
     assert_eq(input_chrome_key(bhumi_button_event(1, 1), 1), ChromeKey.CHROME_NONE, "a button is not a chrome key");
     # ⭐ THE SEQUENCE A REAL Ctrl+F2 IS, through the latch the loop feeds it.
     var cs = input_mod_track(0, bhumi_key_event(1, 0xE0));
-    assert_eq(input_chrome_key(bhumi_key_event(1, 0x3B), input_mod_ctrl(cs)), ChromeKey.CHROME_LAUNCHER, "LCtrl down, F2 down: the launcher");
+    assert_eq(input_chrome_key(bhumi_key_event(1, 0x3B), input_mod_ctrl(cs)), ChromeKey.CHROME_LAUNCHER,
+      "LCtrl down, F2 down: the launcher");
     cs = input_mod_track(cs, bhumi_key_event(0, 0xE0));
-    assert_eq(input_chrome_key(bhumi_key_event(1, 0x3B), input_mod_ctrl(cs)), ChromeKey.CHROME_NONE, "LCtrl up, F2 down: a bare F2, the client's");
+    assert_eq(input_chrome_key(bhumi_key_event(1, 0x3B), input_mod_ctrl(cs)), ChromeKey.CHROME_NONE,
+      "LCtrl up, F2 down: a bare F2, the client's");
     cs = input_mod_track(0, bhumi_key_event(1, 0xE4));
-    assert_eq(input_chrome_key(bhumi_key_event(1, 0x3C), input_mod_ctrl(cs)), ChromeKey.CHROME_THEME, "RCtrl + F3: the theme — either Ctrl");
+    assert_eq(input_chrome_key(bhumi_key_event(1, 0x3C), input_mod_ctrl(cs)), ChromeKey.CHROME_THEME,
+      "RCtrl + F3: the theme — either Ctrl");
 
     # ⭐⭐ THE WINDOW MOVER'S MAPPING. This group exists because the first mover was written as an
     # inline block in main.cyr's frame loop, where nothing could reach it — it was nested inside the
@@ -75,8 +85,10 @@ fn main() {
     # ⛔ THE COLLISION GUARD. F4 was bound to the mover once and it is ALSO IA_CLOSE_FOCUSED, so
     # "move the focused window down" and "destroy the focused window" were the same keystroke. If a
     # future edit re-binds F4-F6 to directions, this line is what says no.
-    assert_eq(input_map(bhumi_key_event(1, 0x3D), 1), InputAction.IA_CLOSE_FOCUSED, "Ctrl+F4 is STILL close, not a move");
-    assert_eq(input_map(bhumi_key_event(1, 0x3E), 1), InputAction.IA_MAXIMIZE_FOCUSED, "Ctrl+F5 is STILL maximize, not a move");
+    assert_eq(input_map(bhumi_key_event(1, 0x3D), 1), InputAction.IA_CLOSE_FOCUSED,
+      "Ctrl+F4 is STILL close, not a move");
+    assert_eq(input_map(bhumi_key_event(1, 0x3E), 1), InputAction.IA_MAXIMIZE_FOCUSED,
+      "Ctrl+F5 is STILL maximize, not a move");
     assert_eq(input_action_is_move(InputAction.IA_MOVE_LEFT), 1, "is_move: left");
     assert_eq(input_action_is_move(InputAction.IA_MOVE_DOWN), 1, "is_move: down");
     assert_eq(input_action_is_move(InputAction.IA_NONE), 0, "is_move: none is not a move");
@@ -298,8 +310,10 @@ fn main() {
     assert_eq(input_map(bhumi_key_event(1, 0x14), 1), InputAction.IA_QUIT, "a REAL Ctrl+Q still quits");
     assert_eq(input_map(bhumi_key_event(1, 0x40), 1), InputAction.IA_MOVE_LEFT, "a REAL Ctrl+F7 still moves");
     # ⛔ AND THE MOTION GUARD IS INDEPENDENT OF THE LATCH: a 297 px motion with Ctrl held must not quit either.
-    assert_eq(input_map(bhumi_motion_event(297, 0), 1), InputAction.IA_NONE, "dx=297 under Ctrl is still not Esc — and Esc is not quit");
-    assert_eq(input_map(bhumi_motion_event(256 + 0x14, 0), 1), InputAction.IA_NONE, "dx=276 (low byte q, bit 8 set) under Ctrl is NOT Ctrl+Q");
+    assert_eq(input_map(bhumi_motion_event(297, 0), 1), InputAction.IA_NONE,
+      "dx=297 under Ctrl is still not Esc — and Esc is not quit");
+    assert_eq(input_map(bhumi_motion_event(256 + 0x14, 0), 1), InputAction.IA_NONE,
+      "dx=276 (low byte q, bit 8 set) under Ctrl is NOT Ctrl+Q");
 
     test_group("input — the cursor clamps to the screen");
     input_ptr_set(100, 100);
@@ -457,7 +471,9 @@ fn main() {
                     # the frame loop's old three-branch rule, verbatim in shape, for THIS button
                     var ob = 0;
                     if (input_btn_pressed(otr) == 1) { if (input_btn_released(otr) == 0) { ob = 1; } }
-                    if (input_btn_pressed(otr) == 0) { if (input_btn_released(otr) == 0) { if ((cv & om) != 0) { ob = 1; } } }
+                    if (input_btn_pressed(otr) == 0) {
+                        if (input_btn_released(otr) == 0) { if ((cv & om) != 0) { ob = 1; } }
+                    }
                     if (ob == 1) { oracle = oracle | om; }
                     obit = obit + 1;
                 }
@@ -518,9 +534,12 @@ fn main() {
     # machine, and a left transition never moves the right one. A machine fed the WHOLE carried mask
     # instead of its own bit would report a phantom left RELEASE on every right-click.
     assert_eq(input_btn_transitions(2 & 1, 2, 2, 1), 0, "right held: the left machine, fed ITS bit, is silent");
-    assert_neq(input_btn_transitions(2, 2, 2, 1), 0, "  ...and fed the whole mask it would NOT be -- which is why the frame loop masks");
-    assert_eq(input_btn_transitions(1 & 2, 3, 3, 2), 1, "left held + right press: the right machine sees exactly a press");
-    assert_eq(input_btn_transitions(2 & 2, 1, 3, 2), 2, "right up + left down in one drain: the right machine sees exactly a release");
+    assert_neq(input_btn_transitions(2, 2, 2, 1), 0,
+      "  ...and fed the whole mask it would NOT be -- which is why the frame loop masks");
+    assert_eq(input_btn_transitions(1 & 2, 3, 3, 2), 1,
+      "left held + right press: the right machine sees exactly a press");
+    assert_eq(input_btn_transitions(2 & 2, 1, 3, 2), 2,
+      "right up + left down in one drain: the right machine sees exactly a release");
 
     # ⛔⛔ `return assert_summary();` SAT HERE, ABOVE THE GROUP BELOW, AND THE GROUP BELOW NEVER RAN.
     # Six assertions on `input_apply_from`'s provenance record — the instrument built so a burn capture
@@ -585,7 +604,8 @@ fn main() {
     # set — and reads as a PRESSED LCtrl to anything that skips the kind check. A latch poisoned that
     # way would turn the next keystroke into a chord and swallow it.
     assert_eq(input_mod_track(0, bhumi_motion_event(256 + 0xE0, 0)), 0, "dx=480 (0x1E0) is not an LCtrl press");
-    assert_eq(input_mod_track(0x01, bhumi_motion_event(0xE0, 0)), 0x01, "dx=224 (0xE0, bit 8 clear) is not an LCtrl release");
+    assert_eq(input_mod_track(0x01, bhumi_motion_event(0xE0, 0)), 0x01,
+      "dx=224 (0xE0, bit 8 clear) is not an LCtrl release");
     assert_eq(input_mod_track(0x11, bhumi_button_event(1, 1)), 0x11, "  ...nor does a button");
     assert_eq(input_mod_track(0, bhumi_key_event(1, 0xE7)), 0x80, "RGUI is bit 7 — the whole modifier row is tracked");
     assert_eq(input_mod_track(0, bhumi_key_event(1, 0xE8)), 0, "0xE8 is not a modifier");
@@ -599,9 +619,11 @@ fn main() {
     var sq = 0;
     sq = input_mod_track(sq, bhumi_key_event(1, 0xE0));
     assert_eq(input_map(bhumi_key_event(1, 0x14), input_mod_ctrl(sq)), InputAction.IA_QUIT, "Ctrl down, q down: QUIT");
-    assert_eq(input_map(bhumi_key_event(0, 0x14), input_mod_ctrl(sq)), InputAction.IA_NONE, "q up: nothing (and the loop swallows it)");
+    assert_eq(input_map(bhumi_key_event(0, 0x14), input_mod_ctrl(sq)), InputAction.IA_NONE,
+      "q up: nothing (and the loop swallows it)");
     sq = input_mod_track(sq, bhumi_key_event(0, 0xE0));
-    assert_eq(input_map(bhumi_key_event(1, 0x14), input_mod_ctrl(sq)), InputAction.IA_NONE, "Ctrl up, q down: a bare q, the client's");
+    assert_eq(input_map(bhumi_key_event(1, 0x14), input_mod_ctrl(sq)), InputAction.IA_NONE,
+      "Ctrl up, q down: a bare q, the client's");
     # ⛔ THE OTHER ORDER — Ctrl released before the key — is a stray release the client may see; asserted
     # here as the boundary, not as a bug: a release edge is a no-op to every client shipped.
     sq = input_mod_track(0, bhumi_key_event(1, 0xE0));
@@ -661,7 +683,8 @@ fn main() {
     assert_eq(win_state(c2), WinState.WS_MINIMIZED, "minimized 2 stays minimized");
     var c4 = comp_create_window(cc, 0, 0, 50, 50, "4");
     comp_close_window(cc, win_id(c1));
-    assert_eq(t_same(comp_focused_window(cc), c4), 1, "closing a window below the focused one leaves focus where it was");
+    assert_eq(t_same(comp_focused_window(cc), c4), 1,
+      "closing a window below the focused one leaves focus where it was");
 
     return assert_summary();
 }

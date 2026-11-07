@@ -1,7 +1,7 @@
 # aethersafha — the setu clients the frame loop serves: one row per client, and one frame of service
 # per row that never waits on the client.
 #
-# ⭐ TWO KINDS OF ROW, ONE LOOP (0.17.6, roadmap D12).
+# ⭐ TWO KINDS OF ROW, ONE LOOP (CHANGELOG 0.17.6).
 #   PLACED   — agnos. A `#97` channel the compositor minted, one end endowed to a child it spawned
 #              (`ae_client_spawn`, main.cyr). The channel exists before the client has run at all.
 #   ACCEPTED — Linux. An AF_UNIX / SOCK_SEQPACKET connection taken off the listener
@@ -23,7 +23,7 @@
 # never follows a symlink and copies only from a regular file at least as long as the read, refusing
 # anything else at once (setu_dispatch.cyr, `setu__hs_buf_irregular`). Sends cannot wait either (below).
 # What a client can cost a frame is bounded work, not a wait: at most DRAIN_MAX records and ONE buffer
-# copy of at most 16 MB (setu_dispatch.cyr; one such serve measured 6.6 ms on Linux 7.2.8).
+# copy of at most 32 MiB (setu_dispatch.cyr; one such serve measured 12 ms on Linux 7.2.14).
 #
 # ⭐ AN IDLE CLIENT COSTS NOTHING (Linux, 0.17.6). Once per frame `ae_clients_poll` asks poll(2), with no
 # timeout, which rows' connections have something to read, and only those are drained; the drain asks
@@ -41,7 +41,9 @@
 #   ACCEPTED — the handshake has a budget, AE_HS_BUDGET_MS from accept to the first COMMIT, and any
 #              handshake error is final. Neither reason a placed row is retried applies: the connection
 #              exists only because the client is running, and SOCK_SEQPACKET neither drops nor reorders a
-#              record, so a kind that is wrong was sent wrong. EOF is final too.
+#              record, so a kind that is wrong was sent wrong. EOF is final too. And a client whose window
+#              left the desktop was told SETU_CLOSE and has AE_CLOSE_BUDGET_MS to hang up: rows are the scarce
+#              thing, and clients that ignore it would hold them all.
 #
 # ⭐ A CLIENT'S WINDOW IS NOT ON THE DESKTOP UNTIL ITS FIRST PRESENT (0.17.6). It is minted at CREATE_SURFACE
 # and mapped — placed at its cascade position, on top, showing its buffer — when its first COMMIT is applied
@@ -59,6 +61,11 @@
 #     an honest client then hangs up), which the retirement line says.
 #     ⛔ DETACH BEFORE CLOSE. The kernel hands the closed fd number to the next accept, and a window still
 #     naming it would send its keys, focus notices and SETU_CLOSE to a different client.
+#     ⭐ A DETACHED WINDOW COSTS NO READ AND IS NOT KEPT FOR EVER. It names no buffer, so it shows its cache
+#     and opens nothing, and at the cap (compositor.cyr, AE_CLIENT_WIN_MAX) the one whose client went first
+#     makes room. On a GPU frame there is no surface to composite, so its body is the theme fill.
+#   - a client still connected AE_CLOSE_BUDGET_MS after its window left the desktop: as above. It was told
+#     SETU_CLOSE when the window closed, so all it gets now is the end of file.
 #   - then the connection is closed, and the row can be reused by the next accept.
 #
 # ⭐ WHAT A RETIRED CLIENT SEES (Linux), in this order:
@@ -93,7 +100,7 @@
 var AE_CLIENT_MAX = 8;
 var chan_fd[8];        # the compositor's end: a placed channel end, or an accepted socket; -1 once closed
 var chan_served[8];    # 1 once that client's surface has been ANNOUNCED (not a poll gate — see chan_dead)
-var chan_st[8];        # per-client handshake scratch (`setu_hs_st_new`, setu_dispatch.cyr)
+var chan_st[8];        # per-row handshake scratch, kept across clients (`ae_client_scratch`)
 var chan_fail[8];      # consecutive handshake failures per client (PLACED rows)
 var chan_name[8];      # window title for the client on this channel
 # ⛔⛔ `chan_served` MEANT TWO THINGS AND THAT COST THE RESIZE. It latched on the first successful
@@ -107,6 +114,7 @@ var chan_dead[8];      # 1 = retired, never poll again (distinct from `served` =
 var chan_kind[8];      # AeRow: which rule ends this row (see the banner)
 var chan_t0[8];        # ACCEPTED: the monotonic ms it was accepted (-1 = no clock)
 var chan_due[8];       # ACCEPTED: the ms its handshake budget runs out; 0 = no budget (every PLACED row)
+var chan_close_due[8]; # ACCEPTED: the ms a client whose window left the desktop must be gone by; 0 = not armed
 # This frame's answer from `ae_clients_poll`, per row: 1 something to read, 0 nothing, -1 not asked — the
 # serve then asks for that row alone. Read once by the serve, which puts it back to -1.
 var chan_ready[8];
@@ -125,34 +133,54 @@ enum AeClientK {
     # on agnos is 8 s (SETU_READ_DEFAULT_MS). ⚠ A client that connects and only presents more than 10 s
     # later is disconnected; setu's client presents when it is ready and connects just before.
     AE_HS_BUDGET_MS = 10000;
+    # ⭐ From the first frame that finds a client's window off the desktop to its disconnection, in ms. Short,
+    # because its window is already gone: all this ends is a connection nothing is drawn for, and a client
+    # that is still saving its work carries on and reads end of file.
+    AE_CLOSE_BUDGET_MS = 2000;
 }
 
 # Why an ACCEPTED row was retired, beside the handshake's own negative codes (-6 .. -15).
 enum AeRetire {
     AE_RET_BUDGET = 1;      # its handshake did not finish within its budget
+    AE_RET_CLOSED = 2;      # its window left the desktop and it stayed connected past the budget
 }
 
-# Initialise row `i` for a client on `fd`: every field, so a reused row carries nothing over. -> i
+# Row `i`'s handshake scratch, zeroed for a new client. -> it, or 0 when it has none and none can be allocated.
+# ⭐ ONE BLOCK PER ROW FOR THE LIFE OF THE PROCESS. The bump heap gives nothing back, so a block per connection
+# is a leak the connecting process sets the rate of.
+fn ae_client_scratch(i): i64 {
+    var st = load64(&chan_st + i * 8);
+    if (st != 0) { return setu_hs_st_zero(st); }
+    st = setu_hs_st_new();
+    store64(&chan_st + i * 8, st);
+    return st;
+}
+
+# Initialise row `i` for a client on `fd`: every field, so a reused row carries nothing over. -> i, or -2 when
+# the row has no scratch and the heap has none to give, with nothing changed.
 fn ae_client_fill(i, fd, name, kind): i64 {
+    if (ae_client_scratch(i) == 0) { return 0 - 2; }
     store64(&chan_fd + i * 8, fd);
     store64(&chan_served + i * 8, 0);
-    store64(&chan_dead + i * 8, 0);      # slots are reused across spawns — clear both latches
-    store64(&chan_st + i * 8, setu_hs_st_new());
+    store64(&chan_dead + i * 8, 0);      # an accepted row is reused — clear both latches
     store64(&chan_fail + i * 8, 0);
     store64(&chan_name + i * 8, name);
     store64(&chan_kind + i * 8, kind);
     store64(&chan_t0 + i * 8, 0);
     store64(&chan_due + i * 8, 0);
+    store64(&chan_close_due + i * 8, 0);
     store64(&chan_ready + i * 8, 0 - 1);
     return i;
 }
 
-# Register a channel the compositor minted and endowed (agnos: `ae_client_spawn`). -> its row, or -1
-# when the table is full. ⚠ Appends and never reuses a row: the agnos table has always been append-only.
+# Register a channel the compositor minted and endowed (agnos: `ae_client_spawn`). -> its row, -1 when the
+# table is full, or -2 when there is no memory for its scratch.
+# ⚠ Appends and never reuses a row, so a session's ninth launch is refused (roadmap B3). Only accepted rows
+# are reused (`ae_client_free_row`).
 fn ae_client_place(fd, name): i64 {
     if (chan_n >= AE_CLIENT_MAX) { return 0 - 1; }
     var i = chan_n;
-    ae_client_fill(i, fd, name, AeRow.AE_ROW_PLACED);
+    if (ae_client_fill(i, fd, name, AeRow.AE_ROW_PLACED) < 0) { return 0 - 2; }
     chan_n = chan_n + 1;
     return i;
 }
@@ -178,8 +206,9 @@ fn ae_client_free_row(): i64 {
 }
 
 # Register a connection the Linux listener just accepted, with `budget_ms` from `now_ms` to finish its
-# handshake. -> its row, or -1 when every row holds a client: the connection is then CLOSED, and the
-# client reads end of file at once. ⚠ `now_ms` -1 (no clock) leaves the row without a budget.
+# handshake. -> its row, -1 when every row holds a client, or -2 when there is no memory for its scratch: in
+# both the connection is CLOSED, and the client reads end of file at once.
+# ⚠ `now_ms` -1 (no clock) leaves the row without a budget.
 # ⭐ Registering is ALL the accept does. Nothing is read here; the row's first service is the drain.
 fn ae_client_accept(fd, now_ms, budget_ms): i64 {
     var i = ae_client_free_row();
@@ -187,16 +216,38 @@ fn ae_client_accept(fd, now_ms, budget_ms): i64 {
         sys_close(fd);
         return 0 - 1;
     }
+    # ⚠ Named for the protocol, as the accept path always named it: nothing here knows what the client is.
+    if (ae_client_fill(i, fd, "setu-surface", AeRow.AE_ROW_ACCEPTED) < 0) {
+        # The row stays what `ae_client_free_row` looks for, so the next connection can try it.
+        store64(&chan_fd + i * 8, 0 - 1);
+        store64(&chan_dead + i * 8, 1);
+        store64(&chan_kind + i * 8, AeRow.AE_ROW_ACCEPTED);
+        sys_close(fd);
+        return 0 - 2;
+    }
     #ifndef CYRIUS_TARGET_AGNOS
     fd_set_nonblocking(fd);         # a send to a client that does not read fails instead of waiting
     #endif
-    # ⚠ Named for the protocol, as the accept path always named it: nothing here knows what the client is.
-    ae_client_fill(i, fd, "setu-surface", AeRow.AE_ROW_ACCEPTED);
     store64(&chan_t0 + i * 8, now_ms);
     if (now_ms >= 0) {
         if (budget_ms > 0) { store64(&chan_due + i * 8, now_ms + budget_ms); }
     }
     return i;
+}
+
+# A connection off the listener: say it, register it with the handshake budget, and say why if it was refused.
+# -> what `ae_client_accept` returned. The lines are capped (`ae_say_ok`, setu_dispatch.cyr).
+fn ae_client_admit(cfd, now_ms): i64 {
+    if (ae_say_ok(AeSay.AE_SAY_CONN, "aethersafha: no more 'setu client connected' lines -- capped") == 1) {
+        println("aethersafha: setu client connected");
+    }
+    var row = ae_client_accept(cfd, now_ms, AeClientK.AE_HS_BUDGET_MS);
+    if (row >= 0) { return row; }
+    if (ae_say_ok(AeSay.AE_SAY_FULL, "aethersafha: no more 'closed the new connection' lines -- capped") == 1) {
+        if (row == 0 - 1) { println("aethersafha: client table full -- closed the new connection"); }
+        if (row == 0 - 2) { println("aethersafha: no memory for a client's handshake -- closed the new connection"); }
+    }
+    return row;
 }
 
 # 1 when row `i` is an ACCEPTED client that has not presented and whose budget has run out at `now_ms`.
@@ -207,6 +258,33 @@ fn ae_client_overdue(i, now_ms): i64 {
     if (due <= 0) { return 0; }
     if (now_ms < 0) { return 0; }
     if (now_ms >= due) { return 1; }
+    return 0;
+}
+
+# 1 when row `i` is an ACCEPTED client whose window left the desktop AE_CLOSE_BUDGET_MS ago. The first frame
+# that finds it gone arms the budget. ⚠ `now_ms` -1 (no clock) neither arms nor ends it, as for the handshake's.
+# ⚠ ACCEPTED rows only: a PLACED row is never reused, so retiring one would free nothing.
+fn ae_client_close_overdue(comp, i, now_ms): i64 {
+    if (load64(&chan_kind + i * 8) != AeRow.AE_ROW_ACCEPTED) { return 0; }
+    if (load64(&chan_served + i * 8) == 0) { return 0; }
+    if (now_ms < 0) { return 0; }
+    var win = load64(load64(&chan_st + i * 8) + HS_ST_WIN);
+    if (comp_find_by_id(comp, win_id(win)) >= 0) { return 0; }
+    var due = load64(&chan_close_due + i * 8);
+    if (due == 0) {
+        store64(&chan_close_due + i * 8, now_ms + AeClientK.AE_CLOSE_BUDGET_MS);
+        return 0;
+    }
+    if (now_ms >= due) { return 1; }
+    return 0;
+}
+
+# Retire row `i` if either of its budgets has run out at `now_ms`.
+fn ae_client_budgets(comp, i, now_ms): i64 {
+    if (ae_client_overdue(i, now_ms) == 1) { return ae_client_retire(comp, i, AeRetire.AE_RET_BUDGET, now_ms); }
+    if (ae_client_close_overdue(comp, i, now_ms) == 1) {
+        return ae_client_retire(comp, i, AeRetire.AE_RET_CLOSED, now_ms);
+    }
     return 0;
 }
 
@@ -279,9 +357,9 @@ fn ae_client_serve(comp, i, dstx, dsty, now_ms): i64 {
     if (load64(&chan_dead + i * 8) != 0) { return 0; }
     var st = load64(&chan_st + i * 8);
     var kind = load64(&chan_kind + i * 8);
-    # ⭐ NOTHING TO READ, NOTHING READ: no `setu_poll_input` at all. The budget still runs.
+    # ⭐ NOTHING TO READ, NOTHING READ: no `setu_poll_input` at all. The budgets still run.
     if (ae_client_readable(i) == 0) {
-        if (ae_client_overdue(i, now_ms) == 1) { ae_client_retire(comp, i, AeRetire.AE_RET_BUDGET, now_ms); }
+        ae_client_budgets(comp, i, now_ms);
         return 0;
     }
     # ⛔ DRAIN, NOT ONE STEP. `..._step` consumes ONE record; a client that presents every
@@ -297,6 +375,7 @@ fn ae_client_serve(comp, i, dstx, dsty, now_ms): i64 {
     # ⭐ No "was its window closed mid-handshake?" check any more (0.17.6): until this present the window
     # was not on the desktop, so nobody could close it.
     if (psid > 0) {
+        store64(&chan_fail + i * 8, 0);             # a present is progress: see the note below
         if (load64(&chan_served + i * 8) != 0) { return 0; }
         store64(&chan_served + i * 8, 1);
         return psid;
@@ -309,7 +388,7 @@ fn ae_client_serve(comp, i, dstx, dsty, now_ms): i64 {
     # behaving" — that is the reset. [[feedback_audit_re_derive_dont_validate_comments]]
     if (psid == 0) {
         if (setu_hs_drained > 0) { store64(&chan_fail + i * 8, 0); }
-        if (ae_client_overdue(i, now_ms) == 1) { ae_client_retire(comp, i, AeRetire.AE_RET_BUDGET, now_ms); }
+        ae_client_budgets(comp, i, now_ms);
         return 0;
     }
     if (kind == AeRow.AE_ROW_ACCEPTED) {
@@ -322,6 +401,11 @@ fn ae_client_serve(comp, i, dstx, dsty, now_ms): i64 {
     # is merely SLOW, and a transient read error while it is still starting is not the
     # same fact as a client that died. Count consecutive failures and only give up
     # after several, so "not ready yet" and "gone" stop being the same verdict.
+    # ⛔⛔ BUT THE BUFFER CANNOT WAIT FOR THE VERDICT. Before its client presents a window has no buffer, so this
+    # is about a window that does, and -6 there is the peer gone: the kernel frees its slot, and the id can be
+    # the next client's. Every one of the frames left in the count would read it (`ae_client_buf_drop`).
+    # ⚠ A client that is somehow still there re-attaches and has it back.
+    if (psid == 0 - 6) { ae_client_buf_drop(load64(st + HS_ST_WIN)); }
     var fails = load64(&chan_fail + i * 8) + 1;
     store64(&chan_fail + i * 8, fails);
     if (fails < AeClientK.AE_PLACED_FAIL_MAX) { return 0; }
@@ -330,19 +414,67 @@ fn ae_client_serve(comp, i, dstx, dsty, now_ms): i64 {
     # ⚠ `dead`, not `served`: `served` only records that the window was announced,
     # and gating the poll on it is what stopped live clients being read at all.
     store64(&chan_dead + i * 8, 1);
-    ae_client_drop_unshown(comp, st);
+    ae_client_orphan(comp, load64(st + HS_ST_WIN));
     ae_client_placed_say(psid);
     return 0;
 }
 
-# A retired row's window, if it is not on the desktop, keeps no pixels: nothing will draw them. ⚠ Normally
-# a no-op — a window off the desktop holds no cache (setu_dispatch.cyr allocates one only for a window it
-# maps or one still mapped, and `comp_remove_window` frees it) — kept so a row cannot be retired holding one.
-fn ae_client_drop_unshown(comp, st): i64 {
-    var win = load64(st + HS_ST_WIN);
+# Stop `win` (0 = none) naming its client's buffer: the client is gone. -> 1 when it named one.
+# ⛔ THE REPAINT IS OWED HERE. A GPU frame composited that surface into both flip buffers, and only a window
+# with a buffer is re-damaged every frame. Falling out of that gives its rect one more frame of band, which
+# clears one buffer and leaves the surface standing in the other, so the window would blink between the two
+# for ever. A retired rect buys the two frames a close gets (compositor.cyr).
+fn ae_client_buf_drop(win): i64 {
     if (win == 0) { return 0; }
-    if (comp_find_by_id(comp, win_id(win)) >= 0) { return 0; }
-    return win_pix_release(win);
+    if (win_buf_forget(win) == 0) { return 0; }
+    comp_retire_add(win_x(win), win_y(win), win_w(win), win_h(win));
+    return 1;
+}
+
+# The row that named `win` (0 = none) is finished with it. On the desktop the window stays, showing what it
+# cached, and reads no buffer again: its client's id means nothing now, and the kernel can give it to the
+# next client. It now counts as gone, so the cap can evict it. Off the desktop nothing can reach it any more,
+# and it goes back to the pool.
+fn ae_client_orphan(comp, win): i64 {
+    if (win == 0) { return 0; }
+    if (comp_find_by_id(comp, win_id(win)) < 0) { return win_recycle(win); }
+    ae_client_buf_drop(win);
+    win_mark_gone(win);
+    return 0;
+}
+
+# Tell every client the desktop is going. -> how many were told.
+# ⭐ TWO WALKS, BECAUSE A WINDOW IS ON THE DESKTOP ONLY FROM ITS FIRST PRESENT. `comp_close_all_clients` tells the
+# mapped ones; a row still in its handshake has a window only the row knows, and its client has the id.
+# ⚠ State 0 is left out: such a client was given no id, so there is nothing to name. It finds out from the
+# channel or the socket, whose other end goes with this process.
+fn ae_clients_close_all(comp): i64 {
+    var told = comp_close_all_clients(comp);
+    var i = 0;
+    while (i < chan_n) {
+        if (load64(&chan_dead + i * 8) == 0) {
+            if (load64(&chan_served + i * 8) == 0) {
+                var st = load64(&chan_st + i * 8);
+                var win = load64(st + HS_ST_WIN);
+                if (win != 0) {
+                    if (load64(st + HS_ST_STATE) >= 1) {
+                        ae_send(load64(&chan_fd + i * 8), SETU_CLOSE, win_id(win), 0, 0, 0);
+                        told = told + 1;
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return told;
+}
+
+# Say a client's first present. Capped (`ae_say_ok`).
+fn ae_client_presented_say(psid): i64 {
+    if (ae_say_ok(AeSay.AE_SAY_PRESENT, "aethersafha: no more 'presented surface' lines -- capped") == 0) { return 0; }
+    println("aethersafha: setu client presented surface");
+    println_int(psid);
+    return 0;
 }
 
 # Focus a client that has just presented for the first time: ITS OWN window, by id.
@@ -384,14 +516,17 @@ fn ae_client_retire(comp, i, why, now_ms): i64 {
         # share, its own line landed inside the one above (seen in QEMU, 0.17.6).
         if (served == 0) {
             if (load64(st) >= 1) {
-                println("aethersafha: accepted client: withdrew the surface it never presented, id:");
-                println_int(id);
-                setu_send(fd, setu_close(id));
+                if (ae_say_ok(AeSay.AE_SAY_WITHDRAWN,
+                    "aethersafha: no more 'withdrew the surface' lines -- capped") == 1) {
+                    println("aethersafha: accepted client: withdrew the surface it never presented, id:");
+                    println_int(id);
+                }
+                ae_send(fd, SETU_CLOSE, id, 0, 0, 0);
             }
         }
-        ae_client_drop_unshown(comp, st);
         # A live window, or a closed one this row still names.
         if (win_cfd(win) == fd) { win_set_cfd(win, 0); }
+        ae_client_orphan(comp, win);
     }
     sys_close(fd);
     store64(&chan_fd + i * 8, 0 - 1);
@@ -399,7 +534,7 @@ fn ae_client_retire(comp, i, why, now_ms): i64 {
 }
 
 # ⛔⛔ EVERY RETIREMENT MUST SAY SOMETHING, AND TWO CODES USED TO SAY NOTHING.
-# `-9` (comp_create_window refused — window table full) and `-12` (attach geometry
+# `-9` (no window: every window at the 16-window cap live, or no memory) and `-12` (attach geometry
 # or buffer id refused) are both returnable by the handshake and neither had a line
 # here, so a client could be retired in COMPLETE SILENCE. That silence is
 # indistinguishable from "the retry budget has not expired yet", which is exactly
@@ -416,16 +551,33 @@ fn ae_client_placed_say(psid): i64 {
     if (psid == 0 - 6) { println("aethersafha: placed client: channel read failed, peer gone or bad fd"); pnamed = 1; }
     if (psid == 0 - 8) { println("aethersafha: placed client: first frame was not create_surface"); pnamed = 1; }
     if (psid == 0 - 7) { println("aethersafha: placed client: could not write surface_created back"); pnamed = 1; }
-    if (psid == 0 - 9) { println("aethersafha: placed client: the compositor could not create a window -- table full"); pnamed = 1; }
-    if (psid == 0 - 12) { println("aethersafha: placed client: surface refused -- create/attach geometry or buffer id out of range"); pnamed = 1; }
+    if (psid == 0 - 9) {
+        println("aethersafha: placed client: the compositor could not create a window -- no client window free");
+        pnamed = 1;
+    }
+    if (psid == 0 - 12) {
+        println("aethersafha: placed client: surface refused -- create/attach geometry or buffer id out of range");
+        pnamed = 1;
+    }
     # ⚠ NO LONGER "the second/third frame" — the machine resyncs past records the
     # channel ring dropped, so these fire only on a kind that is wrong in a way LOSS
     # cannot explain: neither attach nor commit at a point where one of them is due.
-    if (psid == 0 - 11) { println("aethersafha: placed client: expected attach, got neither attach nor commit"); pnamed = 1; }
-    if (psid == 0 - 13) { println("aethersafha: placed client: attached, then got neither commit nor a re-attach"); pnamed = 1; }
+    if (psid == 0 - 11) {
+        println("aethersafha: placed client: expected attach, got neither attach nor commit");
+        pnamed = 1;
+    }
+    if (psid == 0 - 13) {
+        println("aethersafha: placed client: attached, then got neither commit nor a re-attach");
+        pnamed = 1;
+    }
     if (psid == 0 - 14) { println("aethersafha: placed client: buffer read or alloc failed"); pnamed = 1; }
-    if (psid == 0 - 15) { println("aethersafha: placed client: surface refused -- its buffer is not a regular file"); pnamed = 1; }
-    if (pnamed == 0) { println("aethersafha: placed client: retired on a handshake error with NO name -- add a line for this code"); }
+    if (psid == 0 - 15) {
+        println("aethersafha: placed client: surface refused -- its buffer is not a regular file");
+        pnamed = 1;
+    }
+    if (pnamed == 0) {
+        println("aethersafha: placed client: retired on a handshake error with NO name -- add a line for this code");
+    }
     return 0;
 }
 
@@ -435,12 +587,38 @@ fn ae_client_placed_say(psid): i64 {
 # the accept path's, byte for byte: the `hostile` harness scenario reads it.
 # ⚠ The budget lines name the state in words and print only the measured ms as a number, by the rule
 # above: the clients write to the same console, and QEMU showed one landing inside a compositor line.
+# ⭐ CAPPED, since a connection can end this way for as long as processes connect (`ae_say_ok`). A hang-up and
+# a refusal are two kinds: clients that hang up by the thousand leave the line a hostile one earns.
 fn ae_client_accepted_say(why, state, ms, served, shown): i64 {
+    if (why == 0 - 6) {
+        if (ae_say_ok(AeSay.AE_SAY_HUNGUP, "aethersafha: no more 'accepted client: hung up' lines -- capped") == 0) {
+            return 0;
+        }
+    }
+    if (why != 0 - 6) {
+        if (ae_say_ok(AeSay.AE_SAY_REFUSED, "aethersafha: no more 'accepted client' refusal lines -- capped") == 0) {
+            return 0;
+        }
+    }
     if (why == AeRetire.AE_RET_BUDGET) {
-        if (state == 0) { println("aethersafha: accepted client: sent nothing within the handshake budget -- disconnected, ms since accept:"); }
-        if (state == 1) { println("aethersafha: accepted client: sent create_surface, then nothing within the handshake budget -- disconnected, ms since accept:"); }
-        if (state == 2) { println("aethersafha: accepted client: attached, then no commit within the handshake budget -- disconnected, ms since accept:"); }
-        if (state > 2) { println("aethersafha: accepted client: no surface within the handshake budget -- disconnected, ms since accept:"); }
+        if (state == 0) {
+            println("aethersafha: accepted client: sent nothing within the handshake budget -- disconnected, ms since accept:");  #skip-lint
+        }
+        if (state == 1) {
+            println("aethersafha: accepted client: sent create_surface, then nothing within the handshake budget -- disconnected, ms since accept:");  #skip-lint
+        }
+        if (state == 2) {
+            println("aethersafha: accepted client: attached, then no commit within the handshake budget -- disconnected, ms since accept:");  #skip-lint
+        }
+        if (state > 2) {
+            println(
+              "aethersafha: accepted client: no surface within the handshake budget -- disconnected, ms since accept:");
+        }
+        println_int(ms);
+        return 0;
+    }
+    if (why == AeRetire.AE_RET_CLOSED) {
+        println("aethersafha: accepted client: its window was closed and it stayed connected -- disconnected, ms since accept:");  #skip-lint
         println_int(ms);
         return 0;
     }
@@ -449,20 +627,50 @@ fn ae_client_accepted_say(why, state, ms, served, shown): i64 {
         # ⛔ "ITS WINDOW STAYS" WAS PRINTED FOR A WINDOW THE OPERATOR HAD JUST CLOSED: Ctrl+F4 removes it and
         # sends SETU_CLOSE, the client exits as told, and its hang-up is how the row finds out.
         if (served != 0) {
-            if (shown == 1) { println("aethersafha: accepted client: hung up -- its window stays, without a connection"); }
-            if (shown == 0) { println("aethersafha: accepted client: hung up after its window was closed -- disconnected"); }
+            if (shown == 1) {
+                println("aethersafha: accepted client: hung up -- its window stays, without a connection");
+            }
+            if (shown == 0) {
+                println("aethersafha: accepted client: hung up after its window was closed -- disconnected");
+            }
         }
         return 0;
     }
     var named = 0;
-    if (why == 0 - 8) { println("aethersafha: accepted client: first frame was not create_surface -- disconnected"); named = 1; }
-    if (why == 0 - 7) { println("aethersafha: accepted client: could not write surface_created back -- disconnected"); named = 1; }
-    if (why == 0 - 9) { println("aethersafha: accepted client: the compositor could not create a window -- table full"); named = 1; }
-    if (why == 0 - 12) { println("aethersafha: accepted client: surface refused -- create/attach geometry or buffer id out of range"); named = 1; }
-    if (why == 0 - 11) { println("aethersafha: accepted client: expected attach, got neither attach nor commit -- disconnected"); named = 1; }
-    if (why == 0 - 13) { println("aethersafha: accepted client: attached, then got neither commit nor a re-attach -- disconnected"); named = 1; }
-    if (why == 0 - 14) { println("aethersafha: accepted client: buffer read or alloc failed -- disconnected"); named = 1; }
-    if (why == 0 - 15) { println("aethersafha: accepted client: surface refused -- its buffer is not a regular file (a FIFO, a symlink or a directory) -- disconnected"); named = 1; }
-    if (named == 0) { println("aethersafha: accepted client: retired on a handshake error with NO name -- add a line for this code"); }
+    if (why == 0 - 8) {
+        println("aethersafha: accepted client: first frame was not create_surface -- disconnected");
+        named = 1;
+    }
+    if (why == 0 - 7) {
+        println("aethersafha: accepted client: could not write surface_created back -- disconnected");
+        named = 1;
+    }
+    if (why == 0 - 9) {
+        println("aethersafha: accepted client: the compositor could not create a window -- no client window free");
+        named = 1;
+    }
+    if (why == 0 - 12) {
+        println("aethersafha: accepted client: surface refused -- create/attach geometry or buffer id out of range");
+        named = 1;
+    }
+    if (why == 0 - 11) {
+        println("aethersafha: accepted client: expected attach, got neither attach nor commit -- disconnected");
+        named = 1;
+    }
+    if (why == 0 - 13) {
+        println("aethersafha: accepted client: attached, then got neither commit nor a re-attach -- disconnected");
+        named = 1;
+    }
+    if (why == 0 - 14) {
+        println("aethersafha: accepted client: buffer read or alloc failed -- disconnected");
+        named = 1;
+    }
+    if (why == 0 - 15) {
+        println("aethersafha: accepted client: surface refused -- its buffer is not a regular file (a FIFO, a symlink or a directory) -- disconnected");  #skip-lint
+        named = 1;
+    }
+    if (named == 0) {
+        println("aethersafha: accepted client: retired on a handshake error with NO name -- add a line for this code");
+    }
     return 0;
 }

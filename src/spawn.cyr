@@ -1,0 +1,161 @@
+# spawn.cyr — starting a setu client as a child process on Linux, and whether it started.
+#
+# ⚠ Needs `src/sigint.cyr` included first: a child undoes the SIGINT block before its execve.
+
+# 1 = at least one client could not be started, so a "no client connected" verdict has a known cause.
+var ae_spawn_failed = 0;
+
+#ifndef CYRIUS_TARGET_AGNOS
+# The children this path started and has not reaped: each pid, and the path it was told to run. Rows are
+# packed: a reaped row takes the last one's place. The paths are argv's and outlive the run.
+var AE_SPAWN_MAX = 32;
+var ae_spawn_n = 0;
+var ae_spawn_pid[32];     # module scope: AE_SPAWN_MAX x u64
+var ae_spawn_path[32];
+
+var AE_SYS_CLOSE_RANGE = 436;   # the same number on x86_64 and aarch64; lib/ does not name it
+var AE_RLIMIT_NOFILE = 7;
+var AE_FD_SCAN_MAX = 65536;     # where the scan stops however high the limit is
+
+# Close fds 3 up to the file limit, one syscall each. For a kernel without close_range (before 5.9) or a
+# seccomp policy that refuses it. ⚠ RLIM_INFINITY reads as -1 here.
+fn ae_fds_close_scan(): i64 {
+    var rl[16];
+    var top = 1024;
+    if (sys_getrlimit(AE_RLIMIT_NOFILE, &rl) == 0) { top = load64(&rl); }
+    if ((top < 0) || (top > AE_FD_SCAN_MAX)) { top = AE_FD_SCAN_MAX; }
+    var fd = 3;
+    while (fd < top) {
+        sys_close(fd);
+        fd = fd + 1;
+    }
+    return 0;
+}
+
+# Close every fd from 3 up.
+# ⛔ THIS RUNS IN THE CHILD, BETWEEN fork AND execve: syscalls and this frame's stack only, nothing allocated.
+fn ae_fds_close_all(): i64 {
+    if (syscall(AE_SYS_CLOSE_RANGE, 3, 0xFFFFFFFF, 0) == 0) { return 0; }
+    return ae_fds_close_scan();
+}
+
+# Launch a setu client as a detached child. -> pid, or -1 (no fork, or the table of children is full).
+#
+# ⭐ THE LINUX COUNTERPART OF THE agnos MINT/ENDOW/SPAWN BLOCK (M6-B5). agnos hands the child a channel
+# end it is BORN holding; Linux has a listener, so the child just connects back — the same
+# launch-then-connect shape, and `programs/puka_launch_probe.cyr:34-45` already proved it on this
+# target. Until now the host arm launched NOTHING: `--clients` could only reach exit 95 if somebody
+# started two clients by hand in another shell, which is not a probe, it is a two-person job.
+#
+# ⛔ fork+execve here, by design. The Rust port's app layer (`src/apps.cyr`, with its own spawn helpers)
+# was never linked into this binary and was retired at 0.17.0 (ADR 0004): windowed clients are launched
+# here and by the launcher, not by a shadow app framework.
+# ⭐ THE CHILD INHERITS NO COMPOSITOR fd. It keeps 0, 1 and 2 and connects back for everything else.
+# `ae_fds_close_all` is the rule, because close-on-exec is a flag each opener has to remember: bhumi opens
+# /dev/fb0 O_RDWR without it, which would hand a client the raw screen read-write. A held setu listener or
+# connection is as bad: after the compositor died a new client's connect would still succeed, into a backlog
+# nothing accepts, and an old client would still see a live peer. setu's sockets and the SIGINT signalfd are
+# close-on-exec as well.
+# ⭐⭐ `sock` IS ANNOUNCED TO THE CHILD, exactly as the agnos arm announces `AGNOS_CHAN=<fd>` in its
+# `#43` env blob. The child is TOLD where the compositor is listening rather than left to recompute
+# the same default — which is the difference between "both sides agree" and "both sides happen to
+# agree". ⛔ The first cut passed `envp = 0`, giving the child an EMPTY environment: with
+# `SETU_SOCKET=/tmp/ae-alt.sock` set, the compositor bound the override and every spawned client
+# still dialled the default, so `--clients` answered 93 while the server looked perfectly correct.
+# Measured, and it is the same shape as the agnos `AGNOS_CHAN` bug: an announcement that is not made.
+fn ae_spawn_client(path, sock): i64 {
+    if (ae_spawn_n >= AE_SPAWN_MAX) { return 0 - 1; }
+    var cargv = alloc(16);
+    store64(cargv + 0, path);
+    store64(cargv + 8, 0);
+    # "SETU_SOCKET=<sock>\0" — one variable, deliberately: the child needs the rendezvous and nothing
+    # else, and a hand-built blob cannot leak the compositor's own environment into a client.
+    var eb = alloc(256);
+    var lit = "SETU_SOCKET=";
+    var w = 0;
+    while (w < 12) { store8(eb + w, load8(lit + w)); w = w + 1; }
+    var sl = strlen(sock);
+    if (sl > 200) { sl = 200; }
+    var k = 0;
+    while (k < sl) { store8(eb + w, load8(sock + k)); w = w + 1; k = k + 1; }
+    store8(eb + w, 0);
+    var cenv = alloc(16);
+    store64(cenv + 0, eb);
+    store64(cenv + 8, 0);
+    var pid = sys_fork();
+    if (pid < 0) { return 0 - 1; }
+    if (pid == 0) {
+        sigi_child_reset();   # ⛔ a blocked SIGINT survives execve: the client must stay stoppable by Ctrl+C
+        ae_fds_close_all();
+        sys_execve(path, cargv, cenv);
+        # ⚠ Only reachable when execve FAILED — a missing or non-executable client. Exiting 127 (the
+        # shell's "command not found") rather than 0 keeps a bad path distinguishable from a client
+        # that ran and chose to quit.
+        sys_exit(127);
+    }
+    store64(&ae_spawn_pid + ae_spawn_n * 8, pid);
+    store64(&ae_spawn_path + ae_spawn_n * 8, path);
+    ae_spawn_n = ae_spawn_n + 1;
+    return pid;
+}
+#endif
+
+# How many children this path started and has not reaped.
+fn ae_spawn_live(): i64 {
+    #ifndef CYRIUS_TARGET_AGNOS
+    return ae_spawn_n;
+    #endif
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+}
+
+# One non-blocking look at each child this path started. -> how many it reaped. The frame loop calls this every
+# frame; with no children it makes no syscall.
+# ⭐ A FAILED execve HAS NO OTHER WITNESS. The fork succeeded, so the parent has a pid and thinks a client is
+# coming. Exit 127 is what the child leaves behind, and it latches `ae_spawn_failed`.
+# ⛔⛔ BY PID, NEVER waitpid(-1). foreign_run forks too: kavach waits on its guest's pid, and a reap of any child
+# would leave kavach an ECHILD and the guest no exit status.
+# ⚠ Linux only: `ae_client_spawn`, the agnos path, keeps no pid (roadmap B3).
+fn ae_spawn_reap(): i64 {
+    #ifndef CYRIUS_TARGET_AGNOS
+    var gone = 0;
+    var st = 0;
+    var i = 0;
+    while (i < ae_spawn_n) {
+        var r = sys_waitpid(load64(&ae_spawn_pid + i * 8), &st, WNOHANG);
+        if (r == 0) {
+            i = i + 1;
+            continue;
+        }
+        if (r > 0) {
+            gone = gone + 1;
+            if ((WIFEXITED(st) == 1) && (WEXITSTATUS(st) == 127)) {
+                ae_spawn_failed = 1;
+                var path = load64(&ae_spawn_path + i * 8);
+                println("aethersafha: a client could not start, its execve failed:");
+                sys_write(1, path, strlen(path));
+                sys_write(1, "\n", 1);
+            }
+        }
+        ae_spawn_n = ae_spawn_n - 1;
+        store64(&ae_spawn_pid + i * 8, load64(&ae_spawn_pid + ae_spawn_n * 8));
+        store64(&ae_spawn_path + i * 8, load64(&ae_spawn_path + ae_spawn_n * 8));
+    }
+    return gone;
+    #endif
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+}
+
+# The `--clients` verdict once the display socket is known to be up (exit 92 is main's, and Linux-only).
+#   `interrupted`  a SIGINT ended the run before both apps presented: 94/93 claim a spent budget, and an
+#                  interrupted run cannot (`sigi_probe_truncated`).
+fn ae_probe_verdict(spawn_failed, interrupted, accepted): i64 {
+    if (spawn_failed == 1) { return 91; }
+    if (interrupted == 1) { return SIGI_PROBE_EXIT; }
+    if (accepted >= 2) { return 95; }
+    if (accepted == 1) { return 94; }
+    return 93;
+}

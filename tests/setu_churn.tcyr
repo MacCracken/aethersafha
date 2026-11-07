@@ -1,0 +1,914 @@
+# aethersafha — what a long session's clients cost: connect, present, hang up, repeat.
+#
+# ⛔⛔ WHY THIS SUITE EXISTS. A client that presented and hung up left a window on the desktop that re-read its
+# buffer by name every frame, occluded or not, with nothing to bound how many there were: 256 windows naming
+# one 16 MB file cost 3.3 s a frame, and 40 of them held 657 MB. The bounds it needs are on the churn, so they
+# are checked over the churn, through the same `ae_clients_poll` / `ae_client_serve` the frame loop runs.
+#
+# ⭐ THE ORACLES ARE OUTSIDE THE SERVICE: how often the kernel saw a buffer opened (inotify), what the client
+# end of the socket reads, what the compositor prints (stdout through a pipe), the process's resident memory
+# and the bump heap's own count.
+# ⚠ It has its own table: tests/setu_clients.tcyr ends with every row held, and a row belongs to a compositor.
+include "lib/bhumi.cyr"
+include "src/frametime.cyr"
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/theme.cyr"
+include "src/cursor.cyr"
+include "src/render.cyr"
+include "src/gpu.cyr"
+include "src/wallpaper.cyr"
+include "src/setu_server.cyr"
+include "src/setu_dispatch.cyr"
+include "src/setu_clients.cyr"
+
+#ifndef CYRIUS_TARGET_AGNOS
+# Module scope: `[N]` is N x u64 here. Nothing below allocates per cycle, so the heap's count is the
+# compositor's own.
+var ch_fds[2];
+var ch_srv = 0;
+var ch_cli = 0;
+var ch_m[10];              # the client side's one message (SETU_MSG_SIZE)
+var ch_clis[8];            # each row's client end, -1 once hung up
+var ch_rm = 0;
+
+fn ch_pair(): i64 {
+    if (sys_socketpair(SETU_AF_UNIX, SETU_SOCK_SEQPACKET, 0, &ch_fds) != 0) { return 0 - 1; }
+    ch_srv = load32(&ch_fds);
+    ch_cli = load32(&ch_fds + 4);
+    fd_set_nonblocking(ch_cli);         # a client's send to a full queue fails: this suite never waits on one
+    return 0;
+}
+
+fn ch_send(cli, kind, a0, a1, a2): i64 {
+    setu__msg_init(&ch_m, kind);
+    setu_msg_set_arg(&ch_m, 0, a0);
+    setu_msg_set_arg(&ch_m, 1, a1);
+    setu_msg_set_arg(&ch_m, 2, a2);
+    return setu_send(cli, &ch_m);
+}
+fn ch_attach(cli, id, w, h, bid): i64 {
+    return setu_send(cli, setu__attach_buf_into(&ch_m, id, w, h, w * 4, 1, bid));
+}
+fn ch_commit(cli, id): i64 { return setu_send(cli, setu__commit_into(&ch_m, id)); }
+
+# The client reads one record, waiting at most `ms`. -> its kind, or -1 for none.
+fn ch_read_kind(cli, ms): i64 {
+    if (setu_read_msg_ms(cli, ch_rm, ms) <= 0) { return 0 - 1; }
+    return setu_msg_kind(ch_rm);
+}
+
+# One frame over every live row, as main's loop serves them. -> the id that presented first this frame, or 0.
+fn ch_frame(comp, now): i64 {
+    var first = 0;
+    ae_clients_poll();
+    var i = 0;
+    while (i < chan_n) {
+        if (load64(&chan_dead + i * 8) == 0) {
+            var r = ae_client_serve(comp, i, 40, 60, now);
+            if (r > 0) {
+                first = r;
+                ae_client_focus_new(comp, r);
+            }
+        }
+        i = i + 1;
+    }
+    return first;
+}
+
+# A new connection on a row. -> the row; `ch_cli` is its client end.
+fn ch_connect(now): i64 {
+    if (ch_pair() != 0) { return 0 - 1; }
+    var row = ae_client_accept(ch_srv, now, 10000);
+    if (row >= 0) { store64(&ch_clis + row * 8, ch_cli); }
+    return row;
+}
+
+# Connect and ask for a surface. -> the id the compositor answered with, or -1 when it did not.
+fn ch_create(comp, now, w, h): i64 {
+    if (ch_connect(now) < 0) { return 0 - 1; }
+    ch_send(ch_cli, SETU_CREATE_SURFACE, w, h, 0);
+    ch_frame(comp, now);
+    if (ch_read_kind(ch_cli, 1000) != SETU_SURFACE_CREATED) { return 0 - 1; }
+    return setu_msg_arg(ch_rm, 0);
+}
+
+# A whole first present of a `w x h` surface from buffer `bid`. -> its window id, or -1.
+fn ch_present(comp, now, w, h, bid): i64 {
+    var id = ch_create(comp, now, w, h);
+    if (id < 0) { return 0 - 1; }
+    ch_attach(ch_cli, id, w, h, bid);
+    ch_commit(ch_cli, id);
+    if (ch_frame(comp, now) != id) { return 0 - 1; }
+    return id;
+}
+
+# The client on `row` hangs up, and the row is served until it is retired.
+fn ch_hangup(comp, row, now): i64 {
+    var cli = load64(&ch_clis + row * 8);
+    if (cli >= 0) { sys_close(cli); }
+    store64(&ch_clis + row * 8, 0 - 1);
+    var k = 0;
+    while (k < 4) {
+        if (load64(&chan_dead + row * 8) != 0) { return 0; }
+        ch_frame(comp, now);
+        k = k + 1;
+    }
+    return 0 - 1;
+}
+
+# Every client left hangs up, so a group starts with no live row. ⚠ Rows hold windows of the group's own
+# compositor: call it before moving to a new one.
+fn ch_clear(comp): i64 {
+    var i = 0;
+    while (i < chan_n) {
+        if (load64(&chan_dead + i * 8) == 0) { ch_hangup(comp, i, 1000); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# The live row whose window has this id, or -1. ⚠ A dead row's window can be another compositor's, or in the
+# pool.
+fn ch_row_of(id): i64 {
+    var i = 0;
+    while (i < chan_n) {
+        if (load64(&chan_dead + i * 8) == 0) {
+            var win = load64(load64(&chan_st + i * 8) + HS_ST_WIN);
+            if (win != 0) {
+                if (win_id(win) == id) { return i; }
+            }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# A shared buffer of `w x h` packed pixels, every word `px`. -> its id.
+fn ch_buf(w, h, px): i64 {
+    var nb = w * h * 4;
+    var bid = setu_buf_create(nb);
+    var tmp = fl_alloc(nb);
+    var i = 0;
+    while (i < nb) { store32(tmp + i, px); i = i + 4; }
+    setu_buf_write(bid, tmp, nb);
+    fl_free(tmp);
+    return bid;
+}
+
+# ---- what the compositor prints, captured ---------------------------------------------------------------
+var ch_cap_r = 0 - 1;
+var ch_cap_w = 0 - 1;
+var ch_cap_keep = 0 - 1;
+var ch_cap_buf = 0;
+var ch_capfds[2];
+fn ch_capture_begin(): i64 {
+    ae_say_reset();                                 # the lines are capped for a session: this is a new span
+    if (sys_pipe(&ch_capfds) != 0) { return 0 - 1; }
+    ch_cap_r = load32(&ch_capfds);
+    ch_cap_w = load32(&ch_capfds + 4);
+    ch_cap_keep = sys_fcntl(1, 1030, 10);           # F_DUPFD_CLOEXEC: the real stdout, kept
+    sys_dup2(ch_cap_w, 1);
+    return 0;
+}
+# -> how many bytes were printed; `ch_cap_buf` holds them, NUL-terminated (the pipe holds 64 KB).
+fn ch_capture_end(): i64 {
+    sys_dup2(ch_cap_keep, 1);
+    sys_close(ch_cap_keep);
+    sys_close(ch_cap_w);
+    if (ch_cap_buf == 0) { ch_cap_buf = alloc(65536); }
+    var got = 0;
+    while (got < 65535) {
+        var r = sys_read(ch_cap_r, ch_cap_buf + got, 65535 - got);
+        if (r <= 0) { break; }
+        got = got + r;
+    }
+    store8(ch_cap_buf + got, 0);
+    sys_close(ch_cap_r);
+    return got;
+}
+fn ch_said(needle): i64 {
+    if (strstr(ch_cap_buf, needle) >= 0) { return 1; }
+    return 0;
+}
+
+# ---- the process's resident memory, in kB (/proc/self/status VmRSS), or -1 ---------------------------------
+var ch_stat[1024];
+fn ch_rss_kb(): i64 {
+    var fd = sys_open("/proc/self/status", 0, 0);
+    if (fd < 0) { return 0 - 1; }
+    var n = sys_read(fd, &ch_stat, 8000);
+    sys_close(fd);
+    if (n <= 0) { return 0 - 1; }
+    store8(&ch_stat + n, 0);
+    var k = strstr(&ch_stat, "VmRSS:");
+    if (k < 0) { return 0 - 1; }
+    var p = &ch_stat + k + 6;
+    while ((load8(p) == 32) || (load8(p) == 9)) { p = p + 1; }
+    var v = 0;
+    while (load8(p) >= 48) {
+        if (load8(p) > 57) { break; }
+        v = v * 10 + (load8(p) - 48);
+        p = p + 1;
+    }
+    return v;
+}
+
+# ---- how often the kernel saw a buffer's file opened: inotify IN_OPEN --------------------------------------
+var ch_path[6];
+var ch_ev[512];
+fn ch_watch_new(): i64 { return syscall(SYS_INOTIFY_INIT1, 2048); }      # IN_NONBLOCK
+fn ch_watch_buf(ifd, bid): i64 {
+    setu_buf_path(bid, &ch_path);
+    return sys_inotify_add_watch(ifd, &ch_path, 32);                     # IN_OPEN
+}
+# -> the IN_OPEN events queued since the last call. ⚠ The kernel merges an event with an identical one still
+# unread, so a count over several frames must read after each (`ch_frames_opens`).
+fn ch_opens(ifd): i64 {
+    var n = 0;
+    var more = 1;
+    while (more == 1) {
+        var r = sys_read(ifd, &ch_ev, 4096);
+        if (r <= 0) { more = 0; }
+        if (r > 0) {
+            var off = 0;
+            while (off + 16 <= r) {
+                if ((load32(&ch_ev + off + 4) & 32) != 0) { n = n + 1; }
+                off = off + 16 + load32(&ch_ev + off + 12);
+            }
+        }
+    }
+    return n;
+}
+
+# The heap, pinned shut in a forked child: every further mmap is refused and the bump chunk has no room, so
+# every `alloc` answers 0. The table is put back to new first, so the row a connection takes has no scratch.
+# -> an exit code: 0 passes, anything else names the first check that failed.
+fn ch_oom_child(comp): i64 {
+    var i = 0;
+    while (i < AE_CLIENT_MAX) {
+        store64(&chan_st + i * 8, 0);
+        store64(&chan_dead + i * 8, 0);
+        store64(&chan_fd + i * 8, 0);
+        i = i + 1;
+    }
+    chan_n = 0;
+    if (ch_pair() != 0) { return 10; }
+    var lim[16];                                    # function scope: `[N]` is N bytes here
+    store64(&lim, 1);
+    store64(&lim + 8, 0 - 1);
+    syscall(160, 9, &lim);                          # setrlimit(RLIMIT_AS), soft 1 B
+    _heap_ptr = _heap_end;
+    if (alloc(64) != 0) { return 11; }
+    if (ae_client_accept(ch_srv, 1000, 10000) != 0 - 2) { return 1; }
+    if (sys_fcntl(ch_srv, 1, 0) >= 0) { return 2; }           # its connection is closed
+    if (chan_n != 1) { return 3; }
+    if (ae_client_free_row() != 0) { return 4; }              # and the row it tried stays free
+    if (ae_client_place(5, "probe") != 0 - 2) { return 5; }   # a placed row is refused the same way
+    return 0;
+}
+
+# `n` CPU frames of one window. -> how many of them opened a buffer.
+fn ch_frames_opens(fb, win, ifd, n): i64 {
+    var total = 0;
+    var k = 0;
+    while (k < n) {
+        render_window(fb, win, 0);
+        total = total + ch_opens(ifd);
+        k = k + 1;
+    }
+    return total;
+}
+#endif
+
+fn main(): i64 {
+    alloc_init();
+    ch_rm = setu_msg_new();
+
+    #ifndef CYRIUS_TARGET_AGNOS
+    var fb = bhumi_fb_new(640, 400);
+
+    # -----------------------------------------------------------------------
+    test_group("setu churn — a live window is read every frame; a detached one never again");
+    var dc = comp_new();
+    var dbuf = ch_buf(100, 50, 0x00ABCDEF);
+    var dino = ch_watch_new();
+    assert_gte(dino, 0, "inotify");
+    assert_gte(ch_watch_buf(dino, dbuf), 0, "inotify on the client's buffer");
+    var did = ch_present(dc, 1000, 100, 50, dbuf);
+    assert_gt(did, 0, "a client presents");
+    var dwin = comp_get(dc, comp_find_by_id(dc, did));
+    ch_opens(dino);
+    assert_eq(ch_frames_opens(fb, dwin, dino, 4), 4, "CONTROL: the live window is read once per frame");
+    assert_eq(ch_hangup(dc, ch_row_of(did), 1001), 0, "it hangs up and is retired");
+    assert_eq(comp_find_by_id(dc, did) >= 0, 1, "its window stays on the desktop");
+    assert_eq(ch_frames_opens(fb, dwin, dino, 32), 0, "the detached window opens its buffer no more");
+    assert_eq(bhumi_fb_get(fb, win_x(dwin) + 3, win_body_y(dwin) + 3) & 0xFFFFFF, 0xABCDEF,
+      "and shows what it last showed");
+    setu_buf_close(dbuf);
+    sys_close(dino);
+    ch_clear(dc);
+
+    # -----------------------------------------------------------------------
+    # ⛔ A dead client's id is a freed id: reading it fails, or reads whoever got it next, and on the GPU path
+    # one refused blit of it retired the GPU for the run. So it goes at the row's FIRST -6: a placed row is
+    # retried 200 times, and those are 200 frames with a dead slot in the window.
+    test_group("setu churn — a dead client's buffer id goes at its first end of file, on both kinds of row");
+    var sc = comp_new();
+    var sbuf = ch_buf(100, 50, 0x00556677);
+    assert_eq(ch_pair(), 0, "socketpair");
+    var scli = ch_cli;
+    var srow = ae_client_place(ch_srv, "placed-probe");
+    assert_gte(srow, 0, "a placed row");
+    store64(&ch_clis + srow * 8, 0 - 1);
+    ch_send(scli, SETU_CREATE_SURFACE, 100, 50, 0);
+    ch_frame(sc, 1000);
+    assert_eq(ch_read_kind(scli, 1000), SETU_SURFACE_CREATED, "it is given a surface");
+    var sid = setu_msg_arg(ch_rm, 0);
+    ch_attach(scli, sid, 100, 50, sbuf);
+    ch_commit(scli, sid);
+    assert_eq(ch_frame(sc, 1000), sid, "it presents");
+    var swin = comp_get(sc, comp_find_by_id(sc, sid));
+    assert_eq(win_bufid(swin), sbuf, "and its window shows its buffer");
+    comp_retire_clear();
+    sys_close(scli);
+    ch_frame(sc, 1001);
+    assert_eq(load64(&chan_fail + srow * 8), 1, "the first end of file is one failure of 200");
+    assert_eq(load64(&chan_dead + srow * 8), 0, "the row is not retired for it");
+    assert_eq(win_bufid(swin), 0, "the window stops naming the buffer now, not 199 frames from now");
+    assert_eq(comp_retire_valid(), 1, "and its rect is owed the two frames that clear it from both buffers");
+    assert_neq(win_pix(swin), 0, "it keeps its cached pixels");
+    var sf = 0;
+    while (sf < AeClientK.AE_PLACED_FAIL_MAX) { ch_frame(sc, 1002); sf = sf + 1; }
+    assert_eq(load64(&chan_dead + srow * 8), 1, "the row is retired at the end of its budget");
+    assert_gte(comp_find_by_id(sc, sid), 0, "its window stays");
+    assert_gt(win_gone(swin), 0, "and counts as a window whose client went");
+
+    var aid = ch_present(sc, 1003, 100, 50, sbuf);
+    var awin = comp_get(sc, comp_find_by_id(sc, aid));
+    comp_retire_clear();
+    ch_hangup(sc, ch_row_of(aid), 1004);
+    assert_eq(win_bufid(awin), 0, "an accepted row too");
+    assert_eq(comp_retire_valid(), 1, "with the same repaint");
+    assert_eq(win_buf_w(awin), 100, "the extent stays: it is how the cached pixels are laid out");
+    assert_eq(win_buf_h(awin), 50, "both sides of it");
+
+    # A window maximized after its client went is wider than what it cached: the rows must not shear.
+    var cachepix = win_pix(awin);
+    var cr = 0;
+    while (cr < 50) {
+        var cc = 0;
+        while (cc < 100) { store32(cachepix + (cr * 100 + cc) * 4, 0x00010000 * cr + cc); cc = cc + 1; }
+        cr = cr + 1;
+    }
+    win_resize(awin, 300, 200);
+    render_window(fb, awin, 0);
+    assert_eq(bhumi_fb_get(fb, win_x(awin), win_body_y(awin) + 7) & 0xFFFFFF, 0x00070000,
+      "the rows are laid out as cached");
+    assert_eq(bhumi_fb_get(fb, win_x(awin) + 99, win_body_y(awin) + 7) & 0xFFFFFF, 0x00070063,
+      "to the row's last pixel");
+    setu_buf_close(sbuf);
+    ch_clear(sc);
+
+    # -----------------------------------------------------------------------
+    # ⛔ A drain that applied a commit returned before the reset, so a client that presents between errors
+    # never had its count cleared: "200 in a row" was 200 in the whole run.
+    # ⚠ Before the groups that fill the table: placed rows append, and are never reused.
+    test_group("setu churn — a placed row's failures are consecutive: a present ends the run of them");
+    var fc = comp_new();
+    var fbuf = ch_buf(64, 64, 0x00607080);
+    assert_eq(ch_pair(), 0, "socketpair");
+    var fcli = ch_cli;
+    var frow = ae_client_place(ch_srv, "placed-probe");
+    assert_gte(frow, 0, "a placed row");
+    store64(&ch_clis + frow * 8, 0 - 1);
+    ch_send(fcli, SETU_CREATE_SURFACE, 64, 64, 0);
+    ch_frame(fc, 1000);
+    assert_eq(ch_read_kind(fcli, 1000), SETU_SURFACE_CREATED, "it is given a surface");
+    var fid = setu_msg_arg(ch_rm, 0);
+    ch_attach(fcli, fid, 64, 64, fbuf);
+    ch_commit(fcli, fid);
+    assert_eq(ch_frame(fc, 1000), fid, "it presents");
+    var fk = 0;
+    while (fk < AeClientK.AE_PLACED_FAIL_MAX + 8) {
+        ch_send(fcli, SETU_CREATE_SURFACE, 64, 64, 0);     # wrong in state 3: one failure
+        ch_frame(fc, 1000);
+        ch_attach(fcli, fid, 64, 64, fbuf);                # and a re-attach cycle after it
+        ch_commit(fcli, fid);
+        ch_frame(fc, 1000);
+        fk = fk + 1;
+    }
+    assert_eq(load64(&chan_dead + frow * 8), 0, "a client that keeps presenting is not retired");
+    assert_eq(load64(&chan_fail + frow * 8), 0, "and its count is back at 0");
+    sys_close(fcli);
+    fk = 0;
+    while (fk <= AeClientK.AE_PLACED_FAIL_MAX) { ch_frame(fc, 1001); fk = fk + 1; }
+    assert_eq(load64(&chan_dead + frow * 8), 1, "failures in a row still retire it");
+    setu_buf_close(fbuf);
+    ch_clear(fc);
+
+    # -----------------------------------------------------------------------
+    # ⛔ D3's measurement, in a smaller surface: +657 MB over 40 cycles of 2048x2048, every window kept.
+    test_group("setu churn — connect, present, hang up, repeat: the windows and their memory stay bounded");
+    var bc = comp_new();
+    var bw = 1024;
+    var bh = 1024;
+    var bbuf = ch_buf(bw, bh, 0x00112233);
+    var brss0 = ch_rss_kb();
+    var bk = 0;
+    var bbad = 0;
+    while (bk < 40) {
+        var bid = ch_present(bc, 1000 + bk, bw, bh, bbuf);
+        if (bid < 0) { bbad = bbad + 1; }
+        if (bid > 0) { ch_hangup(bc, ch_row_of(bid), 1000 + bk); }
+        bk = bk + 1;
+    }
+    var brss1 = ch_rss_kb();
+    assert_eq(bbad, 0, "every client got in");
+    assert_eq(comp_count(bc), 16, "the desktop holds the cap's worth of windows, not 40");
+    assert_gt(brss0, 0, "resident memory is readable");
+    assert_lt(brss1 - brss0, 16 * 4096 + 16384, "resident memory: the cap's worth of 4 MB caches, not 40");
+    setu_buf_close(bbuf);
+    ch_clear(bc);
+
+    # -----------------------------------------------------------------------
+    test_group("setu churn — at the cap the oldest detached window goes, and only a detached one");
+    var evc = comp_new();
+    var esaved = AE_CLIENT_WIN_MAX;
+    AE_CLIENT_WIN_MAX = 3;
+    var eseed = comp_create_window(evc, 300, 40, 60, 40, "seeded");     # no client: not in the count
+    var ebuf = ch_buf(100, 50, 0x00445566);
+    var ea = ch_present(evc, 1000, 100, 50, ebuf);
+    var eb = ch_present(evc, 1000, 100, 50, ebuf);
+    var ecc = ch_present(evc, 1000, 100, 50, ebuf);
+    assert_gt(ecc, 0, "three clients present");
+    assert_eq(comp_client_count(evc), 3, "three client windows, the seeded one not among them");
+    var ecli_a = load64(&ch_clis + ch_row_of(ea) * 8);
+    ch_hangup(evc, ch_row_of(ecc), 1001);                               # it went first...
+    ch_hangup(evc, ch_row_of(eb), 1002);                                # ...though its window is newer
+    var eccw = comp_get(evc, comp_find_by_id(evc, ecc));
+    comp_retire_clear();
+    var ed = ch_present(evc, 1003, 100, 50, ebuf);
+    assert_gt(ed, 0, "a new client gets in at the cap");
+    assert_eq(comp_find_by_id(evc, ecc), 0 - 1, "the window detached longest ago is gone");
+    assert_eq(win_pix(eccw), 0, "and its cache is freed");
+    assert_eq(comp_retire_valid(), 1, "and its rect repainted");
+    assert_gte(comp_find_by_id(evc, eb), 0, "the other detached window stays");
+    assert_gte(comp_find_by_id(evc, ea), 0, "the live window stays");
+    assert_gte(comp_find_by_id(evc, win_id(eseed)), 0, "the seeded window stays");
+    assert_eq(comp_client_count(evc), 3, "still the cap");
+    assert_eq(ch_read_kind(ecli_a, 50), 0 - 1, "and no client is told anything: nobody was on that window");
+    assert_eq(setu_read_timed_out(), 1, "(the read timed out on a live connection)");
+    AE_CLIENT_WIN_MAX = esaved;
+    setu_buf_close(ebuf);
+    ch_clear(evc);
+
+    # -----------------------------------------------------------------------
+    test_group("setu churn — a new surface is refused only when every window is live");
+    var rc = comp_new();
+    var rsaved = AE_CLIENT_WIN_MAX;
+    AE_CLIENT_WIN_MAX = 2;
+    var rbuf = ch_buf(100, 50, 0x00778899);
+    var ra = ch_present(rc, 1000, 100, 50, rbuf);
+    var rb = ch_present(rc, 1000, 100, 50, rbuf);
+    assert_gt(rb, 0, "two clients present");
+    var rrow = ch_connect(1001);
+    var rcli = ch_cli;
+    ch_send(rcli, SETU_CREATE_SURFACE, 100, 50, 0);
+    ch_capture_begin();
+    ch_frame(rc, 1001);
+    ch_capture_end();
+    assert_eq(load64(&chan_dead + rrow * 8), 1, "a third is refused at create_surface, and retired");
+    assert_eq(ch_said("could not create a window"), 1, "and the line says why");
+    assert_eq(ch_read_kind(rcli, 1000), 0 - 1, "its client reads end of file");
+    assert_eq(setu_read_timed_out(), 0, "at once");
+    assert_eq(comp_client_count(rc), 2, "both live windows are untouched");
+    store64(&ch_clis + rrow * 8, 0 - 1);
+    sys_close(rcli);
+    ch_hangup(rc, ch_row_of(rb), 1002);
+    var rd = ch_present(rc, 1003, 100, 50, rbuf);
+    assert_gt(rd, 0, "one detached window is room: the next client gets in");
+    assert_eq(comp_find_by_id(rc, rb), 0 - 1, "in its place");
+    assert_gte(comp_find_by_id(rc, ra), 0, "and the live window stays");
+
+    # Two handshakes pass create_surface while one window is free: the second COMMIT finds the cap.
+    ch_hangup(rc, ch_row_of(rd), 1004);
+    var rx = ch_create(rc, 1005, 100, 50);
+    var rxcli = ch_cli;
+    var ry = ch_create(rc, 1005, 100, 50);
+    var rycli = ch_cli;
+    assert_gt(ry, 0, "two more clients are mid-handshake, with room for one (a detached window)");
+    ch_attach(rxcli, rx, 100, 50, rbuf);
+    ch_commit(rxcli, rx);
+    assert_eq(ch_frame(rc, 1006), rx, "the first COMMIT is mapped");
+    var rybuf = ch_buf(100, 50, 0x00778899);
+    var rino = ch_watch_new();
+    ch_watch_buf(rino, rybuf);
+    ch_attach(rycli, ry, 100, 50, rybuf);
+    ch_commit(rycli, ry);
+    ch_capture_begin();
+    assert_eq(ch_frame(rc, 1006), 0, "the second is not");
+    ch_capture_end();
+    assert_eq(ch_said("could not create a window"), 1, "it is refused at the cap, as at create_surface");
+    assert_eq(ch_opens(rino), 0, "with its buffer unread");
+    assert_eq(comp_client_count(rc), 2, "the cap holds");
+    assert_eq(ch_read_kind(rycli, 1000), SETU_CLOSE, "the client that held an id is told to close it");
+    assert_eq(setu_msg_arg(ch_rm, 0), ry, "that id");
+    store64(&ch_clis + ch_row_of(ry) * 8, 0 - 1);
+    sys_close(rycli);
+    sys_close(rino);
+    AE_CLIENT_WIN_MAX = rsaved;
+    setu_buf_close(rbuf);
+    setu_buf_close(rybuf);
+    ch_clear(rc);
+
+    # -----------------------------------------------------------------------
+    # ⛔ A window closed by hand used to leave its row serving a client told to go, for as long as that client
+    # liked. Eight that ignored SETU_CLOSE held every row, and every later client was refused at accept.
+    test_group("setu churn — a row whose window left the desktop is retired after a short budget");
+    var lc = comp_new();
+    var lbud = AeClientK.AE_CLOSE_BUDGET_MS;
+    var lbuf = ch_buf(100, 50, 0x00203040);
+    var lid = ch_present(lc, 1000, 100, 50, lbuf);
+    var lrow = ch_row_of(lid);
+    var lcli = ch_cli;
+    var lwin = comp_get(lc, comp_find_by_id(lc, lid));
+    ch_frame(lc, 1000000);
+    assert_eq(load64(&chan_dead + lrow * 8), 0, "a live client with a window on the desktop has no such budget");
+    assert_eq(comp_close_window(lc, lid), 0, "the operator closes its window");
+    assert_eq(ch_read_kind(lcli, 1000), SETU_CLOSE, "the client is told");
+    ch_frame(lc, 2000);                                                # the row finds out here
+    ch_frame(lc, 2000 + lbud - 1);
+    assert_eq(load64(&chan_dead + lrow * 8), 0, "it has its budget to go");
+    ch_capture_begin();
+    ch_frame(lc, 2000 + lbud);
+    ch_capture_end();
+    assert_eq(load64(&chan_dead + lrow * 8), 1, "a client that ignored SETU_CLOSE is retired at the budget");
+    assert_eq(ch_said("was closed"), 1, "and the line says why");
+    assert_eq(ch_read_kind(lcli, 1000), 0 - 1, "its client reads end of file");
+    assert_eq(setu_read_timed_out(), 0, "at once");
+    assert_eq(ae_client_free_row(), lrow, "its row is free for the next connection");
+    store64(&ch_clis + lrow * 8, 0 - 1);
+    sys_close(lcli);
+
+    # A client that keeps presenting into the closed window is not spared by it.
+    var pid = ch_present(lc, 5000, 100, 50, lbuf);
+    var prow = ch_row_of(pid);
+    var pcli = ch_cli;
+    comp_close_window(lc, pid);
+    ch_frame(lc, 6000);
+    ch_attach(pcli, pid, 100, 50, lbuf);
+    ch_commit(pcli, pid);
+    ch_frame(lc, 6000 + lbud);
+    assert_eq(load64(&chan_dead + prow * 8), 1, "presenting into a closed window does not hold the row");
+    store64(&ch_clis + prow * 8, 0 - 1);
+    sys_close(pcli);
+
+    # No clock, no budget: the same rule as the handshake's.
+    var nid = ch_present(lc, 7000, 100, 50, lbuf);
+    var nrow = ch_row_of(nid);
+    comp_close_window(lc, nid);
+    ch_frame(lc, 0 - 1);
+    ch_frame(lc, 0 - 1);
+    assert_eq(load64(&chan_dead + nrow * 8), 0, "no clock leaves the row without a budget");
+    ch_frame(lc, 8000);
+    ch_hangup(lc, nrow, 8001);
+
+    # Eight clients that ignore SETU_CLOSE: every row is held, and the budget gives them back.
+    var hk = 0;
+    while (hk < AE_CLIENT_MAX) {
+        var hid = ch_present(lc, 9000, 64, 64, lbuf);
+        if (hid > 0) { comp_close_window(lc, hid); }
+        hk = hk + 1;
+    }
+    assert_eq(ch_pair(), 0, "socketpair");
+    assert_eq(ae_client_accept(ch_srv, 9000, 10000), 0 - 1, "eight ignoring clients hold every row");
+    sys_close(ch_cli);
+    ch_frame(lc, 9001);
+    ch_frame(lc, 9001 + lbud);
+    assert_gte(ch_connect(9001 + lbud), 0, "and a budget later the next client has a row");
+    setu_buf_close(lbuf);
+    ch_clear(lc);
+
+    # -----------------------------------------------------------------------
+    # ⛔ setu's constructors each allocate a message, which is their contract, and the bump heap never gives one
+    # back: 80 B per key, focus change and pointer move, about 36 MB an hour of motion alone.
+    test_group("setu churn — a record the compositor sends costs the heap nothing, and says the same");
+    var oc = comp_new();
+    assert_eq(ch_pair(), 0, "socketpair");
+    var osrv = ch_srv;
+    var ocli = ch_cli;
+    fd_set_nonblocking(osrv);
+    var owin = comp_create_window(oc, 10, 20, 300, 200, "client");
+    var oother = comp_create_window(oc, 30, 40, 300, 200, "other");
+    win_set_cfd(owin, osrv);
+    win_set_cfd(oother, osrv);
+    comp_focus(oc, comp_find_by_id(oc, win_id(owin)));
+    var oev = bhumi_key_event(1, 0x04);
+    var ou0 = alloc_used();
+    var ok = 0;
+    while (ok < 2000) {
+        setu_srv_forward_key(oc, oev);
+        setu_srv_notify_focus(oc, win_id(oother), win_id(owin));
+        win_notify_resize(owin);
+        while (setu_read_msg_ms(ocli, ch_rm, 0) > 0) { }
+        ok = ok + 1;
+    }
+    assert_eq(alloc_used() - ou0, 0, "2000 keys, focus changes and resizes: 0 B");
+    setu_srv_forward_key(oc, oev);
+    assert_eq(ch_read_kind(ocli, 1000), SETU_INPUT_KEY, "a key reads as a key");
+    assert_eq(setu_msg_arg(ch_rm, 0), win_id(owin), "  its window");
+    assert_eq(setu_msg_arg(ch_rm, 1), 0x04, "  its usage");
+    assert_eq(setu_msg_arg(ch_rm, 2), 0, "  press-only: mods 0");
+    setu_srv_notify_focus(oc, win_id(oother), win_id(owin));
+    assert_eq(ch_read_kind(ocli, 1000), SETU_INPUT_FOCUS, "focus reads as focus");
+    assert_eq(setu_msg_arg(ch_rm, 0), win_id(oother), "  the window losing it");
+    assert_eq(setu_msg_arg(ch_rm, 1), 0, "  lost");
+    assert_eq(ch_read_kind(ocli, 1000), SETU_INPUT_FOCUS, "and for the one gaining it");
+    assert_eq(setu_msg_arg(ch_rm, 0), win_id(owin), "  its window");
+    assert_eq(setu_msg_arg(ch_rm, 1), 1, "  gained");
+    win_notify_resize(owin);
+    assert_eq(ch_read_kind(ocli, 1000), SETU_CONFIGURE, "a resize reads as configure");
+    assert_eq(setu_msg_arg(ch_rm, 0), win_id(owin), "  its window");
+    assert_eq(setu_msg_arg(ch_rm, 1), 300, "  its width");
+    assert_eq(setu_msg_arg(ch_rm, 2), 200, "  its height");
+    assert_eq(setu_msg_arg(ch_rm, 3), WinState.WS_NORMAL, "  its state");
+    assert_eq(comp_close_window(oc, win_id(oother)), 0, "a close");
+    assert_eq(ch_read_kind(ocli, 1000), SETU_CLOSE, "reads as close");
+    # The three pointer records `ae_ptr_forward` sends.
+    ou0 = alloc_used();
+    ok = 0;
+    while (ok < 2000) {
+        ae_send(osrv, SETU_INPUT_PTR_MOVE, 7, ok, ok + 1, 0);
+        ae_send(osrv, SETU_INPUT_PTR_BTN, 7, 1, 1, 0);
+        ae_send(osrv, SETU_INPUT_PTR_SCROLL, 7, 0 - 3, 0, 0);
+        while (setu_read_msg_ms(ocli, ch_rm, 0) > 0) { }
+        ok = ok + 1;
+    }
+    assert_eq(alloc_used() - ou0, 0, "2000 of each pointer record: 0 B");
+    ae_send(osrv, SETU_INPUT_PTR_MOVE, 7, 100, 50, 0);
+    assert_eq(ch_read_kind(ocli, 1000), SETU_INPUT_PTR_MOVE, "a move reads as a move");
+    assert_eq(setu_msg_arg(ch_rm, 1), 100, "  x");
+    assert_eq(setu_msg_arg(ch_rm, 2), 50, "  y");
+    ae_send(osrv, SETU_INPUT_PTR_BTN, 7, 3, 1, 0);
+    assert_eq(ch_read_kind(ocli, 1000), SETU_INPUT_PTR_BTN, "a button reads as a button");
+    assert_eq(setu_msg_arg(ch_rm, 1), 3, "  its number");
+    assert_eq(setu_msg_arg(ch_rm, 2), 1, "  its state");
+    ae_send(osrv, SETU_INPUT_PTR_SCROLL, 7, 0 - 3, 0, 0);
+    assert_eq(ch_read_kind(ocli, 1000), SETU_INPUT_PTR_SCROLL, "a scroll reads as a scroll");
+    assert_eq(setu_msg_arg(ch_rm, 1), 0 - 3, "  its signed delta");
+    assert_eq(setu_msg_argc(ch_rm), 2, "  two args, as its constructor sends");
+    sys_close(osrv);
+    sys_close(ocli);
+
+    # -----------------------------------------------------------------------
+    # ⛔ Each accept took a fresh scratch from the bump heap and left the last one behind, and at the end of
+    # the heap took 0 and went on, so the row's first serve wrote through a null pointer.
+    test_group("setu churn — a connection costs the heap nothing, and one it cannot afford is refused");
+    var mc = comp_new();
+    var mk = 0;
+    while (mk < 8) {                     # first use of the table's rows
+        ch_hangup(mc, ch_connect(1000), 1000);
+        mk = mk + 1;
+    }
+    var mu0 = alloc_used();
+    mk = 0;
+    while (mk < 2000) {
+        var mrow = ch_connect(1000);
+        sys_close(ch_cli);
+        store64(&ch_clis + mrow * 8, 0 - 1);
+        ch_frame(mc, 1000);
+        ch_frame(mc, 1000);
+        mk = mk + 1;
+    }
+    assert_eq(alloc_used() - mu0, 0, "2000 connections that hang up at once: 0 B");
+    assert_eq(comp_count(mc), 0, "and no window");
+    ch_clear(mc);
+    mu0 = alloc_used();
+    mk = 0;
+    while (mk < 2000) {
+        var mid = ch_create(mc, 1000, 100, 60);
+        if (mid > 0) { ch_hangup(mc, ch_row_of(mid), 1000); }
+        mk = mk + 1;
+    }
+    assert_eq(alloc_used() - mu0, 0, "2000 that ask for a surface and hang up: 0 B");
+    assert_eq(comp_count(mc), 0, "and still no window");
+    ch_clear(mc);
+    var mpid = sys_fork();
+    if (mpid == 0) { sys_exit(ch_oom_child(mc)); }
+    var mstat[8];                        # function scope: `[N]` is N bytes here
+    sys_waitpid(mpid, &mstat, 0);
+    assert_eq(load32(&mstat) & 0xFFFF, 0, "with the heap shut a new row is refused, and its connection closed");
+
+    # -----------------------------------------------------------------------
+    # ⛔ The attach cap was 16 MiB while a GPU slot holds 32 and the contract says 3840x2160 fits: maximizing a
+    # window on a 4K screen disconnected its client the moment it re-attached at the size it was told.
+    test_group("setu churn — a 4K client survives its own maximize");
+    var kc = comp_new();
+    var kbuf = ch_buf(64, 64, 0x00304050);
+    var kbig = ch_buf(3840, 2130, 0x00405060);
+    var kid = ch_present(kc, 1000, 64, 64, kbuf);
+    assert_gt(kid, 0, "a client presents small");
+    var krow = ch_row_of(kid);
+    var kcli = ch_cli;
+    var kwin = comp_get(kc, comp_find_by_id(kc, kid));
+    win_maximize(kwin, 3840, 2130);
+    ch_attach(kcli, kid, 3840, 2130, kbig);
+    ch_commit(kcli, kid);
+    ch_frame(kc, 1001);
+    assert_eq(load64(&chan_dead + krow * 8), 0, "its re-attach at the size it was told is accepted");
+    assert_eq(win_bufid(kwin), kbig, "the window shows the new buffer");
+    assert_eq(win_buf_w(kwin), 3840, "at its width");
+    assert_eq(win_buf_h(kwin), 2130, "and height");
+    assert_eq(win_pixcap(kwin), 3840 * 2130 * 4, "its cache grew to hold it");
+    setu_buf_close(kbuf);
+    setu_buf_close(kbig);
+    ch_clear(kc);
+
+    # -----------------------------------------------------------------------
+    # ⛔ Stdout blocks when nobody drains it, and the frame loop is what prints: an ungated line per connection
+    # lets a process that connects in a loop fill the pipe and stop the desktop.
+    test_group("setu churn — a connection's log lines are bounded, however many connect");
+    var gc = comp_new();
+    var gbuf = ch_buf(64, 64, 0x00506070);
+    ch_capture_begin();
+    var gk = 0;
+    while (gk < 64) {
+        assert_eq(ch_pair(), 0, "socketpair");
+        var grow = ae_client_admit(ch_srv, 1000);
+        store64(&ch_clis + grow * 8, ch_cli);
+        var gcli = ch_cli;
+        ch_send(gcli, SETU_CREATE_SURFACE, 64, 64, 0);
+        ch_frame(gc, 1000);
+        if (ch_read_kind(gcli, 1000) == SETU_SURFACE_CREATED) {
+            var gid = setu_msg_arg(ch_rm, 0);
+            ch_attach(gcli, gid, 64, 64, gbuf);
+            ch_commit(gcli, gid);
+            var gfirst = ch_frame(gc, 1000);
+            if (gfirst > 0) { ae_client_presented_say(gfirst); }
+        }
+        ch_hangup(gc, grow, 1000);
+        gk = gk + 1;
+    }
+    var gbytes = ch_capture_end();
+    assert_lt(gbytes, 8192, "64 clients print a bounded amount");
+    assert_eq(ch_said("setu client connected"), 1, "the first ones are said");
+    assert_eq(ch_said("presented surface"), 1, "and their present");
+    assert_eq(ch_said("its window stays"), 1, "and their hang-up");
+    assert_eq(ch_said("no more 'setu client connected' lines"), 1, "and where each kind stops is said too");
+
+    # The cap holds past the first span, and a kind that ran out does not take the others with it.
+    ae_say_reset();
+    gk = 0;
+    while (gk < 64) {
+        ae_say_ok(AeSay.AE_SAY_HUNGUP, "stopped");
+        gk = gk + 1;
+    }
+    assert_eq(ae_say_ok(AeSay.AE_SAY_HUNGUP, "stopped"), 0, "a kind that ran out stays out");
+    assert_eq(ae_say_ok(AeSay.AE_SAY_REFUSED, "stopped"), 1, "and another kind still prints");
+    ae_say_reset();
+
+    # A full table refuses each connection with a line, and those stop too.
+    var gr = 0;
+    while (gr < AE_CLIENT_MAX) {
+        ch_connect(1000);
+        gr = gr + 1;
+    }
+    ch_capture_begin();
+    gk = 0;
+    while (gk < 64) {
+        ch_pair();
+        assert_eq(ae_client_admit(ch_srv, 1000), 0 - 1, "refused");
+        sys_close(ch_cli);
+        gk = gk + 1;
+    }
+    var gfull = ch_capture_end();
+    assert_lt(gfull, 2048, "64 refusals print a bounded amount");
+    assert_eq(ch_said("client table full"), 1, "and say why");
+    setu_buf_close(gbuf);
+    ch_clear(gc);
+
+    # -----------------------------------------------------------------------
+    # ⛔ The quit walked the desktop, and a window is on the desktop only from its first present, so a client
+    # still in its handshake was never told. On agnos SETU_CLOSE is what makes a client exit and give back
+    # its process slot.
+    test_group("setu churn — quitting reaches a client mid-handshake, not only a mapped one");
+    var qc = comp_new();
+    var qbuf = ch_buf(64, 64, 0x00708090);
+    var qa = ch_present(qc, 1000, 64, 64, qbuf);
+    var qacli = ch_cli;
+    var qb = ch_create(qc, 1000, 64, 64);
+    var qbcli = ch_cli;
+    var qd = ch_create(qc, 1000, 64, 64);
+    var qdcli = ch_cli;
+    ch_attach(qdcli, qd, 64, 64, qbuf);
+    ch_frame(qc, 1000);
+    ch_connect(1000);
+    var qccli = ch_cli;
+    ch_frame(qc, 1000);
+    assert_eq(comp_count(qc), 1, "one window on the desktop, and three clients that have none");
+    assert_eq(ae_clients_close_all(qc), 3, "every client with a surface id is told");
+    assert_eq(ch_read_kind(qacli, 1000), SETU_CLOSE, "the mapped client");
+    assert_eq(setu_msg_arg(ch_rm, 0), qa, "  its id");
+    assert_eq(ch_read_kind(qbcli, 1000), SETU_CLOSE, "a client that asked for a surface and has not attached");
+    assert_eq(setu_msg_arg(ch_rm, 0), qb, "  its id");
+    assert_eq(ch_read_kind(qdcli, 1000), SETU_CLOSE, "a client that attached and has not committed");
+    assert_eq(setu_msg_arg(ch_rm, 0), qd, "  its id");
+    assert_eq(ch_read_kind(qacli, 50), 0 - 1, "each is told once");
+    assert_eq(setu_read_timed_out(), 1, "(the read timed out on a live connection)");
+    assert_eq(ch_read_kind(qccli, 50), 0 - 1, "a client that has asked for nothing has no id to be told about");
+    assert_eq(setu_read_timed_out(), 1, "(the read timed out on a live connection)");
+    setu_buf_close(qbuf);
+    ch_clear(qc);
+
+    # -----------------------------------------------------------------------
+    # ⛔ A row names its window by pointer. Handing a window to the next client while a live row names it would
+    # let the old client's re-attach write over the new client's window.
+    test_group("setu churn — a window goes back to the pool only when nothing can reach it, and carries nothing over");
+    var yc = comp_new();
+    var ybuf = ch_buf(64, 64, 0x008090A0);
+    var ya = ch_present(yc, 1000, 64, 64, ybuf);
+    var yarow = ch_row_of(ya);
+    var yawin = comp_get(yc, comp_find_by_id(yc, ya));
+    win_maximize(yawin, 300, 200);
+    win_set_premul(yawin, 1);
+    win_set_opacity(yawin, 40);
+    assert_eq(comp_close_window(yc, ya), 0, "its window is closed by hand, its client still connected");
+    var yb = ch_present(yc, 1001, 64, 64, ybuf);
+    var ybwin = comp_get(yc, comp_find_by_id(yc, yb));
+    assert_neq(ybwin, yawin, "the next client does not get a window a live row still names");
+    ch_hangup(yc, yarow, 1002);
+    var ybb = ch_present(yc, 1003, 80, 40, ybuf);
+    var yrwin = comp_get(yc, comp_find_by_id(yc, ybb));
+    assert_eq(yrwin, yawin, "once that row is retired, the next client's window is that one");
+    assert_gt(ybb, ya, "with a new id");
+    assert_eq(win_w(yrwin), 80, "its own width");
+    assert_eq(win_state(yrwin), WinState.WS_NORMAL, "not the old state");
+    assert_eq(win_premul(yrwin), 0, "not the old premultiplied flag");
+    assert_eq(win_opacity(yrwin), 255, "not the old opacity");
+    assert_eq(win_gone(yrwin), 0, "not gone");
+    assert_eq(win_restore_w(yrwin), 0, "not the old restore rect");
+    var yrid = ybb;
+    ch_hangup(yc, ch_row_of(yrid), 1004);
+    assert_gt(win_gone(yrwin), 0, "its client goes");
+    assert_eq(comp_close_window(yc, yrid), 0, "and its window is closed: nothing can reach it");
+    assert_eq(win_gone(yrwin), WinPool.WIN_POOLED, "it is in the pool");
+    assert_eq(win_recycle(yrwin), 0, "a second recycle is refused, which would have linked the pool to itself");
+    assert_eq(win_new(1, 0, 0, 10, 10, "a"), yrwin, "the pool hands it out once...");
+    assert_neq(win_new(2, 0, 0, 10, 10, "b"), yrwin, "...and only once");
+    setu_buf_close(ybuf);
+    ch_clear(yc);
+
+    # -----------------------------------------------------------------------
+    # ⛔ A window is a bump `alloc`, which nothing gives back: without reuse each cycle costs one for ever.
+    test_group("setu churn — windows are reused: churn at the cap grows the heap by nothing");
+    var wc = comp_new();
+    var wbuf = ch_buf(64, 64, 0x00102030);
+    var wk = 0;
+    while (wk < 32) {                    # past the cap, so the pool and every vector are warm
+        var wid = ch_present(wc, 1000, 64, 64, wbuf);
+        ch_hangup(wc, ch_row_of(wid), 1000);
+        wk = wk + 1;
+    }
+    var wu0 = alloc_used();
+    wk = 0;
+    while (wk < 512) {
+        var wid2 = ch_present(wc, 1000, 64, 64, wbuf);
+        if (wid2 > 0) { ch_hangup(wc, ch_row_of(wid2), 1000); }
+        wk = wk + 1;
+    }
+    assert_eq(alloc_used() - wu0, 0, "512 cycles of connect, present, hang up: 0 B");
+    setu_buf_close(wbuf);
+    ch_clear(wc);
+
+    # ⛔ A compositor with no tree is not the desktop. `desktop_new` wires one, and every mapped window is mirrored in
+    # it, so a churn bound measured without a tree says nothing about what runs.
+    test_group("setu churn — with the desktop's accessibility tree: churn at the cap grows the heap by nothing");
+    var ac = comp_new();
+    comp_set_a11y(ac, a11y_tree_new());
+    var abuf = ch_buf(64, 64, 0x00102030);
+    var ak = 0;
+    while (ak < 160) {                   # two announcements a cycle: past the ring's 256, so its vector is grown too
+        var aid = ch_present(ac, 1000, 64, 64, abuf);
+        ch_hangup(ac, ch_row_of(aid), 1000);
+        ak = ak + 1;
+    }
+    var au0 = alloc_used();
+    ak = 0;
+    while (ak < 512) {
+        var aid2 = ch_present(ac, 1000, 64, 64, abuf);
+        if (aid2 > 0) { ch_hangup(ac, ch_row_of(aid2), 1000); }
+        ak = ak + 1;
+    }
+    assert_eq(alloc_used() - au0, 0, "512 cycles with a tree: 0 B");
+    assert_eq(vec_len(a11y_tree_nodes(comp_a11y(ac))), comp_count(ac), "the tree holds one node per window, no more");
+    setu_buf_close(abuf);
+    ch_clear(ac);
+    #endif
+
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);

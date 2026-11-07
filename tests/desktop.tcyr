@@ -443,8 +443,10 @@ fn main() {
     var kmem = sysp_mem_permille_now();
     assert_eq(sysp_is_known(kmem), 1, "precondition: the host answers mem, so the next check can discriminate");
     assert_eq(t_gauge_from(shell_status_mem(kst), kmem, 20), 1, "mem is sysp_mem_permille_now (within 20 permille)");
-    assert_eq(t_gauge_from(shell_status_cpu(kst), sysp_cpu_permille_now(), 1000), 1, "cpu is sysp_cpu_permille_now (known iff it is)");
-    assert_eq(t_gauge_from(shell_status_disk(kst), sysp_disk_permille_now(), 20), 1, "disk is sysp_disk_permille_now (within 20 permille)");
+    assert_eq(t_gauge_from(shell_status_cpu(kst), sysp_cpu_permille_now(), 1000), 1,
+      "cpu is sysp_cpu_permille_now (known iff it is)");
+    assert_eq(t_gauge_from(shell_status_disk(kst), sysp_disk_permille_now(), 20), 1,
+      "disk is sysp_disk_permille_now (within 20 permille)");
     assert_eq(shell_status_battery_is_none(kst), 1, "battery None, as Rust writes it");
     # ⛔ NOT Connected — Rust hardcoded that (main.rs:173) with nothing measuring it.
     assert_eq(shell_status_net(kst), SH_NetStatus.SH_NET_UNKNOWN, "net UNKNOWN, not a claimed Connected");
@@ -462,11 +464,34 @@ fn main() {
     if (vec_len(ai_history(kai)) > khist0 + 1) { kev2 = vec_get(ai_history(kai), khist0 + 1); }
     assert_eq(t_ne_d(ai_event_id(kev2), ai_event_id(kev)), 1, "each event has its own id");
 
+    # ⛔ A tick every 5 s for the life of the desktop. Once the history is at its cap of 100, the event
+    # it drops pays for the one it takes.
+    test_group("desktop — a status tick costs nothing once the context history is full");
+    var tkd = desktop_new();
+    var tki = 0;
+    while (tki < 120) {
+        desktop_status_tick(tkd, 1700000000 + tki);
+        tki = tki + 1;
+    }
+    var tku = alloc_used();
+    var tkp = _fl_arena_pos;
+    while (tki < 2120) {
+        desktop_status_tick(tkd, 1700000000 + tki);
+        tki = tki + 1;
+    }
+    assert_eq(alloc_used() - tku, 0, "2000 ticks: 0 B of heap");
+    assert_eq(_fl_arena_pos - tkp, 0, "  ...and no new freelist block");
+    assert_eq(vec_len(ai_history(desk_ai(tkd))), 100, "  ...the history at its cap");
+    assert_eq(ai_event_ts(vec_get(ai_history(desk_ai(tkd)), 99)), 1700000000 + 2119,
+      "  ...its last event the last tick");
+    assert_eq(ai_event_ts(vec_get(ai_history(desk_ai(tkd)), 0)), 1700000000 + 2020,
+      "  ...its first the hundredth from the end");
+
     # -----------------------------------------------------------------------
     test_group("desktop — the status tick is due every 5 s of the #95 clock");
     assert_eq(desk_tick_due(0, 0 - 1, 0, 120), 1, "first frame ticks (tokio's first tick is immediate)");
     assert_eq(desk_tick_due(123456, 0 - 1, 7, 120), 1, "the first tick does not wait for a frame multiple");
-    assert_eq(desk_tick_due(4999999, 0, 1, 120), 0, "4.999999 s after the last: not yet");
+    assert_eq(desk_tick_due(4999999, 0, 1, 120), 0, "4.999999 s after the last: not due");
     assert_eq(desk_tick_due(5000000, 0, 2, 120), 1, "5 s after the last: due");
     assert_eq(desk_tick_due(12000000, 5000000, 3, 120), 1, "7 s after the last: due");
     # ⛔ THE FRAME COUNT NO LONGER DRIVES IT when the clock answers — 120 frames is 5 s at one rate only.
@@ -497,7 +522,7 @@ fn main() {
     var glfd = t_dbind(1);
     assert_gt(glfd, 0 - 1, "a fake daimon listens on a port of this test's own");
     daimon_set_endpoint(0x0100007F, t_dport);
-    var gbody = "{\"agents\":[{\"id\":1,\"name\":\"a\",\"type\":\"User\",\"status\":2,\"pid\":7,\"exit_code\":null,\"limits_enforced\":true,\"contained\":true},{\"id\":2,\"name\":\"b\",\"type\":\"User\",\"status\":0,\"pid\":0,\"exit_code\":null},{\"id\":3,\"name\":\"c\",\"type\":\"Service\",\"status\":6,\"pid\":0,\"exit_code\":1}],\"count\":3}";
+    var gbody = "{\"agents\":[{\"id\":1,\"name\":\"a\",\"type\":\"User\",\"status\":2,\"pid\":7,\"exit_code\":null,\"limits_enforced\":true,\"contained\":true},{\"id\":2,\"name\":\"b\",\"type\":\"User\",\"status\":0,\"pid\":0,\"exit_code\":null},{\"id\":3,\"name\":\"c\",\"type\":\"Service\",\"status\":6,\"pid\":0,\"exit_code\":1}],\"count\":3}";  #skip-lint
     var gsb = str_builder_new();
     str_builder_add_cstr(gsb, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ");
     str_builder_add_int(gsb, strlen(gbody));
@@ -538,6 +563,48 @@ fn main() {
     assert_eq(ai_agent_hud_count(gai), 3, "  ...and the HUD kept the three");
     daimon_set_endpoint(0x0100007F, dsink_port);
     sys_close(dsink);
+
+    # -----------------------------------------------------------------------
+    test_group("desktop — a change of frame path owes the band an invalidation");
+    # ⛔ A GPU FRAME DRAWS NOTHING INTO THE USERLAND FRAMEBUFFER, so on the first CPU frame after one the
+    # framebuffer outside the damage band is whatever it last held, and that frame presents all of it (R-03).
+    var pthd = desktop_new();
+    var pthfb = bhumi_fb_new(400, 300);
+    bhumi_fb_clear(pthfb, 0);
+    var pold_cur = ae_frame_dmg;
+    var pold_prev = ae_prev_dmg;
+    ae_frame_dmg = rend_dmg_new();
+    ae_prev_dmg = rend_dmg_new();
+    ae_gpu_frame_ok = 1;
+    render_desktop(pthd, pthfb);
+    render_desktop(pthd, pthfb);
+    render_desktop(pthd, pthfb);
+    ae_gpu_frame_ok = 0;
+    var pthbg = ae_bhumi(rupa_theme_bg(rupa_theme_active()));
+    assert_neq(bhumi_fb_get(pthfb, 200, 200), pthbg, "the GPU frames left the userland framebuffer undrawn");
+    render_desktop(pthd, pthfb);
+    assert_eq(rend_band_valid(), 0, "the first CPU frame after them repaints the whole screen");
+    assert_eq(bhumi_fb_get(pthfb, 200, 200), pthbg, "  so an undamaged pixel holds the theme's word");
+    assert_eq(rend_inval_owed(), 1, "  and one more frame is owed, for the buffer it did not land in");
+    render_desktop(pthd, pthfb);
+    assert_eq(rend_inval_owed(), 0, "the debt is paid in two frames");
+    render_desktop(pthd, pthfb);
+    assert_eq(rend_band_valid(), 1, "  and a steady CPU path bands again");
+    # back to the GPU: its first frame clears both flipped buffers the same way
+    ae_gpu_frame_ok = 1;
+    render_desktop(pthd, pthfb);
+    assert_eq(rend_inval_owed(), 1, "the change back to the GPU owes the two frames too");
+    ae_gpu_frame_ok = 0;
+    render_desktop(pthd, pthfb);
+    render_desktop(pthd, pthfb);
+    render_desktop(pthd, pthfb);
+    # a demotion happens after the frame was rendered, so it says so itself
+    ae_inval_owed = 0;
+    ae_gpu_demote();
+    assert_eq(rend_inval_owed(), 2, "ae_gpu_demote owes the band two frames");
+    ae_inval_owed = 0;
+    ae_frame_dmg = pold_cur;
+    ae_prev_dmg = pold_prev;
 
     return assert_summary();
 }

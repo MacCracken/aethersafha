@@ -1,0 +1,441 @@
+# pixel_spans.tcyr — the row walkers, against a per-pixel reference.
+#
+# ⛔ WHY. `fill_rect`, `rend_clear_band`, `blit_rect_s`, `rend_composite_premul_s`, `wp_fill_band`, `draw_char` and
+# `ae_text_pack_1bpp` are the frame path's hot loops, and each one's fast form must lay down the words its slow form
+# did: a clipped edge, a 0 or 1 px span, a negative origin, a short tail. Every case here runs the routine and a
+# one-pixel-at-a-time reference through `bhumi_fb_set`, which clips per pixel, and compares the whole framebuffer.
+# The word stream is also folded into one hash, printed as `@sum`, so two builds of a change can be compared.
+# Builds with the x86 row loops disabled must pass this file unchanged.
+include "lib/bhumi.cyr"
+include "src/geom.cyr"
+include "src/window.cyr"
+include "src/compositor.cyr"
+include "src/theme.cyr"
+include "src/cursor.cyr"
+include "src/render.cyr"
+include "src/gpu.cyr"
+include "src/wallpaper.cyr"
+include "src/input.cyr"
+
+var PS_W = 97;
+var PS_H = 53;
+var ps_hash = 0;
+var ps_bad = 0;          # cases that differed from the reference
+
+var ps_xs[14];
+var ps_ys[7];
+var ps_ws[16];
+var ps_hs[4];
+
+fn ps_init(): i64 {
+    var xs = 0;
+    store64(&ps_xs + 0, 0 - 300);
+    store64(&ps_xs + 8, 0 - 9);
+    store64(&ps_xs + 16, 0 - 8);
+    store64(&ps_xs + 24, 0 - 7);
+    store64(&ps_xs + 32, 0 - 1);
+    store64(&ps_xs + 40, 0);
+    store64(&ps_xs + 48, 1);
+    store64(&ps_xs + 56, 3);
+    store64(&ps_xs + 64, PS_W - 9);
+    store64(&ps_xs + 72, PS_W - 8);
+    store64(&ps_xs + 80, PS_W - 7);
+    store64(&ps_xs + 88, PS_W - 1);
+    store64(&ps_xs + 96, PS_W);
+    store64(&ps_xs + 104, PS_W + 3);
+    store64(&ps_ys + 0, 0 - 5);
+    store64(&ps_ys + 8, 0 - 1);
+    store64(&ps_ys + 16, 0);
+    store64(&ps_ys + 24, 1);
+    store64(&ps_ys + 32, PS_H - 2);
+    store64(&ps_ys + 40, PS_H - 1);
+    store64(&ps_ys + 48, PS_H);
+    var wi = 0;
+    var ww = 0;
+    while (wi < 12) {                  # 0, 1, 2, 3, 4, 7, 8, 9, 15, 16, 17, 63
+        store64(&ps_ws + wi * 8, ww);
+        ww = ww + 1;
+        if (ww == 5) { ww = 7; }
+        if (ww == 10) { ww = 15; }
+        if (ww == 18) { ww = 63; }
+        wi = wi + 1;
+    }
+    store64(&ps_ws + 96, 64);
+    store64(&ps_ws + 104, 65);
+    store64(&ps_ws + 112, PS_W);
+    store64(&ps_ws + 120, PS_W + 10);
+    store64(&ps_hs + 0, 0);
+    store64(&ps_hs + 8, 1);
+    store64(&ps_hs + 16, 2);
+    store64(&ps_hs + 24, 7);
+    return xs;
+}
+
+# A backdrop every word of which differs, in all four bytes.
+fn ps_backdrop(fb): i64 {
+    var px = bhumi_fb_pixels(fb);
+    var i = 0;
+    while (i < PS_W * PS_H) {
+        store32(px + i * 4, 0x40302010 + i * 0x01010107);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn ps_same(a, b): i64 {
+    var pa = bhumi_fb_pixels(a);
+    var pb = bhumi_fb_pixels(b);
+    var i = 0;
+    var same = 1;
+    while (i < PS_W * PS_H) {
+        var w = load32(pa + i * 4);
+        ps_hash = ((ps_hash * 31) + w) & 0xFFFFFFFFFFFF;
+        if (w != load32(pb + i * 4)) { same = 0; }
+        i = i + 1;
+    }
+    if (same == 0) { ps_bad = ps_bad + 1; }
+    return same;
+}
+
+# The reference: one bhumi_fb_set per pixel, which skips what is off the framebuffer.
+fn ps_ref_fill(fb, x, y, w, h, color): i64 {
+    var py = y;
+    while (py < y + h) {
+        var px = x;
+        while (px < x + w) { bhumi_fb_set(fb, px, py, color); px = px + 1; }
+        py = py + 1;
+    }
+    return 0;
+}
+
+fn ps_ref_blit(fb, x, y, src, w, h, stride): i64 {
+    var sy = 0;
+    while (sy < h) {
+        var sx = 0;
+        while (sx < w) {
+            bhumi_fb_set(fb, x + sx, y + sy, load32(src + sy * stride + sx * 4));
+            sx = sx + 1;
+        }
+        sy = sy + 1;
+    }
+    return 0;
+}
+
+fn ps_in(fb, x, y): i64 {
+    if ((x < 0) || (y < 0)) { return 0; }
+    if ((x >= bhumi_fb_width(fb)) || (y >= bhumi_fb_height(fb))) { return 0; }
+    return 1;
+}
+
+# op 0x01 / op 0x06, one pixel at a time, through the arithmetic the kernel's reference fixes.
+fn ps_ref_premul(fb, x, y, src, w, h, stride, alpha): i64 {
+    if (alpha < 255) { rend_blend_tables(alpha); }
+    var sy = 0;
+    while (sy < h) {
+        var sx = 0;
+        while (sx < w) {
+            if (ps_in(fb, x + sx, y + sy) == 1) {
+                var sp = load32(src + sy * stride + sx * 4);
+                if (sp != 0) {
+                    var dp = bhumi_fb_get(fb, x + sx, y + sy);
+                    if (alpha >= 255) { bhumi_fb_set(fb, x + sx, y + sy, rend_px_premul(sp, dp)); }
+                    else { bhumi_fb_set(fb, x + sx, y + sy, rend_px_alpha(sp, dp)); }
+                }
+            }
+            sx = sx + 1;
+        }
+        sy = sy + 1;
+    }
+    return 0;
+}
+
+fn ps_ref_char(fb, ch, x, y, color): i64 {
+    var row = 0;
+    while (row < FONT_H) {
+        var bits = kashi_glyph_row(KASHI_FONT_VGA_8X16, ch, row);
+        var col = 0;
+        while (col < FONT_W) {
+            if ((bits & (128 >> col)) != 0) { bhumi_fb_set(fb, x + col, y + row, color); }
+            col = col + 1;
+        }
+        row = row + 1;
+    }
+    return 0;
+}
+
+fn ps_ref_pack(dst, cells, len): i64 {
+    var stride = ae_text_stride(len);
+    var t = 0;
+    while (t < stride * FONT_H) { store8(dst + t, 0); t = t + 1; }
+    var i = 0;
+    while (i < len) {
+        var ch = load16(cells + i * 2);
+        var row = 0;
+        while (row < FONT_H) {
+            var bits = kashi_glyph_row(KASHI_FONT_VGA_8X16, ch, row);
+            var c = 0;
+            while (c < FONT_W) {
+                if ((bits & (128 >> c)) != 0) {
+                    var px = i * FONT_ADV + c;
+                    var byi = row * stride + px / 8;
+                    store8(dst + byi, load8(dst + byi) | (128 >> (px % 8)));
+                }
+                c = c + 1;
+            }
+            row = row + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# A surface of `sw` x `sh`, `stride` bytes per row, whose rows are the shapes the composite treats differently:
+# wholly opaque, opaque with one translucent word near either end, transparent black, a translucent run.
+fn ps_surface(sw, sh, stride): i64 {
+    var s = alloc(sh * stride + 8);
+    memset(s, 0x5A, sh * stride);          # the padding: a walker that reads it shows up
+    var y = 0;
+    while (y < sh) {
+        var r = s + y * stride;
+        var kind = y % 5;
+        var x = 0;
+        while (x < sw) {
+            var c = (0x00102030 + (x * 0x030507) + (y * 0x0B0D11)) & 0x00FFFFFF;
+            var w = 0xFF000000 | c;
+            if (kind == 1) { if (x == (y * 7) % sw) { w = 0x40102030; } }
+            if (kind == 2) { w = 0; }
+            if (kind == 3) { if ((x & 1) == 0) { w = 0x80000000 | (c & 0x007F7F7F); } }
+            # the translucent word a run of width 9 or 17 ends on, past its whole 16-byte groups
+            if (kind == 4) { if ((x == 8) || (x == 16)) { w = 0x01010101; } }
+            store32(r + x * 4, w);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return s;
+}
+
+fn ps_each_rect(fa, fb2, src, stride): i64 {
+    var xi = 0;
+    while (xi < 14) {
+        var x = load64(&ps_xs + xi * 8);
+        var yi = 0;
+        while (yi < 7) {
+            var y = load64(&ps_ys + yi * 8);
+            var wi = 0;
+            while (wi < 16) {
+                var w = load64(&ps_ws + wi * 8);
+                var hi = 0;
+                while (hi < 4) {
+                    var h = load64(&ps_hs + hi * 8);
+                    # the surface is as big as the widest and tallest case
+                    ps_backdrop(fa); ps_backdrop(fb2);
+                    fill_rect(fa, x, y, w, h, 0x00A1B2C3);
+                    ps_ref_fill(fb2, x, y, w, h, 0x00A1B2C3);
+                    ps_same(fa, fb2);
+                    ps_backdrop(fa); ps_backdrop(fb2);
+                    blit_rect_s(fa, x, y, src, w, h, stride);
+                    ps_ref_blit(fb2, x, y, src, w, h, stride);
+                    ps_same(fa, fb2);
+                    ps_backdrop(fa); ps_backdrop(fb2);
+                    rend_composite_premul_s(fa, x, y, src, w, h, stride, 255);
+                    ps_ref_premul(fb2, x, y, src, w, h, stride, 255);
+                    ps_same(fa, fb2);
+                    ps_backdrop(fa); ps_backdrop(fb2);
+                    rend_composite_premul_s(fa, x, y, src, w, h, stride, 200);
+                    ps_ref_premul(fb2, x, y, src, w, h, stride, 200);
+                    ps_same(fa, fb2);
+                    hi = hi + 1;
+                }
+                wi = wi + 1;
+            }
+            yi = yi + 1;
+        }
+        xi = xi + 1;
+    }
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    kashi_font_init();
+    ps_init();
+    var fa = bhumi_fb_new(PS_W, PS_H);
+    var fr = bhumi_fb_new(PS_W, PS_H);
+    var sw = PS_W + 10;
+    var sh = 7;
+
+    test_group("pixel spans — fills, blits and composites against the per-pixel reference");
+    ps_each_rect(fa, fr, ps_surface(sw, sh, sw * 4), sw * 4);
+    assert_eq(ps_bad, 0, "a tightly packed surface: every clipped rect, in all four routines");
+    ps_bad = 0;
+    ps_each_rect(fa, fr, ps_surface(sw, sh, sw * 4 + 32), sw * 4 + 32);
+    assert_eq(ps_bad, 0, "a padded surface, rows further apart than its width");
+
+    test_group("pixel spans — the clear, and a framebuffer with a padded pitch");
+    var yi = 0;
+    while (yi < 7) {
+        var hi = 0;
+        while (hi < 4) {
+            var cy = load64(&ps_ys + yi * 8);
+            var ch = load64(&ps_hs + hi * 8);
+            ps_backdrop(fa); ps_backdrop(fr);
+            rend_clear_band(fa, cy, ch, 0x00112233);
+            ps_ref_fill(fr, 0, cy, PS_W, ch, 0x00112233);
+            ps_same(fa, fr);
+            hi = hi + 1;
+        }
+        yi = yi + 1;
+    }
+    assert_eq(ps_bad, 0, "rend_clear_band: every band, off either end too");
+
+    # 16 x 8 inside a 24-pixel pitch: a word past a row's end is the row walker's mistake, not the picture's
+    var pfa = bhumi_fb_new(16, 8);
+    var pad = alloc(24 * 8 * 4);
+    memset(pad, 0x33, 24 * 8 * 4);
+    store64(pfa + BHUMI_FB_PIXELS, pad);
+    store64(pfa + BHUMI_FB_PITCH, 24 * 4);
+    fill_rect(pfa, 0 - 2, 1, 40, 2, 0x00ABCDEF);
+    blit_rect(pfa, 3, 4, ps_surface(12, 2, 12 * 4), 12, 2);
+    rend_clear_band(pfa, 6, 1, 0x00FEDCBA);
+    var ok = 1;
+    var py = 0;
+    while (py < 8) {
+        var px = 16;
+        while (px < 24) {
+            if (load32(pad + py * 96 + px * 4) != 0x33333333) { ok = 0; }
+            px = px + 1;
+        }
+        py = py + 1;
+    }
+    assert_eq(ok, 1, "nothing is written past a row's end at a padded pitch");
+    assert_eq(load32(pad + 96 + 15 * 4), 0x00ABCDEF, "  a fill still reaches the last column");
+    assert_eq(load32(pad + 6 * 96 + 15 * 4), 0x00FEDCBA, "  and the clear does");
+
+    test_group("pixel spans — the image wallpaper, scaled");
+    ps_bad = 0;
+    var iw = 37;
+    var ih = 11;
+    var img = alloc(iw * ih * 4);
+    var ip = 0;
+    while (ip < iw * ih) { store32(img + ip * 4, 0x00010203 + ip * 0x00030507); ip = ip + 1; }
+    ae_wp_track = 0;
+    ae_wp_kind = AeWallpaperKind.AE_WP_IMAGE;
+    ae_wp_img = img;
+    ae_wp_iw = iw;
+    ae_wp_ih = ih;
+    ae_wp_serial = ae_wp_serial + 1;
+    yi = 0;
+    while (yi < 7) {
+        var whi = 0;
+        while (whi < 4) {
+            var wy = load64(&ps_ys + yi * 8);
+            var wh = load64(&ps_hs + whi * 8) * 3;
+            ps_backdrop(fa); ps_backdrop(fr);
+            wp_fill_band(fa, wy, wh, PS_H);
+            var ry = 0;
+            while (ry < wh) {
+                var rx = 0;
+                while (rx < PS_W) {
+                    bhumi_fb_set(fr, rx, wy + ry, wp_pixel(rx, wy + ry, PS_W, PS_H));
+                    rx = rx + 1;
+                }
+                ry = ry + 1;
+            }
+            ps_same(fa, fr);
+            whi = whi + 1;
+        }
+        yi = yi + 1;
+    }
+    assert_eq(ps_bad, 0, "every band of the image is the source's nearest pixel");
+    # a new image at one serial later, and a screen of another size
+    var img2 = alloc(iw * ih * 4);
+    ip = 0;
+    while (ip < iw * ih) { store32(img2 + ip * 4, 0x00FF0000 - ip); ip = ip + 1; }
+    ae_wp_img = img2;
+    ae_wp_serial = ae_wp_serial + 1;
+    ps_backdrop(fa);
+    wp_fill_all(fa, PS_W, PS_H);
+    assert_eq(bhumi_fb_get(fa, 50, 20), wp_pixel(50, 20, PS_W, PS_H), "a new wallpaper is what is drawn");
+    var fsm = bhumi_fb_new(31, 17);
+    wp_fill_all(fsm, 31, 17);
+    assert_eq(bhumi_fb_get(fsm, 30, 16), wp_pixel(30, 16, 31, 17), "a screen of another size is sampled again");
+    # ⛔ THE COPY IS THE CPU'S: while the GPU paints the wallpaper from its own slot none is built or used
+    ae_wp_serial = ae_wp_serial + 1;
+    var sc_before = ae_wp_sc;
+    var sc_ser = ae_wp_sc_ser;
+    ae_gpu_wp_ready = 1;
+    ps_backdrop(fa);
+    wp_fill_all(fa, PS_W, PS_H);
+    ae_gpu_wp_ready = 0;
+    assert_eq(ae_wp_sc_ser, sc_ser, "a frame the GPU paints scales nothing");
+    assert_eq(ae_wp_sc, sc_before, "  and allocates nothing");
+    assert_eq(bhumi_fb_get(fa, 50, 20), (0x40302010 + (20 * PS_W + 50) * 0x01010107) & 0xFFFFFFFF,
+      "  and leaves the framebuffer alone");
+    ae_wp_kind = AeWallpaperKind.AE_WP_SOLID;
+    ae_wp_img = 0;
+
+    test_group("pixel spans — glyphs");
+    ps_bad = 0;
+    var chs = 0;
+    while (chs < 4) {
+        var ch = 65;
+        if (chs == 1) { ch = 0x82; }
+        if (chs == 2) { ch = 0x101; }
+        if (chs == 3) { ch = 0xDB; }            # the full block: every column lit, so a clipped edge shows
+        var xi = 0;
+        while (xi < 14) {
+            yi = 0;
+            while (yi < 7) {
+                ps_backdrop(fa); ps_backdrop(fr);
+                draw_char(fa, ch, load64(&ps_xs + xi * 8), load64(&ps_ys + yi * 8), 0x00E0E0E0);
+                ps_ref_char(fr, ch, load64(&ps_xs + xi * 8), load64(&ps_ys + yi * 8), 0x00E0E0E0);
+                ps_same(fa, fr);
+                yi = yi + 1;
+            }
+            xi = xi + 1;
+        }
+        chs = chs + 1;
+    }
+    # a cell with no glyph draws nothing
+    ps_backdrop(fa); ps_backdrop(fr);
+    assert_eq(draw_char(fa, 0x7FFF, 10, 10, 0x00E0E0E0), 1, "a cell with no glyph answers as a blank one");
+    ps_same(fa, fr);
+    assert_eq(ps_bad, 0, "every glyph at every clip");
+
+    var cells = alloc(64 * 2);
+    var pa = alloc(ae_text_bytes(64) + 8);
+    var pb = alloc(ae_text_bytes(64) + 8);
+    var bad = 0;
+    var len = 0;
+    while (len <= 64) {
+        var c = 0;
+        while (c < len) {
+            store16(cells + c * 2, 32 + (c * 13 + len * 7) % 226);
+            if (c == 5) { store16(cells + c * 2, 0x101); }
+            if (c == 7) { store16(cells + c * 2, 0x7FFF); }
+            c = c + 1;
+        }
+        memset(pa, 0xEE, ae_text_bytes(64) + 8);
+        store64(pb, 0);
+        ae_text_pack_1bpp(pa, cells, len);
+        ps_ref_pack(pb, cells, len);
+        var n = ae_text_bytes(len);
+        var i = 0;
+        while (i < n) {
+            var w = load8(pa + i);
+            ps_hash = ((ps_hash * 31) + w) & 0xFFFFFFFFFFFF;
+            if (w != load8(pb + i)) { bad = bad + 1; }
+            i = i + 1;
+        }
+        if (load8(pa + n) != 0xEE) { bad = bad + 1; }  # nothing past the run's own bytes
+        len = len + 1;
+    }
+    assert_eq(bad, 0, "the 1bpp pack of every run length, 0 to 64 cells");
+
+    print("@sum pixel_spans ", 17); print_num(ps_hash); println("");
+    return assert_summary();
+}
+
+var ec = main();
+syscall(60, ec);

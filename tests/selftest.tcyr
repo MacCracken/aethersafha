@@ -202,5 +202,15 @@ fn main() {
     # ⚠ Found alongside the same defect in gpu_fallback.tcyr (no summary at all) and the mid-`main`
     # `return` in render.tcyr that left four groups unreachable. Three shapes, one class: a gate whose
     # verdict never reaches the caller. The suite's own count is the verdict, so return it.
+    test_group("selftest — frame 2 passes only if it was really checked");
+    assert_eq(ae_st_far_verdict(1, 0, 0, 0), 0, "presented, captured, read, clean: passes");
+    assert_eq(ae_st_far_verdict(1, 0, 0, 1), 75, "a sentinel far from the window: 75");
+    assert_eq(ae_st_far_verdict(0, 0, 0, 0), 77, "the hardware refused frame 2: not a pass");
+    assert_eq(ae_st_far_verdict(1, 0 - 99, 0 - 1, 0), 77, "the capture hook never ran: not a pass");
+    assert_eq(ae_st_far_verdict(1, 0 - 5, 0 - 1, 0), 77, "the readback was rejected: not a pass");
+    assert_eq(ae_st_far_verdict(1, 0, 0 - 1, 0), 77, "the capture could not be read: not a pass");
+    assert_eq(ae_st_far_verdict(0, 0 - 99, 0 - 1, 1), 77,
+      "a stale sentinel on a refused frame proves nothing either way");
+
     return assert_summary();
 }

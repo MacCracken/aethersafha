@@ -242,6 +242,19 @@ fn ae_st_scan_margin(cap, capw, caph, ox, oy, bw, bh): i64 {
 # the shader against the copy rather than a comparison with a hand-computed number: the source is
 # ALPHA 255, where premultiplied and straight alpha are the same bytes and the shader collapses to
 # `out = src + dst*0 = src`.
+# What frame 2, the far negative control, proved: `presented` and `cap_rc` are what the frame answered, `read_rc`
+# the `#73` of its capture, `found` 1 when the scan saw a sentinel. -> 0 clean, 75 a sentinel far from the window,
+# 77 the check never completed.
+# ⛔ A CHECK THAT DID NOT RUN IS NOT A CHECK THAT PASSED. Each step needs the one before it, so a refused frame or
+# a failed readback leaves nothing to scan, and an exit 95 here would claim a screen nobody looked at.
+fn ae_st_far_verdict(presented, cap_rc, read_rc, found): i64 {
+    if (presented != 1) { return 77; }
+    if (cap_rc != 0) { return 77; }
+    if (read_rc != 0) { return 77; }
+    if (found == 1) { return 75; }
+    return 0;
+}
+
 fn ae_selftest(): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     # ⚠ Not "unsupported" — the same honest 96 a GPU-less agnos box answers. This test's subject is
@@ -416,22 +429,24 @@ fn ae_selftest(): i64 {
     var p2 = ae_gpu_present_frame(comp, fb);
     var rc2 = ae_gpu_capture_result();
     ae_gpu_capture_disarm();
-    if (p2 == 1) {
-        if (rc2 == 0) {
-            if (sys_shm_read(cid, &ae_st_cap, AE_ST_CAP_W * AE_ST_CAP_H * 4) == 0) {
-                if (ae_st_scan_for_sentinel(&ae_st_cap, AE_ST_CAP_W, AE_ST_CAP_H) == 1) {
-                    sys_shm_free(sid);
-                    sys_shm_free(cid);
-                    println("aethersafha selftest: window pixels turned up far away from the window");
-                    return 75;
-                }
-                println("aethersafha selftest: the rest of the screen is clean");
-            }
-        }
+    var rd2 = 0 - 1;
+    var hit2 = 0;
+    if ((p2 == 1) && (rc2 == 0)) {
+        rd2 = sys_shm_read(cid, &ae_st_cap, AE_ST_CAP_W * AE_ST_CAP_H * 4);
+        if (rd2 == 0) { hit2 = ae_st_scan_for_sentinel(&ae_st_cap, AE_ST_CAP_W, AE_ST_CAP_H); }
     }
-
     sys_shm_free(sid);
     sys_shm_free(cid);
+    var far = ae_st_far_verdict(p2, rc2, rd2, hit2);
+    if (far == 75) { println("aethersafha selftest: window pixels turned up far away from the window"); }
+    if (far == 77) {
+        println("aethersafha selftest: the far check never completed -- present, capture, read:");
+        println_int(p2);
+        println_int(rc2);
+        println_int(rd2);
+    }
+    if (far != 0) { return far; }
+    println("aethersafha selftest: the rest of the screen is clean");
     println("aethersafha selftest: the graphics hardware composited the desktop correctly");
     return 95;
     #endif

@@ -5,6 +5,111 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.18.2] — 2026-11-06 — the first P(-1) pass: 38 findings fixed, and a CPU frame ten times faster
+
+> The project's first audit, hardening and optimization pass, recorded in
+> [`docs/audit/2026-11-06-audit.md`](docs/audit/2026-11-06-audit.md). It found 44 distinct defects: 0 critical, 2 high, 12
+> medium and 30 low. 38 are fixed; 6 stay open with their reasons in the report. No client could corrupt the
+> compositor's memory. A client could slow the desktop without limit, grow its heap, or knock the run off the GPU, and
+> none of those is possible now. No dep or toolchain moved. The commit, the tag and the push are the operator's.
+
+### Security — a client can no longer hang, grow or demote the compositor
+
+- **A client can no longer slow the desktop without limit (HIGH).** Nothing capped windows, and a window whose client had
+  gone re-read its buffer every frame: 256 windows cost 3,282 ms a frame, which stops input. At most 16 client windows now
+  exist, the oldest dead window is evicted for a new one, and a dead window never re-reads.
+- **One refused blit no longer costs the GPU for the whole run (HIGH, agnos).** A client exiting on its own was enough. A
+  slot refusal now costs that window, a dead client's buffer id is cleared, and clients are served before the frame plan.
+  Only a device failure demotes.
+- **No heap growth per connection, per message or per window.** Connect, CREATE_SURFACE, hang up cost 464 B a cycle and ended
+  in a NULL deref at OOM. Every server-to-client record cost 80 B, about 36 MB per hour of mouse motion. Every window
+  left 484 B of accessibility node behind. All are 0 B now, and a connection that cannot allocate is closed cleanly.
+- **A client ignoring SETU_CLOSE no longer holds its row for ever,** which let eight of them refuse every later client.
+- **Spawned clients no longer inherit `/dev/fb0`,** or any fd from 3 up.
+- **A daimon body past 32,000 structural tokens is refused unparsed,** so a large answer no longer stalls a frame 81 ms and
+  pins 62 MB. A growing answer can no longer lengthen the poll arena's chain for good.
+- **Library code, ahead of its first caller:** `sec_pid_ok` refuses pid 1 and the compositor's own pid; the audit log follows
+  no link and waits on no FIFO; audit lines are well-formed UTF-8 of bounded length; encoders refuse a size their file
+  format cannot hold; human-override cards show text, not pointer bytes.
+
+### Fixed
+
+- **A click reaches a client at the right point.** PTR_MOVE now precedes PTR_BTN or PTR_SCROLL when the window or the point
+  changed, and motion dedupes on the window as well as the point.
+- **A release goes to the window that got the press,** per button, with its point clamped into that window's content.
+- **A 4K client survives its own maximize.** The attach cap is 32 MiB, as the slot and the docs always said.
+- **A failed `--client` is visible and Linux children are reaped.** Exit 127 logs the path and answers 91, not 93. Reaping is by
+  pid, because `waitpid(-1)` would take an exit status another part of the compositor is waiting for.
+- **Background after a path change, and the wallpaper on a refused frame (agnos).** A GPU to CPU change now invalidates the band,
+  and the wallpaper flag is published only with a frame that will blit it.
+- **A window narrower than its buffer, or a padded stride, no longer shears.**
+- **Guest text** is bounded, clipped to its window, drawn in the window's z slot, and gone with its window. A full surface
+  read past its end.
+- **The wallpaper decode has a budget:** four screens of RGBA8, never below one 4K image.
+- **`--clients --frames N` is refused,** because it reported the wrong verdict. **`--selftest` exits 77, not 95,** if the far
+  check never completed.
+- **The announcement queue keeps the newest 256,** and the status tick no longer leaks its event.
+- `chan_fail` is consecutive, a client mid-handshake hears SETU_CLOSE at quit, and connection log lines stop after 16 of each
+  kind, so an undrained stdout cannot block the frame loop.
+
+### Performance
+
+The CPU path, so this helps Linux and any frame that falls back from the GPU. It says nothing about iron's 7–15 fps (D1).
+
+| Bench, `docs/benchmarks.md` | 0.18.1 | 0.18.2 | |
+|---|---:|---:|---|
+| `renderer/render_frame/1` | 2.78 ms | 277.8 µs | 10.0× |
+| `renderer/render_frame/20` | 11.45 ms | 1.06 ms | 10.8× |
+| `framebuffer/blit_400x300` | 294.3 µs | 16.4 µs | 17.9× |
+| `screen_capture/png_encode/full_screen/1080p` | 516.40 ms | 41.51 ms | 12.4× |
+| `screen_capture/bmp_encode/full_screen/1080p` | 42.31 ms | 11.80 ms | 3.6× |
+
+- **Rows, not pixels.** `fill_rect`, `rend_clear_band` and `blit_rect` use `rep stosd` and `rep movsd` on x86 above 8 pixels, with
+  a tested fallback arm. The wallpaper is scaled once and copied by rows: a 720-row band goes 53,436 → 351 µs, for +14.7 MB
+  and about 26 ms once.
+- **Composites, text and capture.** An opaque surface goes 3,430 → 740 µs and a translucent one 19,506 → 13,224 µs. Glyph packing
+  is 9.5× faster and titles 5.4×. Capture uses sankoch's CRC.
+- **Pixels are unchanged.** `tests/pixel_spans.tcyr` compares every routine with a per-pixel reference on both arms, and review
+  added a 60,000-case differential fuzz with 0 mismatches. No bench is more than 8% slower.
+
+### Changed — what a user or client will notice
+
+- ⚠ **An audit log path that is a symlink, a FIFO or a device now warns and writes nothing.** A deployment that symlinks
+  `/var/log/agnos/audit.log` loses its lines.
+- ⚠ **A BMP or GIF wallpaper is refused,** as is a file past 16 MiB or an image past the budget. Each falls back to the theme.
+- **The 17th client window evicts the oldest dead one, silently.** A window with no client shows its last pixels on a CPU frame
+  and the theme fill on a GPU frame.
+- **A client ignoring SETU_CLOSE gets end of file after 2 s.**
+- **A client on a slot the GPU cannot read keeps the whole desktop on the CPU** while that window is on screen. That replaces
+  the permanent demotion; mixed frames are roadmap P4.
+- `--clients --frames N` exits 2, and `--selftest` can exit 77. agnos's `stage-tools.sh` exit list owes that code.
+
+### Docs and cleanup
+
+- **The roadmap holds only open work,** organized into release lines 0.18.x to 0.23.x. Its v1.0 boxes for benchmarks and the
+  CHANGELOG were done and are ticked.
+- ADR 0003 records each new divergence from Rust. The client contract gains §5, What ends a client, and a Pointer section.
+- **`cyrius lint` goes 309 warnings → 0 across `src/` and `tests/`,** with both binaries byte-identical through that change. ⚠ 31
+  lines carry `#skip-lint`, because a string literal cannot be split on 6.7.18, and that mutes every rule on those lines.
+- About 20 false comments are corrected, and citations of finished roadmap items now cite the CHANGELOG.
+- New: `src/spawn.cyr`, and the suites `setu_churn`, `route_wire`, `client_spawn`, `frame_order`, `pixel_spans` and `wallpaper`.
+
+### Verified
+
+- **Host 4,788,992 B** (sha256 `55be8a36…`) · **`--agnos` 4,738,256 B** (sha256 `a745b1b8…`).
+- **39 / 39 suites, 5,405 assertions, 0 failed** (0.18.1: 33 / 4,723). Each repair's regression test failed first on the
+  unrepaired code. No compiler warning points at `src/`.
+- **Every `ci.yml` step replayed in `ubuntu:26.04`** (uutils 0.10.0, the real `cyrius` CLI, a non-root user, git added), plus `cyrius
+  deps --locked`: 39 / 39 and 5,405, and the binary built there is the same `55be8a36…`.
+- `scripts/qemu-linux-input.sh` → PASS for focus, hostile, sigint, drag and silent, on this binary (same hash).
+- `check-dep-tags.sh` → 7 deps clean · `cyrius deps --verify` → 91 verified · `cyrius vet` → 31 deps, 0 untrusted · `cyrius lint` → 0
+  warnings · `cyrius fmt --check` clean · `cyrius coverage --min 69` passes (921 of 1,317 functions).
+- Two independent reviewers tried to break the repairs and found LC-1 to LC-5 and PX-1 and PX-2, which the audit report lists. The
+  window pool held 120,000 random steps on each of 6 seeds.
+- ⚠ **Not run on iron, and the `--agnos` binary is compile-verified only.** The GPU repairs are host-tested decision logic plus a
+  reading of the kernel, and the asm rows have never run on agnos (roadmap B1, B2).
+- 11 of 12 `programs/` build. `puka_desktop_probe.cyr` still does not (roadmap Cleanup).
+
 ## [0.18.1] — 2026-11-06 — Cyrius 6.7.18, every dep on its latest tag, and a stricter JSON parser
 
 > Each declared dep moves to its latest release, and all seven are on 6.7.18. bayan's parser now refuses a document

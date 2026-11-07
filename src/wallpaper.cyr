@@ -151,6 +151,42 @@ fn wp_row_color(y, h): i64 {
     return ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
 }
 
+# ⭐ THE IMAGE SCALED ONCE, then copied by rows: a 720-row band costs 50 ms through `wp_pixel`, and 0.35 this way. One
+# `fw * fh * 4` copy, built on the first CPU frame that paints this image at this size, and again only when either
+# changes. ⚠ NEVER BUILT WHILE `ae_gpu_wp_on()` HOLDS: `wp_fill_band` returns first, as the GPU paints that frame
+# from its own `#86` slot, so a GPU desktop does not hold the screen in memory twice. -> the pixels, or 0.
+var ae_wp_sc = 0;
+var ae_wp_sc_img = 0;
+var ae_wp_sc_w = 0;
+var ae_wp_sc_h = 0;
+var ae_wp_sc_ser = 0 - 1;
+fn wp_scaled(fw, fh): i64 {
+    var sized = 0;
+    if ((ae_wp_sc != 0) && (ae_wp_sc_w == fw) && (ae_wp_sc_h == fh)) { sized = 1; }
+    if ((sized == 1) && (ae_wp_sc_ser == ae_wp_serial) && (ae_wp_sc_img == ae_wp_img)) { return ae_wp_sc; }
+    if (sized == 0) {
+        if (ae_wp_sc != 0) { fl_free(ae_wp_sc); }
+        ae_wp_sc = fl_alloc(fw * fh * 4);
+        ae_wp_sc_w = fw;
+        ae_wp_sc_h = fh;
+        if (ae_wp_sc == 0) { return 0; }
+    }
+    var y = 0;
+    while (y < fh) {
+        var srow = ae_wp_img + wp_src_index(y, fh, ae_wp_ih) * ae_wp_iw * 4;
+        var d = ae_wp_sc + y * fw * 4;
+        var x = 0;
+        while (x < fw) {
+            store32(d + x * 4, load32(srow + wp_src_index(x, fw, ae_wp_iw) * 4));
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    ae_wp_sc_ser = ae_wp_serial;
+    ae_wp_sc_img = ae_wp_img;
+    return ae_wp_sc;
+}
+
 # Paint rows [y, y+h) of `fb` from the source. `fh` is the FULL screen height — the gradient is defined
 # over the whole desktop, not over the band, or a damage band would show a different gradient than a
 # full repaint of the same pixels.
@@ -170,6 +206,26 @@ fn wp_fill_band(fb, y, h, fh): i64 {
         # work: a full-screen per-pixel loop thrown away every frame. The flag is set by the frame
         # PLAN, which runs before render, so this is a decision already made rather than one guessed at.
         if (ae_gpu_wp_on() == 1) { return 0; }
+        # ⭐ ROWS OF THE IMAGE AT SCREEN SIZE, from the copy `wp_scaled` keeps. Rows outside the framebuffer are
+        # skipped, as the per-pixel walk below skips them.
+        var sc = 0;
+        if ((fh == bhumi_fb_height(fb)) && (bhumi_fb_bpp(fb) == 4)) { sc = wp_scaled(fw, fh); }
+        if (sc != 0) {
+            var y0 = y;
+            var y1 = y + h;
+            if (y0 < 0) { y0 = 0; }
+            if (y1 > fh) { y1 = fh; }
+            var pitch = bhumi_fb_pitch(fb);
+            var dr = bhumi_fb_pixels(fb) + y0 * pitch;
+            var sr = sc + y0 * fw * 4;
+            while (y0 < y1) {
+                ae_row_copy(dr, sr, fw);
+                dr = dr + pitch;
+                sr = sr + fw * 4;
+                y0 = y0 + 1;
+            }
+            return 0;
+        }
         var iy = 0;
         while (iy < h) {
             var ix = 0;
@@ -189,12 +245,36 @@ fn wp_fill_band(fb, y, h, fh): i64 {
     return 0;
 }
 
-# Load a wallpaper from a PNG or JPEG file. -> 0 on success, negative on failure.
+# Load a wallpaper from a PNG or JPEG file. -> 0 on success, negative on failure: -1 cannot open it, -2 out of
+# memory, -3 empty, -4 chitra could not decode it, -5 no pixels, -6 past the 16 MiB read cap, -7 not a PNG or a JPEG,
+# -8 past the decode ceiling.
 # ⚠ chitra returns canonical **RGBA8**; the framebuffer is XRGB8888, so the channels are repacked once
 # here rather than per frame. Alpha is DISCARDED deliberately: the wallpaper is the bottom layer, so
 # there is nothing beneath it for an alpha to blend against and honouring it would only darken the
 # image against black. A translucent wallpaper is a different feature from a translucent window.
-fn wp_load_file(path): i64 {
+# ⛔ A SMALL FILE CAN DECLARE A HUGE IMAGE: a 137 KB PNG can cost 269 MB of RSS at startup. A wallpaper is scaled to
+# the screen by nearest neighbour, so past twice the screen per axis the extra pixels are thrown away. -> the most
+# RGBA8 bytes one wallpaper may decode to on an `fw` x `fh` screen: four screens, and never under one 4K image, so a
+# small panel still takes a common file.
+fn wp_decode_ceiling(fw, fh): i64 {
+    var floor = 3840 * 2160 * 4;
+    if ((fw <= 0) || (fh <= 0)) { return floor; }
+    var c = fw * fh * 4 * 4;
+    if (c < floor) { return floor; }
+    return c;
+}
+
+# The ceiling for this screen. Asked here because the file is read before the backend opens.
+fn wp_screen_ceiling(): i64 {
+    var info[24];                       # function-local => 24 BYTES == BHUMI_FBINFO_SIZE
+    if (bhumi_output_query(&info) < 0) { return wp_decode_ceiling(0, 0); }
+    return wp_decode_ceiling(bhumi_fbinfo_width(&info), bhumi_fbinfo_height(&info));
+}
+
+fn wp_load_file(path): i64 { return wp_load_file_budget(path, wp_screen_ceiling()); }
+
+# `max_bytes` is chitra's budget: the RGBA8 output it may begin to make.
+fn wp_load_file_budget(path, max_bytes): i64 {
     # ⚠ `sys_open` is one NAME with two CONTRACTS. agnos is open(name, NAMELEN, flags)
     # (SYS_OPEN=7); Linux is open(path, flags, mode). The Linux form compiled fine on agnos and
     # handed the kernel namelen=0 — a zero-length filename — so an entirely valid path failed with
@@ -221,12 +301,25 @@ fn wp_load_file(path): i64 {
         if (n > 0) { got = got + n; }
         if (got >= cap) { n = 0; }
     }
+    # ⛔ A FILE THE CAP CUT IS NOT A FILE THAT FAILED TO DECODE. One byte more says which this is, and a file of
+    # exactly 16 MiB has none.
+    var past = 0;
+    if (got >= cap) {
+        var one[8];                     # function-local => 8 BYTES
+        if (sys_read(fd, &one, 1) > 0) { past = 1; }
+    }
     sys_close(fd);
+    if (past == 1) { return 0 - 6; }
     if (got <= 0) { return 0 - 3; }
+    # ⚠ chitra also routes BMP and GIF; `--wallpaper` is documented as PNG or JPEG, so those stop here.
+    if ((chitra_png_check_signature(src, got) != 1) && (chitra_jpeg_check_signature(src, got) != 1)) { return 0 - 7; }
     var err = alloc(8);
     store64(err, 0);
-    var img = chitra_image_decode(src, got, err);
-    if (img == 0) { return 0 - 4; }
+    var img = chitra_image_decode_budget(src, got, max_bytes, err);
+    if (img == 0) {
+        if (chitra_err_code(load64(err)) == CHITRA_ERR_BUDGET) { return 0 - 8; }
+        return 0 - 4;
+    }
     var iw = chitra_image_width(img);
     var ih = chitra_image_height(img);
     if (iw <= 0) { return 0 - 5; }
@@ -288,7 +381,7 @@ fn wp_gpu_expressible(): i64 {
 # an `#86 shm_create_gpu` slot, then `#87 gpu_blit_shm` into the back buffer before the windows — which
 # is `AE-2`, iron-proven for an opaque surface. No new kernel op, no shader, no driver stack.
 # ⛔ mabda is NOT involved and must not be re-proposed: its GPU surface rides Linux's driver stack,
-# while this band is the agnos kernel's own ring-3 `#82`-`#94` (roadmap, corrected 2026-08-01). The
+# while this band is the agnos kernel's own ring-3 `#82`-`#94` (roadmap, standing rulings). The
 # only thing mabda could ever have offered here is decode acceleration, and decode is chitra's on CPU.
-# ⚠ Not wired yet — the upload wants a persistent slot (16 system-wide, each rounded to a 2 MB page) and
-# a re-upload only when the image or the geometry changes. That is the next bite, not a line here.
+# ⭐ WIRED: `ae_gpu_wp_ensure` (gpu.cyr) keeps one persistent `#86` slot and re-uploads it only when the
+# image or the geometry changes, and `ae_gpu_present_frame` blits it before anything else in the frame.
