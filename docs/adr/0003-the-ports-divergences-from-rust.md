@@ -155,8 +155,11 @@ fix.
     socket never blocks. Rust's `start_hud_polling` existed, but its binary never called it.
   - The answer is bounded at 256 KiB, and HTTP is narrowed to what daimon sends: no chunked encoding,
     no redirects.
-  - The body is parsed with bayan, which unlike serde_json accepts leading zeros, and ill-formed UTF-8
-    or raw control bytes inside a string.
+  - The body is parsed with bayan. Unlike serde_json it refuses a document with a duplicate key, at any
+    depth, where serde_json keeps the last (bayan 1.11, 0.18.1): there is no opt-out, so a refused body
+    takes the failed-poll path and the HUD stays as it was. daimon writes its keys as fixed literals, so
+    its own answers cannot carry one. Also unlike serde_json, bayan accepts ill-formed UTF-8 or raw
+    control bytes inside a string.
   - A failed poll is not logged.
   - **On agnos the poll and the DELETE are no-ops.** Its `connect` blocks for up to 8 s, and a SYN to a
     closed port gets no RST, so the frame loop cannot dial out safely. The agnos agent gauge shows only

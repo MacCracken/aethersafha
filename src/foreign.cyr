@@ -52,7 +52,9 @@ fn foreign_has_run(f): i64 {
 # foreign_run(f): run the foreign guest in a kavach PROCESS sandbox (real
 # fork+exec+reap) AND capture its rendered surface into the hosted window's pixel
 # buffer — the mehman M2 handoff. Records the MehmanError result + kavach exec
-# status. -> the MehmanError code (MehmanError.OK on a clean run+capture+reap).
+# status. -> the MehmanError code (MehmanError.OK on a clean run+capture+reap). A guest
+# killed at its deadline returns GUEST_TIMED_OUT: it ran, so foreign_has_run stays 1 and
+# what it wrote before the kill is presented like any other capture.
 # This is the actual "swallow" path: the compositor launching a foreign app and
 # taking its surface. (mehman 0.3.0: mehman_sandbox_capture_guest.)
 fn foreign_run(f): i64 {

@@ -53,7 +53,8 @@ each module's size, test count and Cyrius home.
 | **0.17.6** | Delete `rust-old/` | ✅ **Shipped.** The gate passed: every parity row CLOSED (the OBSOLETE row through [`../architecture/002-rust-public-api-map.md`](../architecture/002-rust-public-api-map.md)), nothing of value lost, every reference pointed at tag `0.17.5` — the last tag that carries the directory. `parity-plan.md` retired with it. Folded in: setu 0.8.12, whose bounded reads let the Linux accept path handshake without blocking (D12). |
 | **0.17.7** | setu 0.8.13 | ✅ **Shipped.** setu reads a client's shared buffer without waiting or following a link, and allocates nothing per message; aethersafha returns to setu's reader on both targets and drops its own. |
 | **0.17.8** | Cyrius 6.6.20 | ✅ **Shipped.** The pin moves 6.6.11 → 6.6.20 and each declared dep moves to its 6.6.20 tag, with no change to `src/`. `foreign`'s guests re-exec the test binary, so CI passes on Ubuntu 26.04 with the runner and kavach unchanged. |
-| **0.18.0** | Cyrius 6.7.9 | ✅ **Built.** The pin moves onto the 6.7 language line and each declared dep moves to its 6.7.9 tag, with no change to `src/`. kavach 3.14.0 runs uutils guests, so `foreign` runs the host's `/bin/echo` again. |
+| **0.18.0** | Cyrius 6.7.9 | ✅ **Shipped.** The pin moves onto the 6.7 language line and each declared dep moves to its 6.7.9 tag, with no change to `src/`. kavach 3.14.0 runs uutils guests, so `foreign` runs the host's `/bin/echo` again. |
+| **0.18.1** | Cyrius 6.7.18 | ✅ **Built.** The pin moves to 6.7.18 and each declared dep moves to its latest tag. bayan refuses a duplicate JSON key, a divergence from Rust recorded in ADR 0003, and a guest killed at its deadline is reported. |
 
 **The gate for deleting `rust-old/`:**
 1. Every `parity-plan.md` row is CLOSED.

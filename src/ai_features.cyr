@@ -998,9 +998,9 @@ fn ai_rfc3339_secs(p, n, out): i64 {
     return 1;
 }
 
-# `v[key]` as serde_json's Value indexing reads it (Rust's `agent["id"]`): the LAST pair named
-# `key` (serde_json's map keeps the last duplicate, where bayan's obj_get returns the first), and 0,
-# Rust's Null, when `v` is not an object or has no such key. `key` is a cstr.
+# `v[key]` as serde_json's Value indexing reads it (Rust's `agent["id"]`): the pair named `key`, and 0,
+# Rust's Null, when `v` is not an object or has no such key. `key` is a cstr. At most one pair matches:
+# bayan refuses a duplicate key at the parse, where serde_json keeps the last (ADR 0003).
 fn _ai_json_at(v, key): i64 {
     var n = bayan_json_v_obj_len(v);
     var klen = strlen(key);
@@ -1079,7 +1079,8 @@ fn ai_poll_mem(f): i64 {
 # `resp.json()` and poll_agents (ai_features.rs:506-545), then the caller's clear + insert
 # (:479-485). `now` is epoch seconds, the default last_activity.
 # -> the number of agents the body lists (the HUD holds them, a repeated id once), or -1 when the
-#    body is not JSON (Rust's `resp.json()` Err) or memory ran out. On -1 the HUD is untouched.
+#    body is not JSON (Rust's `resp.json()` Err) or memory ran out. On -1 the HUD is untouched. A
+#    duplicate key reads as not JSON here, where Rust kept the last (ADR 0003).
 # ⚠ A JSON body of any other shape is Rust's EMPTY list and CLEARS the HUD:
 #   `body["agents"].as_array()` is None for `{}`, `[]` or `{"agents":5}`. An element that is not an
 #   object is still an agent with every field defaulted, as `agent["id"]` on it is Null.

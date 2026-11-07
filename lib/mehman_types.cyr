@@ -22,6 +22,7 @@ enum MehmanError {
     EXEC_BLOCKED = 4;
     GUEST_REAP_FAILED = 5;
     CAPABILITY_DENIED = 6;
+    GUEST_TIMED_OUT = 7;   # killed at its deadline, then reaped (v1.1.1, ADR 0008)
 }
 
 fn mehman_err_name(code) {
@@ -32,6 +33,7 @@ fn mehman_err_name(code) {
     if (code == MehmanError.EXEC_BLOCKED) { return "guest execution blocked"; }
     if (code == MehmanError.GUEST_REAP_FAILED) { return "guest reap failed"; }
     if (code == MehmanError.CAPABILITY_DENIED) { return "capability denied"; }
+    if (code == MehmanError.GUEST_TIMED_OUT) { return "guest timed out"; }
     return "unknown error";
 }
 

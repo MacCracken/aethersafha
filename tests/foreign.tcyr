@@ -32,6 +32,7 @@ fn t_ok(x): i64 {
 #
 #   guest-echo WORD   prints WORD and a newline, exits 0
 #   guest-exit N      exits N (one digit)
+#   guest-hang WORD   prints WORD and a newline, then outlasts any deadline this suite sets
 var T_GUEST_ECHO_HI = "/proc/self/exe guest-echo hi";
 
 # The guest's entry: its exit code, or -1 when this run is the suite.
@@ -45,6 +46,11 @@ fn t_guest(): i64 {
         return 0;
     }
     if (streq(verb, "guest-exit") == 1) { return load8(arg) - 48; }
+    if (streq(verb, "guest-hang") == 1) {
+        println(arg);
+        sleep_ms(60000);
+        return 0;
+    }
     return 0 - 1;
 }
 
@@ -96,6 +102,20 @@ fn main() {
     var hbuf = MehmanSurface_buffer(foreign_surface(hf));
     assert_eq(load8(hbuf + 0), 104, "  ...and its output is captured: 'h'");
     assert_eq(load8(hbuf + 1), 105, "  ...'i'");
+
+    test_group("mehman — a guest killed at its deadline ran, and what it wrote stays in the surface");
+    # Through mehman 1.1.0 a kill returned OK. `_mehman_deadline_ms` is mehman's private test hook: without
+    # it a one-shot guest gets kavach's 30 s, which would keep this path out of the suite.
+    _mehman_deadline_ms = 300;
+    var kf = foreign_new("/proc/self/exe guest-hang hi", 64, 8);
+    assert(t_ok(kf), "foreign_new for a guest that never exits");
+    assert_eq(foreign_run(kf), MehmanError.GUEST_TIMED_OUT, "foreign_run reports the kill, not OK");
+    _mehman_deadline_ms = 0;
+    assert_eq(foreign_has_run(kf), 1, "  ...and the guest counts as run, so its window presents");
+    assert_eq(foreign_exit_status(kf), 137, "  ...killed: 128 + SIGKILL");
+    var kbuf = MehmanSurface_buffer(foreign_surface(kf));
+    assert_eq(load8(kbuf + 0), 104, "  ...and what it wrote first is still in the surface: 'h'");
+    assert_eq(load8(kbuf + 1), 105, "  ...'i'");
 
     test_group("mehman — present the captured surface as window content");
     kashi_font_init();   # the glyph tables must be live before draw_text_lines

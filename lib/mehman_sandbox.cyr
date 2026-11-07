@@ -17,6 +17,11 @@
 # vocabulary pays nothing for the heavy security engine.
 var _mehman_kavach_ready = 0;
 
+# The one-shot guest deadline in ms, 0 for kavach's default (30000 from
+# `config_new`). Private and not API: it exists so tests/mehman.tcyr can run the
+# kill path in milliseconds, which a 30 s deadline would keep out of the suite.
+var _mehman_deadline_ms = 0;
+
 fn _mehman_kavach_ensure_init() {
     if (_mehman_kavach_ready == 0) {
         kavach_init();
@@ -45,8 +50,9 @@ fn _mehman_kavach_ensure_init() {
 # branch on the MehmanError return for that and read this value as the guest's
 # own status. See CHANGELOG 1.0.2 and the superseding note on ADR 0002.
 #
-# Returns MehmanError.OK on a clean run+reap, or a MehmanError code identifying
-# the stage that failed.
+# Returns MehmanError.OK on a clean run+reap, MehmanError.GUEST_TIMED_OUT if the
+# guest was killed at its deadline and reaped (`out_exit_code` is then 137), or a
+# MehmanError code identifying the stage that failed. See ADR 0008.
 fn mehman_sandbox_run_guest(spec, out_exit_code): i64 {
     return _mehman_run_guest(spec, 0, out_exit_code);
 }
@@ -66,7 +72,9 @@ fn mehman_sandbox_run_guest(spec, out_exit_code): i64 {
 # first NUL. True framebuffer capture (a shared-memory handoff, or kavach exposing
 # the raw byte count) is a future refinement; this establishes the seam.
 #
-# Returns MehmanError.OK on a clean run+capture+reap, or a MehmanError code.
+# Returns MehmanError.OK on a clean run+capture+reap, or a MehmanError code. A guest
+# killed at its deadline returns GUEST_TIMED_OUT, and what it wrote before then is
+# still in the surface.
 fn mehman_sandbox_capture_guest(spec, surface, out_exit_code): i64 {
     if (surface_is_valid(surface) == 0) {
         mehman_err_print(MehmanError.INVALID_SPEC, "surface");
@@ -91,6 +99,7 @@ fn _mehman_run_guest(spec, surface, out_exit_code): i64 {
     # resolved) for a deterministic, dependency-light reap.
     var cfg = config_new();
     config_backend(cfg, KavachBackend.PROCESS);
+    if (_mehman_deadline_ms > 0) { config_timeout_ms(cfg, _mehman_deadline_ms); }
 
     var sb = sandbox_create(cfg);
     if (sb == 0) {
@@ -124,10 +133,19 @@ fn _mehman_run_guest(spec, surface, out_exit_code): i64 {
         surface_blit_bytes(surface, out, n);
     }
 
+    # Read before the destroy, which owns `res`. The guest's status and output are
+    # already reported above: a kill changes what the run means, not what happened.
+    var timed_out = ExecResult_timed_out(res);
+
     var derr = sandbox_destroy(sb);
     if (derr != KavachError.KAVACH_ERR_OK) {
         mehman_err_print(MehmanError.GUEST_REAP_FAILED, 0);
         return MehmanError.GUEST_REAP_FAILED;
+    }
+
+    if (timed_out != 0) {
+        mehman_err_print(MehmanError.GUEST_TIMED_OUT, MehmanGuestSpec_command(spec));
+        return MehmanError.GUEST_TIMED_OUT;
     }
 
     return MehmanError.OK;

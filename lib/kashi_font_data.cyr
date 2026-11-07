@@ -139,8 +139,9 @@ var kashi_cp437_n = 0;     # entries filled: 0 before kashi_font_init, then 128 
 # SLOTS: N u64 = 8N bytes = exactly the bytes used, addressed per byte.
 # Each buffer holds (224 CP437 + 2 extension) = 226 glyphs. Internal (the
 # `_` prefix): named only so src/test.cyr's "storage" group checks the
-# same N the declarations use — an array size takes a constant, not an
-# expression, so the byte count cannot be written as `bytes / 8` here. A
+# same N the declarations use. The byte count is not written as `bytes / 8`:
+# an array size takes an expression only from cyrius 6.7.2, and consumers
+# compile this file on their own 6.6.x pins (architecture note 001). A
 # cell added past KASHI_EXT_LAST grows each N by (rows x stride) / 8, or
 # its rows land in the next buffer; the "storage" group fails until then.
 enum _KashiFontStore {
@@ -597,7 +598,7 @@ fn kashi_font_init() {
     kashi_fset8(0x7E, 0x76DC000000000000);  # ~
     kashi_fset8(0x7F, 0x0000000000000000);  # DEL=blank
 
-    # --- CGA 8x8 high half (CP437 0x80..0xFF) — added in 0.5.1 (ADR 0007).
+    # --- CGA 8x8 high half (CP437 0x80..0xFF) — added in 0.5.2 (ADR 0007).
     # 128 glyphs sourced byte-for-byte from Linux's lib/fonts/font_8x8.c
     # (public-domain IBM CGA 8x8). The ASCII half above is the AGNOS hand-
     # drawn original, so this font now mixes two PD sources: the box-
@@ -994,8 +995,12 @@ fn kashi_cp437_from_unicode(cp) {
     # SQUARE); outside that only the cases above can match.
     if (cp < 0xA0) { return 0; }
     if (cp > 0x25A0) { return 0; }
+    # 1.3.0 (audit 2026-10-30, C1): the count is a mutable global, so clamp
+    # it to the index's 128 slots — every load in the core is then bounded by
+    # a constant. Before init the zero-filled index answers 0 anyway.
     var lo = 0;
     var hi = kashi_cp437_n - 1;
+    if (hi > 127) { hi = 127; }
     while (lo <= hi) {
         var mid = (lo + hi) / 2;
         var e = &kashi_cp437_rev + mid * 8;

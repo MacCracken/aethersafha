@@ -5,6 +5,75 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 
+## [0.18.1] — 2026-11-06 — Cyrius 6.7.18, every dep on its latest tag, and a stricter JSON parser
+
+> Each declared dep moves to its latest release, and all seven are on 6.7.18. bayan's parser now refuses a document
+> with a duplicate key, a new divergence from Rust that ADR 0003 records. The commit, the tag and the push are the
+> operator's.
+
+### Changed — Cyrius 6.7.9 → 6.7.18
+
+- **`lib/` is re-vendored from the new pin: 84 → 91 files.** 61 change, and `lib/unicode/` is new: seven files that
+  bayan includes. Every stdlib file is byte-identical to the 6.7.18 snapshot.
+- **6.7.18 refuses nothing here.** Both targets build with 0 `duplicate fn`, all 79 files are clean under the 6.7.18
+  formatter, and `programs/` builds as it did. sigil's static-array warning is gone.
+- **Sizes.** Host +408,864 B, `--agnos` +408,896 B, the largest of the three pin moves. mehman measured +389,024 B for
+  the same move. Static data falls 1,170,080 → 868,704 B. The growth was not attributed further.
+- **What was read.** The migration notes for 6.7.10–6.7.18 hold 1,998 items. 667 were read in full and 227 by title.
+  The other 1,104 are in lanes for constructs this repo does not use (structs, generics, vectors, closures, Windows,
+  macOS), and were swept by machine for names this repo calls, which surfaced nothing new. One change needed work:
+  bayan's parser, below.
+- **`bayan_json_v_is_int` and `_is_float` now return `: bool`.** All five sites compare `== 1`, which still holds.
+
+### Changed — deps to their latest tags
+
+| Dep | 0.18.0 | 0.18.1 | What reaches this build, read from the vendored diff |
+|---|---|---|---|
+| bhumi | 1.5.0 | **1.5.1** | One version line |
+| rupa | 0.2.0 | **0.2.1** | One version line |
+| kashi | 1.2.0 | **1.3.0** | A bound on one index in the glyph core |
+| mehman | 1.1.0 | **1.1.1** | A guest killed at its deadline is reported (below) |
+| kavach | 3.14.0 | **3.14.6** | Capture reads its deadline on every pass. Its OCI, gVisor, rootfs and WASM changes do not reach the PROCESS backend |
+| chitra | 1.1.3 | **1.3.1** | A PNG past 16 MiB of scanlines decodes, at a lower peak |
+| setu | 0.9.0 | **0.9.1** | Two agnos refusal lines get their newline, and no wire change |
+
+- **A wallpaper PNG above about 5.6 megapixels now loads,** where chitra refused it. `src/wallpaper.cyr` keeps its
+  16 MB cap on the file. ⚠ A valid PNG can cost more memory than it could; that was not measured on this compositor.
+- **`[deps].stdlib` is unchanged,** and `lib/sys.cyr` still arrives through sigil.
+- **`cyrius.lock`'s ninth commit row moves to sankoch 2.8.9,** still not vendored, because `"sankoch"` is a stdlib leaf.
+
+### Changed — a guest killed at its deadline is reported
+
+- **mehman 1.1.1 returns `GUEST_TIMED_OUT` for such a guest, where 1.1.0 returned `OK`.** `src/foreign.cyr` needed no
+  code change: `foreign_has_run` already counts it as run, so what the guest wrote before the kill is presented.
+- **`tests/foreign.tcyr` proves that: 30 → 36 assertions.** A guest writes and hangs, and a 300 ms deadline kills it.
+  A `foreign_has_run` that reads non-`OK` as "never ran", the caller bug mehman warns about, fails the group.
+
+### Diverges from Rust — bayan refuses a duplicate JSON key
+
+- **bayan 1.11.1 refuses a whole document with a duplicate key, at any depth, and has no opt-out.** serde_json kept
+  the last. `ai_poll_agents_apply` returns -1 on such a body and the HUD stays as it was. ADR 0003 records this.
+- **Production is not affected:** daimon writes every key as a fixed literal, so its answers cannot carry a duplicate.
+- **A leading zero is refused too, which matches serde_json.** ADR 0003 said bayan accepts them; that is corrected,
+  and a test now pins it.
+- **`tests/ai_features.tcyr` failed 16 assertions on the new pin.** Its duplicate-key cases now assert the refusal, and
+  the fixture that carried them keeps its other checks: 320 → 323 assertions.
+
+### Verified
+
+- **Host 4,766,328 B** (sha256 `9246a06e…`) · **`--agnos` 4,716,064 B** (sha256 `b6265dda…`).
+- **33 / 33 suites, 4,723 assertions, 0 failed** (0.18.0: 33 / 4,714). No compiler warning points at `src/`.
+- **Every `ci.yml` step replayed in `ubuntu:26.04`** (uutils 0.10.0, the real `cyrius` CLI, a non-root user, git
+  added): format, deps, build, test and coverage all pass, 33 / 33 and 4,723. The binary built there is the same
+  `9246a06e…`.
+- `scripts/qemu-linux-input.sh` → PASS for focus, hostile, sigint, drag and silent, on this binary (same hash).
+- `check-dep-tags.sh` → 7 deps clean · `cyrius deps --verify` → 91 verified · `cyrius deps --locked` passes · CI's
+  format check clean on all 79 files · `cyrius coverage --min 69` passes (880 of 1,259 functions).
+- **A clean resolve reproduces the tree.** With an empty `lib/`, an empty dep cache and no sibling checkouts, `lib/`
+  and `cyrius.lock` come out byte-identical.
+- 11 of 12 `programs/` build. `puka_desktop_probe.cyr` still does not, as at 0.17.7.
+- ⚠ Not run on iron, and the `--agnos` binary is compile-verified only.
+
 ## [0.18.0] — 2026-11-06 — Cyrius 6.7.9, and a coreutils guest runs on a uutils host
 
 > The pin moves onto Cyrius's 6.7 language line, which is why this is a minor. Each declared dep moves to its release

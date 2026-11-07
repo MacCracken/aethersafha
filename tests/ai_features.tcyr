@@ -968,8 +968,18 @@ fn main() {
     var b5 = "{\"agents\":5}";
     assert_eq(ai_poll_agents_apply(pf, b5, strlen(b5), 1), 0, "agents is not an array");
     assert_eq(ai_agent_hud_count(pf), 0, "  ...empty");
+    # ⛔ DIVERGES FROM RUST (ADR 0003): bayan refuses a duplicate key, where serde_json keeps the last. A refused
+    # body takes Rust's `resp.json()` Err path, so the HUD stays as the last good poll left it. A leading zero is
+    # refused too, and there bayan agrees with serde_json.
+    ai_register_agent_hud(pf, 3, str_from("x"));
     var bdup = "{\"agents\":[{\"id\":1}],\"agents\":[]}";
-    assert_eq(ai_poll_agents_apply(pf, bdup, strlen(bdup), 1), 0, "two agents keys: the last wins (serde_json)");
+    assert_eq(ai_poll_agents_apply(pf, bdup, strlen(bdup), 1), 0 - 1, "two agents keys: the document is refused");
+    assert_eq(ai_agent_hud_count(pf), 1, "  ...and the HUD is untouched");
+    var bdupn = "{\"agents\":[{\"id\":1,\"id\":2}]}";
+    assert_eq(ai_poll_agents_apply(pf, bdupn, strlen(bdupn), 1), 0 - 1, "a duplicate key inside an agent: refused too");
+    var bzero = "{\"agents\":[{\"id\":01}]}";
+    assert_eq(ai_poll_agents_apply(pf, bzero, strlen(bzero), 1), 0 - 1, "a leading zero: refused, as serde_json refuses it");
+    assert_eq(ai_agent_hud_count(pf), 1, "  ...and the HUD is still untouched");
     var bne = "{\"agents\":[1,\"x\",null]}";
     assert_eq(ai_poll_agents_apply(pf, bne, strlen(bne), 9), 3, "elements that are not objects are still agents");
     assert_eq(ai_agent_hud_count(pf), 3, "  ...three, each under a minted id");
@@ -986,12 +996,11 @@ fn main() {
     assert_eq(ne_ok, 3, "  ...each minted, named unknown, Idle, stamped now");
 
     test_group("ai_features — poll: fields of another type keep Rust's defaults; Rust's own shape still reads");
-    var bw = "{\"agents\":[{\"id\":1,\"id\":2,\"name\":7,\"name\":\"last\",\"status\":\"running\",\"status\":\"failed\"},{\"id\":5,\"name\":\"first\"},{\"id\":5,\"name\":\"second\",\"status\":2.0},{\"id\":6,\"name\":\"rusty\",\"status\":\"waiting\",\"current_task\":\"build\",\"last_heartbeat\":\"2026-10-10T12:34:56Z\",\"cpu_percent\":45.5,\"memory_mb\":512},{\"id\":7,\"name\":{\"x\":1},\"current_task\":3,\"status\":null}]}";
+    var bw = "{\"agents\":[{\"id\":2,\"name\":\"last\",\"status\":\"failed\"},{\"id\":5,\"name\":\"first\"},{\"id\":5,\"name\":\"second\",\"status\":2.0},{\"id\":6,\"name\":\"rusty\",\"status\":\"waiting\",\"current_task\":\"build\",\"last_heartbeat\":\"2026-10-10T12:34:56Z\",\"cpu_percent\":45.5,\"memory_mb\":512},{\"id\":7,\"name\":{\"x\":1},\"current_task\":3,\"status\":null}]}";
     assert_eq(ai_poll_agents_apply(pf, bw, strlen(bw), 1700000000), 5, "five agents listed");
     assert_eq(ai_agent_hud_count(pf), 4, "  ...four ids: a repeated id keeps the last (HashMap::insert)");
-    assert_eq(ai_get_agent_hud_state(pf, 1), 0, "a repeated key keeps the last: id 2, not 1");
     var w2 = t_state(pf, 2);
-    assert_eq(str_eq(ai_hud_name(w2), str_from("last")), 1, "  ...name last");
+    assert_eq(str_eq(ai_hud_name(w2), str_from("last")), 1, "id 2: name last");
     assert_eq(ai_hud_status(w2), AI_AgentStatus.AI_AS_ERROR, "  ...status failed -> Error");
     var w5 = t_state(pf, 5);
     assert_eq(str_eq(ai_hud_name(w5), str_from("second")), 1, "id 5 twice: the second");
